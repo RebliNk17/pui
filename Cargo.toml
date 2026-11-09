@@ -1,0 +1,43 @@
+[package]
+name = "pui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A native desktop workspace for the Pi coding agent"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+semver = "1"
+dirs = "6"
+fs2 = "0.4"
+notify = "8"
+uuid = { version = "1", features = ["v4"] }
+rfd = "0.15"
+pulldown-cmark = "0.13"
+portable-pty = "0.9"
+vt100 = "0.18"
+base64 = "0.22"
+arboard = { version="3.7",default-features=false,features=["image-data"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-app-kit = {version="0.3",default-features=false,features=["std","NSEvent","NSPasteboard","NSSound","NSApplication","NSMenu","NSMenuItem","NSCell","NSResponder","NSWindow","block2"]}
+objc2-foundation = {version="0.3",default-features=false,features=["std","NSObject","NSString","NSError","NSBundle"]}
+objc2-user-notifications = {version="0.3",default-features=false,features=["std","block2","UNNotification","UNNotificationContent","UNNotificationRequest","UNNotificationTrigger","UNUserNotificationCenter"]}
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[package.metadata.bundle]
+name = "Pui"
+identifier = "dev.pi.pui"
+category = "Developer Tool"
+short_description = "A native workspace for Pi"
+osx_minimum_system_version = "12.0"

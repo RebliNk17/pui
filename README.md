@@ -1,0 +1,226 @@
+# Pui
+
+A native desktop workspace for the [Pi](https://pi.dev) coding harness. Written in Rust with egui/eframe: no Electron or webview. macOS first, with a portable Linux/Windows foundation.
+
+![Pui design preview](assets/preview.png)
+
+## Run
+
+Requires **Rust 1.88+**, the platform's native build tools, and an installed/authenticated Pi CLI for real conversations. Pui doesn't manage provider credentials: sign in with `pi /login` in your terminal first.
+
+```sh
+cargo run -- --demo                # populated design preview; never starts Pi
+cargo run -- --cwd /path/to/repo   # real workspace
+cargo run                        # last chat and sidebar view (or a new chat on first launch)
+```
+
+On this Mac, Rust already exists but isn't on the shell PATH. If needed:
+
+```sh
+export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+```
+
+Pui starts a Pi RPC process automatically in a real workspace to load its configured model catalog, current model, and supported thinking levels. Demo mode never starts Pi. It never sends a prompt automatically. The bundled adapter adds tool-level permission checks (including nested codemode calls), with **Auto** as the default. Pi still runs with your local OS permissions: this is **not an OS sandbox**. Trusted extensions can execute their own code, and project trust remains Pi's responsibility.
+
+### macOS application
+
+```sh
+./scripts/bundle-macos.sh          # release .app for this Mac's architecture
+./scripts/bundle-macos.sh --debug  # quicker local build
+open dist/Pui.app
+open dist/Pui.app --args --demo
+```
+
+The bundle includes an app icon and a local ad-hoc signature, but no Developer ID signature or notarization. Pi is a separately installed dependency. Finder launches often lack your shell PATH; Pui adds common managed-Pi, nvm, Volta, and Homebrew binary directories to the child's inherited PATH without running shell startup scripts.
+
+### Pi executable
+
+Resolution order: `PUI_PI_BIN`, the managed install in `~/.pi/agent/bin/`, then `pi` on PATH (`pi.cmd` on Windows).
+
+```sh
+PUI_PI_BIN=/absolute/path/to/pi cargo run -- --cwd /path/to/repo
+```
+
+## Interface
+
+The detailed layout follows `InspectorCards`, `MessageTimeline`, `Transcript`, and the neutral palette in the supplied `remote-control-agents` UI (read-only reference; that repository is not modified).
+
+- Floating inspector cards: click a heading to collapse, right-click to show/hide cards or reset defaults, drag the grip to reorder. Arrow keys on the grip move a card. Drag a card's lower edge to adjust its content height; double-click to reset. Layout preferences persist across real sessions.
+- A thin conversation rail with exactly one mark per sent user message. Click to jump, drag to scrub, or use Alt+Up/Down while focused to move between messages. Crowded marks spread near the pointer.
+- Activity stays between the prose updates that produced it. Compact verb/count summaries expand into plain read rows, inset command blocks, and inline colored edit replacements, with status/duration indicators. Codemode wrappers summarize actual nested actions from Pi metadata; expand to inspect child calls, JavaScript and results, including successful scripts. While running, older actions fold behind a muted chevron disclosure (no pill button); click or use Enter/Space to expand and collapse them. No generic Output/Copy/Arguments boilerplate.
+- The **Outputs** card shows successful recorded session edits/writes—not Git status. The separate working-tree view is read-only. Replacement counts are recorded snippets, not necessarily a minimal Git diff; write counts represent supplied content, not inferred deletions.
+- Context has a usage disclosure with cache and session totals. Pi RPC doesn't expose category sizes or the compaction reserve; real sessions explicitly say this instead of fabricating a breakdown. The full category example and PR cards in demo mode are labeled fixtures only.
+- Light and dark three-pane workspace inspired by the supplied reference.
+- Search recent local sessions; Projects groups all repositories (including subfolders/worktrees) by repository folder. Each project shows its five most recently active chats by default, with Show N more / Show less. Resume in the session's original working directory. Reopening Pui restores the last open chat and Recent/Projects selection without sending a message or resuming queued work. Missing session files fall back to a new chat. Explicit `--session` takes priority; `--cwd` alone opens a new chat in that workspace. Demo/screenshot runs do not overwrite these preferences.
+- Chat overflow menus: rename locally, pin, organize under a project, copy session path, export active-branch Markdown, archive, or hide from Pui. These actions do not delete Pi session files or change their working directory. Hidden chats can be restored.
+- Real streamed assistant text, selectable CommonMark text/code, copy controls, collapsed reasoning and tool output.
+- New sessions, stop, searchable Pi model selection in a compact upward-opening dropdown with a quiet inset search field, provider filtering, pricing/context metadata, and a discrete thinking slider. Choices come from Pi's `get_available_thinking_levels` for the confirmed current model, not hard-coded model-name guesses. The composer shows model name, provider only if ambiguous, and capitalized effort.
+- **Ultracode** is a separate per-chat orchestration toggle beside the effort slider, not an invented provider reasoning level. The bundled Pi extension gives the parent spawn/list/message/wait/stop tools and enables native codemode as the script coordinator. Guidance asks for the fewest useful workers (including zero), bounded tasks, minimal explicit messages, and review/verification. See [research and design sources](docs/ultracode-research.md).
+- Parent-linked agent trees in the left sidebar. Each worker has its own Pi RPC process, transcript, draft, model state and live status. Click to chat directly while the parent keeps running. Parent/descendant-only messaging, event-driven script waits (no transcript/progress chatter), one bounded completion report when not collected by a wait, Stop tree, and confirmation before quitting with active agents. The concurrency ceiling is configurable (default 4, 1–16), not a target team size; extra workers queue.
+- Read-only workers have a tool allowlist and no shell/MCP/discovered extensions; this is **not an OS sandbox**. Writable workers receive isolated detached Git worktrees from committed HEAD. Uncommitted parent edits are not copied. Worktrees and sessions are kept—never auto-committed, merged, pushed or deleted. Parent-child links are saved with Pui preferences and reopen as saved/stopped sessions; pending tasks, script execution and in-memory queues are not automatically resumed.
+- Explicit connected/idle/working/waiting-for-input/compacting status for the attached Pi process in the sidebar and inspector. Live progress appears **after all transcript outputs/images**, outside the composer, with rotating short verbs and a subtle glyph; connecting, approval and compaction retain truthful labels. Progress has a fixed row height, animates only when visible/active, and disappears when idle. **Stop** sits immediately left of Send; right-click Stop for Stop tree when a workflow is present. Other session files are labeled Saved rather than falsely reporting live status; external terminal agents are not observable through this RPC connection.
+- A compact, left-aligned waiting queue with **Send now**, edit and delete icons. Settings choose **Steer** (default: the next turn/tool boundary) or **Queue** (after the current run settles). Enter uses your default; Cmd+Enter / Ctrl+Enter uses the other behavior. Steering stays editable locally until the adapter opens a turn boundary; acceptance releases that boundary. Send now hands the message to Pi steering without aborting tools. Images stay attached; compaction and approval dialogs defer delivery. Rejected sends are retained; uncertain sends are never retried automatically. Stop clears the queue; it is in memory only.
+- A compact sidebar header keeps app controls below the macOS traffic lights, with a **Pui** menu, New chat and a segmented Recent/Projects switch. macOS has native **Pui / File / Edit / View / Window / Help** menus: About, Settings, New Chat/Window, Open Project, standard text editing, search/layout/files/changes/terminal/zoom, window actions, and guarded Close/Quit. **View → Theme** selects Light/Dark; **Pui → Completion Alerts** switches sound and desktop notifications (macOS only), and **Pui → Default Message Delivery** selects Steer/Queue. These use Settings’ saved values, apply live, and show current checkmarks, including changes made from Settings or a shared chat. The in-app Pui menu uses the same supported-action definition. Empty Services and ineffective cross-process Bring All to Front entries are omitted; context-dependent actions are disabled when unavailable. No browser Reload/Developer Tools entries. New Window is a separate process; Quit closes this process/window through its active-agent confirmation, leaving independently opened windows running.
+- **Check for Updates** is manual-only, using stable GitHub Releases and semantic version tags (`v1.2.3`). The release repository is intentionally unset: **Check for Updates is hidden from both menus until a valid repository is configured**, and no request is made. When ready, build with `PUI_GITHUB_REPOSITORY=OWNER/REPO ./scripts/bundle-macos.sh`. The current version comes from `Cargo.toml`, also copied to the app bundle. Checks use an unauthenticated, bounded GitHub API request via Pi’s existing Node prerequisite; private repositories need a future authenticated distribution design. Pui never downloads/installs/restarts itself or interrupts agents. Signing/notarization and automatic installation remain future work.
+- **Settings** is a dedicated full-window view with sidebar navigation, search, Back to app and grouped cards—not a floating dialog. Open it with the composer settings icon or Cmd+, / Ctrl+,. Pages cover General, Appearance, Notifications, Keyboard shortcuts, Permissions, Models and Providers; only supported controls are exposed. Appearance supports saved Light/Dark themes, layout and scale; theme changes apply immediately without interrupting agents. Dark remains the default. System-following mode is not implemented. Agents keep running while settings are open. General includes auto-compaction at **50–95% of context used** (default 85%) and recent context retention (default 20,000 tokens, capped at half the trigger budget for small models). The adapter uses Pi's canonical compaction preparation/summary generation and persisted boundary drafts, not raw transcript slicing. Overflow recovery remains enabled. Requires a compatible managed Pi SDK or `PUI_PI_SDK` pointing at `dist/index.js`; unavailable overrides are explicitly reported. Settings affect Pui processes only, not user/project Pi files.
+- **Settings → Resources** manages Skills, MCP servers, Extensions, Prompts, Pi CLI Themes and Packages with search, counts, personal/project scope, source paths and config-file shortcuts. Register local paths, enable/disable individual resources, install npm/git/local Pi packages, uninstall managed packages, and add/edit/remove MCP definitions. Every mutation is reviewed before confirmation; MCP edits are JSON patches that preserve omitted fields, including credentials. Discovery never executes extensions, connects to servers or installs missing packages; the list reports configuration, not live connection state. Project resources remain hidden/locked until trusted with Pi. Local-resource Remove adds an exclusion and keeps source files; package Uninstall removes its managed installation (local package sources are kept). MCP removal keeps OAuth credentials. Changes affect future Pi processes, not running agents; reopen Pui to reliably reload the active workspace. Existing secrets/command arguments/server URLs are not returned in the catalog. Use environment-variable references for new credentials and Pi `/mcp` for OAuth and live diagnostics. Requires a compatible managed Pi SDK or `PUI_PI_SDK` pointing to `dist/index.js`. Demo settings use isolated, non-editable fixtures.
+- **Permissions:** Auto (default), Manual, Accept edits, Plan, Don't ask, and Bypass all permissions. Switch modes from the composer picker beside the model selector or Settings → Permissions. Manual approves inspection tools and asks for each other call. Accept edits adds canonical workspace edits and bounded local `mkdir`/`mv`/`cp`; scripts/network/unknown tools still ask. Plan blocks mutations, delegation, codemode and arbitrary shell, allowing only inspection tools and a tiny read-only shell grammar; approve the written plan and change mode to implement. Don't ask allows the bounded preapproved set and denies all permission-requiring actions without a dialog. Bypass requires an explicit warning confirmation and skips Pui tool approvals/classification for writable agents. Read-only workers remain restricted.
+- **Auto permissions** actually call the lowest-priced suitable text model available in the current provider and configured scope, ranked by configured input + output token prices (ties by model ID; zero prices may be provider placeholders). Canonical workspace edits and bounded local mkdir/mv/cp proceed without a classifier round-trip. Other calls are checked for dangerous effects, not narrow task relevance, using the proposed action and up to eight recent user requests (bounded to 18,000 characters total). It has no tools and does not see the full conversation. It uses a 12-second deadline and at most 256 output tokens. Standard actions matching the request can proceed; destructive/high-risk actions bypass automatic approval and ask. Classifier failure, missing pricing/model/auth, malformed output, uncertainty or a classifier denial falls back to explicit per-call approval, not a hard denial. Uncertainty never implicitly approves a call. Source text mentioning dangerous words is not treated as executing them. This is probabilistic intent classification, not a security sandbox or Claude's proprietary classifier. Classifier calls cost provider usage, are recorded in Pi custom entries and shown separately from session chat cost in Settings. Permission/compaction settings remain editable while agents work, including from attached windows, and apply to existing and future Pui workers. Changes affect subsequent tool calls/context checks, not commands or summaries already executing. Changing permission mode invalidates outstanding approvals; unchanged modes are not invalidated by compaction-only updates. Read-only worker restrictions always win.
+- Real session cost and current context-window usage from Pi; manual compaction.
+- Git status with read-only diffs against HEAD, refreshed on workspace/session changes, run completion, or explicit refresh. No idle polling, staging, commits, or pushes.
+- **Settings → Notifications → Agent completion** has independent **Play completion sound** (on by default) and **Show OS notification** (off by default) switches. macOS plays its Glass sound and uses native Notification Center banners, including while Pui is foregrounded. Turning OS notifications on requests permission; denied permission/delivery errors are shown in Settings, and Focus/system volume rules still apply. Notifications show only the bounded chat/worker name, not the response/transcript. A successful observed `agent_settled` triggers once; intermediate `agent_end`, tools, compaction, history loading, disconnected/aborted/stopped/failed runs do not. Local queued follow-up work defers the alert until that work completes. Background chats/workers notify through their owning process, never through attached mirror snapshots. Alert preferences persist and can be changed during a run or forwarded from an attached window. These alert backends currently support **macOS only**; Linux/Windows controls are explicitly disabled.
+- **Agent questions** use `pui_ask_questions` in ordinary chats and Ultracode: one or several questions, single-choice or multi-select (`multiSelect: true`), with optional explanations beneath each option. Normal option sets are fully visible; unusually long content scrolls. Single-choice clicks advance immediately. Answers use shortcut cards (design B): a separate numbered badge, aligned title/description column, and a checkmark for selected answers. Multi-select waits for an explicit **Next question / Submit & continue** action. **Something else** accepts free text (also alongside multiple selections); **Skip** records an unanswered question. Previous/next chevrons preserve answers and drafts across chat switches. Number keys **1–9** select/toggle the matching card, including **Something else**; they remain ordinary text while editing a custom answer. Answering the last question returns one batch to the existing Pi tool call and automatically continues—no extra Send or injected user prompt. Cancel ends the question tool without granting consent; Stop aborts its wait. Arrow/number keys work without sending your composer draft. The completed **Your answers** card stays in the transcript above the agent's continuation, including across history reloads and shared windows; skipped questions are explicitly labeled. Preview with `cargo run -- --demo-questions` or compare designs interactively with `cargo run -- --demo-question-designs` (no provider calls).
+- Pi extension confirmation, choice and answer prompts appear inline directly above the composer, not as global modals. Permission prompts show the exact command/path, remaining arguments, Allow once and Deny. Bodies wrap and scroll separately from always-visible response buttons. Prompt drafts stay with their chat. Shared approvals route to the owner and stale dialog IDs cannot approve another action.
+- Project/sidebar **+** and Cmd+N / Ctrl+N immediately open a blank chat in that project/current workspace, without a native dialog. The new-chat view lets you choose an existing project or explicitly **Open folder…** in the native picker. Switching the project keeps your unsent text/images; cancelling the picker changes nothing, and stale picker results never redirect another chat. The original connection, draft, images and approvals remain parked while existing work continues.
+- Approval cards display decoded, selectable code/commands and separate before/after fields rather than escaped JSON. **Cmd+Enter / Ctrl+Enter** allows once; **Cmd+Backspace / Ctrl+Backspace** denies, taking priority over composer keys. **Always allow** remembers only the exact tool + arguments + workspace for the current chat connection (up to 256 rules); mode changes, session switches and reconnects clear it. Nested calls still require their own approval. Older adapters support Allow once/Deny only.
+- Composer ↑/↓ recalls up to 100 previously sent user messages **from the current session only**, including attachments. At the first/last visual line, arrows browse history; within multiline drafts they move the cursor normally. Moving past the newest prompt restores the unsent draft; recalled drafts/cursors do not cross chats. Messages are not sent automatically.
+- **Fork** sits after an assistant response and creates a separate chat **including that response**. The original session, draft and files stay unchanged; the new chat starts with an empty composer and shares the workspace. User messages have inline **Copy**, **Edit**, and **Rewind** icon buttons matching the assistant footer, with no actions menu. Copy stays available during runs; Edit/Rewind require an idle owning window and open the existing confirmation flow with **Messages only**, **Code + messages**, or **Code only**. Rewinding stops before the selected prompt and waits with its text/images in the composer—never automatically reruns anything. The current unsent draft is retained for manual recovery. Later conversation entries remain in Pi’s append-only session tree; use Pi’s tree UI to revisit abandoned branches. History changes currently require the owning Pui window and an idle chat with no waiting deliveries.
+- **Code restoration is deliberately bounded:** checkpoints capture built-in/nested `edit` and `write` file bytes in the workspace (4 MiB per file, 128 files and about 16 MiB per prompt). Shell commands, unknown mutating tools, missing old checkpoints, symlinks/protected paths, concurrent same-file edits, or conflicts disable/refuse code restore. Every affected file is checked before changes; a private recovery manifest is kept before restoration. Other owned agents must be idle, but external processes/windows are not an OS-level lock. Only captured files are restored—not external side effects, Git state, directories, deployments or purchases. Checkpoints/recovery copies are private local app data in `pui/checkpoints-v1`, are not sent to models, and persist until manually removed.
+- Streaming uses Pi's indexed content-block events: each text/thinking block is rebuilt from its own deltas, and completed block contents replace the reconstruction. This avoids transient doubled first words when `message_start` already contains a shallow first-token seed. Current Pi RPC omits snapshots on updates; older snapshot-based and unindexed delta adapters remain supported. Full snapshots and `message_end` are authoritative; genuine repeated words are retained.
+- The top-right **Files** button opens a docked panel: selectable previews/open-file tabs on the left, a searchable expandable folder tree on the right, and an expand/restore control. Folders load only on expansion; searching scans names, never contents, with bounded results. Only explicit file clicks read content. Sensitive paths, symlinks, binary/non-UTF-8 files and files over 512 KiB are blocked. Directory listings are bounded to 2,000 entries; open previews to 16 tabs. Refresh reloads expanded folders and the selected file. Works during active runs and in narrow windows without switching chats, starting Pi, or idle polling.
+- The adjacent **Changes** button opens a docked, expandable panel with path search and separate **Current Git / Recorded edits** tabs. Click rows to expand selectable, line-numbered inline diffs with addition/deletion counts. Recorded edits remain in session order, not a net Git diff, and work without a Git repository. Git status and per-file diffs load on workers; Refresh invalidates cached diffs. Files, Changes and Session details are mutually exclusive.
+- The top-right **Terminal** button beside Files opens a resizable bottom dock with an interactive PTY shell, starting in the active project's working directory (including subfolders/worktrees). Each workspace keeps its own shell while switching chats/projects. Hide/reopen preserves running commands; expand/restore fills the workspace. Stop asks for confirmation, and closing Pui warns while shells are open. Supports ANSI/256-color/truecolor output, Unicode, keyboard navigation, Ctrl-C, bracketed paste, drag-to-select/copy and 2,000 lines of scrollback. Shell I/O/spawn/resize/reaping run on workers with output-driven repaints, not idle polling. Terminal output is local only, never sent to Pi. Shells are window-local and do not survive quitting Pui. Demo mode renders a fixture without spawning a shell.
+- Native folder picker, persisted workspace/card preferences, responsive inspector, locally loaded macOS fonts.
+- Clearly labeled, isolated demo fixtures. Demo conversations are never saved to Pi.
+- Attach PNG/JPEG/GIF/WebP via the composer + picker, drag/drop, or image paste (Cmd-V on macOS; + right-click also offers clipboard paste). Up to eight images, 8 MiB each, 24 megapixels; removable previews appear before sending, including image-only messages. Images use Pi's native RPC images field, never a text path workaround. Image loading/encoding is off the UI thread.
+- Sent-image thumbnails are inside the user bubble. Exact trailing Pi image-resize/coordinate notes are hidden when backed by image attachments; raw message text, saved sessions, exports and model context remain unchanged. Quoted/inline examples, non-matching text and notes without attachments are preserved. Historical screenshot paths are replaced only when Pi already returned matching read-result image bytes; no historical filesystem reads. Theater overlay with fit/reset, zoom buttons/wheel/pinch, drag-to-pan, Escape, on-screen/keyboard arrows, Home/End, and a bottom thumbnail strip. Bounded asynchronous decoding/cache; GIF/WebP display a still frame.
+- Clickable HTTP/HTTPS/mailto Markdown links and bare URLs open the system browser. Text stays selectable. Lists/inline code use a common line height/alignment, with compact item spacing and no link underlines.
+- Read-only GitHub PR state, checks and review decision in the Pull requests card, plus inline check markers/link hover details. Looks up explicit PR URLs from user/assistant prose using local authenticated `gh`, never source patches or thinking. Refresh is event-driven/manual, not periodic. Inaccessible PRs show unavailable rather than inferred status.
+- Sidebar account usage ring/popover with LiteLLM budget, remaining allowance, reset date, month-to-date spend/requests, all-time spend and model breakdown. Pi resolves credentials locally in a short-lived Node helper; only aggregates reach Rust. No credentials are logged, stored in Pui preferences, or sent to Harbor. The gateway must permit `/user/info` and `/user/daily/activity`; HTTP 403 is shown as unavailable, not substituted with session cost. Set `PUI_PI_SDK` to Pi's `dist/index.js` for non-managed installs, and `PUI_USAGE_PROVIDER` if the provider is not named `litellm`.
+
+The session list is a read-only bounded scan of up to 150 recent JSONL files in Pi's default session store. It honors `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`. Custom `sessionDir` settings require that environment override. Histories are loaded through Pi rather than replaying the on-disk session tree ourselves.
+
+### Multiple windows
+
+Pui coordinates **one live Pi owner per session file** across current-build app processes. Open the same chat in a second window to attach to the owner instead of launching another Pi writer. Live transcript/tool activity, images, run/compaction state, cost/context, permission dialogs and waiting messages are shared. Send, queue, Send now, edit/delete, Stop, model/effort, and chat permission/compaction settings route to the owning window. Queue edits use a revision check; an obsolete approval cannot approve a later dialog. Drafts, selection and scroll position remain window-local. Layout, local session organization preferences and the entire agent-supervisor UI are not globally mirrored.
+
+A shared composer says **Shared · another Pui window**. Switching the owner to another chat parks its connection so attached windows keep working. This can retain more idle Pi processes until the owner exits. Closing the owner still owns the agent lifecycle: active work prompts for confirmation, and sessions/worktrees remain on disk. An attached window reports the owner unavailable; reopen the chat to reconnect. There is no automatic process takeover, workflow replay, or retry of uncertain messages; retained drafts can be restored explicitly. Closing an attached-only window does not abort the owner.
+
+Coordination uses exclusive OS file locks, a user-private local registry, authenticated loopback IPC and native filesystem notifications—not periodic idle scans or Git polling. Streaming publications are coalesced. Full structured snapshots are encoded/decoded off the UI thread on attachment/update; very large histories can be expensive and have a 192 MiB transport bound. All participating windows must use this build: **reopen older Pui windows**. Independent terminal Pi processes and pre-sync Pui versions do not implement this ownership protocol and cannot be live-synchronized.
+
+### Shortcuts
+
+| Action | macOS | Linux / Windows |
+| --- | --- | --- |
+| New session | ⌘N | Ctrl+N |
+| Search sessions | ⌘K | Ctrl+K |
+| Toggle sessions | ⌘B | Ctrl+B |
+| Toggle inspector | ⌘I | Ctrl+I |
+| Send / default busy behavior (Steer initially) | Enter | Enter |
+| Other busy behavior | ⌘Enter | Ctrl+Enter |
+| New line | Shift+Enter | Shift+Enter |
+| Stop | Escape | Escape |
+
+The inspector hides automatically on narrower windows. Switching views parks active chats with their Pi connection, drafts, images, queue, approvals and in-flight deliveries; their work continues. This does not depend on live-window coordination being registered. Clicking back restores the same connection instead of restarting or aborting it. A pending chat connection does **not** lock the sidebar: clicking a different chat supersedes it, with the old process retired in the background and its events/preview receiver discarded. Chat row widget IDs follow session file paths, not list positions, so refresh, pinning, search and project grouping do not redirect pointer presses. Stop clears any pending queue before requesting abort.
+
+Saved chats open a bounded, read-only 2 MiB tail preview on a worker while Pi initializes its tools/MCP connections. This preview follows the active parent chain and is presentation only: Pi's RPC history remains authoritative for model context. Partial previews are labeled in the top bar. Full-history parsing/tool-result reconstruction happens on the stdout reader, not the UI thread; the preview-to-history swap preserves the reading anchor. Coordinated session connections are retained per chat to preserve single ownership across windows. Non-coordinated same-working-directory switches reuse Pi `switch_session`; replaced connections retire/reap off the UI thread.
+
+MCP/extension warnings are deduplicated in the top-bar **bell** notification popover, not inserted above the composer. Session updates and connection warnings have separate cards, with individual dismiss and **Clear all** actions. Escape or clicking outside closes the popover without clearing its contents or stopping a run. MCP troubleshooting and a copyable Pi CLI `/mcp` command appear only for relevant diagnostics; a remote 503/closed connection still requires service recovery. Pui does not disable your configured servers.
+
+## Resource use
+
+- Native egui/eframe + OpenGL, no browser runtime or animation loop when idle.
+- Worker results wake the UI; there is no recurring repaint timer or periodic Git scan. The RPC worker blocks on commands and is woken on stdout EOF, rather than checking the process every 25 ms while idle.
+- Markdown parsing is frame-cached. Settled transcript groups cache heights; offscreen groups skip rendering and text layout. Tool details stay unlaid-out until expanded (small successful diffs display inline). Thumbnails reserve identical geometry while pending, ready, failed or evicted; texture completion and unrelated clicks never invalidate all transcript heights. Offscreen attachments do not start decoders during measurement.
+- Real workspaces start a Pi RPC process for configuration discovery. Ultracode workers add separate Pi processes and provider usage; they inherit the parent model/effort at launch, with Pi clamping unsupported levels. Worktree preparation runs off the UI thread. UI measurements exclude Pi/providers. Usage refresh is event-driven/on-demand with a five-minute throttle, not a recurring idle timer. A pending workflow wait schedules only its deadline repaint, not a polling loop.
+- Earlier pre-image-support measurements are not current resource guarantees. Measure the present release with the intended history/window size. Window/GPU buffers, image textures and Pi's own subprocess can be substantial.
+
+Use `cargo run --release -- --demo` for performance measurements. Debug builds are not representative. High-DPI memory use is still a tuning target.
+
+## Verified development tasks (first slice)
+
+Use **New task** in the sidebar, or **Tasks** in the workspace bar. Ordinary chat and its drafts remain separate.
+
+1. Enter an objective and constraints. **Generate acceptance checks** explicitly starts a provider-backed, read-only proposal using the model/effort selected in chat.
+2. Review/edit 1–8 criteria and their exact commands. At least one executable check is required. **Approve checks and start** freezes the contract and authorizes implementation, fresh verification, and at most **two repair rounds**. Tool permissions remain separate; task approval is not a blanket tool grant.
+3. Git tasks use a retained detached worktree from the inspected committed HEAD. Dirty source requires an explicit **committed HEAD only** choice; uncommitted changes are never copied or silently omitted. A changed HEAD blocks execution. Non-Git tasks work in place without an extra location prompt.
+4. The builder uses bounded workspace file tools; shell, codemode, ambient extensions/MCP and delegation are disabled for this initial implementation. A separate Pi check process runs the approved commands through the existing `user_bash` permission gate. Tests/builds execute project code with local OS permissions: **not a sandbox**.
+5. A fresh read-only verifier sees the objective, frozen contract, candidate edits and actual command results—not the builder's rationale. It must cover every criterion and report blocked when required behavioral evidence is missing. Failed checks cannot be overridden by positive prose. Checks, review and acceptance are tied to a bounded SHA-256 source fingerprint; source changes make evidence stale. Acceptance always recomputes it.
+6. Review **Results & evidence**: recorded candidate replacements, command exit status/output/duration, independent findings and unresolved blockers. **Accept this result** records your decision only; it does not commit, merge, push or deploy.
+
+The right-side **Workflow** card shows acceptance → builder → check runner → fresh verifier → result, including repair attempts, waiting states and per-task reported cost. Click agents for live transcripts or a bounded saved-session preview; click checks/results for evidence. The card is automatically exposed for a new task and otherwise follows normal inspector collapse/hide/reorder controls. In narrow windows the main task view remains available when the inspector is hidden.
+
+Task state/evidence is written privately under local app data `pui/tasks-v1` (0700 directory / 0600 records on Unix); Pi session files and worktrees are retained. A restart marks active tasks **Interrupted** and never replays prompts or shell effects. This version allows one task execution per Pui window; work does not survive closing the owning app, and task orchestration is not mirrored across windows. There is no guaranteed hard dollar cap. Each pending agent operation/check has a 30-minute deadline; cancellation cannot undo completed external effects. Source fingerprints cover Git tracked/nonignored files (whole repository), or a bounded non-Git tree excluding generated directories; they are not a filesystem snapshot or external-process lock.
+
+Provider-free preview:
+
+```sh
+cargo run -- --demo-task
+cargo run -- --demo-task --light --screenshot /tmp/pui-task-light.png
+```
+
+Fixtures exercise the builder/check/verifier lifecycle without provider calls, including the first interaction regression `task_draft_survives_chat_switch`. No paid end-to-end task has been run; production quality improvement has not yet been measured.
+
+## Architecture
+
+```text
+src/app.rs        desktop state and interaction
+src/app/views.rs  workspace bar, floating inspector and conversation layout
+src/app/files.rs  docked file tree, name search, explicit read-only previews and tabs
+src/app/changes.rs docked Git/recorded-edit search and expandable inline diffs
+src/app/terminal.rs project-local docked terminal, selection and keyboard rendering
+src/terminal.rs   background PTY shell, bounded VT parser, I/O and process lifecycle
+src/app/sidebar.rs repository grouping, chat menus and account footer
+src/app/model_picker.rs upward Pi catalog/provider/search/effort dropdown
+src/app/settings/resources.rs resource browser, reviewed changes and background helper lifecycle
+scripts/resources.mjs safe Pi resource discovery, package operations and MCP config patches
+src/app/attachments.rs composer image loading, picker/drop/clipboard previews
+src/app/run_status.rs visible lifecycle state, waiting queue and delivery tracking
+src/app/agents.rs parent/child RPC supervision, explicit mail/waits, isolation, tree persistence
+src/tasks.rs     verified-task domain, frozen contracts, evidence and recovery
+src/tasks/       private task persistence, workspace isolation and source fingerprints
+src/app/tasks/   task supervisor, approval/results view and right-side workflow
+scripts/ultracode.ts bundled Pi tools and orchestration guidance (no separate agent loop)
+src/pulls.rs      read-only explicit-link GitHub PR status
+src/media.rs      bounded background decoding, stable thumbnail slots and viewer
+src/history.rs    bounded read-only saved-chat tail preview
+src/usage.rs      LiteLLM account budget popover and helper lifecycle
+src/tool_view.rs  quiet tool rows, commands and inline edit diffs
+src/inspector.rs  persisted card layout, disclosures, menus, drag/resize
+src/transcript.rs cached/culled turns, message rail and expandable activity
+src/activity.rs   tool summaries and successful recorded outputs
+src/context.rs    reported context metadata and usage disclosure
+src/theme.rs      colors, typography, shared surfaces
+src/icons.rs      vector icons, no icon font dependency
+src/markdown.rs   selectable CommonMark and diff rendering
+src/protocol.rs   testable Pi event/state reducer
+src/rpc.rs        JSONL subprocess transport and lifecycle
+src/sessions.rs   read-only local session discovery
+src/workspace.rs  background read-only Git inspection
+```
+
+Pui communicates with `pi --mode rpc` over stdin/stdout JSONL. Process output is read continuously; stdout is protocol-only and stderr is drained but not persisted/displayed because extensions can log sensitive values. Commands use request IDs. Completed messages replace streaming snapshots. A run is idle only on `agent_settled`, not `agent_end`. Shutdown closes stdin, waits briefly, then terminates/reaps an unresponsive child.
+
+## Development / validation
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+node --test tests/*.test.mjs
+cargo run -- --demo --screenshot /tmp/pui.png
+cargo run -- --demo-questions --screenshot /tmp/pui-questions.png
+cargo run -- --demo-files --light --screenshot /tmp/pui-files.png
+cargo run -- --demo-changes --light --screenshot /tmp/pui-changes.png
+cargo run -- --demo-terminal --screenshot /tmp/pui-terminal.png
+cargo run -- --demo-notifications --screenshot /tmp/pui-notifications.png
+cargo run -- --demo --light --screenshot /tmp/pui-light.png
+cargo run -- --demo-settings --settings-page Appearance --light --screenshot /tmp/pui-settings-light.png
+cargo run -- --demo-settings --settings-page Resources --screenshot /tmp/pui-resources.png
+cargo run -- --demo-expanded --screenshot /tmp/pui-expanded.png
+cargo run -- --demo-collapsed --screenshot /tmp/pui-collapsed.png
+cargo run -- --demo-theater --screenshot /tmp/pui-theater.png
+cargo run -- --demo-model-picker --screenshot /tmp/pui-picker.png
+cargo run -- --demo-agents --screenshot /tmp/pui-agents.png
+cargo run -- --demo-task --screenshot /tmp/pui-task.png
+cargo run -- --demo-compacting --screenshot /tmp/pui-compacting.png
+cargo run -- --cwd /path/to/repo --session /path/to/session.jsonl
+```
+
+The screenshot option captures the app and exits; use `--demo` to avoid including private session titles. Tests include simulated card clicks, right-click menus and drag/drop, preference roundtrips, rail jumps/viewport culling, activity expansion, protocol lifecycles, ordered text/tool reconstruction, Unicode-safe JSONL framing, and a deterministic mock Pi subprocess. The Unix transport fixture requires Python 3. No test sends a provider request.
+
+Validated locally on **Apple Silicon macOS**. Linux and Windows have **not** been built or tested. eframe/winit, the folder picker, paths, and process boundaries are cross-platform; Linux builds will need their distribution's graphics/window-system development packages. Platform-specific packaging, CI, signing, and notarization are future work.
+
+## Deliberate v0.1 limits
+
+Ultracode is a first implementation of parent-supervised native Pi workers, not full Claude Code feature parity: no durable JavaScript workflow replay, automatic dirty-working-copy integration, per-workflow hard spending budget, or automatic model-tier router. The parent dynamically delegates through native codemode and Pui's tools; execution quality still depends on the selected model. Workers inherit the chosen model, not a silently substituted expensive tier. Multi-agent behavior is validated with fixtures; no paid-provider multi-agent run has been executed. Agents running separately in terminals are not given fabricated live status. No full session-tree browser, login UI, syntax highlighting, or full extension widget rendering yet. The terminal is a basic VT-compatible pane, not a full replacement for a dedicated terminal emulator (no mouse-reporting, terminal tabs, or persistent shells after app exit). Edit/Rewind and response-level Fork use Pi’s canonical session tree, but revisiting abandoned branches still uses Pi’s tree UI. The waiting queue is local/in-memory, and cannot inspect messages already queued by another client in Pi. Use the Pi CLI for the remaining workflows. Intermittent UI flashing reported by the user has not been reproduced conclusively; repeated-frame, image-readiness, reading-anchor and late-state lifecycle regressions are covered but are not proof that every visual glitch is resolved.
