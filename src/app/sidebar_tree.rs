@@ -39,6 +39,9 @@ impl Branch {
             || self.children.iter().any(|c| c.matches(query))
     }
     pub fn active(&self, app: &Pui) -> bool {
+        if app.kanban.open {
+            return false;
+        }
         match &self.target {
             Target::Task(task, run) => {
                 app.tasks.open

@@ -6,6 +6,7 @@ pub enum Icon {
     Plus,
     Search,
     Sidebar,
+    Board,
     Sliders,
     Folder,
     ArrowUp,
@@ -70,6 +71,14 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
         Icon::Sidebar => {
             outline(-7.0, -6.0, 14.0, 12.0, 2);
             line((-2.0, -6.0), (-2.0, 6.0));
+        }
+        Icon::Board => {
+            outline(-7.0, -6.0, 14.0, 12.0, 2);
+            line((-2.5, -6.0), (-2.5, 6.0));
+            line((2.5, -6.0), (2.5, 6.0));
+            line((-5.0, -3.0), (-5.0, 1.0));
+            line((0.0, -3.0), (0.0, -1.0));
+            line((5.0, -3.0), (5.0, 3.0));
         }
         Icon::Sliders => {
             for (y, x) in [(-4.0, -2.0), (3.0, 3.0)] {

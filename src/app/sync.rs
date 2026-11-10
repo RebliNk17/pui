@@ -20,6 +20,12 @@ pub(super) struct LivePath {
     pub path: PathBuf,
     pub revision: u64,
     pub label: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub model: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Endpoint {
@@ -72,7 +78,7 @@ struct RemoteCommand {
     reply: mpsc::Sender<Reply>,
 }
 enum Work {
-    Publish(PathBuf, u64, String),
+    Publish(LivePath),
     Scan,
     Forget(PathBuf),
     Fetch(PathBuf, Endpoint, u64),
@@ -329,16 +335,11 @@ impl WindowSync {
                 while let Ok(job) = work.recv() {
                     match job {
                         Work::Stop => break,
-                        Work::Publish(path, revision, label) => {
-                            endpoint.paths.retain(|p| p.path != path);
-                            endpoint.paths.push(LivePath {
-                                path,
-                                revision,
-                                label,
-                            });
+                        Work::Publish(live) => {
+                            endpoint.paths.retain(|p| p.path != live.path);
+                            endpoint.paths.push(live);
                             let _ = write_endpoint(&dir, &endpoint);
-                            // Publication has no UI result. Other windows wake
-                            // through their registry watchers, not our renderer.
+                            // No self-repaint on publication; peer watchers handle updates.
                             continue;
                         }
                         Work::Forget(path) => {
@@ -521,6 +522,14 @@ impl WindowSync {
             let _ = self.tx.send(Work::Fetch(path, peer.clone(), revision));
         }
     }
+    pub fn live_sessions(&self) -> Vec<LivePath> {
+        self.endpoints
+            .iter()
+            .filter(|(path, _)| !self.owns(path))
+            .filter_map(|(path, endpoint)| endpoint.paths.iter().find(|p| &p.path == path))
+            .cloned()
+            .collect()
+    }
     pub fn act(&mut self, path: &Path, action: Action) -> Result<(), String> {
         let path = identity(path);
         let peer = self
@@ -695,6 +704,8 @@ impl Pui {
         self.prefs.notifications.sound.hash(&mut hash);
         self.prefs.notifications.desktop.hash(&mut hash);
         self.state.session_name.hash(&mut hash);
+        self.state.model_name.hash(&mut hash);
+        self.prefs.cwd.hash(&mut hash);
         for command in &self.state.commands {
             command.name.hash(&mut hash);
             command.description.hash(&mut hash);
@@ -726,10 +737,21 @@ impl Pui {
         owner.revision += 1;
         owner.published = std::time::Instant::now();
         let revision = self.sync.owned[&path].revision;
-        let _ = self
-            .sync
-            .tx
-            .send(Work::Publish(path, revision, self.run_label().0.into()));
+        let _ = self.sync.tx.send(Work::Publish(LivePath {
+            path,
+            revision,
+            label: if self.state.dialogs.is_empty()
+                && self.state.ready()
+                && self.state.error.is_some()
+            {
+                "Failed".into()
+            } else {
+                self.run_label().0.into()
+            },
+            title: self.state.chat_title().unwrap_or_default(),
+            cwd: self.prefs.cwd.clone(),
+            model: self.state.model_name.clone(),
+        }));
     }
     pub(super) fn poll_window_sync(&mut self) {
         let events: Vec<_> = self.sync.rx.try_iter().collect();
@@ -1110,6 +1132,65 @@ mod tests {
         );
     }
     #[test]
+    fn kanban_discovers_other_windows_without_attaching_or_duplicating_sessions() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut observer = app(&directory, &path);
+        observer.state = State::default();
+        observer.connected = false;
+        owner.client = Some(rpc::Client::stub());
+        owner.prefs.cwd = directory.clone();
+        owner.state.session_name = "Live agent in another window".into();
+        owner.state.model_name = "Example model".into();
+        owner.state.busy = true;
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            !b.sync.live_sessions().is_empty()
+        });
+        let cards = observer.board_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, "Live agent in another window");
+        assert_eq!(cards[0].project, directory);
+        assert_eq!(cards[0].model, "Example model");
+        assert_eq!(cards[0].status, kanban::Status::Working);
+        assert!(observer.client.is_none());
+        assert!(
+            observer.sync.mirror.is_none(),
+            "Board discovery must not attach a session"
+        );
+        owner.state.dialogs.push_back(questions::demo_dialog());
+        std::thread::sleep(Duration::from_millis(130));
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            b.board_cards()
+                .iter()
+                .any(|c| c.status == kanban::Status::Waiting)
+        });
+        observer.state.session_file = Some(path.display().to_string());
+        observer.connected = true;
+        assert_eq!(
+            observer.board_cards().len(),
+            1,
+            "Mirrored paths must be deduplicated"
+        );
+        owner.state.dialogs.clear();
+        owner.state.busy = false;
+        owner.state.error = Some("Provider disconnected".into());
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            b.sync.live_sessions().iter().any(|p| p.label == "Failed")
+        });
+        observer.state = State::default();
+        observer.connected = false;
+        assert_eq!(observer.board_cards()[0].status, kanban::Status::Error);
+        // Registry additions are backwards compatible with older metadata.
+        let legacy: LivePath =
+            serde_json::from_value(json!({"path":"old.jsonl","revision":1,"label":"Idle"}))
+                .unwrap();
+        assert!(legacy.title.is_empty());
+    }
+    #[test]
     fn registry_watcher_ignores_own_publications_and_temporary_files() {
         use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
         let root = Path::new("registry");
@@ -1164,7 +1245,14 @@ mod tests {
         }
         assert!(!ctx.has_requested_repaint());
         sync.tx
-            .send(Work::Publish(path.clone(), 1, "Working…".into()))
+            .send(Work::Publish(LivePath {
+                path: path.clone(),
+                revision: 1,
+                label: "Working…".into(),
+                title: String::new(),
+                cwd: PathBuf::new(),
+                model: String::new(),
+            }))
             .unwrap();
         // Stop is a barrier: the publication must finish before we inspect the
         // repaint state. The watcher remains active throughout publication.
@@ -1179,6 +1267,9 @@ mod tests {
                 path,
                 revision: 1,
                 label: "Working…".into(),
+                title: String::new(),
+                cwd: PathBuf::new(),
+                model: String::new(),
             }],
         };
         let registry = sync.directory.as_ref().unwrap();

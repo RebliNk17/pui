@@ -42,6 +42,7 @@ pub struct Options {
     pub demo_questions: bool,
     pub demo_question_designs: bool,
     pub demo_agents: bool,
+    pub demo_kanban: bool,
     pub demo_task: bool,
     pub demo_task_proposal: bool,
     pub demo_files: bool,
@@ -116,6 +117,10 @@ fn main() -> eframe::Result {
             "--demo-task" => {
                 options.demo = true;
                 options.demo_task = true;
+            }
+            "--demo-kanban" => {
+                options.demo = true;
+                options.demo_kanban = true;
             }
             "--demo-task-proposal" => {
                 options.demo = true;

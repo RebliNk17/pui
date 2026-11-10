@@ -9,6 +9,7 @@ mod confirmations;
 mod deletion;
 mod diagnostics;
 mod files;
+mod kanban;
 mod menu;
 mod model_picker;
 mod new_chat;
@@ -101,6 +102,7 @@ pub struct Pui {
     demo: bool,
     agents: agents::Agents,
     tasks: tasks::Tasks,
+    kanban: kanban::Board,
     deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
@@ -213,6 +215,7 @@ impl Pui {
             demo: options.demo,
             agents: Default::default(),
             tasks: tasks::Tasks::new(&cc.egui_ctx, !options.demo && !cfg!(test)),
+            kanban: Default::default(),
             deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
@@ -310,7 +313,10 @@ impl Pui {
                 app.model_picker_open = true;
                 app.ultracode_ready = true;
             }
-            if options.demo_agents {
+            if options.demo_kanban {
+                app.demo_kanban_agents();
+                app.open_agents_board();
+            } else if options.demo_agents {
                 app.demo_agent_tree();
             }
             if options.demo_task {
@@ -551,6 +557,7 @@ impl Pui {
         if self.deletion.in_progress() {
             return;
         }
+        self.kanban.open = false;
         self.tasks.open = false;
         let path = session.path.clone();
         if !self.loading_chat
@@ -1514,8 +1521,14 @@ impl eframe::App for Pui {
             || self.deletion.confirming()
             || self.menu.about
             || self.updates.open;
-        let terminal_input = !self.settings_open && self.terminals.focused(ctx);
-        if !confirming && !self.settings_open && !self.tasks.open && !terminal_input {
+        let terminal_input =
+            !self.settings_open && !self.kanban.open && self.terminals.focused(ctx);
+        if !confirming
+            && !self.settings_open
+            && !self.kanban.open
+            && !self.tasks.open
+            && !terminal_input
+        {
             self.image_inputs(ctx);
         }
         let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
@@ -1548,6 +1561,7 @@ impl eframe::App for Pui {
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I))
         {
+            self.kanban.open = false;
             self.files.close();
             self.inspector_panel = false;
             self.prefs.hide_inspector = !self.prefs.hide_inspector;
@@ -1567,7 +1581,17 @@ impl eframe::App for Pui {
         {
             self.new_session();
         }
-        if !self.settings_open
+        let leaving_board = !confirming
+            && !self.settings_open
+            && self.kanban.open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if leaving_board {
+            self.kanban.open = false;
+            self.focus_composer = true;
+        }
+        if !leaving_board
+            && !self.settings_open
+            && !self.kanban.open
             && !confirming
             && !terminal_input
             && !self.diagnostics_open
@@ -1593,12 +1617,16 @@ impl eframe::App for Pui {
                 self.sidebar(ctx);
             }
             self.top_bar(ctx);
-            let terminal_expanded =
-                self.terminals.is_open() && self.terminals.show(ctx, &self.prefs.cwd, self.demo);
+            let terminal_expanded = !self.kanban.open
+                && self.terminals.is_open()
+                && self.terminals.show(ctx, &self.prefs.cwd, self.demo);
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if terminal_expanded {
+            let central = if self.kanban.open {
+                self.agents_board(ctx);
+                true
+            } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
                 self.files.show(ctx, &self.prefs.cwd)
@@ -1636,6 +1664,7 @@ impl eframe::App for Pui {
             self.draft_images.gallery.viewer(ctx);
         }
         if !self.settings_open
+            && !self.kanban.open
             && !theater
             && !confirming
             && !self.model_picker_open

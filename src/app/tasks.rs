@@ -446,6 +446,61 @@ impl Drop for Tasks {
     }
 }
 impl Pui {
+    pub(super) fn task_board_cards(&self, cards: &mut Vec<kanban::AgentCard>) {
+        use kanban::{AgentCard, Status, Target};
+        for task in &self.tasks.records {
+            for process in self
+                .tasks
+                .processes
+                .iter()
+                .filter(|p| !p.ended && task.runs.iter().any(|r| r.id == p.run))
+            {
+                let mut card = AgentCard::from_state(
+                    Target::Task {
+                        task: task.id.clone(),
+                        run: Some(process.run.clone()),
+                    },
+                    format!("{} · {}", task.objective, process.role.label()),
+                    task.source.clone(),
+                    if process.initializing {
+                        "Connecting"
+                    } else if process.pending.is_none() && process.state.ready() {
+                        "Idle"
+                    } else {
+                        "Working"
+                    },
+                    &process.state,
+                    Some(task.objective.clone()),
+                );
+                if card.model.is_empty() {
+                    card.model = task.model.clone();
+                }
+                cards.push(card);
+            }
+            if task.phase == Phase::AwaitingApproval {
+                cards.push(AgentCard {
+                    target: Target::Task {
+                        task: task.id.clone(),
+                        run: None,
+                    },
+                    title: task.objective.clone(),
+                    project: task.source.clone(),
+                    status: Status::Waiting,
+                    activity: "Acceptance checks need your approval".into(),
+                    model: task.model.clone(),
+                    parent: None,
+                    action: "Review acceptance checks",
+                    path: None,
+                });
+            }
+        }
+    }
+    pub(super) fn open_task_from_board(&mut self, task: String, run: Option<String>) {
+        self.tasks.selected = Some(task);
+        self.tasks.selected_run = run;
+        self.tasks.transcript = Default::default();
+        self.tasks.open = true;
+    }
     /// Match known retained run paths first; names support older role sessions opened from Recent.
     pub(super) fn task_session(&self, state: &State) -> Option<Role> {
         if let Some(path) = state.session_file.as_deref() {
@@ -477,6 +532,7 @@ impl Pui {
         if self.deletion.in_progress() {
             return;
         }
+        self.kanban.open = false;
         self.tasks.open = true;
         if self.tasks.running() {
             self.tasks.selected = self.tasks.live.clone();

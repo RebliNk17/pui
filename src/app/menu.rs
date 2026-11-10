@@ -265,28 +265,33 @@ impl Pui {
             }
             Sidebar => self.prefs.hide_sidebar = !self.prefs.hide_sidebar,
             Inspector => {
+                self.kanban.open = false;
                 let shown = self.menu_state(ctx).inspector;
                 self.files.close();
                 self.inspector_panel = false;
                 self.prefs.hide_inspector = shown;
             }
             Terminal => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                 self.focus_composer = !self.terminals.is_open();
             }
             Files => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }
             Browser => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.files.toggle_browser(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
                 self.terminals.close(ctx);
             }
             Changes => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.files.close();
                 self.inspector_panel = !self.inspector_panel;

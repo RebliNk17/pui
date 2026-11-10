@@ -397,6 +397,7 @@ impl Pui {
         if self.deletion.in_progress() {
             return;
         }
+        self.kanban.open = false;
         self.tasks.open = false;
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
@@ -1157,6 +1158,83 @@ impl Pui {
             node.status = "Connecting".into();
             node.settled = false;
             running += 1;
+        }
+    }
+    pub(super) fn demo_kanban_agents(&mut self) {
+        self.demo_agent_tree();
+        self.state.session_name = "Add Kanban board".into();
+        self.state.busy = true;
+        let root = self.agents.active.clone();
+        self.agents.nodes.get_mut(&root).unwrap().name = "Add Kanban board".into();
+        for (name, status, project) in [
+            ("Refactor session search", "Waiting for input", "pui"),
+            (
+                "Update sharing permissions",
+                "Waiting for input",
+                "agent-harbor",
+            ),
+            ("Fix artifact previews", "Working…", "agent-harbor"),
+            ("Investigate failing build", "Failed", "api-service"),
+        ] {
+            self.agents.next += 1;
+            let id = format!("agent-{}", self.agents.next);
+            let cwd = PathBuf::from(format!("/example/{project}"));
+            let mut state = State {
+                session_name: name.into(),
+                model_name: "Example model".into(),
+                busy: status == "Working…",
+                ..Default::default()
+            };
+            state.messages.push(Message {
+                role: "assistant".into(),
+                text: "Design fixture only; no provider request.".into(),
+                ..Default::default()
+            });
+            if status == "Waiting for input" {
+                if project == "pui" {
+                    state.dialogs.push_back(questions::demo_dialog());
+                } else {
+                    state.dialogs.push_back(json!({"method":"select","id":"demo-board-approval",
+                    "title":"Allow bash?\n\nApproval needed.\n\n{\"command\":\"npm test\"}\n\nApprove this exact action.",
+                    "options":["Allow once","Always allow this exact action (this chat)","Deny"]}));
+                }
+            }
+            if status == "Failed" {
+                state.error =
+                    Some("Connection lost. Open the session to inspect the error.".into());
+            }
+            self.agents.nodes.insert(
+                id.clone(),
+                Node {
+                    id: id.clone(),
+                    parent: None,
+                    name: name.into(),
+                    cwd,
+                    path: None,
+                    access: "workspace".into(),
+                    status: status.into(),
+                    children: Vec::new(),
+                    stopped: false,
+                    reported: true,
+                    needs_report: false,
+                    settled: true,
+                    launch: None,
+                    failure: None,
+                    result: None,
+                    task: String::new(),
+                    depends: Vec::new(),
+                    setup: None,
+                    worktree: None,
+                },
+            );
+            self.agents.parked.insert(
+                id,
+                Chat {
+                    state,
+                    connected: true,
+                    ..Default::default()
+                },
+            );
         }
     }
     pub(super) fn demo_agent_tree(&mut self) {
