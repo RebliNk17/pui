@@ -977,8 +977,8 @@ impl Pui {
                 "This chat is not active in its owning window. Switch to it there first.".into(),
             );
         }
-        if self.deletion.in_progress() {
-            return Err("Deletion is in progress in the owning window.".into());
+        if self.deletion.in_progress() || self.deletion.deleting_chat(path) {
+            return Err("Deletion is in progress for this chat in the owning window.".into());
         }
         if self.loading_chat {
             return Err("Owning window is connecting; try again when ready.".into());

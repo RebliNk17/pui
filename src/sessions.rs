@@ -13,6 +13,7 @@ pub struct Session {
     pub cwd: PathBuf,
     pub project: PathBuf,
     pub title: String,
+    pub created: Option<SystemTime>,
     pub modified: SystemTime,
 }
 
@@ -26,13 +27,17 @@ pub fn session_root() -> Option<PathBuf> {
     Some(agent.join("sessions"))
 }
 
-pub fn discover() -> Vec<Session> {
+pub fn discover(retained: &[PathBuf]) -> Vec<Session> {
     let Some(root) = session_root() else {
         return Vec::new();
     };
+    discover_in(&root, retained)
+}
+
+fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
     let mut files = Vec::new();
-    collect(&root, &mut files);
-    if let Ok(dirs) = fs::read_dir(&root) {
+    collect(root, &mut files);
+    if let Ok(dirs) = fs::read_dir(root) {
         for dir in dirs
             .flatten()
             .filter(|d| d.file_type().is_ok_and(|t| t.is_dir()))
@@ -41,10 +46,25 @@ pub fn discover() -> Vec<Session> {
         }
     }
     files.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    // Pinned/hidden chats must remain reachable even after leaving the recent 150.
+    files.truncate(150);
+    let mut seen: std::collections::HashSet<_> =
+        files.iter().map(|(path, _)| path.clone()).collect();
+    for path in retained {
+        if seen.insert(path.clone()) {
+            if let Ok(meta) = fs::metadata(path) {
+                if meta.is_file() {
+                    files.push((
+                        path.clone(),
+                        meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    ));
+                }
+            }
+        }
+    }
     let mut projects = std::collections::HashMap::new();
     files
         .into_iter()
-        .take(150)
         .filter_map(|(path, modified)| {
             let mut session = read_session(&path, modified)?;
             session.project = projects
@@ -77,6 +97,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     let reader = BufReader::new(file.take(96 * 1024 * 1024));
     let mut prefix_bytes = 0;
     let mut cwd = None;
+    let mut created = None;
     let mut prompt = None;
     let mut name = None;
     for line in reader.lines().map_while(Result::ok) {
@@ -86,6 +107,10 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         };
         if string(&entry, "type") == "session" {
             cwd = entry["cwd"].as_str().map(PathBuf::from);
+            created = entry["timestamp"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(SystemTime::from);
         }
         if string(&entry, "type") == "message"
             && string(&entry["message"], "role") == "user"
@@ -136,6 +161,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         cwd: cwd.clone()?,
         project: cwd?,
         title: name.or(prompt).unwrap_or_else(|| "New conversation".into()),
+        created,
         modified,
     })
 }
@@ -289,6 +315,64 @@ mod tests {
         let session = read_session(&path, SystemTime::now()).unwrap();
         fs::remove_file(path).unwrap();
         session
+    }
+    #[test]
+    fn pinned_and_hidden_paths_survive_the_recent_scan_limit() {
+        let root = std::env::temp_dir().join(format!("pui-retained-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..152 {
+            fs::write(
+                root.join(format!("{i}.jsonl")),
+                format!(
+                    "{}\n",
+                    serde_json::json!({"type":"session", "cwd":"/fixture"})
+                ),
+            )
+            .unwrap();
+        }
+        let recent = discover_in(&root, &[]);
+        assert_eq!(recent.len(), 150);
+        let excluded: Vec<_> = (0..152)
+            .map(|i| root.join(format!("{i}.jsonl")))
+            .filter(|p| !recent.iter().any(|s| &s.path == p))
+            .collect();
+        assert_eq!(excluded.len(), 2);
+        let retained = discover_in(
+            &root,
+            &[
+                excluded[0].clone(),
+                excluded[1].clone(),
+                excluded[0].clone(),
+                root.join("missing.jsonl"),
+            ],
+        );
+        assert_eq!(retained.len(), 152);
+        assert!(
+            excluded
+                .iter()
+                .all(|p| retained.iter().any(|s| &s.path == p))
+        );
+        for i in 0..152 {
+            fs::remove_file(root.join(format!("{i}.jsonl"))).unwrap();
+        }
+        fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn creation_time_comes_from_session_header_not_last_activity() {
+        let session = fixture(&[serde_json::json!({
+            "type":"session", "cwd":"/fixture", "timestamp":"2024-01-02T03:04:05.000Z"
+        })]);
+        let expected = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap();
+        assert_eq!(session.created, Some(SystemTime::from(expected)));
+        assert_ne!(session.created, Some(session.modified));
+        assert_eq!(fixture(&[]).created, None);
+        assert_eq!(
+            fixture(&[
+                serde_json::json!({"type":"session", "cwd":"/fixture", "timestamp":"invalid"})
+            ])
+            .created,
+            None
+        );
     }
     #[test]
     fn title_survives_first_prompt_crossing_old_prefix_limit() {

@@ -56,13 +56,26 @@ impl DeliveryStatus {
 impl PendingMessage {
     pub fn matches(&self, message: &Message) -> bool {
         message.role == "user"
-            && self.text == crate::transcript::user_display_text(message)
-            && self.images.len() == message.images.len()
-            && self
-                .images
-                .iter()
-                .zip(&message.images)
-                .all(|(a, b)| a.key == b.key)
+            && self.matches_content(
+                crate::transcript::user_display_text(message),
+                &message.images,
+            )
+    }
+
+    pub(crate) fn matches_content(&self, text: &str, images: &[crate::media::Attachment]) -> bool {
+        self.text == text
+            && self.images.len() == images.len()
+            && self.images.iter().zip(images).all(|(a, b)| {
+                // Pi normalizes inline images before emitting the canonical user
+                // message, so their encoded-byte keys need not survive delivery.
+                // Reconciliation uses the occurrence count captured before send;
+                // this is receipt matching, never general history deduplication.
+                match (&a.file, &b.file) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.path == b.path,
+                    _ => false,
+                }
+            })
     }
 }
 

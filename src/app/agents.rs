@@ -394,7 +394,14 @@ impl Pui {
         id
     }
     pub(super) fn view_agent(&mut self, id: &str) {
-        if self.deletion.in_progress() {
+        if self.deletion.in_progress()
+            || self
+                .agents
+                .nodes
+                .get(id)
+                .and_then(|n| n.path.as_deref())
+                .is_some_and(|p| self.deletion.deleting_chat(p))
+        {
             return;
         }
         self.kanban.open = false;
@@ -1626,6 +1633,7 @@ mod tests {
             cwd: app.prefs.cwd.clone(),
             project: app.prefs.cwd.clone(),
             title: "Original run".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         };
         let second = Session {
