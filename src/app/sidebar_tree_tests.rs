@@ -87,6 +87,36 @@ fn click(app: &mut Pui, point: egui::Pos2) {
     }
 }
 #[test]
+fn pinned_and_hidden_descendants_are_reachable_once_without_their_parent() {
+    let mut app = fixture();
+    let hidden_path = app.sessions[0].path.clone();
+    let pinned_path = app.sessions[1].path.clone();
+    app.prefs
+        .chats
+        .entry(hidden_path.clone())
+        .or_default()
+        .hidden = true;
+    let meta = app.prefs.chats.entry(pinned_path.clone()).or_default();
+    meta.pinned = true;
+    meta.hidden = true;
+    let (pinned, rows) = listing(&app);
+    assert_eq!(pinned.len(), 1);
+    assert_eq!(pinned[0].path.as_ref(), Some(&pinned_path));
+    fn count(rows: &[Branch], path: &PathBuf) -> usize {
+        rows.iter()
+            .map(|row| usize::from(row.path.as_ref() == Some(path)) + count(&row.children, path))
+            .sum()
+    }
+    assert_eq!(count(&rows, &pinned_path), 0);
+    assert_eq!(count(&rows, &hidden_path), 0);
+    app.show_hidden = true;
+    let (pinned, rows) = listing(&app);
+    assert_eq!(pinned.len(), 1);
+    assert_eq!(count(&rows, &hidden_path), 1);
+    assert_eq!(count(&rows, &pinned_path), 0);
+}
+
+#[test]
 fn light_sidebar_uses_larger_saturated_dots_for_chats_and_compact_children() {
     for projects in [false, true] {
         let mut app = fixture();

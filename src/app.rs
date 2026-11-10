@@ -146,6 +146,7 @@ pub struct Pui {
     model_query: String,
     model_provider: String,
     show_archived: bool,
+    show_hidden: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
     rename_chat: Option<PathBuf>,
@@ -259,6 +260,7 @@ impl Pui {
             model_query: String::new(),
             model_provider: String::new(),
             show_archived: false,
+            show_hidden: false,
             closed_projects: Default::default(),
             expanded_projects: Default::default(),
             rename_chat: None,
@@ -425,8 +427,15 @@ impl Pui {
         let (tx, rx) = mpsc::channel();
         self.session_rx = Some(rx);
         let ctx = self.ctx.clone();
+        let retained = self
+            .prefs
+            .chats
+            .iter()
+            .filter(|(_, prefs)| prefs.pinned || prefs.hidden)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         std::thread::spawn(move || {
-            let _ = tx.send(sessions::discover());
+            let _ = tx.send(sessions::discover(&retained));
             ctx.request_repaint();
         });
     }

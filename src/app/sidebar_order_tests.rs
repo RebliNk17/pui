@@ -58,19 +58,18 @@ fn sorting_is_independent_of_grouping_and_supports_both_directions() {
 }
 
 #[test]
-fn pinned_first_is_optional_and_not_reversed_with_the_sort() {
+fn sorting_inside_sections_does_not_prioritize_pins() {
     let rows = [
         row("Alpha", Some(30), 30, false),
         row("zebra", Some(10), 10, true),
     ];
     for sort in [Sort::Activity, Sort::Created, Sort::Name] {
         for reverse in [false, true] {
-            let options = Options {
-                sort,
-                reverse,
-                pinned_first: true,
-            };
-            assert_eq!(titles(&rows, options)[0], "zebra");
+            let options = Options { sort, reverse };
+            assert_eq!(
+                titles(&rows, options)[0],
+                if reverse { "zebra" } else { "Alpha" }
+            );
         }
     }
     assert_eq!(
@@ -78,7 +77,6 @@ fn pinned_first_is_optional_and_not_reversed_with_the_sort() {
             &rows,
             Options {
                 sort: Sort::Name,
-                pinned_first: false,
                 ..Default::default()
             }
         ),
@@ -100,7 +98,6 @@ fn unknown_dates_stay_last_and_equal_values_preserve_discovery_order() {
                 Options {
                     sort: Sort::Created,
                     reverse,
-                    ..Default::default()
                 }
             ),
             ["Second", "First", "Unknown"]
@@ -124,7 +121,6 @@ fn project_headings_sort_by_project_name_or_newest_timestamp_not_first_pinned_ch
     for sort in [Sort::Activity, Sort::Created, Sort::Name] {
         let options = Options {
             sort,
-            pinned_first: false,
             ..Default::default()
         };
         assert_eq!(options.compare_groups(a, b, &rows), Ordering::Less);
@@ -141,7 +137,7 @@ fn project_headings_sort_by_project_name_or_newest_timestamp_not_first_pinned_ch
         reverse: true,
         ..Default::default()
     };
-    assert_eq!(options.compare_groups(a, b, &rows), Ordering::Less);
+    assert_eq!(options.compare_groups(a, b, &rows), Ordering::Greater);
 }
 
 #[test]
@@ -149,5 +145,6 @@ fn legacy_preferences_keep_existing_defaults() {
     let options: Options = serde_json::from_str("{}").unwrap();
     assert!(options.sort == Sort::Activity);
     assert!(!options.reverse);
-    assert!(options.pinned_first);
+    let legacy: Options = serde_json::from_str(r#"{"pinned_first":false}"#).unwrap();
+    assert!(legacy.sort == Sort::Activity);
 }

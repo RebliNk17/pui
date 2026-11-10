@@ -24,32 +24,15 @@ impl Sort {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct Options {
     pub sort: Sort,
     pub reverse: bool,
-    pub pinned_first: bool,
-}
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            sort: Sort::Activity,
-            reverse: false,
-            pinned_first: true,
-        }
-    }
 }
 impl Options {
     fn direction(self, order: Ordering) -> Ordering {
         if self.reverse { order.reverse() } else { order }
-    }
-    fn pins(self, a: bool, b: bool) -> Ordering {
-        if self.pinned_first {
-            b.cmp(&a)
-        } else {
-            Ordering::Equal
-        }
     }
     // Unknown creation times stay at the end in either direction.
     fn dates(self, a: Option<std::time::SystemTime>, b: Option<std::time::SystemTime>) -> Ordering {
@@ -59,11 +42,11 @@ impl Options {
         }
     }
     pub fn compare(self, a: &Branch, b: &Branch) -> Ordering {
-        self.pins(a.pinned, b.pinned).then_with(|| match self.sort {
+        match self.sort {
             Sort::Activity => self.dates(Some(a.modified), Some(b.modified)),
             Sort::Created => self.dates(a.created, b.created),
             Sort::Name => self.direction(a.title.to_lowercase().cmp(&b.title.to_lowercase())),
-        })
+        }
     }
     pub fn compare_groups(
         self,
@@ -71,11 +54,7 @@ impl Options {
         b: (&Path, &[usize]),
         rows: &[Branch],
     ) -> Ordering {
-        self.pins(
-            a.1.iter().any(|i| rows[*i].pinned),
-            b.1.iter().any(|i| rows[*i].pinned),
-        )
-        .then_with(|| match self.sort {
+        (match self.sort {
             Sort::Name => self.direction(
                 crate::sessions::project_name(a.0)
                     .to_lowercase()

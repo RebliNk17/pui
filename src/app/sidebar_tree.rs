@@ -62,6 +62,32 @@ impl Branch {
         }
     }
 }
+/// Pull pinned descendants into a dedicated section and expose hidden descendants
+/// without requiring their visible parent to be shown. No duplicated row IDs.
+pub(super) fn listing(app: &Pui) -> (Vec<Branch>, Vec<Branch>) {
+    fn project(mut branch: Branch, show_hidden: bool, pinned: &mut Vec<Branch>) -> Vec<Branch> {
+        branch.children = branch
+            .children
+            .into_iter()
+            .flat_map(|child| project(child, show_hidden, pinned))
+            .collect();
+        if branch.pinned {
+            pinned.push(branch);
+            Vec::new()
+        } else if branch.hidden != show_hidden {
+            branch.children
+        } else {
+            vec![branch]
+        }
+    }
+    let mut pinned = Vec::new();
+    let rows = forest(app)
+        .into_iter()
+        .flat_map(|branch| project(branch, app.show_hidden, &mut pinned))
+        .collect();
+    (pinned, rows)
+}
+
 // These are the same macOS directory, without canonicalizing on every frame.
 fn path_key(path: &std::path::Path) -> PathBuf {
     #[cfg(target_os = "macos")]
