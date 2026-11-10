@@ -69,12 +69,24 @@ impl Pui {
         egui::Popup::menu(&button)
             .align(egui::emath::RectAlign::TOP_START)
             .align_alternatives(&[])
-            .width(245.0)
+            .width(275.0)
+            .frame(prompt_ui::popup(ui.ctx()))
             .show(|ui| {
+                prompt_ui::style(ui);
+                ui.set_width(243.0);
                 ui.label(theme::small(ui, "Agent mode"));
                 for mode in PermissionMode::ALL {
                     if ui
-                        .selectable_label(self.prefs.settings.permission == mode, mode.label())
+                        .add(
+                            egui::Button::new(mode.label())
+                                .selected(self.prefs.settings.permission == mode)
+                                .fill(if self.prefs.settings.permission == mode {
+                                    colors.accent_bg
+                                } else {
+                                    prompt_ui::background(ui.ctx())
+                                })
+                                .stroke(Stroke::NONE),
+                        )
                         .on_hover_text(mode.description())
                         .clicked()
                     {
@@ -86,7 +98,6 @@ impl Pui {
         self.propagate_settings(&before);
     }
     pub(super) fn permission_confirmation(&mut self, ui: &mut egui::Ui) {
-        let colors = crate::theme::palette(ui.ctx());
         let Some(scope) = self.bypass_pending.as_ref() else {
             return;
         };
@@ -94,16 +105,34 @@ impl Pui {
             self.bypass_pending = None;
             return;
         }
-        egui::Frame::new().fill(colors.sidebar).stroke(Stroke::new(1.0, colors.red)).corner_radius(10).inner_margin(12).show(ui, |ui| {
-            ui.label(RichText::new("Bypass all permissions?").color(colors.red).strong());
-            ui.add(egui::Label::new(theme::small(ui, "Writable agents in this window can run commands, change or delete files, access credentials and use the network without asking. This also changes existing workers. Read-only workers stay restricted. Only enable this for work you trust.")).wrap());
-            ui.horizontal(|ui| {
-                if ui.button("Enable bypass").clicked() {
+        let frame = ui.ctx().cumulative_frame_nr();
+        let first = ui.ctx().data_mut(|data| {
+            let id = egui::Id::new("bypass-confirmation-focus");
+            let previous = data.get_temp::<(String, u64)>(id);
+            data.insert_temp(id, (scope.clone(), frame));
+            previous.is_none_or(|(previous_scope, previous_frame)| {
+                previous_scope != *scope || previous_frame.saturating_add(1) < frame
+            })
+        });
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            prompt_ui::style(ui);
+            confirmations::heading(ui, "Bypass all permissions?", "Only enable this for work you trust.", true);
+            ui.add_space(14.0);
+            confirmations::note(ui, "Writable agents in this window can run commands, change or delete files, access credentials and use the network without asking. This also changes existing workers. Read-only workers stay restricted.");
+            ui.add_space(18.0);
+            let choice = if prompt_ui::keyboard_available(ui) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                Some(confirmations::Choice::Cancel)
+            } else {
+                confirmations::actions(ui, "Cancel", "Enable bypass", true, true, first)
+            };
+            match choice {
+                Some(confirmations::Choice::Confirm) => {
                     self.prefs.settings.permission = PermissionMode::Bypass;
                     self.bypass_pending = None;
                 }
-                if ui.button("Cancel").clicked() { self.bypass_pending = None; }
-            });
+                Some(confirmations::Choice::Cancel) => self.bypass_pending = None,
+                None => {}
+            }
         });
     }
 }
@@ -215,6 +244,29 @@ mod tests {
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.permission_confirmation(ui));
         });
+        assert!(app.bypass_pending.is_none());
+        assert!(app.prefs.settings.permission == PermissionMode::Auto);
+        app.choose_permission(PermissionMode::Bypass);
+        for _ in 0..3 {
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.permission_confirmation(ui));
+            });
+        }
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.permission_confirmation(ui));
+            },
+        );
         assert!(app.bypass_pending.is_none());
         assert!(app.prefs.settings.permission == PermissionMode::Auto);
         app.choose_permission(PermissionMode::Plan);

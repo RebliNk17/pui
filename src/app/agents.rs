@@ -64,8 +64,11 @@ pub(super) struct Chat {
     partial: bool,
     draft: String,
     recall: composer_history::Recall,
+    completions: completions::View,
     images: attachments::DraftImages,
+    image_picker: Option<Receiver<Vec<PathBuf>>>,
     deliveries: Vec<run_status::Delivery>,
+    interrupt: Option<run_status::Interrupt>,
     transcript: Transcript,
     ultra: bool,
     ready: bool,
@@ -73,6 +76,15 @@ pub(super) struct Chat {
     questions: questions::View,
     current_dialog: String,
     pending_dialog: Option<String>,
+}
+impl Chat {
+    pub(super) fn deletion_busy(&self) -> bool {
+        self.loading
+            || self.history_pending.is_some()
+            || self.interrupt.is_some()
+            || !self.deliveries.is_empty()
+            || !self.state.dialogs.is_empty()
+    }
 }
 struct AgentWait {
     source: String,
@@ -91,6 +103,7 @@ pub(super) struct Agents {
     pub background: bool,
     mail: BTreeMap<String, (String, Option<String>)>,
     waits: Vec<AgentWait>,
+    retiring: Vec<Receiver<()>>,
 }
 impl Pui {
     pub(super) fn with_live_chat<R>(
@@ -236,6 +249,41 @@ impl Pui {
             }
         }
     }
+    pub(super) fn agents_still_retiring(&self) -> bool {
+        self.agents
+            .retiring
+            .iter()
+            .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
+    }
+    pub(super) fn forget_deleted_agents(&mut self, path: &std::path::Path) {
+        let ids: std::collections::BTreeSet<_> = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| {
+                n.path
+                    .as_ref()
+                    .is_some_and(|p| sync::identity(p) == sync::identity(path))
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        for id in &ids {
+            self.agents.nodes.remove(id);
+            self.agents.parked.remove(id);
+        }
+        for node in self.agents.nodes.values_mut() {
+            node.children.retain(|id| !ids.contains(id));
+            if node.parent.as_ref().is_some_and(|id| ids.contains(id)) {
+                node.parent = None;
+            }
+        }
+        if ids.contains(&self.agents.active) {
+            self.agents.active.clear();
+        }
+        self.agents.waits.retain(|w| !ids.contains(&w.source));
+        self.agents.mail.retain(|_, (id, _)| !ids.contains(id));
+        self.prefs.agent_tree = self.agent_records();
+    }
     pub(super) fn agent_records(&self) -> Vec<AgentRecord> {
         self.agents
             .nodes
@@ -268,8 +316,11 @@ impl Pui {
             partial: std::mem::take(&mut self.preview_partial),
             draft: std::mem::take(&mut self.draft),
             recall: std::mem::take(&mut self.recall),
+            completions: std::mem::take(&mut self.completions),
             images: std::mem::take(&mut self.draft_images),
+            image_picker: self.image_picker_rx.take(),
             deliveries: std::mem::take(&mut self.deliveries),
+            interrupt: self.interrupt.take(),
             transcript: std::mem::take(&mut self.transcript),
             ultra: std::mem::take(&mut self.ultracode),
             ready: std::mem::take(&mut self.ultracode_ready),
@@ -294,7 +345,10 @@ impl Pui {
         self.draft = chat.draft;
         self.recall = chat.recall;
         self.draft_images = chat.images;
+        self.image_picker_rx = chat.image_picker;
+        self.completions = chat.completions;
         self.deliveries = chat.deliveries;
+        self.interrupt = chat.interrupt;
         self.transcript = chat.transcript;
         self.ultracode = chat.ultra;
         self.ultracode_ready = chat.ready;
@@ -340,6 +394,9 @@ impl Pui {
         id
     }
     pub(super) fn view_agent(&mut self, id: &str) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.tasks.open = false;
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
@@ -415,6 +472,7 @@ impl Pui {
         for kind in [
             "get_state",
             "get_messages",
+            "get_commands",
             "get_available_models",
             "get_available_thinking_levels",
         ] {
@@ -776,7 +834,12 @@ impl Pui {
                 if let Some(mut client) = self.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
-                    client.retire();
+                    let (tx, rx) = mpsc::channel();
+                    self.agents.retiring.push(rx);
+                    std::thread::spawn(move || {
+                        drop(client);
+                        let _ = tx.send(());
+                    });
                 }
                 self.connected = false;
                 self.state.busy = false;
@@ -789,7 +852,12 @@ impl Pui {
                 if let Some(mut client) = chat.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
-                    client.retire();
+                    let (tx, rx) = mpsc::channel();
+                    self.agents.retiring.push(rx);
+                    std::thread::spawn(move || {
+                        drop(client);
+                        let _ = tx.send(());
+                    });
                 }
                 chat.connected = false;
                 chat.state.busy = false;
@@ -847,6 +915,9 @@ impl Pui {
         self.agents.waits = pending;
     }
     pub(super) fn poll_other_agents(&mut self) {
+        self.agents
+            .retiring
+            .retain(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         if self.demo {
             return;
         }
@@ -1061,6 +1132,7 @@ impl Pui {
             };
             for kind in [
                 "get_state",
+                "get_commands",
                 "get_available_models",
                 "get_available_thinking_levels",
             ] {
@@ -1085,47 +1157,6 @@ impl Pui {
             node.status = "Connecting".into();
             node.settled = false;
             running += 1;
-        }
-    }
-    pub(super) fn agent_rows(&mut self, ui: &mut egui::Ui, parent: &str) {
-        let colors = crate::theme::palette(ui.ctx());
-        let children = self
-            .agents
-            .nodes
-            .get(parent)
-            .map(|n| n.children.clone())
-            .unwrap_or_default();
-        for id in children {
-            let node = &self.agents.nodes[&id];
-            let selected = self.agents.active == id;
-            let label = format!("{} · {}", node.name, node.status);
-            let tooltip = format!("{}\n{}\n{}", node.id, node.access, node.cwd.display());
-            let color = node.color(colors);
-            ui.push_id(&id, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(17.0);
-                    let (pos, _) = ui.allocate_exact_size(Vec2::new(8.0, 30.0), Sense::hover());
-                    ui.painter().line_segment(
-                        [pos.left_top(), pos.left_center()],
-                        Stroke::new(1.0, colors.border),
-                    );
-                    ui.painter().line_segment(
-                        [pos.left_center(), pos.right_center()],
-                        Stroke::new(1.0, colors.border),
-                    );
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(label).size(10.0).color(color))
-                                .frame(selected),
-                        )
-                        .on_hover_text(tooltip)
-                        .clicked()
-                    {
-                        self.view_agent(&id);
-                    }
-                });
-                self.agent_rows(ui, &id);
-            });
         }
     }
     pub(super) fn demo_agent_tree(&mut self) {
@@ -1231,33 +1262,35 @@ impl Pui {
             self.agents.close_prompt = true;
         }
         if self.agents.close_prompt {
-            egui::Modal::new(egui::Id::new("close-agent-tree")).show(ctx, |ui| {
-                ui.label("Agents or terminal shells are active. Stop all and quit Pui?");
-                ui.label(theme::small(
-                    ui,
-                    "Sessions and worktrees will be kept. Terminal commands will stop; queued messages are in memory only.",
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button("Keep working").clicked() {
-                        self.agents.close_prompt = false;
-                    }
-                    if ui.button("Stop all and quit").clicked() {
-                        self.tasks.stop();
-                        let roots: Vec<_> = self
-                            .agents
-                            .nodes
-                            .values()
-                            .filter(|n| n.parent.is_none())
-                            .map(|n| n.id.clone())
-                            .collect();
-                        for id in roots {
-                            self.stop_agent_tree(&id);
-                        }
-                        self.agents.exiting = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
+            let choice = confirmations::Dialog::new(
+                "close-agent-tree",
+                "Quit Pui?",
+                "Agents or terminal shells are still active. Quitting will stop their work in this window.",
+                "Keep working",
+                "Stop all and quit",
+            ).show(ctx, |ui| {
+                confirmations::note(ui, "Sessions and worktrees will be kept. Running terminal commands will stop, and queued messages will be lost.");
             });
+            match choice {
+                Some(confirmations::Choice::Cancel) => self.agents.close_prompt = false,
+                Some(confirmations::Choice::Confirm) => {
+                    self.tasks.stop();
+                    let roots: Vec<_> = self
+                        .agents
+                        .nodes
+                        .values()
+                        .filter(|n| n.parent.is_none())
+                        .map(|n| n.id.clone())
+                        .collect();
+                    for id in roots {
+                        self.stop_agent_tree(&id);
+                    }
+                    self.agents.close_prompt = false;
+                    self.agents.exiting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                None => {}
+            }
         }
     }
 }

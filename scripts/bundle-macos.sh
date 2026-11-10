@@ -11,7 +11,15 @@ if [[ "${1:-}" == --debug ]]; then
   profile=debug
   cargo_flags=(--locked)
 fi
-cargo build "${cargo_flags[@]}"
+# CEF's build requires CMake/Ninja. Download only the pinned, hash-checked
+# runtime before Cargo so custom TLS roots can use the system curl stack.
+command -v cmake >/dev/null || { echo "CMake is required to build Chromium." >&2; exit 1; }
+command -v ninja >/dev/null || { echo "Ninja is required to build Chromium." >&2; exit 1; }
+if [[ -z "${CEF_PATH:-}" ]]; then
+  CEF_PATH=$(python3 scripts/fetch-chromium-macos.py "${CARGO_TARGET_DIR:-target}/cef-runtime")
+  export CEF_PATH
+fi
+cargo build --bins "${cargo_flags[@]}"
 app="$PWD/dist/Pui.app"
 resources="$app/Contents/Resources"
 iconset="$PWD/target/pui.iconset"
@@ -23,7 +31,8 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" assets/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$resources/Pui.icns"
-cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts "$resources/"
+cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts "$resources/"
+python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
 cp packaging/Info.plist "$app/Contents/Info.plist"
 # Cargo is the release-version source of truth, including future GitHub checks.
 version=$(cargo pkgid --offline | awk -F# '{print $NF}' | awk -F@ '{print $NF}')

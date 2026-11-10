@@ -9,7 +9,8 @@ impl Pui {
     pub(super) fn notifications_button(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let colors = theme::palette(ui.ctx());
         let count = self.state.diagnostics.len() + usize::from(self.state.notice.is_some());
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(52.0, 28.0), Sense::click());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(52.0, theme::CONTROL_HEIGHT), Sense::click());
         if response.hovered() || self.diagnostics_open {
             ui.painter().rect_filled(rect, 7, colors.hover);
         }
@@ -77,14 +78,9 @@ impl Pui {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .gap(10.0)
             .width(width)
-            .frame(
-                egui::Frame::popup(&ctx.style())
-                    .fill(colors.surface)
-                    .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(12)
-                    .inner_margin(16),
-            )
+            .frame(prompt_ui::popup(ctx))
             .show(|ui| {
+                prompt_ui::style(ui);
                 ui.set_width(width - 32.0);
                 ui.spacing_mut().item_spacing.y = 12.0;
                 ui.horizontal(|ui| {

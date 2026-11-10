@@ -32,6 +32,14 @@ impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
+    pub(super) fn close(&mut self, ctx: &egui::Context) {
+        self.open = false;
+        self.focus = false;
+        ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+    }
+    pub(super) fn confirming_stop(&self) -> bool {
+        self.confirm_stop
+    }
     pub(super) fn focused(&self, ctx: &egui::Context) -> bool {
         self.open && ctx.memory(|m| m.has_focus(terminal_id()))
     }
@@ -106,24 +114,32 @@ impl Terminals {
                 .show(ctx, |ui| self.content(ui, demo));
         }
         if self.confirm_stop {
-            egui::Modal::new(egui::Id::new("stop-project-terminal")).show(ctx, |ui| {
-                ui.label("Stop this terminal?");
-                ui.label(theme::small(
+            let choice = confirmations::Dialog::new(
+                "stop-project-terminal",
+                "Stop this terminal?",
+                "This ends its shell and interrupts any commands still running.",
+                "Keep running",
+                "Stop terminal",
+            )
+            .show(ctx, |ui| {
+                confirmations::note(
                     ui,
-                    "This ends its shell and may interrupt running commands.",
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button("Keep running").clicked() {
-                        self.confirm_stop = false;
-                    }
-                    if ui.button("Stop terminal").clicked() {
-                        self.projects.remove(&self.root);
-                        self.confirm_stop = false;
-                        self.open = false;
-                        ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
-                    }
-                });
+                    &format!(
+                        "Project: {}\nFiles and chat sessions will be kept.",
+                        self.root.display()
+                    ),
+                );
             });
+            match choice {
+                Some(confirmations::Choice::Cancel) => self.confirm_stop = false,
+                Some(confirmations::Choice::Confirm) => {
+                    self.projects.remove(&self.root);
+                    self.confirm_stop = false;
+                    self.open = false;
+                    ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+                }
+                None => {}
+            }
         }
         expanded
     }

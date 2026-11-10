@@ -152,33 +152,128 @@ impl Updates {
             self.result = Some(result);
         }
     }
+    fn status(&self, configured: bool) -> (&'static str, String) {
+        if !configured {
+            return ("Updates aren’t configured", "This build has no GitHub release repository configured. No network request was made.".to_owned());
+        }
+        if self.rx.is_some() {
+            return (
+                "Checking for updates…",
+                "Looking for the latest published stable release.".to_owned(),
+            );
+        }
+        match &self.result {
+            Some(Ok(release)) if release.newer => (
+                "A new version is ready",
+                format!("Version {} is available on GitHub.", release.version),
+            ),
+            Some(Ok(release)) => (
+                "You’re up to date",
+                format!("Pui {} is the latest available version.", release.version),
+            ),
+            Some(Err(error)) => ("Couldn’t check for updates", error.clone()),
+            None => (
+                "Updates on your terms",
+                "Check published GitHub releases when you’re ready.".to_owned(),
+            ),
+        }
+    }
+
     pub(super) fn show(&mut self, ctx: &egui::Context) {
         if !self.open {
             return;
         }
         let mut retry = false;
-        egui::Window::new("Pui updates").open(&mut self.open).resizable(false).collapsible(false).default_width(390.0).show(ctx,|ui|{
-            ui.heading(format!("Pui {}",env!("CARGO_PKG_VERSION")));
-            ui.add_space(8.0);
-            if repository().is_none(){
-                ui.label("GitHub updates aren’t configured yet.");
-                ui.add(egui::Label::new(theme::small(ui,"When releases are ready, build with PUI_GITHUB_REPOSITORY=OWNER/REPO. Checks will use published stable GitHub Releases. No network request was made.")).wrap());
-            }else if self.rx.is_some(){ui.label("Checking GitHub Releases…");}
-            else if let Some(result)=&self.result {match result {
-                Ok(release)=>{
-                    ui.label(if release.newer {format!("Version {} is available.",release.version)}else{format!("You’re up to date. Latest release: {}.",release.version)});
-                    if ui.button("Open GitHub release").clicked(){ctx.open_url(egui::OpenUrl::new_tab(&release.url));}
+        let response = prompt_ui::modal(ctx, egui::Id::new("pui-updates"), 330.0, |ui| {
+            let mut close = prompt_ui::close(ui);
+            prompt_ui::badge(ui, Icon::Refresh, false);
+            let (title, description) = self.status(repository().is_some());
+            prompt_ui::heading(ui, title, "");
+            egui::ScrollArea::vertical()
+                .id_salt("update-description")
+                .max_height((ctx.screen_rect().height() * 0.25).clamp(60.0, 160.0))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(theme::small(ui, &description)).wrap());
+                });
+            ui.add_space(16.0);
+            installed_version(ui);
+            ui.add_space(10.0);
+            ui.add(egui::Label::new(theme::small(ui, "Never downloads, installs or restarts automatically. Running agents won’t be interrupted.")).wrap());
+            if repository().is_none() {
+                ui.add_space(8.0);
+                egui::CollapsingHeader::new("Configuration details").show(ui, |ui| {
+                    ui.add(egui::Label::new(theme::small(ui, "Build with PUI_GITHUB_REPOSITORY=OWNER/REPO to enable stable GitHub release checks.")).wrap());
+                });
+            }
+            ui.add_space(20.0);
+            prompt_ui::footer(ui, |ui| {
+                if let Some(Ok(release)) = &self.result {
+                    if release.newer
+                        && prompt_ui::button(
+                            ui,
+                            "Open GitHub release",
+                            prompt_ui::Button::Primary,
+                            true,
+                        )
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(&release.url));
+                    }
                 }
-                Err(error)=>{ui.add(egui::Label::new(error).wrap());}
-            }}else if !self.checked {ui.label("Updates are checked only when you ask.");}
-            ui.add_space(8.0);ui.add(egui::Label::new(theme::small(ui,"Pui never downloads, installs or restarts automatically. Existing agents are not interrupted.")).wrap());
-            if repository().is_some() && self.rx.is_none() && ui.button("Check again").clicked(){retry=true;}
+                let release_ready = self
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| result.as_ref().is_ok_and(|release| release.newer));
+                if repository().is_some()
+                    && self.rx.is_none()
+                    && !release_ready
+                    && prompt_ui::button(
+                        ui,
+                        if self.checked {
+                            "Check again"
+                        } else {
+                            "Check for updates"
+                        },
+                        prompt_ui::Button::Secondary,
+                        true,
+                    )
+                    .clicked()
+                {
+                    retry = true;
+                }
+                close |=
+                    prompt_ui::button(ui, "Close", prompt_ui::Button::Secondary, true).clicked();
+            });
+            close
         });
+        if response.should_close() || response.inner {
+            self.open = false;
+        }
         if retry {
             self.start(ctx);
         }
     }
 }
+// Allocate the dot and label in the same centered row; never top-align the dot.
+fn installed_version(ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .fill(prompt_ui::subtle(ui.ctx()))
+        .corner_radius(7)
+        .inner_margin(12)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let color = theme::palette(ui.ctx()).accent;
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                theme::status_dot(ui, rect.center(), color, 2.5);
+                ui.label(theme::small(
+                    ui,
+                    format!("Installed version {}", env!("CARGO_PKG_VERSION")),
+                ));
+            });
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +305,85 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn all_update_states_have_honest_copy_without_starting_work() {
+        let mut updates = Updates::default();
+        assert_eq!(updates.status(false).0, "Updates aren’t configured");
+        assert_eq!(updates.status(true).0, "Updates on your terms");
+        let (_tx, rx) = mpsc::channel();
+        updates.rx = Some(rx);
+        assert_eq!(updates.status(true).0, "Checking for updates…");
+        updates.rx = None;
+        for newer in [false, true] {
+            updates.result = Some(Ok(Release {
+                version: "0.2.0".into(),
+                url: "https://github.com/example/pui/releases/latest".into(),
+                newer,
+            }));
+            assert_eq!(
+                updates.status(true).0,
+                if newer {
+                    "A new version is ready"
+                } else {
+                    "You’re up to date"
+                }
+            );
+        }
+        updates.result = Some(Err("Connection unavailable".into()));
+        assert_eq!(
+            updates.status(true),
+            (
+                "Couldn’t check for updates",
+                "Connection unavailable".into()
+            )
+        );
+        assert!(updates.rx.is_none());
+    }
+
+    #[test]
+    fn installed_version_dot_is_centered_on_the_label_in_both_themes() {
+        fn collect(
+            shape: &egui::Shape,
+            dots: &mut Vec<egui::Pos2>,
+            label: &mut Option<egui::Rect>,
+        ) {
+            match shape {
+                egui::Shape::Circle(circle) => dots.push(circle.center),
+                egui::Shape::Text(text)
+                    if text.galley.job.text.starts_with("Installed version") =>
+                {
+                    *label = Some(egui::Rect::from_min_size(text.pos, text.galley.size()));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, dots, label);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    installed_version(ui);
+                });
+            });
+            let mut dots = vec![];
+            let mut label = None;
+            for shape in output.shapes {
+                collect(&shape.shape, &mut dots, &mut label);
+            }
+            let label = label.expect("version label");
+            assert!(
+                dots.iter()
+                    .any(|dot| (dot.y - label.center().y).abs() < 1.0)
+            );
+        }
+    }
+
     #[test]
     fn unconfigured_update_check_starts_no_worker() {
         if repository().is_some() {

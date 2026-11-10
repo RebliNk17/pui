@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::files::tests::{app, click, folder, frame, text};
+use crate::app::files::tests::{app, click, frame, text};
 
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
@@ -67,8 +67,11 @@ fn toolbar_terminal_docks_without_changing_chat_and_preserves_projects() {
         app.draft = "Keep my draft".into();
         let messages = app.state.messages.len();
         frame(&ctx, &mut app, vec![]);
-        let output = frame(&ctx, &mut app, vec![]);
-        let terminal_button = folder(&output) + egui::vec2(36.0, 0.0);
+        frame(&ctx, &mut app, vec![]);
+        let terminal_button = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("terminal-toolbar-button")))
+            .unwrap()
+            .center();
         click(&ctx, &mut app, terminal_button);
         assert!(app.terminals.is_open());
         assert_eq!(app.terminals.projects.len(), 1);

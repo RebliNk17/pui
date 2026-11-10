@@ -3,6 +3,10 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+/// Shared logical-pixel height for app controls. Chat controls opt into compact spacing.
+pub const CONTROL_HEIGHT: f32 = 32.0;
+pub const COMPACT_HEIGHT: f32 = 28.0;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Theme {
     #[default]
@@ -127,7 +131,7 @@ pub fn install(ctx: &egui::Context) {
     for (name, path, family) in [
         (
             "system",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
             FontFamily::Proportional,
         ),
         (
@@ -217,9 +221,11 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
     }
     style.visuals.widgets.inactive.bg_fill = colors.surface;
     style.visuals.widgets.inactive.weak_bg_fill = colors.surface;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, colors.border);
     style.visuals.widgets.hovered.weak_bg_fill = colors.hover;
     style.visuals.widgets.active.weak_bg_fill = colors.hover;
     style.visuals.widgets.hovered.bg_fill = colors.hover;
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, colors.dim);
     style.visuals.widgets.active.bg_fill = colors.hover;
     for widget in [
         &mut style.visuals.widgets.noninteractive,
@@ -235,7 +241,8 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, colors.border);
     style.visuals.hyperlink_color = colors.accent;
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 7.0);
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.scroll.bar_width = 4.0;
     style.spacing.scroll.floating = true;
     style
@@ -251,6 +258,74 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
         .text_styles
         .insert(TextStyle::Monospace, FontId::monospace(12.0));
     ctx.set_style_of(theme, style);
+}
+
+/// Tiny status indicators need more color and area than text in light mode.
+/// Keep dark-mode colors/geometry unchanged and preserve each semantic hue.
+pub fn status_dot(ui: &egui::Ui, center: egui::Pos2, color: Color32, radius: f32) {
+    let (color, radius) = if ui.ctx().theme() == egui::Theme::Light {
+        let color = if color == LIGHT.accent {
+            Color32::from_rgb(80, 42, 198)
+        } else if color == LIGHT.green {
+            Color32::from_rgb(0, 101, 50)
+        } else if color == LIGHT.red {
+            Color32::from_rgb(165, 30, 36)
+        } else if color == LIGHT.blue {
+            Color32::from_rgb(15, 80, 160)
+        } else if color == LIGHT.amber {
+            Color32::from_rgb(127, 72, 0)
+        } else if color == LIGHT.dim || color == LIGHT.muted {
+            Color32::from_rgb(82, 82, 76)
+        } else {
+            color
+        };
+        (color, radius + 1.5)
+    } else {
+        (color, radius)
+    };
+    ui.painter().circle_filled(center, radius, color);
+}
+
+/// Matching input geometry for settings search, resource forms and toolbars.
+pub fn text_field<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .font(FontId::proportional(12.0))
+        .margin(egui::Margin::symmetric(10, 7))
+        .min_size(egui::vec2(0.0, CONTROL_HEIGHT))
+}
+
+/// A quiet selected state shared by settings choices and resource filters.
+pub fn choice(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> egui::Response {
+    let colors = palette(ui.ctx());
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(12.0).color(if selected {
+            colors.accent
+        } else {
+            colors.muted
+        }))
+        .selected(selected)
+        .fill(if selected {
+            colors.accent_bg
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(Stroke::NONE)
+        .corner_radius(7)
+        .min_size(egui::vec2(0.0, CONTROL_HEIGHT)),
+    )
+}
+
+pub fn slider_style(ui: &mut egui::Ui) {
+    let colors = palette(ui.ctx());
+    ui.spacing_mut().slider_rail_height = 4.0;
+    ui.visuals_mut().widgets.inactive.bg_fill = colors.border;
+    ui.visuals_mut().slider_trailing_fill = true;
+}
+
+pub fn compact_controls(ui: &mut egui::Ui) {
+    ui.spacing_mut().interact_size.y = COMPACT_HEIGHT;
+    ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
 }
 
 pub fn small(ui: &egui::Ui, text: impl Into<String>) -> egui::RichText {
@@ -331,6 +406,53 @@ mod tests {
                 colors.user_bg,
             ] {
                 assert!(contrast(colors.selection_bg, surface) >= 1.5);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_status_dots_are_stronger_in_light_mode_and_unchanged_in_dark() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        for mode in [Theme::Light, Theme::Dark] {
+            mode.apply(&ctx);
+            let colors = mode.palette();
+            for color in [
+                colors.accent,
+                colors.green,
+                colors.red,
+                colors.blue,
+                colors.amber,
+                colors.dim,
+                colors.muted,
+            ] {
+                for radius in [2.5, 3.0] {
+                    let output = ctx.run(egui::RawInput::default(), |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            status_dot(ui, egui::pos2(30.0, 30.0), color, radius);
+                        });
+                    });
+                    let dot = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Circle(c) => Some(c),
+                            _ => None,
+                        })
+                        .expect("status dot is painted");
+                    assert_eq!(dot.fill.a(), 255);
+                    if mode == Theme::Light {
+                        assert_eq!(dot.radius, radius + 1.5);
+                        for background in [colors.sidebar, colors.surface, colors.hover] {
+                            let contrast =
+                                (luminance(background) + 0.05) / (luminance(dot.fill) + 0.05);
+                            assert!(contrast >= 5.5, "{color:?} on {background:?}: {contrast}");
+                        }
+                    } else {
+                        assert_eq!(dot.radius, radius);
+                        assert_eq!(dot.fill, color);
+                    }
+                }
             }
         }
     }

@@ -1,8 +1,8 @@
-//! Source-shaped floating card stack: collapse, hide, resize and drag to reorder.
+//! Content-sized card stack: collapse, hide and drag to reorder.
 use crate::icons::{self, Icon};
 use eframe::egui::{self, Align, Layout, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Card {
@@ -39,7 +39,6 @@ pub struct CardLayout {
     pub order: Vec<Card>,
     pub hidden: BTreeSet<Card>,
     pub collapsed: BTreeSet<Card>,
-    pub heights: BTreeMap<Card, f32>,
 }
 impl Default for CardLayout {
     fn default() -> Self {
@@ -47,7 +46,6 @@ impl Default for CardLayout {
             order: Card::ALL.to_vec(),
             hidden: BTreeSet::from([Card::Changes, Card::Workflow]),
             collapsed: BTreeSet::new(),
-            heights: BTreeMap::new(),
         }
     }
 }
@@ -86,6 +84,14 @@ impl CardLayout {
             }
         }
         ui.separator();
+        if ui.button("Collapse all cards").clicked() {
+            self.collapsed.extend(Card::ALL);
+            ui.close();
+        }
+        if ui.button("Expand all cards").clicked() {
+            self.collapsed.clear();
+            ui.close();
+        }
         if ui.button("Reset to defaults").clicked() {
             *self = Self::default();
             ui.close();
@@ -129,31 +135,41 @@ pub fn stack(
                 ui.set_width((width - 26.0).max(40.0));
                 ui.set_max_width((width - 26.0).max(40.0));
                 ui.spacing_mut().item_spacing.y = 4.0;
-                let header = ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
                     let label_width = (ui.available_width() - 36.0).max(30.0);
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(label_width, 25.0), Sense::click());
-                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(label_width, crate::theme::CONTROL_HEIGHT),
+                        Sense::click(),
+                    );
+                    let response = response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text(if collapsed {
+                            "Expand card"
+                        } else {
+                            "Collapse card"
+                        });
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::CollapsingHeader,
+                            true,
+                            !collapsed,
+                            card.label(),
+                        )
+                    });
+                    if response.hovered() || response.has_focus() {
+                        ui.painter().rect_filled(rect, 6, colors.surface);
+                    }
                     ui.painter().text(
-                        rect.left_center(),
+                        rect.left_center() + egui::vec2(20.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         card.label(),
                         egui::FontId::proportional(12.0),
                         colors.text,
                     );
-                    let text_width = ui
-                        .painter()
-                        .layout_no_wrap(
-                            card.label().into(),
-                            egui::FontId::proportional(12.0),
-                            colors.text,
-                        )
-                        .size()
-                        .x;
                     icons::chevron(
                         ui,
                         egui::Rect::from_center_size(
-                            rect.left_center() + egui::vec2(text_width + 12.0, 0.0),
+                            rect.left_center() + egui::vec2(7.0, 0.0),
                             Vec2::splat(12.0),
                         ),
                         !collapsed,
@@ -168,7 +184,13 @@ pub fn stack(
                             colors.muted,
                         );
                     }
-                    if response.clicked() {
+                    if response.clicked()
+                        || (response.has_focus()
+                            && ui.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            }))
+                    {
                         if collapsed {
                             layout.collapsed.remove(&card);
                         } else {
@@ -176,8 +198,10 @@ pub fn stack(
                         }
                     }
                     response.context_menu(|ui| layout.menu(ui));
-                    let (grip_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(20.0, 25.0), Sense::hover());
+                    let (grip_rect, _) = ui.allocate_exact_size(
+                        Vec2::new(20.0, crate::theme::CONTROL_HEIGHT),
+                        Sense::hover(),
+                    );
                     let grip = ui.interact(grip_rect, id.with("grip"), Sense::click_and_drag());
                     icons::draw(ui, grip_rect, Icon::Grip, colors.dim);
                     grip.dnd_set_drag_payload(card);
@@ -213,55 +237,22 @@ pub fn stack(
                             layout.hidden.insert(card);
                             ui.close();
                         }
-                        if ui.button("Reset card height").clicked() {
-                            layout.heights.remove(&card);
-                            ui.close();
-                        }
                         ui.separator();
                         layout.menu(ui);
                     });
                 });
                 if !collapsed {
                     ui.add_space(7.0);
-                    let max_height = layout.heights.get(&card).copied().unwrap_or(match card {
-                        Card::Outputs => 320.0,
-                        Card::Changes => 260.0,
-                        _ => 600.0,
-                    });
-                    let resized = layout.heights.contains_key(&card);
+                    let max_height = (ui.ctx().screen_rect().height() * 0.55).clamp(160.0, 420.0);
                     egui::ScrollArea::vertical()
                         .id_salt(("card-body", card))
                         .max_height(max_height)
-                        .min_scrolled_height(if resized { max_height } else { 0.0 })
-                        .auto_shrink([false, !resized])
-                        .show(ui, |ui| contents(ui, card));
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::drag());
-                    if response.hovered() || response.dragged() {
-                        ui.painter().line_segment(
-                            [
-                                rect.center() - egui::vec2(16.0, 0.0),
-                                rect.center() + egui::vec2(16.0, 0.0),
-                            ],
-                            Stroke::new(1.0, colors.muted),
-                        );
-                    }
-                    let response = response
-                        .on_hover_cursor(egui::CursorIcon::ResizeVertical)
-                        .on_hover_text("Drag to change card height · double-click to reset");
-                    if response.drag_started() {
-                        layout
-                            .heights
-                            .entry(card)
-                            .or_insert((rect.top() - header.response.rect.bottom()).max(60.0));
-                    }
-                    if response.dragged() {
-                        let height = layout.heights.entry(card).or_insert(max_height);
-                        *height = (*height + ui.input(|i| i.pointer.delta().y)).clamp(60.0, 800.0);
-                    }
-                    if response.double_clicked() {
-                        layout.heights.remove(&card);
-                    }
+                        .min_scrolled_height(0.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.set_width((width - 32.0).max(40.0));
+                            contents(ui, card);
+                        });
                 }
             });
         });
@@ -385,42 +376,64 @@ mod tests {
         }
     }
     #[test]
-    fn dragging_lower_edge_saves_card_height() {
-        let ctx = egui::Context::default();
-        crate::theme::install(&ctx);
-        let mut layout = CardLayout::default();
-        frame(&ctx, &mut layout, vec![]);
-        frame(&ctx, &mut layout, vec![]);
-        let start = egui::pos2(150.0, 87.0);
-        let end = egui::pos2(150.0, 150.0);
-        frame(
-            &ctx,
-            &mut layout,
-            vec![
-                egui::Event::PointerMoved(start),
-                egui::Event::PointerButton {
-                    pos: start,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-        frame(&ctx, &mut layout, vec![egui::Event::PointerMoved(end)]);
-        frame(
-            &ctx,
-            &mut layout,
-            vec![egui::Event::PointerButton {
-                pos: end,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-        );
-        assert!(
-            layout.heights.contains_key(&Card::Environment),
-            "lower-edge drag should persist a height"
-        );
+    fn cards_fit_short_content_cap_long_content_and_fully_collapse() {
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            theme.apply(&ctx);
+            let mut layout = CardLayout {
+                hidden: Card::ALL
+                    .into_iter()
+                    .filter(|c| *c != Card::Environment)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut height = 0.0;
+            let mut renders = 0;
+            let mut render = |layout: &mut CardLayout, long: bool| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(350.0, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let start = ui.cursor().top();
+                            stack(
+                                ui,
+                                layout,
+                                |_| "Idle".into(),
+                                |ui, _| {
+                                    renders += 1;
+                                    for _ in 0..if long { 80 } else { 1 } {
+                                        ui.label("Card body");
+                                    }
+                                },
+                            );
+                            height = ui.cursor().top() - start;
+                        });
+                    },
+                );
+                height
+            };
+            let short = render(&mut layout, false);
+            let long = render(&mut layout, true);
+            assert!(short < 110.0, "Short card must shrink to content: {short}");
+            assert!(
+                long > 400.0 && long <= short + 420.0,
+                "Long body must cap at 420pt plus header: {long}"
+            );
+            layout.collapsed.insert(Card::Environment);
+            let collapsed = render(&mut layout, true);
+            assert!(
+                (collapsed - (crate::theme::CONTROL_HEIGHT + 44.0)).abs() < 1.0,
+                "Collapsed card must contain only the shared-height header, frame margins and stack spacing: {collapsed}"
+            );
+            assert_eq!(renders, 2, "Collapsed content must not be rendered");
+        }
     }
     #[test]
     fn right_click_header_opens_visibility_menu() {
@@ -464,7 +477,7 @@ mod tests {
         frame(&ctx, &mut layout, vec![]);
         frame(&ctx, &mut layout, vec![]);
         let start = egui::pos2(308.0, 33.0);
-        let end = egui::pos2(300.0, 195.0);
+        let end = egui::pos2(300.0, 140.0);
         frame(
             &ctx,
             &mut layout,
@@ -497,15 +510,17 @@ mod tests {
         );
     }
     #[test]
-    fn preferences_roundtrip_card_sizes_and_visibility() {
-        let mut l = CardLayout::default();
-        l.heights.insert(Card::Outputs, 180.0);
-        l.collapsed.insert(Card::Context);
-        let restored: CardLayout =
-            serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
-        assert_eq!(restored.heights[&Card::Outputs], 180.0);
+    fn old_card_heights_are_ignored_without_losing_visibility_or_order() {
+        let restored: CardLayout = serde_json::from_str(r#"{"heights":{"Outputs":800},"collapsed":["Context"],"hidden":["Changes"],"order":["Workflow","Environment"]}"#).unwrap();
         assert!(restored.collapsed.contains(&Card::Context));
         assert!(restored.hidden.contains(&Card::Changes));
+        assert_eq!(restored.order[0], Card::Workflow);
+        assert!(
+            serde_json::to_value(restored)
+                .unwrap()
+                .get("heights")
+                .is_none()
+        );
     }
     #[test]
     fn move_both_directions_and_preserve_hidden() {

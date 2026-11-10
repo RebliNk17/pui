@@ -1,4 +1,4 @@
-//! Composer attachments are ephemeral; bytes are loaded only after attach/drop/paste.
+//! Drafts are ephemeral. Explicitly attached non-image files get private durable copies.
 use super::*;
 use crate::media::{Attachment, Gallery};
 use std::{
@@ -8,8 +8,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-const MAX_IMAGES: usize = 8;
-const MAX_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 8;
+const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) struct Item {
     id: u64,
     name: String,
@@ -19,6 +19,7 @@ pub(super) struct Item {
 pub(super) struct DraftImages {
     items: Vec<Item>,
     next: u64,
+    limit_notice: bool,
     tx: mpsc::Sender<(u64, Result<Attachment, String>)>,
     rx: Receiver<(u64, Result<Attachment, String>)>,
     pub gallery: Gallery,
@@ -29,6 +30,7 @@ impl Default for DraftImages {
         Self {
             items: Vec::new(),
             next: 0,
+            limit_notice: false,
             tx,
             rx,
             gallery: Gallery::default(),
@@ -44,6 +46,7 @@ impl DraftImages {
     }
     pub fn clear(&mut self) {
         self.items.clear();
+        self.limit_notice = false;
     }
     pub fn set_images(&mut self, images: Vec<Attachment>) {
         self.clear();
@@ -51,7 +54,11 @@ impl DraftImages {
             self.next += 1;
             self.items.push(Item {
                 id: self.next,
-                name: "Queued image".into(),
+                name: image
+                    .file
+                    .as_ref()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "Queued image".into()),
                 image: Some(image),
                 error: None,
             });
@@ -66,7 +73,8 @@ impl DraftImages {
         ctx: &egui::Context,
         load: impl FnOnce() -> Result<Attachment, String> + Send + 'static,
     ) {
-        if self.items.len() >= MAX_IMAGES {
+        if self.items.len() >= MAX_ATTACHMENTS {
+            self.limit_notice = true;
             return;
         }
         self.next += 1;
@@ -99,7 +107,7 @@ impl DraftImages {
             let image = arboard::Clipboard::new()
                 .and_then(|mut c| c.get_image())
                 .map_err(|_| {
-                    "No image on clipboard. Copy an image, or use Attach images.".to_owned()
+                    "No image on clipboard. Copy an image, or use Attach files.".to_owned()
                 })?;
             if image.width as u64 * image.height as u64 > 24_000_000 {
                 return Err("Clipboard image exceeds 24 megapixels".into());
@@ -132,6 +140,13 @@ impl DraftImages {
         let colors = crate::theme::palette(ui.ctx());
         if self.items.is_empty() {
             return;
+        }
+        if self.limit_notice {
+            ui.label(
+                RichText::new("Up to 8 files per message. Additional files were not attached.")
+                    .size(11.0)
+                    .color(colors.amber),
+            );
         }
         let mut remove = None;
         let images = self.images();
@@ -183,20 +198,79 @@ impl DraftImages {
         });
         if let Some(id) = remove {
             self.items.retain(|i| i.id != id);
+            self.limit_notice = false;
         }
         ui.add_space(6.0);
     }
 }
 fn load_file(path: &Path) -> Result<Attachment, String> {
-    let file = File::open(path).map_err(|_| "Cannot open image")?;
-    if file.metadata().map_err(|_| "Cannot inspect image")?.len() > MAX_BYTES {
-        return Err("Image is larger than 8 MB".into());
+    let metadata = std::fs::metadata(path).map_err(|_| "Cannot inspect file")?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be attached".into());
+    }
+    let file = File::open(path).map_err(|_| "Cannot open file")?;
+    let metadata = file.metadata().map_err(|_| "Cannot inspect file")?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be attached".into());
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err("File is larger than 64 MiB".into());
     }
     let mut bytes = Vec::new();
     file.take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read image")?;
-    Attachment::from_bytes(&bytes)
+        .map_err(|_| "Cannot read file")?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("File is larger than 64 MiB".into());
+    }
+    if matches!(
+        image::guess_format(&bytes),
+        Ok(image::ImageFormat::Png
+            | image::ImageFormat::Jpeg
+            | image::ImageFormat::Gif
+            | image::ImageFormat::WebP)
+    ) {
+        return Attachment::from_bytes(&bytes);
+    }
+    let home = dirs::data_local_dir()
+        .ok_or("Cannot locate attachment storage")?
+        .join("pui/attachments-v1");
+    retain_file(&home, path, &bytes)
+}
+
+/// Copies are immutable per attachment and survive chat switches/restarts. Never
+/// delete them on Send: saved Pi conversations still reference these paths.
+fn retain_file(home: &Path, source: &Path, bytes: &[u8]) -> Result<Attachment, String> {
+    use std::io::Write;
+    let directory = home.join(uuid::Uuid::new_v4().to_string());
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&directory)
+        .map_err(|_| "Cannot create attachment storage")?;
+    let name = source.file_name().ok_or("File has no name")?;
+    let path = directory.join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(&path)
+        .and_then(|mut f| f.write_all(bytes))
+        .map_err(|_| "Cannot retain attached file")?;
+    Ok(Attachment::from_file(crate::media::FileAttachment {
+        path,
+        name: name.to_string_lossy().into_owned(),
+        size: bytes.len() as u64,
+    }))
 }
 
 impl Pui {
@@ -239,8 +313,7 @@ impl Pui {
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let files = rfd::FileDialog::new()
-                .set_title("Attach images")
-                .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+                .set_title("Attach files")
                 .pick_files()
                 .unwrap_or_default();
             let _ = tx.send(files);
@@ -326,6 +399,72 @@ mod tests {
         .unwrap();
         assert_eq!(image.mime, "image/png");
         assert_eq!(image.to_json()["type"], "image");
+    }
+    #[test]
+    fn csv_binary_and_empty_files_are_retained_privately_without_text_conversion() {
+        let home = std::env::temp_dir().join(format!("pui-attachments-{}", uuid::Uuid::new_v4()));
+        for (name, bytes) in [
+            ("report file.csv", b"name,value\na,2\n".as_slice()),
+            ("binary.pdf", b"%PDF\0\xff".as_slice()),
+            ("empty", b"".as_slice()),
+        ] {
+            let attachment = retain_file(&home, Path::new(name), bytes).unwrap();
+            let file = attachment.file.as_ref().unwrap();
+            assert_eq!(file.name, name);
+            assert_eq!(file.size, bytes.len() as u64);
+            assert_eq!(std::fs::read(&file.path).unwrap(), bytes);
+            assert!(file.path.is_absolute());
+            assert!(attachment.data.is_empty());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&file.path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    std::fs::metadata(file.path.parent().unwrap())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+            }
+        }
+    }
+    #[test]
+    fn picker_and_drop_loading_accept_csv_and_failures_block_send() {
+        let root = std::env::temp_dir().join(format!("pui-attach-input-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("report.csv");
+        let bytes = b"name,value\na,2\n";
+        std::fs::write(&source, bytes).unwrap();
+        let attachment = load_file(&source).unwrap();
+        std::fs::write(&source, "changed").unwrap();
+        assert_eq!(
+            std::fs::read(&attachment.file.unwrap().path).unwrap(),
+            bytes
+        );
+        assert!(load_file(&root).unwrap_err().contains("regular"));
+        let oversized = root.join("large.zip");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_BYTES + 1)
+            .unwrap();
+        assert!(load_file(&oversized).unwrap_err().contains("64 MiB"));
+        let ctx = egui::Context::default();
+        let mut draft = DraftImages::default();
+        draft.add_paths(vec![root.join("missing.csv")], &ctx);
+        for _ in 0..100 {
+            draft.poll(&ctx);
+            if draft.items[0].error.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!draft.ready());
+        assert!(draft.items[0].error.is_some());
     }
     #[test]
     fn attachment_limit_and_removal_of_loading_jobs() {
