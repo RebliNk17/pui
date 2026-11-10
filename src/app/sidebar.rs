@@ -573,6 +573,10 @@ impl Pui {
         }
         let colors = theme::palette(ui.ctx());
         let selected = branch.active(self);
+        let deleting = branch
+            .path
+            .as_deref()
+            .is_some_and(|p| self.deletion.deleting_chat(p));
         let expanded = !self.prefs.closed_threads.contains(&branch.key) || !query.is_empty();
         let has_children = branch
             .children
@@ -647,7 +651,12 @@ impl Pui {
                                 colors.dim
                             };
                         let title_y = if compact { row.height() / 2.0 } else { 13.0 };
-                        theme::status_dot(ui, row.min + egui::vec2(8.0, title_y), tint, 2.5);
+                        let indicator = row.min + egui::vec2(8.0, title_y);
+                        if deleting {
+                            deletion_spinner(ui, indicator);
+                        } else {
+                            theme::status_dot(ui, indicator, tint, 2.5);
+                        }
                         paint_text(
                             ui,
                             &branch.title,
@@ -663,7 +672,11 @@ impl Pui {
                         if !compact {
                             paint_text(
                                 ui,
-                                &branch.status,
+                                if deleting {
+                                    "Deleting…"
+                                } else {
+                                    &branch.status
+                                },
                                 row.min + egui::vec2(19.0, 30.0),
                                 row.width() - 24.0,
                                 FontId::proportional(10.0),
@@ -678,6 +691,12 @@ impl Pui {
                                 format!("{} · {}", branch.title, branch.status),
                             )
                         });
+                        if deleting {
+                            response.on_hover_text(
+                                "Deleting chat… You can keep working in other chats.",
+                            );
+                            return;
+                        }
                         let delete_target = match target {
                             sidebar_tree::Target::Task(id, None) => {
                                 Some(deletion::Target::Task(id.clone()))
@@ -884,6 +903,7 @@ impl Pui {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
         let path = s.path.clone();
+        let deleting = self.deletion.deleting_chat(&path);
         let selected = !self.kanban.open
             && !self.tasks.open
             && (self
@@ -898,7 +918,9 @@ impl Pui {
             .values()
             .find(|n| n.path.as_ref() == Some(&path));
         let shared = self.other_window_status(&path).map(str::to_owned);
-        let (status, status_color) = if selected {
+        let (status, status_color) = if deleting {
+            ("Deleting…", colors.red)
+        } else if selected {
             self.run_label()
         } else if let Some(node) = node {
             (node.status.as_str(), node.color(colors))
@@ -916,20 +938,24 @@ impl Pui {
         };
         let title = self.session_title(s);
         let meta = self.prefs.chats.entry(path.clone()).or_default();
-        let editing = self.rename_chat.as_ref() == Some(&path);
+        let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 48.0));
         // Session identity, not layout position: filtering, pinning, regrouping or
         // asynchronous refresh must not move a pointer press to another chat.
         let response = ui.interact(
             rect,
             ui.make_persistent_id(("chat-row", &path)),
-            if editing {
+            if editing || deleting {
                 Sense::hover()
             } else {
                 Sense::click()
             },
         );
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = if deleting {
+            response.on_hover_text("Deleting chat… You can keep working in other chats.")
+        } else {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        };
         let response = if self.loading_chat && !selected {
             response.on_hover_text("Open this chat instead")
         } else {
@@ -946,7 +972,12 @@ impl Pui {
                 },
             );
         }
-        theme::status_dot(ui, rect.min + egui::vec2(10.0, 16.0), status_color, 3.0);
+        let indicator = rect.min + egui::vec2(10.0, 16.0);
+        if deleting {
+            deletion_spinner(ui, indicator);
+        } else {
+            theme::status_dot(ui, indicator, status_color, 3.0);
+        }
         if editing {
             let id = egui::Id::new(("chat-rename", &path));
             let focused = ui.memory(|m| m.has_focus(id));
@@ -995,7 +1026,7 @@ impl Pui {
             &format!(
                 "{} · {}",
                 sessions::project_name(&s.project),
-                if selected || node.is_some() || shared.is_some() {
+                if deleting || selected || node.is_some() || shared.is_some() {
                     status.to_owned()
                 } else {
                     format!("Saved · {}", sessions::age(s.modified))
@@ -1006,6 +1037,9 @@ impl Pui {
             FontId::proportional(10.5),
             colors.dim,
         );
+        if deleting {
+            return None;
+        }
         let menu_rect = egui::Rect::from_center_size(
             rect.right_center() - egui::vec2(12.0, 6.0),
             Vec2::splat(24.0),
@@ -1106,6 +1140,11 @@ impl Pui {
         }
         action
     }
+}
+fn deletion_spinner(ui: &egui::Ui, center: egui::Pos2) {
+    egui::Spinner::new()
+        .color(theme::palette(ui.ctx()).red)
+        .paint_at(ui, egui::Rect::from_center_size(center, Vec2::splat(12.0)));
 }
 fn paint_text(
     ui: &egui::Ui,

@@ -1,5 +1,5 @@
 use super::*;
-fn app() -> Pui {
+pub(super) fn app() -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(egui::Context::default()),
         Options {
@@ -11,17 +11,17 @@ fn app() -> Pui {
     app.sessions.clear();
     app
 }
-fn session(home: &Path, name: &str) -> PathBuf {
+pub(super) fn session(home: &Path, name: &str) -> PathBuf {
     std::fs::create_dir_all(home).unwrap();
     let path = home.join(format!("{name}.jsonl"));
     std::fs::write(&path, "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n").unwrap();
     path
 }
-fn home() -> PathBuf {
+pub(super) fn home() -> PathBuf {
     std::env::temp_dir().join(format!("pui-delete-test-{}", uuid::Uuid::new_v4()))
 }
 fn complete(app: &mut Pui) {
-    let (target, rx) = app.deletion.job.take().unwrap();
+    let (target, rx) = app.deletion.jobs.remove(0);
     rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
     app.finish_delete(&target);
 }
@@ -43,6 +43,15 @@ fn chat_delete_removes_transcript_and_preferences_but_keeps_project_and_tasks() 
     app.pending_session = None;
     app.loading_chat = false;
     app.begin_delete(Target::Chat(path.clone())).unwrap();
+    assert!(
+        app.tasks
+            .records
+            .iter()
+            .find(|t| t.id == task)
+            .unwrap()
+            .parent_session
+            .is_none()
+    );
     complete(&mut app);
     assert!(!path.exists());
     assert!(other.exists());
@@ -136,7 +145,7 @@ fn chat_overflow_has_permanent_delete_and_requires_a_second_explicit_click() {
         .expect("Permanent delete menu entry");
     click(&mut app, delete.center());
     assert_eq!(app.deletion.pending, Some(Target::Chat(path.clone())));
-    assert!(app.deletion.job.is_none());
+    assert!(app.deletion.jobs.is_empty());
     assert!(path.exists());
 }
 #[test]
@@ -270,7 +279,7 @@ fn deletion_requires_confirmation_and_escape_cancels_without_stopping_work() {
         |ctx| app.deletion_dialog(ctx),
     );
     assert!(app.deletion.pending.is_none());
-    assert!(app.deletion.job.is_none());
+    assert!(app.deletion.jobs.is_empty());
     assert!(app.state.busy);
     assert!(path.exists());
 }
