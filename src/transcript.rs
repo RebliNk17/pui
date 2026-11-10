@@ -1162,21 +1162,60 @@ fn activity(
 }
 
 pub fn time_label(timestamp: i64) -> String {
+    time_label_at(timestamp, chrono::Local::now())
+}
+
+fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -> String {
     if timestamp == 0 {
         return String::new();
     }
-    // UTC is explicitly labeled; no platform timezone dependency or background clock.
-    let mins = timestamp.div_euclid(60000);
-    format!(
-        "{:02}:{:02} UTC",
-        mins.div_euclid(60).rem_euclid(24),
-        mins.rem_euclid(60)
-    )
+    let Some(time) = chrono::DateTime::from_timestamp_millis(timestamp) else {
+        return String::new();
+    };
+    let local = time.with_timezone(&now.timezone()).naive_local();
+    local
+        .format(if local.date() == now.date_naive() {
+            "%H:%M"
+        } else {
+            "%Y-%m-%d %H:%M"
+        })
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_use_local_24_hour_time_and_date_only_outside_today() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:15:00+05:30").unwrap();
+        for (time, expected) in [
+            ("2025-12-31T18:30:00Z", "00:00"),
+            ("2026-01-01T08:04:00+05:30", "08:04"),
+            ("2026-01-01T23:59:59+05:30", "23:59"),
+            ("2025-12-31T18:29:59Z", "2025-12-31 23:59"),
+            ("2026-01-02T00:00:00+05:30", "2026-01-02 00:00"),
+            ("2025-01-01T00:15:00+05:30", "2025-01-01 00:15"),
+        ] {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(time)
+                .unwrap()
+                .timestamp_millis();
+            assert_eq!(time_label_at(timestamp, now), expected, "{time}");
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T23:30:00-07:00").unwrap();
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-02T06:04:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(time_label_at(timestamp, now), "23:04");
+    }
+
+    #[test]
+    fn missing_or_invalid_timestamps_have_no_label() {
+        for timestamp in [0, i64::MIN, i64::MAX] {
+            assert_eq!(time_label(timestamp), "");
+        }
+    }
+
     const DIMENSION_NOTE: &str = "[Image: original 3024x1910, displayed at 2000x1263. Multiply coordinates by 1.51 to map to original image.]";
     fn image_message(text: String, count: usize) -> Message {
         Message {
@@ -1358,7 +1397,11 @@ mod tests {
                                 &mut labels,
                             );
                         }
-                        let timestamp = labels.iter().find(|(s, _)| s.ends_with(" UTC")).unwrap().1;
+                        let timestamp = labels
+                            .iter()
+                            .find(|(s, _)| s == &time_label(message.timestamp))
+                            .unwrap()
+                            .1;
                         let rewind = labels.iter().find(|(s, _)| s == "Rewind").unwrap().1;
                         assert!(
                             bubbles.iter().any(|r| r.left() <= timestamp.left() + 1.0
@@ -1428,7 +1471,11 @@ mod tests {
                         .iter()
                         .any(|(t, _)| t.contains("Fork") || t == "Message actions")
                 );
-                let timestamp = text.iter().find(|(t, _)| t.ends_with(" UTC")).unwrap().1;
+                let timestamp = text
+                    .iter()
+                    .find(|(t, _)| t == &time_label(60000))
+                    .unwrap()
+                    .1;
                 let mut previous = timestamp;
                 for label in ["Copy", "Edit", "Rewind"] {
                     let rect = text.iter().find(|(t, _)| t == label).expect(label).1;
