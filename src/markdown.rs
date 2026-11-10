@@ -1,13 +1,19 @@
-//! Selectable CommonMark with one consistent baseline and real link hit targets.
+//! Selectable Markdown with tables, one consistent baseline and real link hit targets.
+mod table;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, TextFormat, Ui, text::LayoutJob};
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::sync::Arc;
+use table::Table;
 #[derive(Default)]
 struct ParseMarkdown;
 impl egui::cache::ComputerMut<&str, Arc<Vec<Event<'static>>>> for ParseMarkdown {
     fn compute(&mut self, source: &str) -> Arc<Vec<Event<'static>>> {
-        Arc::new(Parser::new(source).map(Event::into_static).collect())
+        Arc::new(
+            Parser::new_ext(source, Options::ENABLE_TABLES)
+                .map(Event::into_static)
+                .collect(),
+        )
     }
 }
 type MarkdownCache = egui::cache::FrameCache<Arc<Vec<Event<'static>>>, ParseMarkdown>;
@@ -24,9 +30,18 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     }
     job.wrap.max_width = ui.available_width();
     let galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
+    show_galley(ui, galley, links);
+    links.clear();
+}
+fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
     let response = ui.add(egui::Label::new(galley.clone()).wrap().selectable(true));
+    let origin = match galley.job.halign {
+        egui::Align::Min => response.rect.left_top(),
+        egui::Align::Center => response.rect.center_top(),
+        egui::Align::Max => response.rect.right_top(),
+    };
     if let Some(pos) = response.hover_pos() {
-        let cursor = galley.cursor_from_pos(pos - response.rect.min);
+        let cursor = galley.cursor_from_pos(pos - origin);
         let byte = galley
             .job
             .text
@@ -51,7 +66,6 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
             }
         }
     }
-    links.clear();
 }
 fn format(
     ctx: &egui::Context,
@@ -98,11 +112,35 @@ pub fn show(ui: &mut Ui, source: &str) {
     let mut language = String::new();
     let mut lists: Vec<Option<u64>> = Vec::new();
     let mut in_item = false;
+    let mut table: Option<Table> = None;
+    let mut table_header = false;
     let events = ui
         .ctx()
         .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
     for event in events.iter().cloned() {
         match event {
+            Event::Start(Tag::Table(alignments)) => {
+                flush(ui, &mut job, &mut links);
+                table = Some(Table::new(alignments));
+            }
+            Event::Start(Tag::TableHead) => table_header = true,
+            Event::End(TagEnd::TableHead) => table_header = false,
+            Event::Start(Tag::TableRow) => {
+                if let Some(table) = &mut table {
+                    table.start_row();
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(table) = &mut table {
+                    table.push_cell(std::mem::take(&mut job), std::mem::take(&mut links));
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(table) = table.take() {
+                    table.show(ui);
+                    ui.add_space(6.0);
+                }
+            }
             Event::Start(Tag::Strong) => bold = true,
             Event::End(TagEnd::Strong) => bold = false,
             Event::Start(Tag::Emphasis) => italic = true,
@@ -204,11 +242,20 @@ pub fn show(ui: &mut Ui, source: &str) {
                 }
             }
             Event::Text(text) if code => code_text.push_str(&text),
-            Event::Code(text) => job.append(
-                &text,
-                0.0,
-                format(ui.ctx(), false, false, false, true, link.is_some()),
-            ),
+            Event::Code(text) => {
+                let start = job.text.len();
+                job.append(
+                    &text,
+                    0.0,
+                    format(ui.ctx(), false, false, false, true, link.is_some()),
+                );
+                if let Some(url) = &link {
+                    links.push(Link {
+                        range: start..job.text.len(),
+                        url: url.clone(),
+                    });
+                }
+            }
             Event::Text(mut text) => {
                 if let Some(url) = &link {
                     if let Some(symbol) = crate::pulls::symbol(ui.ctx(), url) {
@@ -219,7 +266,14 @@ pub fn show(ui: &mut Ui, source: &str) {
                 job.append(
                     &text,
                     0.0,
-                    format(ui.ctx(), bold, italic, heading, false, link.is_some()),
+                    format(
+                        ui.ctx(),
+                        bold || table_header,
+                        italic,
+                        heading,
+                        false,
+                        link.is_some(),
+                    ),
                 );
                 if let Some(url) = &link {
                     links.push(Link {
@@ -329,6 +383,7 @@ pub fn diff(ui: &mut Ui, source: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::cache::ComputerMut;
     #[test]
     fn list_markers_inline_code_and_body_share_rows_without_double_spacing() {
         let ctx = egui::Context::default();
@@ -366,6 +421,217 @@ mod tests {
             }
         }
     }
+    fn text_shapes(shape: &egui::Shape, texts: &mut Vec<egui::epaint::TextShape>) {
+        match shape {
+            egui::Shape::Text(text) => texts.push(text.clone()),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    text_shapes(shape, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render(
+        ctx: &egui::Context,
+        source: &str,
+        width: f32,
+    ) -> (Vec<egui::epaint::TextShape>, egui::Rect) {
+        let mut rect = egui::Rect::NOTHING;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 2000.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    rect = ui.scope(|ui| show(ui, source)).response.rect;
+                });
+            },
+        );
+        let mut texts = Vec::new();
+        for shape in output.shapes {
+            text_shapes(&shape.shape, &mut texts);
+        }
+        (texts, rect)
+    }
+
+    #[test]
+    fn tables_render_rows_alignment_inline_styles_and_surrounding_prose() {
+        let source = "Before.\n\n| Usage | Key | Entries |\n| :--- | :---: | ---: |\n| **Backend** | `mock-key` | *One* and [two](https://example.com) |\n| Tools | a \\| b | |\n\nAfter.";
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for theme in [theme::Theme::Light, theme::Theme::Dark] {
+            theme.apply(&ctx);
+            let (texts, _) = render(&ctx, source, 700.0);
+            let text = |value: &str| {
+                texts
+                    .iter()
+                    .find(|text| text.galley.job.text == value)
+                    .unwrap_or_else(|| panic!("Missing {value:?}: {texts:?}"))
+            };
+            assert_eq!(texts.len(), 11); // Includes the empty cell, but no table syntax.
+            let headers = [text("Usage"), text("Key"), text("Entries")];
+            for header in headers {
+                assert_eq!(header.pos.y, headers[0].pos.y);
+                assert_eq!(
+                    header.galley.job.sections[0].format.font_id.family,
+                    egui::FontFamily::Name("body-bold".into())
+                );
+                assert_eq!(
+                    header.galley.job.sections[0].format.color,
+                    theme.palette().text
+                );
+            }
+            assert_eq!(text("Backend").pos.y, text("mock-key").pos.y);
+            assert_eq!(text("Backend").pos.y, text("One and two").pos.y);
+            assert!(text("Before.").pos.y < headers[0].pos.y);
+            assert!(text("After.").pos.y > text("Tools").pos.y);
+            assert_eq!(text("Usage").galley.job.halign, egui::Align::Min);
+            assert_eq!(text("mock-key").galley.job.halign, egui::Align::Center);
+            assert_eq!(text("One and two").galley.job.halign, egui::Align::Max);
+            assert_eq!(text("a | b").galley.job.halign, egui::Align::Center);
+            assert_eq!(
+                text("mock-key").galley.job.sections[0]
+                    .format
+                    .font_id
+                    .family,
+                egui::FontFamily::Monospace
+            );
+            let inline = &text("One and two").galley.job;
+            assert!(inline.sections[0].format.italics);
+            assert_eq!(
+                inline.sections.last().unwrap().format.color,
+                theme.palette().accent
+            );
+            assert_eq!(
+                text("After.").galley.job.sections[0].format.font_id.family,
+                egui::FontFamily::Proportional
+            );
+        }
+    }
+
+    #[test]
+    fn table_wrapping_and_overflow_keep_stable_bounded_geometry() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let source = format!(
+            "| Usage | Key | Entries |\n| --- | --- | --- |\n| Backend | `{}` | {} |\n\nAfter.\n\n| Another | Table |\n| --- | --- |\n| A | B |",
+            "mock-key-".repeat(20),
+            "Long entries wrap without overlapping the next row. ".repeat(10)
+        );
+        for width in [240.0, 700.0] {
+            let mut geometry = Vec::new();
+            for _ in 0..4 {
+                let (texts, rect) = render(&ctx, &source, width);
+                assert!(
+                    rect.width() <= width,
+                    "Table widened the transcript: {rect:?}"
+                );
+                assert!(rect.height().is_finite());
+                let wrapped = texts
+                    .iter()
+                    .find(|text| text.galley.job.text.starts_with("Long entries"))
+                    .unwrap();
+                assert!(wrapped.galley.rows.len() > 1);
+                assert!(!wrapped.galley.elided);
+                let after = texts
+                    .iter()
+                    .find(|text| text.galley.job.text == "After.")
+                    .unwrap();
+                assert!(after.pos.y > wrapped.pos.y + wrapped.galley.size().y);
+                geometry.push((
+                    rect,
+                    texts
+                        .iter()
+                        .map(|text| (text.pos, text.galley.size()))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            assert!(
+                geometry.windows(2).all(|pair| pair[0] == pair[1]),
+                "Unstable table layout: {geometry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_streamed_tables_and_literal_pipes_render_without_panicking() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let source = "| Usage | Key |\n| --- | --- |\n| Backend | `clé` |\n| Tools |";
+        for end in source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([source.len()])
+        {
+            let (_, rect) = render(&ctx, &source[..end], 500.0);
+            assert!(rect.is_finite());
+        }
+        for literal in ["a | b", "`a | b`", "```\n| A | B |\n| --- | --- |\n```"] {
+            let events = ParseMarkdown.compute(literal);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::Start(Tag::Table(_))))
+            );
+        }
+    }
+
+    #[test]
+    fn table_links_support_alignment_unicode_and_inline_code_but_block_unsafe_urls() {
+        for (alignment, label, url) in [
+            (":---:", "clé", "https://example.com"),
+            ("---:", "`code`", "https://example.com/code"),
+            ("---:", "unsafe", "javascript:bad"),
+        ] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let source = format!("| Link |\n| {alignment} |\n| [{label}]({url}) |");
+            let (texts, _) = render(&ctx, &source, 500.0);
+            let text = texts
+                .iter()
+                .find(|text| text.galley.job.text == label.trim_matches('`'))
+                .unwrap();
+            let pos = text.pos + text.galley.rect.center().to_vec2();
+            let mut commands = Vec::new();
+            for pressed in [true, false] {
+                let output = ctx.run(
+                    egui::RawInput {
+                        events: vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            ui.scope(|ui| show(ui, &source));
+                        });
+                    },
+                );
+                commands.extend(output.platform_output.commands);
+            }
+            let opened = commands.iter().any(
+                |command| matches!(command, egui::OutputCommand::OpenUrl(open) if open.url == url),
+            );
+            assert_eq!(
+                opened,
+                safe_url(url),
+                "Unexpected navigation for {label}: {commands:?}"
+            );
+        }
+    }
+
     #[test]
     fn links_open_browser_only_on_click_not_selection_drag() {
         let ctx = egui::Context::default();
