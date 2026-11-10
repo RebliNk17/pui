@@ -77,7 +77,13 @@ fn toolbar_terminal_docks_without_changing_chat_and_preserves_projects() {
         assert_eq!(app.terminals.projects.len(), 1);
         assert!(app.terminals.focused(&ctx));
         let output = frame(&ctx, &mut app, vec![]);
-        assert!(text(&output, "Terminal").y > 400.0);
+        assert!(
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                if text.galley.job.text == "Terminal" && text.pos.y > 400.0)
+            }),
+            "The terminal panel should remain docked below chat, independently of its breadcrumb"
+        );
         let root = app.prefs.cwd.clone();
         frame(
             &ctx,

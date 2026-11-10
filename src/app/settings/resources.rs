@@ -411,6 +411,16 @@ impl Resources {
             self.start(ctx,JobKind::Review,json!({"action":"preview","revision":self.catalog.as_ref().map(|c| c.revision.clone()).unwrap_or_default(),"operations":self.drafts.iter().map(|d| &d.request).collect::<Vec<_>>() }));
         }
     }
+    pub(in crate::app) fn navigation_view(&self) -> &'static str {
+        match self.mode {
+            Mode::Library => "Library",
+            Mode::Workspace => "Workspace",
+            Mode::Packages => "Packages & sources",
+        }
+    }
+    pub(in crate::app) fn navigation_blocked(&self) -> bool {
+        self.form.open || self.remove.is_some() || self.review_open
+    }
     pub(in crate::app) fn select_view(&mut self, name: &str) {
         self.mode = match name.to_lowercase().as_str() {
             "workspace" => Mode::Workspace,

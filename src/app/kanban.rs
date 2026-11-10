@@ -338,9 +338,6 @@ impl Pui {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Agents board").size(25.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("Back to chat").clicked() {
-                            target = Some(Target::Current);
-                        }
                         ui.label(RichText::new(if self.demo { "DEMO · example agents" } else { "Live status" })
                             .size(11.0).color(if self.demo { colors.amber } else { colors.green }));
                     });
@@ -412,7 +409,7 @@ impl Pui {
                                         if agent_card(ui, card, since.elapsed()) {
                                             target = Some(card.target.clone());
                                         }
-                                        ui.add_space(10.0);
+                                        ui.add_space(5.0);
                                     }
                                 });
                                 #[cfg(test)]
@@ -462,6 +459,26 @@ fn elapsed(duration: Duration) -> String {
         format!("{}h {}m", seconds / 3600, seconds / 60 % 60)
     }
 }
+/// Bound previews by rendered lines, not character count (commands may contain newlines).
+fn card_preview(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: Color32,
+    rows: usize,
+    strong: bool,
+) {
+    let font = if strong {
+        FontId::new(size, egui::FontFamily::Name("body-bold".into()))
+    } else {
+        FontId::proportional(size)
+    };
+    let mut job = egui::text::LayoutJob::simple(text.into(), font, color, ui.available_width());
+    job.wrap.max_rows = rows;
+    job.wrap.break_anywhere = true;
+    ui.add(egui::Label::new(job).wrap()).on_hover_text(text);
+}
+
 fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
     let colors = theme::palette(ui.ctx());
     let response = ui
@@ -470,8 +487,10 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                 .fill(colors.surface)
                 .stroke(Stroke::new(1.0, colors.border))
                 .corner_radius(7)
-                .inner_margin(12)
+                .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
+                    ui.spacing_mut().interact_size.y = 18.0;
                     ui.set_width((ui.available_width() - 2.0).max(60.0));
                     ui.horizontal(|ui| {
                         icons::inline(ui, Icon::Folder, colors.dim);
@@ -488,14 +507,7 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                             ui.label(RichText::new("Subagent").size(9.0).color(colors.muted));
                         }
                     });
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(short(&card.title, 120)).size(12.0).strong(),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(10.0);
+                    card_preview(ui, &card.title, 12.0, colors.text, 2, true);
                     let attention = matches!(card.status, Status::Waiting | Status::Error);
                     if attention {
                         egui::Frame::new()
@@ -505,28 +517,21 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                                 colors.error_bg
                             })
                             .corner_radius(5)
-                            .inner_margin(8)
+                            .inner_margin(egui::Margin::symmetric(6, 4))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&card.activity)
-                                            .size(11.0)
-                                            .color(card.status.color(colors)),
-                                    )
-                                    .wrap(),
+                                card_preview(
+                                    ui,
+                                    &card.activity,
+                                    11.0,
+                                    card.status.color(colors),
+                                    2,
+                                    false,
                                 );
                             });
                     } else {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&card.activity).size(11.0).color(colors.muted),
-                            )
-                            .wrap(),
-                        );
+                        card_preview(ui, &card.activity, 11.0, colors.muted, 1, false);
                     }
-                    ui.add_space(12.0);
-                    ui.separator();
                     if let Some(parent) = &card.parent {
                         ui.add(
                             egui::Label::new(
@@ -562,7 +567,6 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                         });
                     });
                     if attention {
-                        ui.add_space(6.0);
                         ui.label(
                             RichText::new(format!("{} →", card.action))
                                 .size(11.0)
@@ -594,5 +598,7 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
     response.clicked()
 }
 
+#[cfg(test)]
+mod compact_tests;
 #[cfg(test)]
 mod tests;

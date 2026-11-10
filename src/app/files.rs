@@ -105,6 +105,16 @@ impl Browser {
         self.open && self.browser_mode
     }
 
+    pub(super) fn navigation_target(&self) -> Option<String> {
+        if self.browser_mode {
+            self.selected_url.clone()
+        } else {
+            self.selected
+                .as_ref()
+                .map(|path| path.display().to_string())
+        }
+    }
+
     pub(super) fn focused(&self, ctx: &egui::Context) -> bool {
         let composer_focused = ctx.memory(|m| m.has_focus(egui::Id::new("composer")));
         self.browser_open()

@@ -13,6 +13,7 @@ mod files;
 mod kanban;
 mod menu;
 mod model_picker;
+mod navigation;
 mod new_chat;
 mod notifications;
 mod permission_picker;
@@ -100,6 +101,7 @@ pub struct Pui {
     sync: sync::WindowSync,
     notifications: notifications::Notifications,
     menu: menu::Menu,
+    navigation: navigation::Navigation,
     updates: updates::Updates,
     completion_run: notifications::CompletionRun,
     demo: bool,
@@ -215,6 +217,7 @@ impl Pui {
             sync: sync::WindowSync::new(&cc.egui_ctx, options.demo || cfg!(test)),
             notifications: Default::default(),
             menu: menu::Menu::new(&cc.egui_ctx),
+            navigation: Default::default(),
             updates: Default::default(),
             completion_run: Default::default(),
             prefs,
@@ -450,6 +453,7 @@ impl Pui {
         } else if options.browser_console {
             let _ = app.files.configure_browser("responsive", true);
         }
+        app.remember_navigation();
         app
     }
 
@@ -600,6 +604,8 @@ impl Pui {
     // Keep the RPC connection (and outstanding approvals/deliveries) parked.
     fn retain_chat_on_switch(&self) -> bool {
         self.has_tree()
+            || !self.draft.is_empty()
+            || !self.draft_images.is_empty()
             || self.sync_live_owner()
             || (!self.is_mirror()
                 && self.client.is_some()
@@ -1588,7 +1594,9 @@ impl eframe::App for Pui {
         self.files.begin_frame();
         self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
+        self.remember_navigation();
         self.poll();
+        self.navigation_inputs(ctx);
         self.menu_commands(ctx);
         if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
@@ -1772,6 +1780,7 @@ impl eframe::App for Pui {
         self.deletion_dialog(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
+        self.remember_navigation();
         self.refresh_menu(ctx);
         if self.screenshot.is_some() && self.frames == 25 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));

@@ -365,6 +365,7 @@ impl Pui {
         }
         self.agents.next += 1;
         let id = format!("agent-{}", self.agents.next);
+        self.bind_navigation_agent(&id);
         self.agents.active = id.clone();
         self.agents.nodes.insert(
             id.clone(),

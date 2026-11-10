@@ -32,6 +32,23 @@ impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
+    pub(super) fn navigation_state(&self) -> Option<bool> {
+        self.open.then_some(self.expanded)
+    }
+    pub(super) fn restore_navigation(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        demo: bool,
+        state: Option<bool>,
+    ) {
+        if let Some(expanded) = state {
+            if !self.open {
+                self.toggle(ctx, root, demo);
+            }
+            self.expanded = expanded;
+        }
+    }
     pub(super) fn close(&mut self, ctx: &egui::Context) {
         self.open = false;
         self.focus = false;

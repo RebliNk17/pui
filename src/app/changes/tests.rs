@@ -208,7 +208,18 @@ fn changes_search_expand_refresh_and_file_panel_switching() {
     frame(&ctx, &mut app, vec![]);
     app.changes.query = "no-match-for-this-path".into();
     let output = frame(&ctx, &mut app, vec![]);
-    let heading = position(&output, "Changes");
+    // The titlebar breadcrumb also says Changes; target the panel heading below it.
+    let heading = output
+        .shapes
+        .iter()
+        .rev()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "Changes" => {
+                Some(text.pos + text.galley.size() / 2.0)
+            }
+            _ => None,
+        })
+        .expect("Changes panel heading");
     let expand = output
         .shapes
         .iter()

@@ -96,6 +96,16 @@ pub(in crate::app) struct View {
 }
 
 impl View {
+    pub(in crate::app) fn location(&self) -> String {
+        if self.page == Page::Resources {
+            format!("Resources/{}", self.resources.navigation_view())
+        } else {
+            self.page.title().into()
+        }
+    }
+    pub(in crate::app) fn navigation_blocked(&self) -> bool {
+        self.resources.navigation_blocked()
+    }
     pub(in crate::app) fn select(&mut self, name: &str) {
         if let Some(view) = name.strip_prefix("Resources/") {
             self.page = Page::Resources;
@@ -330,6 +340,7 @@ impl Pui {
                 self.settings_view.page = page;
             }
         }
+        self.settings_navigation_header(ctx);
         egui::SidePanel::left("settings-navigation")
             .exact_width(244.0)
             .resizable(false)
@@ -340,23 +351,7 @@ impl Pui {
                     .inner_margin(12),
             )
             .show(ctx, |ui| {
-                ui.add_space(43.0);
-                ui.horizontal(|ui| {
-                    icons::inline(ui, Icon::ArrowLeft, colors.muted);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Back to app").size(12.0).color(colors.text),
-                            )
-                            .frame(false),
-                        )
-                        .clicked()
-                    {
-                        self.settings_open = false;
-                        self.focus_composer = true;
-                    }
-                });
-                ui.add_space(15.0);
+                ui.add_space(8.0);
                 ui.add(
                     theme::text_field(&mut self.settings_view.search, "Search settings")
                         .id_salt("settings-search")
@@ -785,8 +780,46 @@ impl Pui {
         card(ui, |ui| {
             row(
                 ui,
-                "Back from settings",
-                "Return to your conversation without interrupting work.",
+                "Previous view",
+                "Also available with the mouse back button.",
+                |ui| {
+                    keycaps(
+                        ui,
+                        &[
+                            if cfg!(target_os = "macos") {
+                                "⌘"
+                            } else {
+                                "Alt"
+                            },
+                            "[",
+                        ],
+                    )
+                },
+            );
+            separator(ui);
+            row(
+                ui,
+                "Next view",
+                "Also available with the mouse forward button.",
+                |ui| {
+                    keycaps(
+                        ui,
+                        &[
+                            if cfg!(target_os = "macos") {
+                                "⌘"
+                            } else {
+                                "Alt"
+                            },
+                            "]",
+                        ],
+                    )
+                },
+            );
+            separator(ui);
+            row(
+                ui,
+                "Close settings",
+                "Return to the workspace without interrupting work.",
                 |ui| keycaps(ui, &["Esc"]),
             );
             separator(ui);
@@ -1328,7 +1361,8 @@ mod tests {
         for shape in output.shapes {
             texts(&shape.shape, &mut text);
         }
-        assert!(text.iter().any(|(t, _)| t == "Back to app"));
+        assert!(text.iter().any(|(t, _)| t == "Chat"));
+        assert!(!text.iter().any(|(t, _)| t == "Back to app"));
         assert!(text.iter().any(|(t, _)| t == "Auto compact at"));
         assert!(!text.iter().any(|(t, _)| t.contains("Stop active agents")));
         assert!(!text.iter().any(|(t, _)| t.contains("Message Pi")));

@@ -85,12 +85,7 @@ impl Pui {
         let mut action = None;
         let mut creator = None;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.bg).inner_margin(24)).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Scheduled tasks");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Back to chat").clicked() { self.automation.open = false; }
-                });
-            });
+            ui.heading("Scheduled tasks");
             ui.add_space(8.0);
             if self.demo { ui.label(theme::small(ui, "Design preview · fixture jobs only · no commands or provider calls")); }
             ui.label(theme::small(ui, "Runs while Pui is open · Active jobs reconnect their creator on restart · Cron schedules use UTC"));

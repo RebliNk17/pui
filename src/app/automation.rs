@@ -120,6 +120,9 @@ pub(super) struct Automation {
     delete: Option<String>,
 }
 impl Automation {
+    pub(super) fn confirming(&self) -> bool {
+        self.delete.is_some()
+    }
     pub(super) fn running_stop(&mut self) {
         for running in self.running.values() {
             running.cancel.store(true, Ordering::Release);

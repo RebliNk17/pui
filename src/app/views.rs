@@ -25,50 +25,13 @@ impl Pui {
                     {
                         self.prefs.hide_sidebar = false;
                     }
-                    let title = if self.automation.open {
-                        "Scheduled tasks".to_owned()
-                    } else if self.kanban.open {
-                        "Agents board".to_owned()
-                    } else if self.tasks.open {
-                        self.tasks
-                            .current()
-                            .map(|t| {
-                                if t.objective.is_empty() {
-                                    "New verified task"
-                                } else {
-                                    t.objective.as_str()
-                                }
-                            })
-                            .unwrap_or("Verified tasks")
-                            .to_owned()
-                    } else {
-                        self.state
-                            .chat_title()
-                            .unwrap_or_else(|| "New conversation".into())
-                    };
-                    let width = (ui.available_width() - 346.0).max(40.0);
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click_and_drag());
-                    let mut job = egui::text::LayoutJob::simple_singleline(
-                        title,
-                        FontId::proportional(13.0),
-                        colors.text,
-                    );
-                    job.wrap.max_width = width;
-                    job.wrap.max_rows = 1;
-                    let galley = ui.painter().layout_job(job);
-                    ui.painter().galley(
-                        rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
-                        galley,
-                        colors.text,
-                    );
-                    if response.drag_started() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    if response.double_clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(
-                            !ctx.input(|i| i.viewport().maximized.unwrap_or(false)),
-                        ));
+                    let narrow = ui.available_width() < 520.0;
+                    let width =
+                        (ui.available_width() - if narrow { 68.0 } else { 346.0 }).max(40.0);
+                    self.navigation_header(ui, width);
+                    if narrow {
+                        self.compact_view_menu(ui);
+                        return;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
