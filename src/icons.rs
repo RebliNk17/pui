@@ -8,6 +8,8 @@ pub enum Icon {
     Sidebar,
     Board,
     Sliders,
+    Filter,
+    Group,
     Folder,
     ArrowUp,
     ArrowLeft,
@@ -86,6 +88,15 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
                 p.circle_filled(pt(x, y), 2.3 * scale, colors.bg);
                 p.circle_stroke(pt(x, y), 2.3 * scale, s);
             }
+        }
+        Icon::Filter => {
+            for (y, width) in [(-4.0, 7.0), (0.0, 4.5), (4.0, 2.0)] {
+                line((-width, y), (width, y));
+            }
+        }
+        Icon::Group => {
+            outline(-7.0, -6.0, 14.0, 5.0, 1);
+            outline(-7.0, 2.0, 14.0, 5.0, 1);
         }
         Icon::Folder => {
             p.add(egui::Shape::closed_line(

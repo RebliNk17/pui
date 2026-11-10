@@ -263,6 +263,7 @@ impl Pui {
                 cwd: project.clone(),
                 project: project.clone(),
                 title: title.clone(),
+                created: saved.and_then(|s| s.created),
                 modified: std::time::SystemTime::now(),
             };
             cards.push(AgentCard {
