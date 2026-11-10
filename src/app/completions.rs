@@ -16,6 +16,7 @@ const LOCAL: &[(&str, &str)] = &[
     ("compact", "Compact context; optional instructions"),
     ("stop", "Stop the agent and clear waiting messages"),
     ("files", "Toggle workspace files"),
+    ("browser", "Toggle Chromium browser"),
     ("terminal", "Toggle workspace terminal"),
     ("help", "Show composer help"),
 ];
@@ -401,7 +402,15 @@ impl Pui {
             "settings" => self.settings_open = true,
             "compact" => self.send(json!({"type":"compact","customInstructions":args})),
             "stop" => self.stop(),
-            "files" => self.files.toggle(&self.ctx, &self.prefs.cwd),
+            "files" => {
+                self.files.toggle(&self.ctx, &self.prefs.cwd);
+                self.inspector_panel = false;
+            }
+            "browser" => {
+                self.files.toggle_browser(&self.ctx, &self.prefs.cwd);
+                self.inspector_panel = false;
+                self.terminals.close(&self.ctx);
+            }
             "terminal" => self.terminals.toggle(&self.ctx, &self.prefs.cwd, self.demo),
             "help" => {
                 self.diagnostics_open = true;

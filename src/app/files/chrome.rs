@@ -21,8 +21,18 @@ impl Browser {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    if self.tabs.is_empty() && self.urls.is_empty() {
-                        ui.label(RichText::new("Files").size(12.0).color(colors.muted));
+                    if (self.browser_mode && self.urls.is_empty())
+                        || (!self.browser_mode && self.tabs.is_empty())
+                    {
+                        ui.label(
+                            RichText::new(if self.browser_mode {
+                                "Browser"
+                            } else {
+                                "Files"
+                            })
+                            .size(12.0)
+                            .color(colors.muted),
+                        );
                     } else {
                         let tabs_width = (ui.available_width() - 96.0).max(90.0);
                         egui::ScrollArea::horizontal()
@@ -31,10 +41,16 @@ impl Browser {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    let count = self.tabs.len() + self.urls.len();
+                                    let count = if self.browser_mode {
+                                        self.urls.len()
+                                    } else {
+                                        self.tabs.len()
+                                    };
                                     let width = ((tabs_width - 36.0) / count.max(1) as f32)
                                         .clamp(120.0, 200.0);
-                                    for (index, file) in self.tabs.iter().enumerate() {
+                                    for (index, file) in
+                                        self.tabs.iter().enumerate().filter(|_| !self.browser_mode)
+                                    {
                                         let title = file
                                             .path
                                             .file_name()
@@ -56,7 +72,9 @@ impl Browser {
                                             close_file = Some(index);
                                         }
                                     }
-                                    for (index, url) in self.urls.iter().enumerate() {
+                                    for (index, url) in
+                                        self.urls.iter().enumerate().filter(|_| self.browser_mode)
+                                    {
                                         let title = self.web.tab_title(url);
                                         let (selected, closed) = chrome::tab(
                                             ui,
@@ -77,7 +95,11 @@ impl Browser {
                                     new_tab = chrome::icon_button(
                                         ui,
                                         Icon::Plus,
-                                        "Open another file or page",
+                                        if self.browser_mode {
+                                            "Open another page"
+                                        } else {
+                                            "Open another file"
+                                        },
                                         false,
                                     )
                                     .clicked();
@@ -112,30 +134,19 @@ impl Browser {
         if let Some(path) = select {
             self.address = path.display().to_string();
             self.selected = Some(path);
-            self.selected_url = None;
+            self.browser_mode = false;
         }
         if let Some(url) = select_url {
             self.address = self.web.location(&url).unwrap_or_else(|| url.clone());
             self.selected_url = Some(url);
-            self.selected = None;
+            self.browser_mode = true;
         }
         if let Some(index) = close_url {
             let url = self.urls.remove(index);
             self.web.close(&url);
             if self.selected_url.as_ref() == Some(&url) {
                 self.selected_url = self.urls.last().cloned();
-                if self.selected_url.is_none() {
-                    self.selected = self.tabs.last().map(|file| file.path.clone());
-                }
-                self.address = self
-                    .selected_url
-                    .clone()
-                    .or_else(|| {
-                        self.selected
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                    })
-                    .unwrap_or_default();
+                self.restore_address();
             }
         }
         if let Some(index) = close_file {
@@ -144,7 +155,12 @@ impl Browser {
         if new_tab {
             self.address.clear();
         }
-        let page = self.selected_url.clone();
+        let focus = new_tab || std::mem::take(&mut self.focus_address);
+        let page = if self.browser_mode {
+            self.selected_url.clone()
+        } else {
+            None
+        };
         let mut open = false;
         egui::TopBottomPanel::top("viewer-navigation")
             .exact_height(48.0)
@@ -173,7 +189,7 @@ impl Browser {
                         Vec2::new((ui.available_width() - trailing).max(50.0), 32.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            open = chrome::address(ui, &mut self.address, page.is_some(), new_tab);
+                            open = chrome::address(ui, &mut self.address, self.browser_mode, focus);
                         },
                     );
                     if let Some(key) = &page {
@@ -201,7 +217,7 @@ impl Browser {
                     );
                 });
         }
-        if let Some(key) = self.selected_url.clone() {
+        if let Some(key) = self.selected_url.clone().filter(|_| self.browser_mode) {
             egui::TopBottomPanel::top("browser-device-toolbar")
                 .exact_height(42.0)
                 .frame(

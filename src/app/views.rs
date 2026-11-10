@@ -94,6 +94,13 @@ impl Pui {
                         notifications_button = Some(self.notifications_button(ui));
                         let response =
                             icons::button(ui, Icon::Terminal, "Terminal · current project");
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::new("terminal-toolbar-button"),
+                                response.rect,
+                            )
+                        });
                         if self.terminals.is_open() {
                             ui.painter().rect_stroke(
                                 response.rect,
@@ -106,8 +113,26 @@ impl Pui {
                             self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                             self.focus_composer = !self.terminals.is_open();
                         }
+                        let response = icons::button(ui, Icon::Globe, "Browser · Chromium");
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("browser-toolbar-button"), response.rect)
+                        });
+                        if self.files.browser_open() {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                7,
+                                Stroke::new(1.5, colors.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            self.files.toggle_browser(ctx, &self.prefs.cwd);
+                            self.inspector_panel = false;
+                            self.terminals.close(ctx);
+                        }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
-                        if self.files.is_open() {
+                        if self.files.files_open() {
                             ui.painter().rect_stroke(
                                 response.rect,
                                 7,

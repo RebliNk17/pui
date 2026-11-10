@@ -65,6 +65,8 @@ enum Action {
 pub(super) struct Browser {
     open: bool,
     expanded: bool,
+    browser_mode: bool,
+    focus_address: bool,
     root: PathBuf,
     directories: BTreeMap<PathBuf, Directory>,
     expanded_dirs: BTreeSet<PathBuf>,
@@ -93,16 +95,53 @@ impl Browser {
         self.open
     }
 
+    pub(super) fn files_open(&self) -> bool {
+        self.open && !self.browser_mode
+    }
+
+    pub(super) fn browser_open(&self) -> bool {
+        self.open && self.browser_mode
+    }
+
     pub(super) fn close(&mut self) {
         self.open = false;
         self.web.hide();
     }
 
     pub(super) fn toggle(&mut self, ctx: &egui::Context, root: &Path) {
-        self.open = !self.open;
-        if self.open {
-            self.workspace(ctx, root);
+        self.toggle_pane(ctx, root, false);
+    }
+
+    pub(super) fn toggle_browser(&mut self, ctx: &egui::Context, root: &Path) {
+        self.toggle_pane(ctx, root, true);
+    }
+
+    fn toggle_pane(&mut self, ctx: &egui::Context, root: &Path, browser: bool) {
+        if self.open && self.browser_mode == browser {
+            self.close();
+            return;
         }
+        self.workspace(ctx, root);
+        self.web.hide();
+        self.browser_mode = browser;
+        self.open = true;
+        self.address_error = None;
+        self.restore_address();
+        self.focus_address = browser && self.selected_url.is_none();
+    }
+
+    fn restore_address(&mut self) {
+        self.address = if self.browser_mode {
+            self.selected_url
+                .as_ref()
+                .map(|key| self.web.location(key).unwrap_or_else(|| key.clone()))
+                .unwrap_or_default()
+        } else {
+            self.selected
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        };
     }
 
     fn workspace(&mut self, ctx: &egui::Context, root: &Path) {
@@ -172,8 +211,10 @@ impl Browser {
     }
 
     fn select_file(&mut self, ctx: &egui::Context, path: PathBuf, external: bool) {
-        self.selected_url = None;
+        self.browser_mode = false;
         self.selected = Some(path.clone());
+        self.address = path.display().to_string();
+        self.web.hide();
         if self.tabs.iter().any(|tab| tab.path == path) {
             return;
         }
@@ -206,9 +247,7 @@ impl Browser {
                 .tabs
                 .get(index.min(self.tabs.len().saturating_sub(1)))
                 .map(|tab| tab.path.clone());
-            if self.selected.is_none() {
-                self.selected_url = self.urls.last().cloned();
-            }
+            self.restore_address();
         }
     }
 
@@ -274,8 +313,8 @@ impl Browser {
                 }
                 self.urls.push(target.into());
             }
+            self.browser_mode = true;
             self.selected_url = Some(target.into());
-            self.selected = None;
         } else {
             if target.contains("://")
                 || target.starts_with("javascript:")
@@ -346,7 +385,9 @@ impl Browser {
     }
 
     fn poll(&mut self) {
-        if let Some(location) = self.web.take_location() {
+        if self.browser_mode
+            && let Some(location) = self.web.take_location()
+        {
             self.address = location;
         }
         for directory in self.directories.values_mut() {
@@ -398,7 +439,7 @@ impl Browser {
         let ctx = ui.ctx().clone();
         self.chrome(ui);
         let tree_width = (ui.available_width() * 0.38).clamp(170.0, 300.0);
-        if self.selected_url.is_none() {
+        if !self.browser_mode {
             egui::SidePanel::right("files-tree")
                 .default_width(tree_width)
                 .width_range(150.0..=(ui.available_width() * 0.65).max(150.0))
@@ -591,12 +632,32 @@ impl Browser {
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        if let Some(url) = self.selected_url.clone() {
-            self.web_preview = Some(WebPreview {
-                rect: self.web.viewport(ui, &url),
-                key: url.clone(),
-                url: Some(url),
-                html: None,
+        if self.browser_mode {
+            if let Some(url) = self.selected_url.clone() {
+                self.web_preview = Some(WebPreview {
+                    rect: self.web.viewport(ui, &url),
+                    key: url.clone(),
+                    url: Some(url),
+                    html: None,
+                });
+                return;
+            }
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.30).max(24.0));
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                icons::draw(ui, rect, Icon::Globe, colors.dim);
+                ui.add_space(14.0);
+                ui.label(RichText::new("Open a page").size(18.0).color(colors.text));
+                ui.add_space(6.0);
+                ui.label(theme::small(
+                    ui,
+                    "Enter a URL above, including localhost development servers.",
+                ));
+                ui.add_space(12.0);
+                ui.label(theme::small(
+                    ui,
+                    "Chromium · Console & DevTools · Desktop & mobile previews",
+                ));
             });
             return;
         }

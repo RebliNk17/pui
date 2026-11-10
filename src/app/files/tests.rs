@@ -145,6 +145,37 @@ fn docked_tree_is_right_of_preview_and_reads_only_clicked_files_while_busy() {
     }
 }
 
+#[test]
+fn globe_and_folder_buttons_open_separate_panes_without_navigation() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let _ = frame(&ctx, &mut app, vec![]);
+    let output = frame(&ctx, &mut app, vec![]);
+    let globe = ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("browser-toolbar-button")))
+        .unwrap()
+        .center();
+    let folder = folder(&output);
+    assert_ne!(globe, folder);
+    click(&ctx, &mut app, globe);
+    assert!(app.files.browser_open());
+    assert!(
+        app.files.urls.is_empty(),
+        "Opening the browser must not navigate or start Chromium"
+    );
+    assert!(app.files.web_preview.is_none());
+    let output = frame(&ctx, &mut app, vec![]);
+    text(&output, "Open a page");
+    click(&ctx, &mut app, folder);
+    assert!(app.files.files_open());
+    let output = frame(&ctx, &mut app, vec![]);
+    text(&output, "Open files appear here");
+    click(&ctx, &mut app, globe);
+    assert!(app.files.browser_open());
+    click(&ctx, &mut app, globe);
+    assert!(!app.files.is_open());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn browser_chrome_has_one_address_row_and_switches_tabs_in_narrow_panels() {
@@ -420,7 +451,7 @@ fn background_open_does_not_steal_foreground_workspace() {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
-fn page_tabs_close_and_restore_file_selection() {
+fn file_and_browser_panes_preserve_their_own_selection() {
     let ctx = egui::Context::default();
     let root = fixture();
     let mut browser = Browser::default();
@@ -428,10 +459,22 @@ fn page_tabs_close_and_restore_file_selection() {
     browser
         .open_target(&ctx, &root, "https://example.com")
         .unwrap();
-    assert!(browser.selected.is_none());
-    browser.open_target(&ctx, &root, "README.md").unwrap();
-    assert!(browser.selected_url.is_none());
+    assert!(browser.browser_open());
+    assert_eq!(
+        browser.selected.as_deref(),
+        Some(root.join("README.md").as_path())
+    );
+    browser.toggle(&ctx, &root);
+    assert!(browser.files_open());
+    assert!(browser.address.ends_with("README.md"));
+    assert_eq!(browser.selected_url.as_deref(), Some("https://example.com"));
+    browser.toggle_browser(&ctx, &root);
+    assert!(browser.browser_open());
+    assert_eq!(browser.address, "https://example.com");
+    browser.toggle(&ctx, &root);
     browser.close_tab(0);
+    assert!(browser.files_open());
+    assert!(browser.selected.is_none());
     assert_eq!(browser.selected_url.as_deref(), Some("https://example.com"));
 }
 

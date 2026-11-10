@@ -113,7 +113,8 @@ impl Pui {
             sidebar: !self.prefs.hide_sidebar,
             inspector: !self.prefs.hide_inspector && !self.files.is_open() && !self.inspector_panel,
             inspector_available: ctx.screen_rect().width() > 1110.0,
-            files: self.files.is_open(),
+            files: self.files.files_open(),
+            browser: self.files.browser_open(),
             changes: self.inspector_panel,
             terminal: self.terminals.is_open(),
             terminal_focused: !self.settings_open && self.terminals.focused(ctx),
@@ -278,6 +279,12 @@ impl Pui {
                 self.settings_open = false;
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
+            }
+            Browser => {
+                self.settings_open = false;
+                self.files.toggle_browser(ctx, &self.prefs.cwd);
+                self.inspector_panel = false;
+                self.terminals.close(ctx);
             }
             Changes => {
                 self.settings_open = false;
