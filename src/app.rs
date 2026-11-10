@@ -320,6 +320,16 @@ impl Pui {
                 app.draft = "שלום עולם · English 123 · 日本語".into();
                 app.prefs.hide_inspector = true;
             }
+            if options.demo_markdown {
+                app.state.session_name = "Mixed Markdown alignment preview".into();
+                app.state.messages = vec![Message {
+                    role: "assistant".into(),
+                    text: "**Status:** [#69](https://example.com/pr/69) is merged, but this linked scan still contains the finding. It does **not prove an exploitable bypass**, nor does \"Passed\" prove resolution. The post-merge release is queued; successful deployment is not yet verified.\n\nNormal **bold** normal *italic* normal [link](https://example.com) normal `inline code` normal **[bold link](https://example.com)** normal.\n\n- Normal **bold** and [linked text](https://example.com) with `inline code`.\n\n## Heading with **bold**, [link](https://example.com) and `code`\n\n| Style | Mixed content |\n| --- | --- |\n| Formatting | Normal **bold** *italic* [link](https://example.com) `code` |\n| Languages | English **מודגש** [קישור](https://example.com) `code` |".into(),
+                    ..Default::default()
+                }];
+                app.draft.clear();
+                app.prefs.hide_inspector = true;
+            }
             app.menu.about = options.demo_about;
             // Preview only: opening Updates must not start a network check.
             app.updates.open = options.demo_updates;
