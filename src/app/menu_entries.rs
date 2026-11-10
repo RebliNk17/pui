@@ -1,4 +1,4 @@
-//! One menu definition for AppKit and the in-app menu. No placeholder actions.
+//! One menu definition for AppKit and the non-macOS menu bar. No placeholder actions.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,9 +141,6 @@ impl Entry {
 }
 use Entry::{Action as A, Separator as S, Submenu as M};
 pub(super) const APP: &[Entry] = &[
-    A("Agents board", Command::AgentsBoard),
-    A("Cron jobs & monitors", Command::Automation),
-    S,
     A("About Pui", Command::About),
     A("Check for Updates…", Command::Updates),
     S,
@@ -194,6 +191,9 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
                     A("Dark", Command::DarkTheme),
                 ],
             ),
+            S,
+            A("Agents board", Command::AgentsBoard),
+            A("Scheduled tasks", Command::Automation),
             S,
             A("Search Sessions…", Command::Search),
             A("Session Sidebar", Command::Sidebar),

@@ -184,7 +184,7 @@ fn opening_board_preserves_busy_chat_draft_and_approvals() {
 }
 
 #[test]
-fn sidebar_keeps_overviews_in_menu_instead_of_above_search() {
+fn sidebar_places_navigation_between_header_and_search_without_pui_menu() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     app.kanban.open = false;
@@ -196,13 +196,68 @@ fn sidebar_keeps_overviews_in_menu_instead_of_above_search() {
         .iter()
         .filter(|(_, rect)| rect.left() < 254.0)
         .collect();
-    assert!(sidebar.iter().any(|(s, _)| s == "Search sessions"));
-    assert!(sidebar.iter().any(|(s, _)| s == "Pui"));
-    assert!(
-        !sidebar
+    assert!(!sidebar.iter().any(|(s, _)| s == "Pui"));
+    let rows = [
+        "New task",
+        "Agents board",
+        "Scheduled tasks",
+        "Settings",
+        "Search sessions",
+    ]
+    .map(|label| sidebar.iter().find(|(s, _)| s == label).unwrap().1);
+    for pair in rows.windows(2) {
+        assert!(pair[0].bottom() < pair[1].top());
+    }
+}
+
+#[test]
+fn sidebar_navigation_opens_views_without_interrupting_chat() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.kanban.open = false;
+    app.state.busy = true;
+    app.draft = "Keep this draft".into();
+    app.state.dialogs.push_back(questions::demo_dialog());
+    for label in ["Agents board", "Scheduled tasks", "Settings"] {
+        for _ in 0..2 {
+            frame(&ctx, &mut app, 1440.0, vec![]);
+        }
+        let output = text(frame(&ctx, &mut app, 1440.0, vec![]));
+        let rect = output
             .iter()
-            .any(|(s, _)| s == "Agents board" || s.contains("Cron jobs & monitors"))
+            .find(|(s, r)| s == label && r.left() < 254.0)
+            .unwrap()
+            .1;
+        click(&ctx, &mut app, 1440.0, rect.center());
+        app.menu_commands(&ctx);
+        assert_eq!(app.settings_open, label == "Settings");
+        if !app.settings_open {
+            assert_eq!(app.kanban.open, label == "Agents board");
+            assert_eq!(app.automation.open, label == "Scheduled tasks");
+        }
+        assert!(app.state.busy);
+        assert_eq!(app.draft, "Keep this draft");
+        assert_eq!(app.state.dialogs.len(), 1);
+        assert!(app.deliveries.is_empty());
+    }
+}
+
+#[test]
+fn hidden_sidebar_does_not_add_a_pui_dropdown_to_the_toolbar() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.prefs.hide_sidebar = true;
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1440.0, 850.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.top_bar(ctx),
     );
+    assert!(!text(output).iter().any(|(s, _)| s == "Pui"));
 }
 
 #[test]

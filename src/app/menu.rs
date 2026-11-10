@@ -29,6 +29,7 @@ impl Menu {
         commands
     }
 }
+#[cfg(any(not(target_os = "macos"), test))]
 fn menu_items(
     ui: &mut egui::Ui,
     entries: &[Entry],
@@ -332,28 +333,96 @@ impl Pui {
             )),
         }
     }
-    pub(super) fn app_menu(&mut self, ui: &mut egui::Ui) {
-        let mut command = None;
+    pub(super) fn sidebar_navigation(&mut self, ui: &mut egui::Ui) {
+        let colors = theme::palette(ui.ctx());
         let state = self.menu_state(ui.ctx());
-        ui.menu_button("Pui", |ui| {
-            menu_items(ui, entries::APP, state, &mut command);
-            ui.separator();
-            for (title, items) in entries::GROUPS {
-                ui.menu_button(*title, |ui| menu_items(ui, items, state, &mut command));
-            }
-            ui.separator();
-            menu_items(
-                ui,
-                &[Entry::Action("Quit Pui", Command::Quit)],
-                state,
-                &mut command,
+        for (label, icon, command, selected) in [
+            (
+                "Agents board",
+                Icon::Board,
+                Command::AgentsBoard,
+                state.agents_board,
+            ),
+            (
+                "Scheduled tasks",
+                Icon::Clock,
+                Command::Automation,
+                state.automation,
+            ),
+            (
+                "Settings",
+                Icon::Settings,
+                Command::Settings,
+                self.settings_open,
+            ),
+        ] {
+            let (rect, response) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+                Sense::click(),
             );
+            let highlighted = selected || response.hovered() || response.has_focus();
+            if highlighted {
+                ui.painter().rect_filled(rect, 7, colors.hover);
+            }
+            let color = if highlighted {
+                colors.text
+            } else {
+                colors.muted
+            };
+            icons::draw(
+                ui,
+                egui::Rect::from_center_size(
+                    rect.left_center() + egui::vec2(16.0, 0.0),
+                    Vec2::splat(16.0),
+                ),
+                icon,
+                color,
+            );
+            ui.painter().text(
+                rect.left_center() + egui::vec2(34.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(13.0),
+                color,
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
+            });
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                // Use the same dispatch as the native menu, before next frame's
+                // close guard and text editing. Never interrupt a running chat.
+                self.menu.pending.push(command);
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn fallback_menu_bar(&mut self, ctx: &egui::Context) {
+        let mut command = None;
+        let state = self.menu_state(ctx);
+        egui::TopBottomPanel::top("application-menu-bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Pui", |ui| {
+                    menu_items(ui, entries::APP, state, &mut command);
+                    ui.separator();
+                    menu_items(
+                        ui,
+                        &[Entry::Action("Quit Pui", Command::Quit)],
+                        state,
+                        &mut command,
+                    );
+                });
+                for (title, items) in entries::GROUPS {
+                    ui.menu_button(*title, |ui| menu_items(ui, items, state, &mut command));
+                }
+            });
         });
         if let Some(command) = command {
-            // Execute at the start of the next frame, before the close guard
-            // and text editing, rather than closing behind an active run.
             self.menu.pending.push(command);
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
     }
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
@@ -450,11 +519,16 @@ mod tests {
             assert_eq!(app.draft, "Keep this draft");
             assert_eq!(app.state.dialogs.len(), 1);
             assert!(app.deliveries.is_empty());
-            assert!(
-                entries::APP
+            let mut view_actions = Vec::new();
+            actions(
+                entries::GROUPS
                     .iter()
-                    .any(|entry| matches!(entry, Entry::Action(_, action) if *action == command))
+                    .find(|(name, _)| *name == "View")
+                    .unwrap()
+                    .1,
+                &mut view_actions,
             );
+            assert!(view_actions.contains(&command));
         }
     }
     #[test]

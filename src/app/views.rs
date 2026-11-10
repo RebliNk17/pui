@@ -25,11 +25,8 @@ impl Pui {
                     {
                         self.prefs.hide_sidebar = false;
                     }
-                    if self.prefs.hide_sidebar {
-                        self.app_menu(ui);
-                    }
                     let title = if self.automation.open {
-                        "Cron jobs & monitors".to_owned()
+                        "Scheduled tasks".to_owned()
                     } else if self.kanban.open {
                         "Agents board".to_owned()
                     } else if self.tasks.open {

@@ -86,7 +86,7 @@ impl Pui {
         let mut creator = None;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.bg).inner_margin(24)).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Cron jobs & monitors");
+                ui.heading("Scheduled tasks");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Back to chat").clicked() { self.automation.open = false; }
                 });

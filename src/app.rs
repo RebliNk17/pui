@@ -1694,6 +1694,8 @@ impl eframe::App for Pui {
         {
             self.stop();
         }
+        #[cfg(not(target_os = "macos"))]
+        self.fallback_menu_bar(ctx);
         if let Some(preview) = self.question_designs.as_mut() {
             preview.show(ctx);
         } else if self.settings_open {

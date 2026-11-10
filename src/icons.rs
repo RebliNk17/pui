@@ -7,6 +7,8 @@ pub enum Icon {
     Search,
     Sidebar,
     Board,
+    Clock,
+    Settings,
     Sliders,
     Filter,
     Group,
@@ -81,6 +83,20 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((-5.0, -3.0), (-5.0, 1.0));
             line((0.0, -3.0), (0.0, -1.0));
             line((5.0, -3.0), (5.0, 3.0));
+        }
+        Icon::Clock => {
+            p.circle_stroke(c, 6.0 * scale, s);
+            line((0.0, -3.5), (0.0, 0.0));
+            line((0.0, 0.0), (3.0, 2.0));
+        }
+        Icon::Settings => {
+            p.circle_stroke(c, 4.5 * scale, s);
+            p.circle_stroke(c, 1.8 * scale, s);
+            for step in 0..8 {
+                let angle = step as f32 * std::f32::consts::TAU / 8.0;
+                let (y, x) = angle.sin_cos();
+                line((x * 4.5, y * 4.5), (x * 6.5, y * 6.5));
+            }
         }
         Icon::Sliders => {
             for (y, x) in [(-4.0, -2.0), (3.0, 3.0)] {
