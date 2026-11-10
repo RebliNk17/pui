@@ -68,6 +68,7 @@ pub(super) struct Chat {
     images: attachments::DraftImages,
     image_picker: Option<Receiver<Vec<PathBuf>>>,
     deliveries: Vec<run_status::Delivery>,
+    interrupt: Option<run_status::Interrupt>,
     transcript: Transcript,
     ultra: bool,
     ready: bool,
@@ -274,6 +275,7 @@ impl Pui {
             images: std::mem::take(&mut self.draft_images),
             image_picker: self.image_picker_rx.take(),
             deliveries: std::mem::take(&mut self.deliveries),
+            interrupt: self.interrupt.take(),
             transcript: std::mem::take(&mut self.transcript),
             ultra: std::mem::take(&mut self.ultracode),
             ready: std::mem::take(&mut self.ultracode_ready),
@@ -301,6 +303,7 @@ impl Pui {
         self.image_picker_rx = chat.image_picker;
         self.completions = chat.completions;
         self.deliveries = chat.deliveries;
+        self.interrupt = chat.interrupt;
         self.transcript = chat.transcript;
         self.ultracode = chat.ultra;
         self.ultracode_ready = chat.ready;

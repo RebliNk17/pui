@@ -23,6 +23,49 @@ pub struct Message {
     pub revision: u64,
 }
 
+/// UI-only delivery receipt, never part of Pi's canonical messages or model context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingMessage {
+    pub id: String,
+    pub text: String,
+    pub images: Vec<crate::media::Attachment>,
+    pub status: DeliveryStatus,
+    pub observed: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryStatus {
+    Interrupting,
+    Cancelled,
+    Handled,
+    Sending,
+    AwaitingAgent,
+    Uncertain,
+}
+impl DeliveryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interrupting => "Interrupting current run…",
+            Self::Cancelled => "Not sent · interruption cancelled",
+            Self::Handled => "Handled by Pi extension",
+            Self::Sending => "Sending to Pi…",
+            Self::AwaitingAgent => "Sent to Pi · waiting for agent",
+            Self::Uncertain => "Delivery uncertain · not automatically retried",
+        }
+    }
+}
+impl PendingMessage {
+    pub fn matches(&self, message: &Message) -> bool {
+        message.role == "user"
+            && self.text == message.text
+            && self.images.len() == message.images.len()
+            && self
+                .images
+                .iter()
+                .zip(&message.images)
+                .all(|(a, b)| a.key == b.key)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Block {
     Text(String),
@@ -97,6 +140,7 @@ pub struct SlashCommand {
 #[serde(default)]
 pub struct State {
     pub messages: Vec<Message>,
+    pub pending_messages: Vec<PendingMessage>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
     pub commands: Vec<SlashCommand>,
@@ -230,6 +274,14 @@ impl State {
             }
             self.diagnostics.push(text);
         }
+    }
+    pub fn reconcile_pending_messages(&mut self) {
+        self.pending_messages.retain(|pending| {
+            matches!(
+                pending.status,
+                DeliveryStatus::Interrupting | DeliveryStatus::Cancelled | DeliveryStatus::Handled
+            ) || self.messages.iter().filter(|m| pending.matches(m)).count() <= pending.observed
+        });
     }
     pub fn ready(&self) -> bool {
         !self.busy && !self.pending && !self.compacting

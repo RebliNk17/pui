@@ -485,10 +485,11 @@ impl Pui {
                     self.task_session(&self.state),
                     Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
                 );
+                self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
                 if self.state.messages.is_empty()
-                    && !self.new_chat
+                    && (!self.new_chat || !self.state.pending_messages.is_empty())
                     && self.transcript.progress.is_some()
                 {
                     self.transcript.show(
@@ -499,7 +500,7 @@ impl Pui {
                         !self.state.ready(),
                         self.state.session_file.as_deref().unwrap_or("new"),
                     );
-                } else if self.state.messages.is_empty() {
+                } else if self.state.messages.is_empty() && self.state.pending_messages.is_empty() {
                     let width = ui.available_width();
                     let pad = ((width - 720.0) / 2.0).max(30.0);
                     egui::ScrollArea::vertical()

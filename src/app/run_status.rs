@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(test)]
+#[path = "send_now_tests.rs"]
+mod send_now_tests;
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub(super) struct WaitingMessage {
     pub text: String,
@@ -34,8 +37,169 @@ impl WaitingMessage {
         }
     }
 }
+pub(super) struct Interrupt {
+    abort_id: String,
+    receipt_id: String,
+    message: WaitingMessage,
+    queue_index: usize,
+}
 impl Pui {
+    fn pending_receipt(
+        &mut self,
+        id: String,
+        message: &WaitingMessage,
+        status: protocol::DeliveryStatus,
+    ) {
+        let mut receipt = protocol::PendingMessage {
+            id,
+            text: message.text.clone(),
+            images: message.images.clone(),
+            status,
+            observed: 0,
+        };
+        receipt.observed = self
+            .state
+            .messages
+            .iter()
+            .filter(|m| receipt.matches(m))
+            .count()
+            + self
+                .state
+                .pending_messages
+                .iter()
+                .filter(|p| {
+                    p.text == receipt.text
+                        && p.images
+                            .iter()
+                            .map(|i| i.key)
+                            .eq(receipt.images.iter().map(|i| i.key))
+                })
+                .count();
+        self.state.pending_messages.push(receipt);
+        self.ctx.request_repaint();
+    }
+
+    pub(super) fn send_now(&mut self, index: usize) -> bool {
+        if self.interrupt.is_some()
+            || !self.connected
+            || self.loading_chat
+            || !self.ultracode_ready
+            || self.history_pending.is_some()
+            || self.restoring_code()
+            || self.state.compacting
+            || !self.state.dialogs.is_empty()
+            || !self.deliveries.is_empty()
+            || self.state.pending_messages.iter().any(|p| {
+                matches!(
+                    p.status,
+                    protocol::DeliveryStatus::AwaitingAgent | protocol::DeliveryStatus::Uncertain
+                )
+            })
+        {
+            self.state.error = Some("Wait for the current handoff, connection or approval before sending now. Message kept.".into());
+            return false;
+        }
+        let Some(path) = self.state.session_file.as_ref().map(PathBuf::from) else {
+            return false;
+        };
+        let Some(message) = self.waiting.get(&path).and_then(|q| q.get(index)).cloned() else {
+            return false;
+        };
+        if self.state.ready() {
+            if !self.deliver_message(message, "prompt") {
+                return false;
+            }
+            self.waiting.get_mut(&path).unwrap().remove(index);
+            return true;
+        }
+        let Some(client) = self.client.as_mut() else {
+            return false;
+        };
+        // Abort cancels the agent's signal and waits for idle; abort_bash also covers user shell work.
+        if let Err(error) = client.send(protocol::command("abort_bash")) {
+            self.state.error = Some(error);
+            return false;
+        }
+        let abort_id = match client.enqueue(protocol::command("abort")) {
+            Ok(id) => id,
+            Err(error) => {
+                self.state.error = Some(error);
+                return false;
+            }
+        };
+        let receipt_id = format!("interrupt-{abort_id}");
+        self.waiting.get_mut(&path).unwrap().remove(index);
+        self.pending_receipt(
+            receipt_id.clone(),
+            &message,
+            protocol::DeliveryStatus::Interrupting,
+        );
+        self.interrupt = Some(Interrupt {
+            abort_id,
+            receipt_id,
+            message,
+            queue_index: index,
+        });
+        self.state.error = None;
+        true
+    }
+
+    pub(super) fn interrupt_response(&mut self, record: &Value) {
+        if record["type"] != "response"
+            || self
+                .interrupt
+                .as_ref()
+                .is_none_or(|i| record["id"].as_str() != Some(i.abort_id.as_str()))
+        {
+            return;
+        }
+        let interrupt = self.interrupt.take().unwrap();
+        if record["success"] != true {
+            if let Some(receipt) = self
+                .state
+                .pending_messages
+                .iter_mut()
+                .find(|p| p.id == interrupt.receipt_id)
+            {
+                receipt.status = protocol::DeliveryStatus::Uncertain;
+            }
+            self.state.error = Some("Could not confirm interruption. Message retained, not automatically sent. Copy it to retry after checking the chat.".into());
+            return;
+        }
+        // The correlated abort acknowledgement means Pi has finished cancelling and is idle.
+        self.state.busy = false;
+        self.state.pending = false;
+        self.state.run_observed = false;
+        self.state
+            .pending_messages
+            .retain(|p| p.id != interrupt.receipt_id);
+        if !self.deliver_message(interrupt.message.clone(), "prompt") {
+            if let Some(path) = self.state.session_file.as_ref().map(PathBuf::from) {
+                let queue = self.waiting.entry(path).or_default();
+                queue.insert(interrupt.queue_index.min(queue.len()), interrupt.message);
+            }
+        }
+    }
+
+    pub(super) fn cancel_send_now(&mut self) {
+        if let Some(interrupt) = self.interrupt.take() {
+            if let Some(receipt) = self
+                .state
+                .pending_messages
+                .iter_mut()
+                .find(|p| p.id == interrupt.receipt_id)
+            {
+                receipt.status = protocol::DeliveryStatus::Cancelled;
+            }
+        }
+    }
+
     pub(super) fn deliver_message(&mut self, message: WaitingMessage, kind: &str) -> bool {
+        if self.interrupt.is_some() {
+            self.state.error =
+                Some("Wait for the interruption to finish. Your message was kept.".into());
+            return false;
+        }
         if self.history_pending.is_some() || self.restoring_code() {
             self.state.error =
                 Some("Wait for history navigation before sending. Your message was kept.".into());
@@ -54,6 +218,7 @@ impl Pui {
             Ok(id) => {
                 self.new_chat = false;
                 self.agent_user_turn();
+                self.pending_receipt(id.clone(), &message, protocol::DeliveryStatus::Sending);
                 self.deliveries.push(Delivery {
                     id,
                     path: self.state.session_file.as_ref().map(PathBuf::from),
@@ -85,6 +250,7 @@ impl Pui {
             self.send(json!({"type":"extension_ui_response","id":window,"value":"continue"}));
         }
         if record["success"] == false {
+            self.state.pending_messages.retain(|p| p.id != delivery.id);
             if let Some(path) = delivery.path {
                 self.waiting
                     .entry(path)
@@ -94,12 +260,44 @@ impl Pui {
                 self.draft = delivery.message.text;
                 self.draft_images.set_images(delivery.message.images);
             }
+        } else if let Some(receipt) = self
+            .state
+            .pending_messages
+            .iter_mut()
+            .find(|p| p.id == delivery.id)
+        {
+            receipt.status = if record["data"]["disposition"] == "handled" {
+                protocol::DeliveryStatus::Handled
+            } else {
+                protocol::DeliveryStatus::AwaitingAgent
+            };
         }
+    }
+
+    pub(super) fn uncertain_deliveries(&mut self) {
+        // A lost transport is not proof of rejection. Retain visibility; never resend automatically.
+        for receipt in &mut self.state.pending_messages {
+            if !matches!(
+                receipt.status,
+                protocol::DeliveryStatus::Handled | protocol::DeliveryStatus::Cancelled
+            ) {
+                receipt.status = protocol::DeliveryStatus::Uncertain;
+            }
+        }
+        self.interrupt = None;
+        self.deliveries.clear();
     }
 
     pub(super) fn run_label(&self) -> (&'static str, Color32) {
         let colors = theme::palette(&self.ctx);
-        if self.history_pending.is_some() {
+        if self
+            .state
+            .pending_messages
+            .iter()
+            .any(|p| p.status == protocol::DeliveryStatus::Interrupting)
+        {
+            ("Interrupting…", colors.amber)
+        } else if self.history_pending.is_some() {
             ("Changing history…", crate::theme::palette(&self.ctx).accent)
         } else if self.loading_chat {
             ("Connecting", colors.accent)
@@ -124,7 +322,14 @@ impl Pui {
     }
     pub(super) fn transcript_progress(&self) -> Option<crate::transcript::Progress> {
         use crate::transcript::Progress;
-        if self.loading_chat {
+        if self
+            .state
+            .pending_messages
+            .iter()
+            .any(|p| p.status == protocol::DeliveryStatus::Interrupting)
+        {
+            Some(Progress::Interrupting)
+        } else if self.loading_chat {
             Some(Progress::Connecting)
         } else if !self.connected && !self.demo {
             None
@@ -174,6 +379,13 @@ impl Pui {
             || self.restoring_code()
             || !self.state.dialogs.is_empty()
             || !self.deliveries.is_empty()
+            || self.interrupt.is_some()
+            || self.state.pending_messages.iter().any(|p| {
+                matches!(
+                    p.status,
+                    protocol::DeliveryStatus::AwaitingAgent | protocol::DeliveryStatus::Uncertain
+                )
+            })
             || self.state.error.is_some()
         {
             return;
@@ -258,12 +470,15 @@ impl Pui {
                                 if ui
                                     .add_enabled(
                                         self.connected
+                                            && self.interrupt.is_none()
+                                            && self.deliveries.is_empty()
                                             && !self.loading_chat
                                             && !self.state.compacting
                                             && self.state.dialogs.is_empty()
                                             && (self.state.ready() || self.state.busy),
                                         egui::Button::new("Send now").small().frame(false),
                                     )
+                                    .on_hover_text("Interrupt the current run, then send this message. Completed actions are not undone.")
                                     .clicked()
                                 {
                                     steer = Some(index);
@@ -296,15 +511,7 @@ impl Pui {
             if self.remote_action(sync::Action::SendNow(index)) {
                 return;
             }
-            let message = self.waiting.get_mut(&path).unwrap().remove(index);
-            let kind = if self.state.ready() {
-                "prompt"
-            } else {
-                "steer"
-            };
-            if !self.deliver_message(message.clone(), kind) {
-                self.waiting.entry(path).or_default().insert(index, message);
-            }
+            self.send_now(index);
         }
         ui.add_space(6.0);
     }
@@ -528,6 +735,12 @@ mod tests {
         app.delivery_response(&json!({"id":id,"success":true}));
         app.deliver_waiting_at_window(true);
         assert!(app.deliveries.is_empty());
+        app.state.messages.push(Message {
+            role: "user".into(),
+            text: "at the next opening".into(),
+            ..Default::default()
+        });
+        app.state.reconcile_pending_messages();
         app.state.busy = false;
         app.deliver_waiting();
         assert_eq!(app.deliveries[0].message.text, "after the run");

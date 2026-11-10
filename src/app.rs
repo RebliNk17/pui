@@ -113,6 +113,7 @@ pub struct Pui {
     history_drafts: Vec<run_status::WaitingMessage>,
     waiting: std::collections::BTreeMap<PathBuf, Vec<run_status::WaitingMessage>>,
     deliveries: Vec<run_status::Delivery>,
+    interrupt: Option<run_status::Interrupt>,
     draft: String,
     recall: composer_history::Recall,
     recall_width: f32,
@@ -221,6 +222,7 @@ impl Pui {
             history_drafts: Vec::new(),
             waiting: Default::default(),
             deliveries: Vec::new(),
+            interrupt: None,
             draft: String::new(),
             recall: Default::default(),
             recall_width: 700.0,
@@ -351,6 +353,16 @@ impl Pui {
                 app.state.add_diagnostic("MCP server unavailable (HTTP 503). The remote service could not be reached. Local chat is still available.".into());
                 app.diagnostics_open = true;
             }
+            if options.demo_send_now {
+                app.state.busy = true;
+                app.state.pending_messages.push(protocol::PendingMessage {
+                    id: "demo-interrupt".into(),
+                    text: "Stop the browser search and use the CSV I attached instead.".into(),
+                    images: vec![],
+                    status: protocol::DeliveryStatus::Interrupting,
+                    observed: 0,
+                });
+            }
             app.transcript.expand_activity = options.demo_expanded;
             if options.demo_collapsed {
                 app.prefs.cards.collapsed = Card::ALL.into_iter().collect();
@@ -422,9 +434,17 @@ impl Pui {
         self.pending_session = session.clone();
         self.preview_rx = None;
         self.preview_partial = false;
+        self.uncertain_deliveries();
+        let pending_messages =
+            if self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref() {
+                std::mem::take(&mut self.state.pending_messages)
+            } else {
+                Vec::new()
+            };
         let models = std::mem::take(&mut self.state.models);
         self.state = State {
             models,
+            pending_messages,
             ..Default::default()
         };
         self.transcript.clear();
@@ -629,6 +649,7 @@ impl Pui {
                     self.transcript
                         .replace_history(&self.state.messages, &messages);
                     self.state.messages = messages;
+                    self.state.reconcile_pending_messages();
                     if !self.state.messages.is_empty() {
                         self.new_chat = false;
                     }
@@ -712,7 +733,19 @@ impl Pui {
                         self.agent_failed(protocol::string(&record, "error"));
                     }
                     let cancelled = record["data"]["cancelled"] == true;
+                    let record_for_interrupt =
+                        if self.interrupt.is_some() && kind == "response" && command == "abort" {
+                            record.clone()
+                        } else {
+                            Value::Null
+                        };
+                    let user_message =
+                        kind == "message_start" && record["message"]["role"] == "user";
                     self.state.apply(record);
+                    if user_message || (kind == "response" && command == "get_messages") {
+                        self.state.reconcile_pending_messages();
+                    }
+                    self.interrupt_response(&record_for_interrupt);
                     if self.state.session_name.is_empty() {
                         if let Some(title) = self
                             .sessions
@@ -777,10 +810,12 @@ impl Pui {
                     }
                 }
                 rpc::Event::Error(error) => {
+                    self.uncertain_deliveries();
                     self.agent_failed(&error);
                     self.state.error = Some(error);
                 }
                 rpc::Event::Exited => {
+                    self.uncertain_deliveries();
                     self.completion_run = Default::default();
                     if let Some(client) = self.client.take() {
                         client.retire();
@@ -881,6 +916,7 @@ impl Pui {
             self.tasks.stop();
             return;
         }
+        self.cancel_send_now();
         if self.is_mirror() {
             self.remote_action(sync::Action::Rpc(protocol::command("clear_queue")));
             self.remote_action(sync::Action::Rpc(protocol::command("abort")));

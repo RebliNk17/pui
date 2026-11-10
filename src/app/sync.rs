@@ -625,6 +625,15 @@ impl Pui {
             self.ultracode_ready,
         )
             .hash(&mut hash);
+        for receipt in &self.state.pending_messages {
+            receipt.id.hash(&mut hash);
+            receipt.text.hash(&mut hash);
+            receipt.status.label().hash(&mut hash);
+            receipt.observed.hash(&mut hash);
+            for image in &receipt.images {
+                image.key.hash(&mut hash);
+            }
+        }
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
@@ -933,18 +942,8 @@ impl Pui {
                         {
                             return Err("Wait for compaction/approval before sending now.".into());
                         }
-                        let message = queue.remove(index);
-                        let kind = if self.state.ready() {
-                            "prompt"
-                        } else {
-                            "steer"
-                        };
-                        if !self.deliver_message(message.clone(), kind) {
-                            self.waiting
-                                .entry(queue_path.clone())
-                                .or_default()
-                                .insert(index, message);
-                            return Err("Owner could not send; message retained".into());
+                        if !self.send_now(index) {
+                            return Err("Owner could not interrupt/send; message retained".into());
                         }
                     }
                     _ => unreachable!(),
@@ -994,6 +993,7 @@ impl Pui {
                     return Err("This approval dialog is no longer active".into());
                 }
                 if kind == "clear_queue" {
+                    self.cancel_send_now();
                     self.waiting.remove(&queue_path);
                 }
                 if kind == "extension_ui_response" {
@@ -1155,6 +1155,70 @@ mod tests {
         assert!(owner.state.busy);
         assert!(owner.client.is_some());
     }
+    #[test]
+    fn shared_send_now_interrupts_owner_and_publishes_immediate_receipt() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        let (client, tx, commands) = rpc::Client::stub_with_commands();
+        owner.client = Some(client);
+        owner.state.busy = true;
+        owner.state.run_observed = true;
+        assert!(owner.attach_or_claim(&path));
+        owner.waiting.insert(
+            path.clone(),
+            vec![run_status::WaitingMessage {
+                text: "interrupt from attached window".into(),
+                ..Default::default()
+            }],
+        );
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.waiting.get(&path).is_some_and(|q| q.len() == 1)
+        });
+        mirror.remote_action(Action::SendNow(0));
+        spin(&mut owner, &mut mirror, |a, b| {
+            a.interrupt.is_some() && b.state.pending_messages.len() == 1
+        });
+        assert_eq!(
+            mirror.state.pending_messages[0].status,
+            protocol::DeliveryStatus::Interrupting
+        );
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(1)).unwrap()["type"],
+            "abort_bash"
+        );
+        let abort = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(abort["type"], "abort");
+        assert!(owner.deliveries.is_empty());
+        tx.send(rpc::Event::Record(
+            json!({"type":"agent_settled","aborted":true}),
+        ))
+        .unwrap();
+        tx.send(rpc::Event::Record(
+            json!({"type":"response","command":"abort","id":abort["id"],"success":true}),
+        ))
+        .unwrap();
+        owner.poll_rpc();
+        assert_eq!(owner.deliveries.len(), 1);
+        let id = owner.deliveries[0].id.clone();
+        tx.send(rpc::Event::Record(json!({"type":"response","command":"prompt","id":id,"success":true,"data":{"disposition":"started"}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state
+                .pending_messages
+                .first()
+                .is_some_and(|p| p.status == protocol::DeliveryStatus::AwaitingAgent)
+        });
+        assert!(mirror.state.messages.is_empty());
+        tx.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":"interrupt from attached window","timestamp":42}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.messages.len() == 1 && b.state.pending_messages.is_empty()
+        });
+    }
+
     #[test]
     fn shared_queue_edit_remove_and_stale_revision_are_authoritative() {
         let (directory, path) = location();

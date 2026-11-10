@@ -46,6 +46,7 @@ pub struct Options {
     pub demo_terminal: bool,
     pub demo_notifications: bool,
     pub demo_confirmation: bool,
+    pub demo_send_now: bool,
     pub cwd: Option<PathBuf>,
     pub session: Option<PathBuf>,
     pub task_proposal: Option<PathBuf>,
@@ -89,6 +90,10 @@ fn main() -> eframe::Result {
             "--demo-notifications" => {
                 options.demo = true;
                 options.demo_notifications = true;
+            }
+            "--demo-send-now" => {
+                options.demo = true;
+                options.demo_send_now = true;
             }
             "--demo-terminal" => {
                 options.demo = true;

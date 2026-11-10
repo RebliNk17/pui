@@ -71,6 +71,8 @@ impl Pui {
             && !self.loading_chat
             && self.state.dialogs.is_empty()
             && self.deliveries.is_empty()
+            && self.interrupt.is_none()
+            && self.state.pending_messages.is_empty()
             && self.history_pending.is_none()
             && !self.restoring_code()
             && self.history_drafts.len() < 8
