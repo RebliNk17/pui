@@ -1073,12 +1073,18 @@ mod tests {
             notify::EventKind::Remove(RemoveKind::File),
         ] {
             let event = notify::Event::new(kind);
-            assert!(!registry_changed(&event.clone().add_path(own.clone()), &own));
+            assert!(!registry_changed(
+                &event.clone().add_path(own.clone()),
+                &own
+            ));
             assert!(!registry_changed(
                 &event.clone().add_path(root.join("own.tmp")),
                 &own
             ));
-            assert!(registry_changed(&event.clone().add_path(peer.clone()), &own));
+            assert!(registry_changed(
+                &event.clone().add_path(peer.clone()),
+                &own
+            ));
             assert!(registry_changed(
                 &event.add_path(own.clone()).add_path(peer.clone()),
                 &own
