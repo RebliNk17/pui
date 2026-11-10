@@ -69,7 +69,7 @@ pub fn show(ui: &mut egui::Ui, text: &str) -> bool {
                 }
             }
         }
-        egui::CollapsingHeader::new("Raw response").id_salt(("task-output-source", text)).show(ui, |ui| command(ui, text));
+        crate::section::Section::new("Raw response").summary("Original structured output · unchanged").icon(crate::icons::Icon::Code).id_salt(("task-output-source", text)).show(ui, |ui| command(ui, text));
     });
     true
 }

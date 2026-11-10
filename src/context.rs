@@ -121,7 +121,7 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         );
     }
     ui.add_space(7.0);
-    egui::CollapsingHeader::new(RichText::new("Usage details").size(10.0).color(colors.muted)).id_salt("usage-details").show(ui,|ui|{
+    crate::section::Section::new("Usage details").summary("Tokens and prompt cache").icon(crate::icons::Icon::Details).id_salt("usage-details").show(ui,|ui|{
         ui.label(RichText::new("Prompt cache").size(12.0));
         if let Some(pct)=state.messages.iter().rev().find_map(|m|m.cached_pct){detail(ui,"Last turn",&format!("{pct:.0}% cached"));}
         ui.add_space(7.0);ui.label(RichText::new("This session").size(12.0));

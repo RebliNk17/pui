@@ -201,7 +201,7 @@ impl Updates {
             ui.add(egui::Label::new(theme::small(ui, "Never downloads, installs or restarts automatically. Running agents won’t be interrupted.")).wrap());
             if repository().is_none() {
                 ui.add_space(8.0);
-                egui::CollapsingHeader::new("Configuration details").show(ui, |ui| {
+                crate::section::Section::new("Configuration details").summary("Release-check setup").icon(Icon::Sliders).show(ui, |ui| {
                     ui.add(egui::Label::new(theme::small(ui, "Build with PUI_GITHUB_REPOSITORY=OWNER/REPO to enable stable GitHub release checks.")).wrap());
                 });
             }

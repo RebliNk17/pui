@@ -197,6 +197,20 @@ impl Transcript {
         busy: bool,
         session: &str,
     ) {
+        self.show_with_footer(ui, messages, model, thinking, busy, session, |_| {});
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_with_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        messages: &[Message],
+        model: &str,
+        thinking: &str,
+        busy: bool,
+        session: &str,
+        footer: impl FnOnce(&mut egui::Ui),
+    ) {
         let colors = crate::theme::palette(ui.ctx());
         let now = ui.input(|i| i.time);
         let elapsed = if let Some(progress) = self.progress {
@@ -425,6 +439,20 @@ impl Transcript {
                     },
                 );
             }
+            let before = ui.cursor().top();
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(("conversation-footer", session))
+                    .max_rect(Rect::from_min_size(
+                        egui::pos2(ui.min_rect().left() + padding, before),
+                        Vec2::new(column, 1.0),
+                    ))
+                    .layout(Layout::top_down(Align::LEFT)),
+                |ui| {
+                    ui.set_width(column);
+                    footer(ui);
+                },
+            );
             ui.add_space(12.0);
         });
         // Disclosures only change their owning, visible turn. Keep all other
@@ -1133,21 +1161,19 @@ fn activity(
                 for (i, item) in items.iter().enumerate().skip(hidden) {
                     ui.push_id(i, |ui| match item {
                         ActivityItem::Thinking(text) => {
-                            egui::CollapsingHeader::new(
-                                RichText::new("Thinking")
-                                    .size(11.0)
-                                    .italics()
-                                    .color(colors.muted),
-                            )
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(*text).size(12.0).color(colors.muted),
-                                    )
-                                    .wrap()
-                                    .selectable(true),
-                                );
-                            });
+                            let response = crate::section::Section::new("Thinking")
+                                .summary("Model reasoning")
+                                .icon(Icon::Spark)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(*text).size(12.0).color(colors.muted),
+                                        )
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                            earlier_changed |= response.clicked() || response.has_focus();
                         }
                         ActivityItem::Tool(tool) => crate::tool_view::row(ui, tool),
                     });

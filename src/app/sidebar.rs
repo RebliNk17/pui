@@ -524,14 +524,15 @@ impl Pui {
         let expanded = !self.prefs.closed_threads.contains(&branch.key) || !query.is_empty();
         let has_children = branch.children.iter().any(|c| !c.hidden);
         let compact = depth > 0;
+        let task_row = matches!(branch.target, sidebar_tree::Target::Task(_, None));
         let row_height = if compact {
-            28.0
+            32.0
         } else if matches!(branch.target, sidebar_tree::Target::Session(_)) {
             48.0
         } else {
             44.0
         };
-        let indent = (depth as f32 * 14.0).min(70.0);
+        let indent = (depth as f32 * 12.0).min(48.0);
         let mut action = None;
         ui.push_id((&branch.key, "tree-row"), |ui| {
             let origin = ui.cursor().min;
@@ -540,17 +541,6 @@ impl Pui {
             let center_y = origin.y + if compact { row_height / 2.0 } else { 16.0 };
             let toggle_rect =
                 egui::Rect::from_center_size(egui::pos2(left + 9.0, center_y), Vec2::splat(20.0));
-            if compact {
-                let x = left - 7.0;
-                ui.painter().line_segment(
-                    [egui::pos2(x, origin.y), egui::pos2(x, center_y)],
-                    Stroke::new(1.0, colors.border),
-                );
-                ui.painter().line_segment(
-                    [egui::pos2(x, center_y), egui::pos2(left + 1.0, center_y)],
-                    Stroke::new(1.0, colors.border),
-                );
-            }
             let toggle = has_children
                 .then(|| ui.interact(toggle_rect, ui.id().with("disclosure"), Sense::click()));
             let child_left = left + 20.0;
@@ -568,11 +558,13 @@ impl Pui {
                             Vec2::new(ui.available_width(), row_height),
                             Sense::click(),
                         );
-                        if selected || response.hovered() {
+                        if selected || response.hovered() || task_row {
                             ui.painter().rect_filled(
                                 row,
                                 7,
                                 if selected {
+                                    colors.accent_bg
+                                } else if response.hovered() {
                                     colors.hover
                                 } else {
                                     colors.surface
@@ -592,25 +584,40 @@ impl Pui {
                                 colors.dim
                             };
                         let title_y = if compact { row.height() / 2.0 } else { 13.0 };
-                        theme::status_dot(ui, row.min + egui::vec2(8.0, title_y), tint, 2.5);
+                        let icon_rect = egui::Rect::from_center_size(
+                            row.min + egui::vec2(12.0, title_y),
+                            Vec2::splat(16.0),
+                        );
+                        icons::draw(
+                            ui,
+                            icon_rect,
+                            match target {
+                                sidebar_tree::Target::Task(_, None) => Icon::Board,
+                                sidebar_tree::Target::Task(_, Some(_))
+                                | sidebar_tree::Target::Agent(_) => Icon::Spark,
+                                _ => Icon::File,
+                            },
+                            if selected || task_row {
+                                colors.accent
+                            } else {
+                                colors.muted
+                            },
+                        );
+                        theme::status_dot(ui, icon_rect.right_bottom(), tint, 2.5);
                         paint_text(
                             ui,
                             &branch.title,
-                            row.min + egui::vec2(19.0, title_y),
-                            row.width() - 48.0,
-                            FontId::proportional(if compact { 11.0 } else { 11.5 }),
-                            if compact && !selected && !response.hovered() {
-                                colors.muted
-                            } else {
-                                colors.text
-                            },
+                            row.min + egui::vec2(28.0, title_y),
+                            row.width() - 56.0,
+                            FontId::proportional(if compact { 11.5 } else { 12.0 }),
+                            colors.text,
                         );
                         if !compact {
                             paint_text(
                                 ui,
                                 &branch.status,
-                                row.min + egui::vec2(19.0, 30.0),
-                                row.width() - 24.0,
+                                row.min + egui::vec2(28.0, 30.0),
+                                row.width() - 32.0,
                                 FontId::proportional(10.0),
                                 colors.dim,
                             );

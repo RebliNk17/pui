@@ -12,6 +12,7 @@ mod media;
 mod protocol;
 mod pulls;
 mod rpc;
+mod section;
 mod sessions;
 mod task_output;
 mod tasks;

@@ -103,8 +103,9 @@ pub fn stack(
     ui: &mut egui::Ui,
     layout: &mut CardLayout,
     summary: impl Fn(Card) -> String,
+    header_action: Option<(Card, &str)>,
     mut contents: impl FnMut(&mut egui::Ui, Card),
-) {
+) -> Option<Card> {
     let colors = crate::theme::palette(ui.ctx());
     let visible: Vec<_> = layout
         .order
@@ -118,6 +119,7 @@ pub fn stack(
     }
     let mut dropped = None;
     let mut move_by = None;
+    let mut action = None;
     for (index, card) in visible.iter().copied().enumerate() {
         let id = ui.make_persistent_id(("inspector-card", card));
         let collapsed = layout.collapsed.contains(&card);
@@ -136,7 +138,16 @@ pub fn stack(
                 ui.set_max_width((width - 26.0).max(40.0));
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal(|ui| {
-                    let label_width = (ui.available_width() - 36.0).max(30.0);
+                    let button = header_action.filter(|(target, _)| *target == card);
+                    let button_width = 46.0;
+                    let label_width = (ui.available_width()
+                        - 36.0
+                        - if button.is_some() {
+                            button_width + ui.spacing().item_spacing.x
+                        } else {
+                            0.0
+                        })
+                    .max(30.0);
                     let (rect, response) = ui.allocate_exact_size(
                         Vec2::new(label_width, crate::theme::CONTROL_HEIGHT),
                         Sense::click(),
@@ -175,7 +186,7 @@ pub fn stack(
                         !collapsed,
                         colors.dim,
                     );
-                    if collapsed {
+                    if collapsed && button.is_none() {
                         ui.painter().text(
                             rect.right_center(),
                             egui::Align2::RIGHT_CENTER,
@@ -198,6 +209,24 @@ pub fn stack(
                         }
                     }
                     response.context_menu(|ui| layout.menu(ui));
+                    if let Some((_, label)) = button {
+                        let response = ui
+                            .add_sized(
+                                [button_width, crate::theme::CONTROL_HEIGHT],
+                                egui::Button::new(egui::RichText::new(label).size(11.0)),
+                            )
+                            .on_hover_text(label);
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                egui::Id::new(("inspector-header-action", card)),
+                                response.rect,
+                            )
+                        });
+                        if response.clicked() {
+                            action = Some(card);
+                        }
+                    }
                     let (grip_rect, _) = ui.allocate_exact_size(
                         Vec2::new(20.0, crate::theme::CONTROL_HEIGHT),
                         Sense::hover(),
@@ -241,6 +270,9 @@ pub fn stack(
                         layout.menu(ui);
                     });
                 });
+                if collapsed && header_action.is_some_and(|(target, _)| target == card) {
+                    ui.add(egui::Label::new(crate::theme::small(ui, summary(card))).truncate());
+                }
                 if !collapsed {
                     ui.add_space(7.0);
                     let max_height = (ui.ctx().screen_rect().height() * 0.55).clamp(160.0, 420.0);
@@ -299,6 +331,7 @@ pub fn stack(
     if let Some((source, target)) = dropped.or(move_by) {
         layout.move_to(source, target);
     }
+    action
 }
 
 pub fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -333,6 +366,7 @@ mod tests {
                         ui,
                         layout,
                         |_| "Idle".into(),
+                        None,
                         |ui, _| {
                             ui.label("Card body");
                         },
@@ -406,6 +440,7 @@ mod tests {
                                 ui,
                                 layout,
                                 |_| "Idle".into(),
+                                None,
                                 |ui, _| {
                                     renders += 1;
                                     for _ in 0..if long { 80 } else { 1 } {

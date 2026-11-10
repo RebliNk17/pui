@@ -72,6 +72,7 @@ fn workflow_is_bounded_and_stable_with_long_names_in_both_states_and_themes() {
                                         ui,
                                         &mut layout,
                                         |_| String::new(),
+                                        Some((Card::Workflow, "Open")),
                                         |ui, _| app.task_workflow(ui),
                                     );
                                     widths.push(ui.min_rect().width());

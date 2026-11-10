@@ -74,15 +74,10 @@ impl Pui {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .button("Tasks")
-                            .on_hover_text("Verified tasks and workflow evidence")
+                            .on_hover_text("Task checks, progress and results in your conversation")
                             .clicked()
                         {
-                            if self.tasks.selected.is_none() {
-                                self.new_task();
-                            } else {
-                                self.kanban.open = false;
-                                self.tasks.open = !self.tasks.open;
-                            }
+                            self.toggle_chat_tasks();
                         }
                         if self.loading_chat {
                             ui.label(
@@ -241,8 +236,7 @@ impl Pui {
                             .map(|a| a.changes.clone())
                             .unwrap_or_default();
                         let workflow_summary = self
-                            .tasks
-                            .current()
+                            .workflow_task()
                             .map(|t| t.phase.label())
                             .unwrap_or("No task")
                             .to_owned();
@@ -269,7 +263,9 @@ impl Pui {
                                 .hidden
                                 .extend([Card::Context, Card::Pulls, Card::Changes]);
                         }
-                        inspector::stack(
+                        let workflow_id = self.workflow_task().map(|t| t.id.clone());
+                        let header_action = workflow_id.as_ref().map(|_| (Card::Workflow, "Open"));
+                        let action = inspector::stack(
                             ui,
                             &mut layout,
                             |card| {
@@ -286,6 +282,7 @@ impl Pui {
                                 }]
                                 .clone()
                             },
+                            header_action,
                             |ui, card| match card {
                                 Card::Workflow => self.task_workflow(ui),
                                 Card::Environment => {
@@ -315,7 +312,7 @@ impl Pui {
                                         );
                                         ui.label(theme::small(
                                             ui,
-                                            "Task evidence only; ordinary chat is separate.",
+                                            "Linked to your conversation. Task workers use their own permission-controlled sessions.",
                                         ));
                                         return;
                                     }
@@ -446,6 +443,9 @@ impl Pui {
                             }
                         }
                         self.prefs.cards = layout;
+                        if action == Some(Card::Workflow) {
+                            if let Some(id) = workflow_id { self.open_task_from_board(id, None); }
+                        }
                     });
             });
     }
@@ -522,7 +522,28 @@ impl Pui {
                 self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
-                if self.state.messages.is_empty()
+                let has_tasks = self.tasks.records.iter().any(|t| self.task_in_chat(t));
+                if has_tasks {
+                    let mut transcript = std::mem::take(&mut self.transcript);
+                    let messages = self.state.messages.clone();
+                    let model = self.state.model.clone();
+                    let thinking = self.state.thinking.clone();
+                    let session = self
+                        .state
+                        .session_file
+                        .clone()
+                        .unwrap_or_else(|| "new".into());
+                    transcript.show_with_footer(
+                        ui,
+                        &messages,
+                        &model,
+                        &thinking,
+                        !self.state.ready(),
+                        &session,
+                        |ui| self.task_chat_cards(ui),
+                    );
+                    self.transcript = transcript;
+                } else if self.state.messages.is_empty()
                     && (!self.new_chat || !self.state.pending_messages.is_empty())
                     && self.transcript.progress.is_some()
                 {

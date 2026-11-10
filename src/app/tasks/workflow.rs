@@ -8,7 +8,7 @@ mod tests;
 impl Pui {
     pub(in crate::app) fn task_workflow(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        let Some(task) = self.tasks.current().cloned() else {
+        let Some(task) = self.workflow_task().cloned() else {
             ui.label(theme::caption(ui, "VERIFIED TASKS"));
             ui.add(
                 egui::Label::new(
@@ -45,8 +45,7 @@ impl Pui {
             &task.objective
         };
         if line(ui, objective, 13.0, colors.text, true).clicked() {
-            self.tasks.open = true;
-            self.tasks.selected_run = None;
+            self.open_task_from_board(task.id.clone(), None);
         }
         line(
             ui,
@@ -98,8 +97,7 @@ impl Pui {
         )
         .clicked()
         {
-            self.tasks.open = true;
-            self.tasks.selected_run = proposal.map(|r| r.id.clone());
+            self.open_task_from_board(task.id.clone(), proposal.map(|r| r.id.clone()));
         }
         // The current attempt is the useful overview; previous attempts remain in Results & evidence.
         let attempt = task.latest();
@@ -156,13 +154,12 @@ impl Pui {
             )
             .clicked()
             {
-                self.tasks.open = true;
-                self.tasks.selected_run = if role == Role::Checks {
+                let run = if role == Role::Checks {
                     None
                 } else {
                     run.map(|r| r.id.clone())
                 };
-                self.tasks.transcript = Default::default();
+                self.open_task_from_board(task.id.clone(), run);
             }
         }
         if step(
@@ -175,12 +172,7 @@ impl Pui {
         )
         .clicked()
         {
-            self.tasks.open = true;
-            self.tasks.selected_run = None;
-        }
-        ui.add_space(8.0);
-        if ui.button("Open workflow").clicked() {
-            self.tasks.open = true;
+            self.open_task_from_board(task.id.clone(), None);
         }
         self.task_routing_details(ui, &task);
         self.workflow_agents(ui);
@@ -238,7 +230,9 @@ impl Pui {
         if !other.is_empty() {
             ui.add_space(8.0);
             let label = format!("Other sessions · {}", other.len());
-            egui::CollapsingHeader::new(label)
+            crate::section::Section::new(label)
+                .summary("Open another session without interrupting work")
+                .icon(Icon::Spark)
                 .id_salt("workflow-other-sessions")
                 .default_open(false)
                 .show(ui, |ui| {

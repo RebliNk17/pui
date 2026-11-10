@@ -39,7 +39,7 @@ pub(super) fn show(ctx: &egui::Context, open: &mut bool) {
             ui.label(theme::small(ui, "A little more room to think."));
         });
         ui.add_space(16.0);
-        egui::CollapsingHeader::new(theme::small(ui, "Build details"))
+        crate::section::Section::new("Build details").summary("Runtime and local build provenance").icon(Icon::Code)
             .show(ui, |ui| {
                 ui.add(egui::Label::new(theme::small(ui, "Pi handles models, tools and authentication. Pui provides the desktop workspace.")).wrap());
                 ui.add(egui::Label::new(theme::small(ui, "Local build · signing and notarization status are not verified by this panel.")).wrap());

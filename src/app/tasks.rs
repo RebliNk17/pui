@@ -5,6 +5,7 @@ use crate::tasks::{
 };
 use std::collections::BTreeMap;
 
+mod chat;
 #[cfg(not(test))]
 mod proposal;
 mod routing;
@@ -499,6 +500,7 @@ impl Pui {
         self.tasks.selected = Some(task);
         self.tasks.selected_run = run;
         self.tasks.transcript = Default::default();
+        self.tasks.revalidate_at = Some(std::time::Instant::now());
         self.tasks.open = true;
     }
     /// Match known retained run paths first; names support older role sessions opened from Recent.
@@ -533,11 +535,20 @@ impl Pui {
             return;
         }
         self.kanban.open = false;
-        self.tasks.open = true;
         if self.tasks.running() {
-            self.tasks.selected = self.tasks.live.clone();
+            if let Some(id) = self
+                .tasks
+                .live_task()
+                .filter(|t| self.task_in_chat(t))
+                .map(|t| t.id.clone())
+            {
+                self.open_task_from_board(id, None);
+            } else {
+                self.state.notice = Some("Another session has an active task. Wait for it to finish before creating a new task; it has not been moved to this chat.".into());
+            }
             return;
         }
+        self.tasks.open = true;
         let mut task = Task::new(
             self.prefs.cwd.clone(),
             self.state.provider.clone(),

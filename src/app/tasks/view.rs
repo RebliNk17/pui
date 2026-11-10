@@ -3,177 +3,141 @@ use super::*;
 impl Pui {
     pub(in crate::app) fn task_panel(&mut self, ctx: &egui::Context) {
         let colors = theme::palette(ctx);
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.bg).inner_margin(22)).show(ctx,|ui|{
-            ui.horizontal(|ui|{
-                ui.heading("Verified task");
-                if self.demo {ui.label(RichText::new("DEMO · no execution").color(colors.amber));}
-                ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
-                    if ui.button("Back to chat").clicked(){self.tasks.open=false;}
-                    if ui.button("New task").clicked(){self.new_task();}
-                    if let Some(id) = self.tasks.selected.clone() {
-                        if ui.button(RichText::new("Delete task…").color(colors.red)).clicked() { self.request_delete(deletion::Target::Task(id)); }
-                    }
-                });
-            });
-            if self.tasks.running() && self.tasks.live != self.tasks.selected {
-                ui.horizontal_wrapped(|ui| { ui.label("Another task is active."); if ui.button("Open active task").clicked() { self.tasks.selected = self.tasks.live.clone(); self.tasks.selected_run = None; } });
-            }
-            let mut selected=self.tasks.selected.clone();
-            egui::ComboBox::from_id_salt("task-history").selected_text(self.tasks.current().map(|t|if t.objective.is_empty(){"New task".into()}else{t.objective.chars().take(80).collect::<String>()}).unwrap_or_else(||"Choose task".into())).width(ui.available_width()).show_ui(ui,|ui|{
-                for t in &self.tasks.records {ui.selectable_value(&mut selected,Some(t.id.clone()),format!("{} · {}",t.phase.label(),if t.objective.is_empty(){"Untitled"}else{&t.objective}));}
-            });
-            if selected!=self.tasks.selected {self.tasks.selected=selected;self.tasks.selected_run=None;self.tasks.transcript=Default::default();self.tasks.revalidate_at=Some(std::time::Instant::now());}
-            if let Some(e)=&self.tasks.error {ui.add(egui::Label::new(RichText::new(e).color(colors.red)).wrap());}
-            ui.separator();
-            let Some(task)=self.tasks.current().cloned() else {ui.label("Create a task to agree on checks, implement, and independently verify the result.");return;};
-            if task.phase==Phase::Draft {
-                egui::ScrollArea::vertical().id_salt("task-draft").show(ui,|ui|{
-                    ui.label("Workspace");ui.add(egui::Label::new(task.source.display().to_string()).selectable(true).wrap());
-                    if ui.button("Use current chat workspace and model").clicked() {
-                        let source=self.prefs.cwd.clone(); let provider=self.state.provider.clone(); let model=self.state.model.clone(); let thinking=self.state.thinking.clone();
-                        if let Some(t)=self.tasks.current_mut() { t.source=source; t.provider=provider; t.model=model; t.thinking=thinking; }
-                        self.tasks.save();
-                    }
-                    ui.label(theme::small(ui,"Git: isolated worktree. Non-Git: work in place. Existing uncommitted Git changes are never silently copied or omitted."));
-                    ui.add_space(10.0);ui.label("Objective");
-                    let t=self.tasks.current_mut().unwrap();
-                    ui.add(egui::TextEdit::multiline(&mut t.objective).desired_rows(4).desired_width(f32::INFINITY).char_limit(16000).hint_text("What observable behavior should change?"));
-                    ui.label("Constraints / out of scope");
-                    ui.add(egui::TextEdit::multiline(&mut t.constraints).desired_rows(3).desired_width(f32::INFINITY).char_limit(12000).hint_text("Compatibility, design constraints, protected behavior…"));
-                    ui.add_space(10.0);
-                    let t=self.tasks.current_mut().unwrap();
-                    ui.checkbox(&mut t.dynamic_routing,"Dynamic per-stage model routing");
-                    let mut limited=t.spend_limit.is_some();
-                    if ui.checkbox(&mut limited,"Stop at a reported spend threshold").changed() { t.spend_limit=limited.then_some(10.0); }
-                    if let Some(limit)=&mut t.spend_limit { ui.add(egui::DragValue::new(limit).range(0.1..=1000.0).prefix("$ ").speed(0.5)); }
-                    ui.label(theme::small(ui,if t.dynamic_routing { "A tool-free Haiku assessment selects each stage: Haiku for easy work, Opus 5.5 / GPT-6.1 Sol for harder work. Fable/Astra always requires an explicit exceptional-model approval." } else { "Pinned to the chat model; no automatic model substitution." }));
-                    ui.label(format!("Provider: {} · pinned model: {} · {}",task.provider,task.model,thinking_label(&task.thinking)));
-                    ui.label(theme::small(ui,"Router and proposal calls incur provider usage. No implementation until you approve the checks. Reported thresholds can overshoot on in-flight usage; not a hard cap."));
-                    if ui.add_enabled(!self.demo&&self.tasks.loaded.is_none()&&self.tasks.live.is_none(),egui::Button::new("Generate acceptance checks · uses provider")).clicked(){self.task_propose();}
-                });
-                if self.tasks.current().is_some_and(|t| t.objective != task.objective || t.constraints != task.constraints || t.dynamic_routing != task.dynamic_routing || t.spend_limit != task.spend_limit) { self.tasks.save(); }
-                return;
-            }
-            ui.horizontal_wrapped(|ui|{
-                ui.label(RichText::new(task.phase.label()).strong());
-                ui.label(theme::small(ui,if task.dynamic_routing {format!("${:.3} reported · dynamic routing · {}",task.cost(),task.provider)} else {format!("${:.3} reported · {} / {}",task.cost(),task.provider,task.model)}));
-                if task.phase.active() && ui.add_enabled(!self.demo, egui::Button::new("Stop task")).clicked(){self.tasks.stop();}
-            });
-            if task.phase.active() && self.tasks.live.as_ref() != Some(&task.id) && !self.demo { return; }
-            if !task.note.is_empty(){ui.add(egui::Label::new(theme::small(ui,&task.note)).wrap());}
-            self.task_dialog(ui);
-            self.task_routing_details(ui, &task);
-            if let Some(pending)=&task.pending_route {
-                prompt_ui::inline(ui.ctx()).show(ui, |ui| {
-                    prompt_ui::style(ui);
-                    prompt_ui::heading(ui, "Exceptional model requested", &format!("{} / {}\n{}",pending.selection.provider,pending.selection.model,pending.selection.reason));
-                    ui.add_space(12.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if prompt_ui::button(ui, "Approve exceptional model · uses provider", prompt_ui::Button::Primary, true).clicked() { self.task_approve_exceptional(); }
-                        if prompt_ui::button(ui, "Decline exceptional model", prompt_ui::Button::Secondary, true).clicked() { if let Some(t)=self.tasks.current_mut(){t.pending_route=None;t.note="Exceptional routing declined. No model call was made; start a new task to revise scope or policy.".into();}self.tasks.save(); }
-                    });
-                });
-            }
-            if task.phase==Phase::AwaitingApproval {
-                egui::ScrollArea::vertical().id_salt("task-contract-approval").show(ui,|ui|{
-                  prompt_ui::inline(ui.ctx()).show(ui, |ui| {
-                    prompt_ui::style(ui);
-                    prompt_ui::heading(ui, "Agree on the checks first.", &task.objective);
-                    ui.label(theme::small(ui,"Approve observable requirements and exact commands. Commands run through the existing Pi permission gate and may execute project code; this is not an OS sandbox."));
-                    let t=self.tasks.current_mut().unwrap();
-                    for c in &mut t.proposed.criteria {
-                        ui.push_id(&c.id,|ui|{
-                            ui.add_space(8.0);ui.label(&c.id);
-                            ui.add(egui::TextEdit::multiline(&mut c.description).desired_rows(2).desired_width(f32::INFINITY).char_limit(4000));
-                            ui.add(egui::TextEdit::multiline(&mut c.command).font(egui::TextStyle::Monospace).desired_rows(2).desired_width(f32::INFINITY).char_limit(4000).hint_text("Exact local test/build command; blank means review only"));
-                        });
-                    }
-                    if task.dirty_source {
-                        ui.add_space(10.0);ui.label(RichText::new("Source has uncommitted changes").color(colors.amber));
-                        ui.checkbox(&mut self.tasks.dirty_confirmed,"Use committed HEAD only; leave uncommitted changes out of this task");
-                        ui.label(theme::small(ui,"Otherwise cancel and prepare the source yourself. Pui will not commit or copy it for you."));
-                    }
-                    ui.add_space(10.0);ui.label(theme::small(ui,"Approval starts provider-backed implementation and fresh verification, including up to two automatic repair rounds under the displayed routing policy. Fable/Astra require separate approval. Each process has a 30-minute deadline. No automatic commits, merges or deployments. Model tools are bounded; test commands keep existing permissions."));
-                    ui.horizontal_wrapped(|ui|{
-                        if prompt_ui::button(ui, "Approve checks and start · uses provider", prompt_ui::Button::Primary, !self.demo).clicked(){self.task_start();}
-                        if ui.button("Cancel task").clicked(){if let Some(t)=self.tasks.current_mut(){t.phase=Phase::Cancelled;t.note="Cancelled before implementation.".into();}self.tasks.save();}
-                    });
-                  });
-                });
-                if self.tasks.current().is_some_and(|t| serde_json::to_value(&t.proposed).ok() != serde_json::to_value(&task.proposed).ok()) { self.tasks.save(); }
-                return;
-            }
-            if let Some(path)=&task.workspace {
-                ui.horizontal_wrapped(|ui|{
-                    ui.label(theme::small(ui,if task.isolated{"Isolated worktree"}else{"Working in place · non-Git"}));
-                    ui.add(egui::Label::new(theme::small(ui,path.display().to_string())).selectable(true).wrap());
-                    if ui.button("Copy path").clicked(){ui.ctx().copy_text(path.display().to_string());}
-                });
-            }
-            ui.horizontal_wrapped(|ui|{
-                if ui.selectable_label(self.tasks.selected_run.is_none(),"Results & evidence").clicked(){self.tasks.selected_run=None;}
-                if task.phase==Phase::Ready && ui.add_enabled(self.tasks.live.is_none()&&!self.demo,egui::Button::new("Accept this result")).clicked(){self.task_fingerprint(FingerprintStep::Accept);}
-                if matches!(task.phase,Phase::Ready|Phase::Accepted) && ui.add_enabled(self.tasks.live.is_none()&&!self.demo,egui::Button::new("Revalidate source")).clicked(){self.task_fingerprint(FingerprintStep::Revalidate);}
-            });
-            if let Some(run)=self.tasks.selected_run.clone() {
-                let state=self.tasks.processes.iter().find(|p|p.run==run).map(|p|&p.state).or_else(||self.tasks.histories.get(&run));
-                if let Some(state)=state {
-                    let state=state.clone();
-                    if !self.tasks.processes.iter().any(|p|p.run==run) { ui.label(theme::small(ui,"Saved transcript · bounded local preview; the Pi session file retains full history.")); }
-                    self.tasks.transcript.task_output = task.runs.iter().find(|r| r.id == run).is_some_and(|r| matches!(r.role, Role::Proposal | Role::Verifier));
-                    let selection=task.runs.iter().find(|r|r.id==run).and_then(|r|r.selection.as_ref());
-                    self.tasks.transcript.show(ui,&state.messages,selection.map(|s|s.model.as_str()).unwrap_or(&task.model),selection.map(|s|s.thinking.as_str()).unwrap_or(&task.thinking),!state.ready(),&run);
-                } else {
-                    if self.tasks.preview.is_none() {
-                        if let Some(path) = task.runs.iter().find(|r|r.id==run).and_then(|r|r.session.clone()) {
-                            let (tx,rx)=mpsc::channel(); let ctx=ctx.clone();
-                            self.tasks.preview=Some((run.clone(),rx));
-                            std::thread::spawn(move || { let _=tx.send(crate::history::load(&path)); ctx.request_repaint(); });
-                        }
-                    }
-                    egui::ScrollArea::vertical().id_salt("saved-task-run").show(ui,|ui|{
-                        if let Some(r)=task.runs.iter().find(|r|r.id==run){
-                            ui.label(r.role.label());
-                            if !matches!(r.role, Role::Proposal | Role::Verifier) || !crate::task_output::show(ui, &r.summary) {
-                                ui.add(egui::Label::new(&r.summary).selectable(true).wrap());
-                            }
-                            if let Some(path)=&r.session{ui.label(theme::small(ui,"Full transcript retained in Pi session:"));ui.add(egui::Label::new(path.display().to_string()).selectable(true).wrap());}
-                        }
-                    });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(colors.bg))
+            .show(ctx, |ui| {
+                egui::TopBottomPanel::top("task-conversation-header")
+                    .show_separator_line(false)
+                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 10)))
+                    .show_inside(ui, |ui| self.task_header(ui));
+                let Some(task) = self.tasks.current().cloned() else { return; };
+                if self.tasks.selected_run.is_some() {
+                    self.task_run(ui, &task);
+                    return;
                 }
-            } else {
-                egui::ScrollArea::vertical().id_salt("task-evidence").show(ui,|ui|{
-                    ui.label(RichText::new(&task.objective).strong());
-                    if let Some(c)=&task.approved {for criterion in &c.criteria {ui.label(format!("{} · {}",criterion.id,criterion.description));}}
-                    for attempt in task.attempts.iter().rev(){
-                        ui.add_space(10.0);ui.heading(format!("Attempt {}{}",attempt.number+1,if attempt.invalidated{" · stale / superseded"}else{""}));
-                        if let Some(f)=&attempt.fingerprint{ui.add(egui::Label::new(theme::small(ui,format!("Source SHA-256: {f}"))).selectable(true).wrap());}
-                        ui.label(theme::small(ui,"Fingerprint scope: Git tracked + nonignored files; non-Git excludes generated directories (target, dist, build, node_modules, caches). Not an external-process lock."));
-                        if !attempt.note.is_empty(){ui.label(&attempt.note);}
-                        if !attempt.changes.is_empty() { ui.label(RichText::new("Recorded candidate edits").strong()); }
-                        for (index, change) in attempt.changes.iter().enumerate() {
-                            egui::CollapsingHeader::new(format!("{} · +{} −{}", change.path, change.added, change.removed)).id_salt((&task.id, attempt.number, "patch", index)).show(ui, |ui| {
-                                ui.label(theme::small(ui, "Recorded replacements, not a net Git diff. Source fingerprint covers the candidate; shell side effects are not represented here."));
-                                ui.add(egui::Label::new(RichText::new(&change.diff).monospace()).selectable(true).wrap());
+                let linked = self.task_in_chat(&task);
+                if linked {
+                    egui::TopBottomPanel::bottom("composer-v2")
+                        .show_separator_line(false)
+                        .frame(egui::Frame::new().fill(colors.bg).inner_margin(egui::Margin { left: 24, right: 24, top: 8, bottom: 3 }))
+                        .show_inside(ui, |ui| {
+                            let width = (ui.available_width() - 24.0).min(760.0);
+                            let padding = ((ui.available_width() - width) / 2.0).max(0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(padding);
+                                ui.vertical(|ui| {
+                                    ui.set_width(width);
+                                    ui.label(theme::small(ui, "Chat with Pi · task scope changes still require check approval"));
+                                    self.composer(ui, ctx);
+                                });
                             });
-                        }
-                        for check in &attempt.checks {
-                            egui::CollapsingHeader::new(format!("{} · {} · exit {} · {} ms",check.criterion,if check.passed(){"passed"}else{"failed / incomplete"},check.exit_code.map(|e|e.to_string()).unwrap_or_else(||"unknown".into()),check.duration_ms)).id_salt((&task.id,attempt.number,&check.criterion)).default_open(!check.passed()).show(ui,|ui|{
-                                approval_view::arguments(ui,&json!({"command":check.command,"output":check.output}));
-                            });
-                        }
-                        if let Some(review)=&attempt.review {
-                            ui.label(RichText::new("Independent review").strong());ui.add(egui::Label::new(&review.summary).wrap().selectable(true));
-                            for f in &review.criteria{ui.add(egui::Label::new(format!("{} · {:?}: {}",f.id,f.status,f.evidence)).wrap().selectable(true));}
-                        }
-                    }
-                });
+                        });
+                }
+                // Keep Pi messages untouched. Task controls are a live footer in
+                // the same conversation scroll, never synthetic provider messages.
+                let messages = if linked { self.state.messages.clone() } else { vec![] };
+                let model = self.state.model.clone();
+                let thinking = self.state.thinking.clone();
+                let session = self.state.session_file.clone().unwrap_or_else(|| "new".into());
+                let mut transcript = if linked { std::mem::take(&mut self.transcript) } else { std::mem::take(&mut self.tasks.transcript) };
+                transcript.task_output = false;
+                transcript.message_actions_enabled = linked && self.history_ready();
+                transcript.pending_messages = if linked { self.state.pending_messages.clone() } else { vec![] };
+                transcript.progress = if linked { self.transcript_progress() } else { None };
+                transcript.show_with_footer(ui, &messages, &model, &thinking, linked && !self.state.ready(), if linked { &session } else { &task.id }, |ui| self.task_content(ui));
+                if linked { self.transcript = transcript; } else { self.tasks.transcript = transcript; }
+            });
+        self.history_action();
+    }
+
+    fn task_run(&mut self, ui: &mut egui::Ui, task: &Task) {
+        let Some(run) = self.tasks.selected_run.clone() else {
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("← Task & results").clicked() {
+                self.tasks.selected_run = None;
+            }
+            if let Some(record) = task.runs.iter().find(|r| r.id == run) {
+                ui.label(RichText::new(record.role.label()).strong());
             }
         });
+        self.task_dialog(ui);
+        let state = self
+            .tasks
+            .processes
+            .iter()
+            .find(|p| p.run == run)
+            .map(|p| &p.state)
+            .or_else(|| self.tasks.histories.get(&run))
+            .cloned();
+        if let Some(state) = state {
+            if !self.tasks.processes.iter().any(|p| p.run == run) {
+                ui.label(theme::small(ui, "Saved transcript · bounded local preview"));
+            }
+            self.tasks.transcript.task_output = task
+                .runs
+                .iter()
+                .find(|r| r.id == run)
+                .is_some_and(|r| matches!(r.role, Role::Proposal | Role::Verifier));
+            let selection = task
+                .runs
+                .iter()
+                .find(|r| r.id == run)
+                .and_then(|r| r.selection.as_ref());
+            self.tasks.transcript.show(
+                ui,
+                &state.messages,
+                selection.map(|s| s.model.as_str()).unwrap_or(&task.model),
+                selection
+                    .map(|s| s.thinking.as_str())
+                    .unwrap_or(&task.thinking),
+                !state.ready(),
+                &run,
+            );
+        } else {
+            if self.tasks.preview.is_none() {
+                if let Some(path) = task
+                    .runs
+                    .iter()
+                    .find(|r| r.id == run)
+                    .and_then(|r| r.session.clone())
+                {
+                    let (tx, rx) = mpsc::channel();
+                    let ctx = ui.ctx().clone();
+                    self.tasks.preview = Some((run.clone(), rx));
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::history::load(&path));
+                        ctx.request_repaint();
+                    });
+                }
+            }
+            egui::ScrollArea::vertical()
+                .id_salt(("saved-task-run", &run))
+                .show(ui, |ui| {
+                    if let Some(record) = task.runs.iter().find(|r| r.id == run) {
+                        if !matches!(record.role, Role::Proposal | Role::Verifier)
+                            || !crate::task_output::show(ui, &record.summary)
+                        {
+                            ui.add(egui::Label::new(&record.summary).selectable(true).wrap());
+                        }
+                        if let Some(path) = &record.session {
+                            ui.add(
+                                egui::Label::new(theme::small(
+                                    ui,
+                                    format!("Full Pi transcript: {}", path.display()),
+                                ))
+                                .selectable(true)
+                                .wrap(),
+                            );
+                        }
+                    }
+                });
+        }
     }
     pub(super) fn task_routing_details(&self, ui: &mut egui::Ui, task: &Task) {
         if task.dynamic_routing || task.runs.iter().any(|r| r.selection.is_some()) {
-            ui.collapsing("Model choices & routing reasons",|ui| {
+            crate::section::Section::new("Model choices & routing reasons").id_salt((&task.id, "routing-details")).summary("Per-stage models, reported cost and selection rationale").icon(Icon::Sliders).show(ui,|ui| {
                 if task.runs.is_empty(){ui.label("Model selection happens before each stage, using the available catalog and task evidence.");}
                 for run in &task.runs {
                     if let Some(selection)=&run.selection {
@@ -185,7 +149,7 @@ impl Pui {
             });
         }
     }
-    fn task_dialog(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn task_dialog(&mut self, ui: &mut egui::Ui) {
         let Some((run, dialog)) = self
             .tasks
             .processes
@@ -385,6 +349,12 @@ impl Pui {
                 },
             );
         }
+        let parent = self.ensure_agent();
+        self.tasks.parents.insert(t.id.clone(), parent);
+        self.state.messages = vec![
+            Message { role: "user".into(), text: "Keep my unsent draft when I switch to another chat and back.".into(), ..Default::default() },
+            Message { role: "assistant".into(), text: "The draft-preservation change is implemented. The regression check passed; a fresh verifier is reviewing the result.".into(), ..Default::default() },
+        ];
         self.tasks.selected = Some(t.id.clone());
         self.tasks.records = vec![t];
         self.tasks.open = true;
