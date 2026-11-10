@@ -331,9 +331,12 @@ impl Engine {
                 },
                 ..Default::default()
             };
-            let mut request_context =
-                cef::request_context_create_context(Some(&RequestContextSettings::default()), None)
-                    .ok_or("Cannot create private browser context")?;
+            let mut handler = crate::chromium::context_handler();
+            let mut request_context = cef::request_context_create_context(
+                Some(&crate::chromium::context_settings()),
+                Some(&mut handler),
+            )
+            .ok_or("Cannot create private browser context")?;
             let browser = cef::browser_host_create_browser_sync(
                 Some(&info),
                 Some(&mut client),

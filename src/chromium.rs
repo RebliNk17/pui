@@ -1,6 +1,10 @@
 //! Process-wide CEF lifecycle. The renderer uses a separate sandboxed helper.
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod privacy;
+#[cfg(target_os = "macos")]
+pub(crate) use privacy::{context_handler, context_settings};
 
 #[cfg(target_os = "macos")]
 pub use mac::{Runtime, prepare_application};
