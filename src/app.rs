@@ -790,8 +790,8 @@ impl Pui {
                         } else {
                             Value::Null
                         };
-                    let user_message =
-                        kind == "message_start" && record["message"]["role"] == "user";
+                    let user_message = matches!(kind.as_str(), "message_start" | "message_end")
+                        && record["message"]["role"] == "user";
                     self.state.apply(record);
                     if user_message || (kind == "response" && command == "get_messages") {
                         self.state.reconcile_pending_messages();
