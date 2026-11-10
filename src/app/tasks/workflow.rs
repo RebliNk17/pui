@@ -55,12 +55,22 @@ impl Pui {
             phase_color(task.phase, colors),
             false,
         );
-        let model = task.runs.iter().rev().find_map(|r| r.selection.as_ref())
+        let model = task
+            .runs
+            .iter()
+            .rev()
+            .find_map(|r| r.selection.as_ref())
             .map(|s| format!("{} · {}", s.model, thinking_label(&s.thinking)))
             .unwrap_or_else(|| format!("{} · {}", task.model, thinking_label(&task.thinking)));
         line(ui, &model, 10.0, colors.muted, false);
         if let Some(route) = &task.pending_route {
-            line(ui, &format!("Approval needed: {}", route.selection.model), 10.0, colors.amber, false);
+            line(
+                ui,
+                &format!("Approval needed: {}", route.selection.model),
+                10.0,
+                colors.amber,
+                false,
+            );
         }
         line(
             ui,

@@ -445,6 +445,33 @@ fn receipt_deduplication_handles_identical_prompts_and_images() {
     assert!(app.state.pending_messages.is_empty());
 }
 #[test]
+fn file_attachment_receipt_is_replaced_when_pi_emits_the_manifest_backed_message() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state.busy = false;
+    let file = crate::media::Attachment::from_file(crate::media::FileAttachment {
+        path: PathBuf::from("/fixture/report.csv"),
+        name: "report.csv".into(),
+        size: 12,
+    });
+    let message = WaitingMessage {
+        text: "read this report".into(),
+        images: vec![file],
+        ..Default::default()
+    };
+    let record = message.rpc_record("prompt");
+    assert!(app.deliver_message(message, "prompt"));
+    app.state.messages.push(Message::from_json(
+        &json!({"role":"user","content":record["message"]}),
+    ));
+    app.state.reconcile_pending_messages();
+    assert!(
+        app.state.pending_messages.is_empty(),
+        "General file manifest must not leave a duplicate receipt"
+    );
+}
+
+#[test]
 fn rejected_prompt_restores_text_and_images_and_removes_optimistic_bubble() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

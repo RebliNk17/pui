@@ -137,8 +137,10 @@ pub fn stack(
                 ui.spacing_mut().item_spacing.y = 4.0;
                 ui.horizontal(|ui| {
                     let label_width = (ui.available_width() - 36.0).max(30.0);
-                    let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(label_width, crate::theme::CONTROL_HEIGHT), Sense::click());
+                    let (rect, response) = ui.allocate_exact_size(
+                        Vec2::new(label_width, crate::theme::CONTROL_HEIGHT),
+                        Sense::click(),
+                    );
                     let response = response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(if collapsed {
@@ -427,8 +429,8 @@ mod tests {
             layout.collapsed.insert(Card::Environment);
             let collapsed = render(&mut layout, true);
             assert!(
-                collapsed < 70.0,
-                "Collapsed card must show only its header: {collapsed}"
+                (collapsed - (crate::theme::CONTROL_HEIGHT + 44.0)).abs() < 1.0,
+                "Collapsed card must contain only the shared-height header, frame margins and stack spacing: {collapsed}"
             );
             assert_eq!(renders, 2, "Collapsed content must not be rendered");
         }

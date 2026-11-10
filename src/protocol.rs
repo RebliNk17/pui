@@ -56,7 +56,7 @@ impl DeliveryStatus {
 impl PendingMessage {
     pub fn matches(&self, message: &Message) -> bool {
         message.role == "user"
-            && self.text == message.text
+            && self.text == crate::transcript::user_display_text(message)
             && self.images.len() == message.images.len()
             && self
                 .images
