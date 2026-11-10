@@ -1251,6 +1251,7 @@ impl Pui {
                         self.pick_images();
                     }
                     attach.context_menu(|ui| {
+                        theme::menu_controls(ui);
                         if ui.button("Paste image from clipboard").clicked() {
                             self.draft_images.clipboard(ctx);
                             ui.close();
@@ -1334,6 +1335,7 @@ impl Pui {
                             }
                             if self.has_tree() {
                                 stop.context_menu(|ui| {
+                                    theme::menu_controls(ui);
                                     if ui.button("Stop tree").clicked() {
                                         let active = self.agents.active.clone();
                                         self.stop_agent_tree(&active);

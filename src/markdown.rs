@@ -131,12 +131,19 @@ fn format(
             Color32::TRANSPARENT
         },
         italics: italic,
-        line_height: Some(24.0),
+        line_height: Some(22.0),
         valign: egui::Align::Center,
         ..Default::default()
     }
 }
 pub fn show(ui: &mut Ui, source: &str) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        show_inner(ui, source);
+    });
+}
+
+fn show_inner(ui: &mut Ui, source: &str) {
     let colors = crate::theme::palette(ui.ctx());
     let mut job = LayoutJob::default();
     let mut links = Vec::new();
@@ -268,12 +275,11 @@ pub fn show(ui: &mut Ui, source: &str) {
             Event::End(TagEnd::Item) => {
                 flush(ui, &mut job, &mut links);
                 in_item = false;
-                ui.add_space(2.0);
             }
             Event::End(TagEnd::Paragraph) => {
                 if !in_item {
                     flush(ui, &mut job, &mut links);
-                    ui.add_space(6.0);
+                    ui.add_space(4.0);
                 }
             }
             Event::Text(text) if code => code_text.push_str(&text),
@@ -468,7 +474,7 @@ mod tests {
                                         glyph.pos.y,
                                     );
                                 }
-                                assert_eq!(row.height(), 24.0);
+                                assert_eq!(row.height(), 22.0);
                             }
                         }
                     }
@@ -504,10 +510,10 @@ mod tests {
             collect(&s.shape, &mut jobs);
         }
         assert_eq!(jobs.len(), 3);
-        assert!(jobs[1].0 - jobs[0].0 < 36.0, "Rows too tall: {jobs:?}");
+        assert!(jobs[1].0 - jobs[0].0 <= 27.0, "Rows too tall: {jobs:?}");
         for (_, job) in jobs {
             for section in &job.sections {
-                assert_eq!(section.format.line_height, Some(24.0));
+                assert_eq!(section.format.line_height, Some(22.0));
                 assert_eq!(section.format.valign, egui::Align::Center);
                 assert_eq!(section.format.underline, egui::Stroke::NONE);
             }

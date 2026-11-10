@@ -719,6 +719,7 @@ impl Pui {
                         }
                         if has_menu {
                             let mut contents = |ui: &mut egui::Ui| {
+                                theme::menu_controls(ui);
                                 if let Some(path) = &branch.path {
                                     let meta = self.prefs.chats.entry(path.clone()).or_default();
                                     if ui
@@ -1059,6 +1060,7 @@ impl Pui {
         }
         let mut action = None;
         let mut menu_contents = |ui: &mut egui::Ui| {
+            theme::menu_controls(ui);
             ui.set_min_width(200.0);
             if ui.button("Rename").clicked() {
                 action = Some(Action::Rename(path.clone()));
@@ -1604,6 +1606,9 @@ mod tests {
         let (output, _) = controls_frame(&ctx, &mut app, vec![]);
         assert!(label_rect(&output, "GROUP BY").is_some());
         assert!(label_rect(&output, "SORT BY").is_none());
+        let recent = label_rect(&output, "Recent").unwrap();
+        let project = label_rect(&output, "Project").unwrap();
+        assert!(project.center().y - recent.center().y <= 27.0);
         click_label(&ctx, &mut app, "Project");
         assert!(app.projects);
         click_label(&ctx, &mut app, "Recent");
