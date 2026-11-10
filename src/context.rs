@@ -1,5 +1,8 @@
 //! Context metadata only. Unsupported Pi fields are never presented as real measurements.
-use crate::{inspector::detail, protocol::State};
+use crate::{
+    inspector::detail,
+    protocol::{PromptUsage, State},
+};
 use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2};
 
 pub fn number(value: f64) -> String {
@@ -123,7 +126,10 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
     ui.add_space(7.0);
     crate::section::Section::new("Usage details").summary("Tokens and prompt cache").icon(crate::icons::Icon::Details).id_salt("usage-details").show(ui,|ui|{
         ui.label(RichText::new("Prompt cache").size(12.0));
-        if let Some(pct)=state.messages.iter().rev().find_map(|m|m.cached_pct){detail(ui,"Last turn",&format!("{pct:.0}% cached"));}
+        let usage = PromptUsage::last_response(&state.messages);
+        if let Some(label) = usage.cache_label() {
+            ui.scope(|ui| detail(ui, "Last response", &label)).response.on_hover_text(usage.cache_tooltip());
+        }
         ui.add_space(7.0);ui.label(RichText::new("This session").size(12.0));
         detail(ui,"In / Out",&format!("{} / {}",number(state.tokens["input"].as_f64().unwrap_or_default()),number(state.tokens["output"].as_f64().unwrap_or_default())));
         detail(ui,"Cache r / w",&format!("{} / {}",number(state.tokens["cacheRead"].as_f64().unwrap_or_default()),number(state.tokens["cacheWrite"].as_f64().unwrap_or_default())));

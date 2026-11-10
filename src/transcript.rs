@@ -3,7 +3,7 @@ use crate::{
     activity::Summary,
     icons::{self, Icon},
     markdown,
-    protocol::{Block, Message},
+    protocol::{Block, Message, PromptUsage},
 };
 use eframe::egui::{self, Align, FontId, Layout, Rect, RichText, Sense, Stroke, Vec2};
 use std::{
@@ -977,6 +977,7 @@ fn assistant(
         ui.add_space(4.0);
         let last = messages.last().unwrap();
         let cost: f64 = messages.iter().map(|m| m.cost).sum();
+        let usage = PromptUsage::from_messages(messages);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.label(
@@ -991,12 +992,13 @@ fn assistant(
                         .color(colors.dim),
                 );
             }
-            if let Some(cache) = last.cached_pct {
+            if let Some(label) = usage.cache_label() {
                 ui.label(
-                    RichText::new(format!("·   {cache:.0}% cached"))
+                    RichText::new(format!("·   {label}"))
                         .size(10.0)
                         .color(colors.dim),
-                );
+                )
+                .on_hover_text(usage.cache_tooltip());
             }
             if icons::labeled_button(ui, Icon::Copy, "Copy", true)
                 .on_hover_text("Copy response")
@@ -1248,6 +1250,73 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_footer_uses_all_calls_for_both_cost_and_cache_rate() {
+        fn labels(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        labels(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let messages = [
+            Message::from_json(&serde_json::json!({
+                "role":"assistant", "content":[{"type":"text","text":"Working."}],
+                "usage":{"input":15,"cacheRead":1187349,"cacheWrite":8446,"cost":{"total":0.2497498}}
+            })),
+            Message::from_json(&serde_json::json!({
+                "role":"assistant", "content":[{"type":"text","text":"Done."}],
+                "usage":{"input":3,"cacheRead":243947,"cacheWrite":205,"cost":{"total":0.0511654}}
+            })),
+        ];
+        for mode in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            mode.apply(&ctx);
+            let mut gallery = crate::media::Gallery::default();
+            let mut rendered = Vec::new();
+            for _ in 0..3 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 600.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            assistant(
+                                ui,
+                                &messages,
+                                "model",
+                                "off",
+                                (false, false, true),
+                                false,
+                                &mut gallery,
+                            );
+                        });
+                    },
+                );
+                rendered.clear();
+                for shape in output.shapes {
+                    labels(&shape.shape, &mut rendered);
+                }
+            }
+            assert!(rendered.iter().any(|s| s.contains("$0.30")));
+            assert!(rendered.iter().any(|s| s.contains("99.4% cached")));
+            assert!(
+                !rendered
+                    .iter()
+                    .any(|s| s.contains("100% cached") || s.contains("99.9% cached"))
+            );
+        }
+    }
 
     #[test]
     fn compaction_is_a_bounded_separator_not_an_assistant_summary() {

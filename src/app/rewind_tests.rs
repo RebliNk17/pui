@@ -373,7 +373,11 @@ fn footer_actions_match_metadata_size_color_and_alignment_in_both_themes() {
             theme.apply(&ctx);
             ctx.set_zoom_factor(zoom);
             app.state.messages[1].cost = 1.15;
-            app.state.messages[1].cached_pct = Some(99.0);
+            app.state.messages[1].prompt_usage = crate::protocol::PromptUsage {
+                input: 1.0,
+                cache_read: 99.0,
+                ..Default::default()
+            };
             let render = |app: &mut Pui| {
                 ctx.run(
                     egui::RawInput {

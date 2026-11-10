@@ -4,7 +4,9 @@ use serde_json::{Value, json};
 
 mod answers;
 mod stream;
+mod usage;
 pub use answers::QuestionAnswers;
+pub use usage::PromptUsage;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Message {
@@ -18,7 +20,8 @@ pub struct Message {
     pub blocks: Vec<Block>,
     pub timestamp: i64,
     pub cost: f64,
-    pub cached_pct: Option<f64>,
+    #[serde(default)]
+    pub prompt_usage: PromptUsage,
     pub effort: String,
     pub revision: u64,
 }
@@ -233,6 +236,7 @@ impl Message {
             error: value["errorMessage"].as_str().map(str::to_owned),
             timestamp: value["timestamp"].as_i64().unwrap_or_default(),
             cost: value["usage"]["cost"]["total"].as_f64().unwrap_or_default(),
+            prompt_usage: PromptUsage::from_json(&value["usage"]),
             effort: string(value, "thinkingLevel").to_owned(),
             ..Default::default()
         };
@@ -270,12 +274,6 @@ impl Message {
                     _ => {}
                 }
             }
-        }
-        let input = value["usage"]["input"].as_f64().unwrap_or_default();
-        let read = value["usage"]["cacheRead"].as_f64().unwrap_or_default();
-        let write = value["usage"]["cacheWrite"].as_f64().unwrap_or_default();
-        if input + read + write > 0.0 {
-            message.cached_pct = Some(100.0 * read / (input + read + write));
         }
         if message.role == "branchSummary" {
             message.text = string(value, "summary").to_owned();
