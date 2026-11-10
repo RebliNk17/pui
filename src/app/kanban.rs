@@ -155,6 +155,9 @@ impl AgentCard {
 
 impl Pui {
     pub(super) fn open_agents_board(&mut self) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.kanban.open = true;
         self.model_picker_open = false;
         self.files.close();
@@ -199,7 +202,7 @@ impl Pui {
             };
             let mut card = AgentCard::from_state(
                 Target::Agent(node.id.clone()),
-                node.name.clone(),
+                state.chat_title().unwrap_or_else(|| node.name.clone()),
                 node.cwd.clone(),
                 label,
                 state,
@@ -223,7 +226,7 @@ impl Pui {
         {
             cards.push(AgentCard::from_state(
                 Target::Current,
-                self.state.session_name.clone(),
+                self.state.chat_title().unwrap_or_default(),
                 self.prefs.cwd.clone(),
                 self.run_label().0,
                 &self.state,
@@ -279,6 +282,9 @@ impl Pui {
     }
 
     fn open_board_card(&mut self, target: Target) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.kanban.open = false;
         self.files.close();
         self.inspector_panel = false;

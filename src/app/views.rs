@@ -29,7 +29,7 @@ impl Pui {
                         self.app_menu(ui);
                     }
                     let title = if self.kanban.open {
-                        "Agents board"
+                        "Agents board".to_owned()
                     } else if self.tasks.open {
                         self.tasks
                             .current()
@@ -41,16 +41,17 @@ impl Pui {
                                 }
                             })
                             .unwrap_or("Verified tasks")
-                    } else if self.state.session_name.is_empty() {
-                        "New conversation"
+                            .to_owned()
                     } else {
-                        &self.state.session_name
+                        self.state
+                            .chat_title()
+                            .unwrap_or_else(|| "New conversation".into())
                     };
                     let width = (ui.available_width() - 346.0).max(40.0);
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click_and_drag());
                     let mut job = egui::text::LayoutJob::simple_singleline(
-                        title.into(),
+                        title,
                         FontId::proportional(13.0),
                         colors.text,
                     );
@@ -72,7 +73,7 @@ impl Pui {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .small_button("Tasks")
+                            .button("Tasks")
                             .on_hover_text("Verified tasks and workflow evidence")
                             .clicked()
                         {
@@ -97,6 +98,13 @@ impl Pui {
                         notifications_button = Some(self.notifications_button(ui));
                         let response =
                             icons::button(ui, Icon::Terminal, "Terminal · current project");
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::new("terminal-toolbar-button"),
+                                response.rect,
+                            )
+                        });
                         if self.terminals.is_open() {
                             ui.painter().rect_stroke(
                                 response.rect,
@@ -110,8 +118,27 @@ impl Pui {
                             self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                             self.focus_composer = !self.terminals.is_open();
                         }
+                        let response = icons::button(ui, Icon::Globe, "Browser · Chromium");
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("browser-toolbar-button"), response.rect)
+                        });
+                        if self.files.browser_open() {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                7,
+                                Stroke::new(1.5, colors.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            self.kanban.open = false;
+                            self.files.toggle_browser(ctx, &self.prefs.cwd);
+                            self.inspector_panel = false;
+                            self.terminals.close(ctx);
+                        }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
-                        if self.files.is_open() {
+                        if self.files.files_open() {
                             ui.painter().rect_stroke(
                                 response.rect,
                                 7,
@@ -347,7 +374,7 @@ impl Pui {
                                     );
                                     if !self.demo
                                         && self.client.is_none()
-                                        && ui.small_button("Connect to Pi").clicked()
+                                        && ui.button("Connect to Pi").clicked()
                                         && !self.resume_agent()
                                     {
                                         self.connect(
@@ -488,10 +515,15 @@ impl Pui {
                             });
                         });
                     });
+                self.transcript.task_output = matches!(
+                    self.task_session(&self.state),
+                    Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
+                );
+                self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
                 if self.state.messages.is_empty()
-                    && !self.new_chat
+                    && (!self.new_chat || !self.state.pending_messages.is_empty())
                     && self.transcript.progress.is_some()
                 {
                     self.transcript.show(
@@ -502,7 +534,7 @@ impl Pui {
                         !self.state.ready(),
                         self.state.session_file.as_deref().unwrap_or("new"),
                     );
-                } else if self.state.messages.is_empty() {
+                } else if self.state.messages.is_empty() && self.state.pending_messages.is_empty() {
                     let width = ui.available_width();
                     let pad = ((width - 720.0) / 2.0).max(30.0);
                     egui::ScrollArea::vertical()

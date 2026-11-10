@@ -39,6 +39,11 @@ pub(super) struct View {
     request: Option<Request>,
     error: Option<String>,
 }
+impl View {
+    pub(super) fn is_open(&self) -> bool {
+        self.request.is_some()
+    }
+}
 fn point_for<'a>(
     message: &Message,
     points: &'a [protocol::HistoryPoint],
@@ -66,6 +71,8 @@ impl Pui {
             && !self.loading_chat
             && self.state.dialogs.is_empty()
             && self.deliveries.is_empty()
+            && self.interrupt.is_none()
+            && self.state.pending_messages.is_empty()
             && self.history_pending.is_none()
             && !self.restoring_code()
             && self.history_drafts.len() < 8
@@ -122,16 +129,18 @@ impl Pui {
             self.history_view = Default::default();
             return;
         }
-        let mut open = true;
-        let mut apply = false;
-        let mut cancel = false;
-        egui::Window::new(match request.operation {MessageAction::Edit=>"Edit an earlier message",MessageAction::Fork=>"Fork after this response",MessageAction::Rewind=>"Rewind to this message"})
-            .id(egui::Id::new("history-restore-confirmation")).collapsible(false).resizable(true).default_width(510.0).max_height((ctx.screen_rect().height() - 64.0).max(180.0)).vscroll(true).open(&mut open).show(ctx, |ui| {
-                ui.add(egui::Label::new(theme::small(ui,if request.operation == MessageAction::Fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Return to just before this prompt. Nothing will be resent or rerun automatically." })).wrap());
+        let fork = request.operation == MessageAction::Fork;
+        let choice = confirmations::Dialog::new(
+            "history-restore-confirmation",
+            match request.operation { MessageAction::Edit => "Edit an earlier message?", MessageAction::Fork => "Fork after this response?", MessageAction::Rewind => "Rewind to this message?" },
+            if fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Return to just before this prompt. Nothing will be resent or rerun automatically." },
+            "Cancel",
+            match request.operation { MessageAction::Edit => "Rewind and edit", MessageAction::Fork => "Create fork", MessageAction::Rewind => "Rewind" },
+        ).destructive(!fork).enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle())).show(ctx, |ui| {
                 egui::Frame::new().fill(theme::palette(ctx).sidebar).corner_radius(8).inner_margin(12).show(ui, |ui| {
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         ui.add(egui::Label::new(crate::transcript::user_display_text(&request.message)).wrap().selectable(true));
-                        if request.operation != MessageAction::Fork && !request.message.images.is_empty() {ui.label(theme::small(ui,format!("{} attached image(s) will return to the draft",request.message.images.len())));}
+                        if request.operation != MessageAction::Fork && !request.message.images.is_empty() {ui.label(theme::small(ui,format!("{} attached file(s) will return to the draft",request.message.images.len())));}
                     });
                 });
                 ui.add_space(8.0);
@@ -140,8 +149,9 @@ impl Pui {
                 } else {
                     for (mode,title,description) in [(Mode::Messages,"Messages only","Return the conversation to this point. Leave files as they are."),(Mode::Both,"Code + messages","Restore captured files and rewind the conversation."),(Mode::Code,"Code only","Restore captured files. Keep the current conversation.")] {
                         let available = mode == Mode::Messages || (request.point.code_reason.is_none() && self.workspace_restore_idle());
-                        ui.add_enabled_ui(available, |ui| {ui.radio_value(&mut request.mode,mode,title);});
-                        ui.add(egui::Label::new(theme::small(ui,description)).wrap());
+                        ui.add_enabled_ui(available, |ui| {
+                            if prompt_ui::option(ui, title, description, request.mode == mode).clicked() { request.mode = mode; }
+                        });
                     }
                     if let Some(reason)=&request.point.code_reason {ui.add(egui::Label::new(theme::small(ui,reason)).wrap());}
                     if !self.workspace_restore_idle() {ui.add(egui::Label::new(theme::small(ui,"File restore requires other agents in this window to finish or stop. Other windows and external writers cannot be locked by Pui; conflicts are checked before restoring.")).wrap());}
@@ -151,18 +161,12 @@ impl Pui {
                 if self.history_drafts.len() >= 8 {ui.add(egui::Label::new(theme::small(ui,"Restore or send saved drafts before another rewind; eight are already retained.")).wrap());}
                 if request.operation != MessageAction::Fork && (!self.draft.is_empty() || !self.draft_images.is_empty()) {ui.add(egui::Label::new(theme::small(ui,"Your current unsent draft will be saved for manual recovery before replacing it.")).wrap());}
                 if let Some(error)=&self.history_view.error {ui.colored_label(theme::palette(ctx).red,error);}
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle()),egui::Button::new(match request.operation {MessageAction::Edit=>"Rewind and edit",MessageAction::Fork=>"Create fork",MessageAction::Rewind=>"Rewind"})).clicked() {apply=true;}
-                    if ui.button("Cancel").clicked() {cancel=true;}
-                });
             });
         self.history_view.request = Some(request.clone());
-        if !open || cancel {
-            self.history_view = Default::default();
-        }
-        if apply {
-            self.begin_history(request);
+        match choice {
+            Some(confirmations::Choice::Cancel) => self.history_view = Default::default(),
+            Some(confirmations::Choice::Confirm) => self.begin_history(request),
+            None => {}
         }
     }
     pub(super) fn restoring_code(&self) -> bool {

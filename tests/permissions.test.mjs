@@ -40,6 +40,17 @@ test('questions are available in all permission modes, including read-only, with
     }
   }
 });
+test('local viewer opens are bounded host actions but web pages retain permission gates', async () => {
+  for (const mode of ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk']) {
+    const h = host(mode);
+    assert.equal(await h.gate('pui_open', { target: '/tmp/review.md' }), undefined);
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.calls.length, 0);
+    assert.equal((await h.gate('pui_open', { target: 'https://example.com' })).block, true);
+    const readonly = host(mode, { readonly: true });
+    assert.equal((await readonly.gate('pui_open', { target: '/tmp/review.md' })).block, true);
+  }
+});
 test('classifier is cheapest priced text model in selected provider and scope',()=>{
   const h=host('auto');assert.equal(cheapestModel(h.ctx).id,'cheap');
   h.ctx.scopedModels=[{model:model('scoped','current',2,3)},{model:model('other','elsewhere',0,0)}];

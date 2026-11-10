@@ -293,7 +293,7 @@ fn filters_change_visible_cards_and_restore_when_project_disappears() {
     assert!(
         !output
             .iter()
-            .any(|(s, _)| s == "Inspect model capabilities")
+            .any(|(s, rect)| s == "Inspect model capabilities" && rect.left() > 254.0)
     );
     app.kanban.project = Some(PathBuf::from("/no-longer-live"));
     app.kanban.roots_only = true;
@@ -302,7 +302,7 @@ fn filters_change_visible_cards_and_restore_when_project_disappears() {
     assert!(
         !output
             .iter()
-            .any(|(s, _)| s == "Inspect model capabilities")
+            .any(|(s, rect)| s == "Inspect model capabilities" && rect.left() > 254.0)
     );
 }
 

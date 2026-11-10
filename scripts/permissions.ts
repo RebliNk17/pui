@@ -74,6 +74,9 @@ export function installPermissions(pi: any, initial: any = {}) {
     const version = revision;
     const name = e.toolName, args = e.input ?? {};
     if (name === "pui_ask_questions") return; // User decisions, never a permission grant.
+    // Native previews enforce their own path/format limits; pages can execute
+    // network requests, so URL opens still pass the normal permission gate.
+    if (!initial.readonly && name === "pui_open" && typeof args.target === "string" && !/^[a-z][a-z\d+.-]*:/i.test(args.target)) return;
     if (initial.readonly && ![...reads, "pui_agents", "pui_message_agent"].includes(name)) return block("Read-only Pui worker: tool not allowed");
     if (mode === "bypassPermissions") return;
     const sensitiveRead = mode === "auto" && reads.has(name) && /(?:^|[\/])(?:\.env(?:\.[^\/]*)?|\.ssh|\.aws|\.gnupg|auth\.json|credentials(?:\.[^\/]*)?|id_(?:rsa|ed25519))(?:[\/]|$)/i.test(String(args.path ?? args.file ?? ""));

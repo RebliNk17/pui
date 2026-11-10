@@ -227,6 +227,7 @@ impl View {
         let body_height = content_height(ui, q, self.editing)
             .min((ui.ctx().screen_rect().height() - 300.0).clamp(180.0, 600.0));
         let mut action = None;
+        let keyboard = keyboard && prompt_ui::keyboard_available(ui);
         let owns_keyboard = keyboard
             && ui.memory(|m| {
                 m.focused() == Some(if self.editing { edit_id } else { card_id })
@@ -302,168 +303,163 @@ impl View {
                 }
             });
         }
-        egui::Frame::new()
-            .fill(colors.sidebar)
-            .stroke(Stroke::new(1.0, colors.border))
-            .corner_radius(16)
-            .inner_margin(14)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add_enabled_ui(!waiting, |ui| {
-                    ui.horizontal(|ui| {
-                        icons::inline(ui, Icon::Details, colors.accent);
-                        ui.label(theme::small(ui, "A few quick questions"));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("Cancel").clicked() {
-                                action = Some(Action::Cancel);
-                            }
-                            if navigation_arrow(ui, true, self.page + 1 < request.questions.len())
-                                .clicked()
-                            {
-                                action = Some(Action::Next);
-                            }
-                            ui.label(theme::small(
-                                ui,
-                                format!("{} of {}", self.page + 1, request.questions.len()),
-                            ));
-                            if navigation_arrow(ui, false, self.page > 0).clicked() {
-                                action = Some(Action::Back);
-                            }
-                        });
-                    });
-                    ui.add_space(7.0);
-                    // Everything that can grow scrolls; navigation and submission
-                    // stay visible even in the minimum supported window size.
-                    egui::ScrollArea::vertical()
-                        .id_salt(("question-options", id, self.page))
-                        .min_scrolled_height(body_height)
-                        .max_height(body_height)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(
-                                egui::Label::new(RichText::new(&q.question).size(15.0).strong())
-                                    .wrap(),
-                            );
-                            if q.multi_select {
-                                ui.label(theme::small(ui, "Select all that apply"));
-                            }
-                            ui.add_space(9.0);
-                            for (index, option) in q.options.iter().enumerate() {
-                                let selected = !self.editing && self.selected == index;
-                                let answer = self.answers[self.page].as_ref().is_some_and(|a| {
-                                    !a.custom && !a.skipped && a.answer == option.label
-                                });
-                                let checked = self.checked[self.page].contains(&index);
-                                let row = components::choice(
-                                    ui,
-                                    index + 1,
-                                    &option.label,
-                                    &option.description,
-                                    if q.multi_select { checked } else { answer },
-                                    selected,
-                                );
-                                if selected && moved {
-                                    row.scroll_to_me(Some(Align::Center));
-                                }
-                                if row.clicked() {
-                                    action = Some(Action::Choose(index));
-                                }
-                                ui.add_space(3.0);
-                            }
-                            if !q.options.is_empty() {
-                                let row = components::choice(
-                                    ui,
-                                    q.options.len() + 1,
-                                    "Something else",
-                                    "Write your own answer",
-                                    self.custom_enabled[self.page],
-                                    !self.editing && self.selected == q.options.len(),
-                                );
-                                if self.selected == q.options.len() && moved {
-                                    row.scroll_to_me(Some(Align::Center));
-                                }
-                                if row.clicked() {
-                                    action = Some(Action::Custom);
-                                }
-                            }
-                            if self.editing {
-                                ui.add_space(8.0);
-                                let edit = components::editor(
-                                    ui,
-                                    &mut self.drafts[self.page],
-                                    edit_id,
-                                    self.focus,
-                                );
-                                if edit.changed() {
-                                    self.answers[self.page] = None;
-                                }
-                                if self.focus {
-                                    edit.request_focus();
-                                    self.focus = false;
-                                }
-                                if keyboard
-                                    && edit.has_focus()
-                                    && ui.input_mut(|i| {
-                                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                                    })
-                                {
-                                    action = Some(Action::SubmitCustom);
-                                }
-                            }
-                        });
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("Skip")
-                            .on_hover_text("Leave this question unanswered")
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            prompt_ui::style(ui);
+            ui.set_width(ui.available_width());
+            ui.add_enabled_ui(!waiting, |ui| {
+                ui.horizontal(|ui| {
+                    icons::inline(ui, Icon::Details, colors.accent);
+                    ui.label(theme::small(ui, "A few quick questions"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.small_button("Cancel").clicked() {
+                            action = Some(Action::Cancel);
+                        }
+                        if navigation_arrow(ui, true, self.page + 1 < request.questions.len())
                             .clicked()
                         {
-                            action = Some(Action::Skip);
+                            action = Some(Action::Next);
                         }
-                        components::right_aligned(ui, |ui| {
-                            let can_submit = if self.editing {
-                                !self.drafts[self.page].trim().is_empty()
-                            } else {
-                                !self.checked[self.page].is_empty()
-                            };
-                            if (self.editing || q.multi_select)
-                                && components::submit(
-                                    ui,
-                                    can_submit,
-                                    self.page + 1 == request.questions.len(),
-                                )
-                                .clicked()
+                        ui.label(theme::small(
+                            ui,
+                            format!("{} of {}", self.page + 1, request.questions.len()),
+                        ));
+                        if navigation_arrow(ui, false, self.page > 0).clicked() {
+                            action = Some(Action::Back);
+                        }
+                    });
+                });
+                ui.add_space(7.0);
+                // Everything that can grow scrolls; navigation and submission
+                // stay visible even in the minimum supported window size.
+                egui::ScrollArea::vertical()
+                    .id_salt(("question-options", id, self.page))
+                    .min_scrolled_height(body_height)
+                    .max_height(body_height)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(RichText::new(&q.question).size(18.0).strong()).wrap(),
+                        );
+                        if q.multi_select {
+                            ui.label(theme::small(ui, "Select all that apply"));
+                        }
+                        ui.add_space(9.0);
+                        for (index, option) in q.options.iter().enumerate() {
+                            let selected = !self.editing && self.selected == index;
+                            let answer = self.answers[self.page].as_ref().is_some_and(|a| {
+                                !a.custom && !a.skipped && a.answer == option.label
+                            });
+                            let checked = self.checked[self.page].contains(&index);
+                            let row = components::choice(
+                                ui,
+                                index + 1,
+                                &option.label,
+                                &option.description,
+                                if q.multi_select { checked } else { answer },
+                                selected,
+                            );
+                            if selected && moved {
+                                row.scroll_to_me(Some(Align::Center));
+                            }
+                            if row.clicked() {
+                                action = Some(Action::Choose(index));
+                            }
+                            ui.add_space(3.0);
+                        }
+                        if !q.options.is_empty() {
+                            let row = components::choice(
+                                ui,
+                                q.options.len() + 1,
+                                "Something else",
+                                "Write your own answer",
+                                self.custom_enabled[self.page],
+                                !self.editing && self.selected == q.options.len(),
+                            );
+                            if self.selected == q.options.len() && moved {
+                                row.scroll_to_me(Some(Align::Center));
+                            }
+                            if row.clicked() {
+                                action = Some(Action::Custom);
+                            }
+                        }
+                        if self.editing {
+                            ui.add_space(8.0);
+                            let edit = components::editor(
+                                ui,
+                                &mut self.drafts[self.page],
+                                edit_id,
+                                self.focus,
+                            );
+                            if edit.changed() {
+                                self.answers[self.page] = None;
+                            }
+                            if self.focus {
+                                edit.request_focus();
+                                self.focus = false;
+                            }
+                            if keyboard
+                                && edit.has_focus()
+                                && ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                })
                             {
                                 action = Some(Action::SubmitCustom);
                             }
-                            ui.add(
-                                egui::Label::new(theme::small(
-                                    ui,
-                                    if self.editing {
-                                        "Enter: answer · Shift+Enter: new line"
-                                    } else if q.multi_select {
-                                        "1–9 / Space: toggle · Enter: confirm"
-                                    } else {
-                                        "1–9: choose · ↑↓ navigate · Enter: select"
-                                    },
-                                ))
-                                .wrap(),
-                            );
-                        });
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Skip")
+                        .on_hover_text("Leave this question unanswered")
+                        .clicked()
+                    {
+                        action = Some(Action::Skip);
+                    }
+                    components::right_aligned(ui, |ui| {
+                        let can_submit = if self.editing {
+                            !self.drafts[self.page].trim().is_empty()
+                        } else {
+                            !self.checked[self.page].is_empty()
+                        };
+                        if (self.editing || q.multi_select)
+                            && components::submit(
+                                ui,
+                                can_submit,
+                                self.page + 1 == request.questions.len(),
+                            )
+                            .clicked()
+                        {
+                            action = Some(Action::SubmitCustom);
+                        }
+                        ui.add(
+                            egui::Label::new(theme::small(
+                                ui,
+                                if self.editing {
+                                    "Enter: answer · Shift+Enter: new line"
+                                } else if q.multi_select {
+                                    "1–9 / Space: toggle · Enter: confirm"
+                                } else {
+                                    "1–9: choose · ↑↓ navigate · Enter: select"
+                                },
+                            ))
+                            .wrap(),
+                        );
                     });
                 });
-                ui.add(
-                    egui::Label::new(theme::small(
-                        ui,
-                        if waiting {
-                            "Waiting for the owning window…"
-                        } else {
-                            "The agent continues automatically after your last answer."
-                        },
-                    ))
-                    .wrap(),
-                );
             });
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    if waiting {
+                        "Waiting for the owning window…"
+                    } else {
+                        "The agent continues automatically after your last answer."
+                    },
+                ))
+                .wrap(),
+            );
+        });
         ui.add_space(6.0);
         if waiting {
             None
