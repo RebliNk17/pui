@@ -324,6 +324,7 @@ impl Transcript {
                     m.role.hash(&mut hasher);
                     m.revision.hash(&mut hasher);
                     m.text.len().hash(&mut hasher);
+                    m.error.hash(&mut hasher);
                     m.tools.len().hash(&mut hasher);
                     for image in &m.images {
                         image.key.hash(&mut hasher);
@@ -961,7 +962,11 @@ fn assistant(
                 }
             }
         }
-        if let Some(error) = &message.error {
+    }
+    // Failed attempts remain available in history, but a later assistant message
+    // supersedes them. While Pi is still working it may retry or compact first.
+    if !running {
+        if let Some(error) = messages.last().and_then(|message| message.error.as_ref()) {
             ui.colored_label(colors.red, error);
         }
     }
@@ -1246,6 +1251,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
         })
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "transcript/retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 mod tests {

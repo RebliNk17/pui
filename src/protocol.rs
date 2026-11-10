@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod answers;
+#[cfg(test)]
+mod retry_tests;
 mod stream;
 mod usage;
 pub use answers::QuestionAnswers;
@@ -698,11 +700,16 @@ impl State {
             "session_info_changed" => self.session_name = string(&event, "name").into(),
             "thinking_level_changed" => self.thinking = string(&event, "level").into(),
             "extension_error" => self.add_diagnostic(string(&event, "error").into()),
-            "auto_retry_start" => {
-                self.notice = Some(format!("Retrying: {}", string(&event, "errorMessage")))
-            }
+            // Pi owns bounded retries. Intermediate failures stay in raw history,
+            // not user-facing notices; the transcript shows only the final failure.
             "auto_retry_end" if event["success"] == false => {
-                self.error = Some(string(&event, "finalError").into())
+                let error = string(&event, "finalError");
+                if !error.is_empty()
+                    && error != "Retry cancelled"
+                    && self.messages.last().and_then(|m| m.error.as_deref()) != Some(error)
+                {
+                    self.error = Some(error.into());
+                }
             }
             "extension_ui_request" => match string(&event, "method") {
                 "confirm" | "select" | "input" | "editor" => self.dialogs.push_back(event),
