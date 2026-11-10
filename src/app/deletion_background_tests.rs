@@ -7,6 +7,7 @@ fn saved(app: &mut Pui, home: &Path, name: &str) -> Session {
         cwd: home.into(),
         project: home.into(),
         title: name.into(),
+        created: None,
         modified: std::time::SystemTime::now(),
     };
     app.sessions.push(session.clone());
