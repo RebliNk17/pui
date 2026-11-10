@@ -16,6 +16,7 @@ enum Action {
     Move(PathBuf),
     Export(PathBuf),
     Hide(PathBuf),
+    Restore(PathBuf),
     Delete(deletion::Target),
     Open(usize),
     Agent(String),
@@ -30,7 +31,7 @@ impl Pui {
         let colors = crate::theme::palette(ctx);
         let mut action = None;
         let tasks_loading = self.tasks.loading_history();
-        let branches = sidebar_tree::forest(self);
+        let (mut pinned, branches) = sidebar_tree::listing(self);
         egui::SidePanel::left("sessions-v4")
             .exact_width(254.0)
             .resizable(false)
@@ -156,38 +157,6 @@ impl Pui {
                         });
                     });
                 ui.add_space(10.0);
-                egui::Frame::new()
-                    .fill(colors.bg)
-                    .corner_radius(8)
-                    .inner_margin(3)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let width = (ui.available_width() - 3.0) / 2.0;
-                        ui.horizontal(|ui| {
-                            for (index, label) in ["Recent", "Projects"].iter().enumerate() {
-                                let selected = self.projects == (index == 1);
-                                if ui
-                                    .add_sized(
-                                        [width, theme::CONTROL_HEIGHT],
-                                        egui::Button::new(RichText::new(*label).size(11.5).color(
-                                            if selected { colors.text } else { colors.muted },
-                                        ))
-                                        .fill(if selected {
-                                            colors.hover
-                                        } else {
-                                            Color32::TRANSPARENT
-                                        })
-                                        .stroke(Stroke::NONE)
-                                        .corner_radius(6),
-                                    )
-                                    .clicked()
-                                {
-                                    self.projects = index == 1;
-                                }
-                            }
-                        });
-                    });
-                ui.add_space(10.0);
                 // Reserve exactly the footer, not a 95px estimate followed by extra layout padding.
                 egui::TopBottomPanel::bottom("account-footer-v2")
                     .exact_height(55.0)
@@ -200,35 +169,35 @@ impl Pui {
                 ui.horizontal(|ui| {
                     ui.label(theme::caption(
                         ui,
-                        if self.show_archived {
+                        if self.show_hidden {
+                            "HIDDEN CHATS"
+                        } else if self.show_archived {
                             "ARCHIVED"
                         } else if self.projects {
                             "PROJECTS"
-                        } else if self.demo {
-                            "PREVIEW SESSIONS"
                         } else {
-                            "RECENT SESSIONS"
+                            "SESSIONS"
                         },
                     ));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Refresh, "Refresh sessions").clicked() {
-                            self.refresh_sessions();
-                        }
+                        self.session_list_controls(ui);
                     });
                 });
                 let query = self.search.trim().to_lowercase();
-                let visible: Vec<_> = branches
+                let mut visible: Vec<_> = branches
                     .iter()
                     .enumerate()
                     .filter(|(_, branch)| {
-                        !(branch.hidden
-                            || tasks_loading
-                                && matches!(branch.target, sidebar_tree::Target::Session(_)))
-                            && branch.archived == self.show_archived
+                        !(tasks_loading
+                            && matches!(branch.target, sidebar_tree::Target::Session(_)))
+                            && (self.show_hidden || branch.archived == self.show_archived)
                             && branch.matches(&query)
                     })
                     .map(|(index, _)| index)
                     .collect();
+                let order = self.prefs.session_order;
+                pinned.sort_by(|a, b| order.compare(a, b));
+                visible.sort_by(|a, b| order.compare(&branches[*a], &branches[*b]));
                 let mut groups: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
                 if self.projects {
                     for index in &visible {
@@ -239,24 +208,34 @@ impl Pui {
                     }
                 }
                 egui::ScrollArea::vertical()
-                    .id_salt(("session-list-v4", self.projects, self.show_archived))
+                    .id_salt((
+                        "session-list-v4",
+                        self.projects,
+                        self.show_archived,
+                        self.show_hidden,
+                    ))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        if self.prefs.chats.values().any(|m| m.hidden)
-                            && ui.button("Restore hidden chats").clicked()
-                        {
-                            for meta in self.prefs.chats.values_mut() {
-                                meta.hidden = false;
+                        if !pinned.is_empty() {
+                            ui.label(theme::caption(ui, "PINNED"));
+                            for branch in &pinned {
+                                if let Some(next) = self.branch_row(ui, branch, 0, "") {
+                                    action = Some(next);
+                                }
                             }
+                            ui.add_space(6.0);
+                            ui.separator();
                         }
-                        if visible.is_empty() {
+                        if visible.is_empty() && pinned.is_empty() {
                             ui.label(theme::small(
                                 ui,
                                 if self.session_rx.is_some() {
                                     "Loading sessions…"
                                 } else if tasks_loading {
                                     "Loading workflows…"
+                                } else if self.show_hidden {
+                                    "No hidden chats."
                                 } else {
                                     "No sessions found."
                                 },
@@ -264,9 +243,10 @@ impl Pui {
                         }
                         if self.projects {
                             let mut groups: Vec<_> = groups.into_iter().collect();
-                            groups.sort_by_key(|(_, indices)| indices[0]);
-                            for (project, mut indices) in groups {
-                                indices.sort_by_key(|i| std::cmp::Reverse(branches[*i].modified));
+                            groups.sort_by(|a, b| {
+                                order.compare_groups((&a.0, &a.1), (&b.0, &b.1), &branches)
+                            });
+                            for (project, indices) in groups {
                                 let open = !self.closed_projects.contains(&project);
                                 let (_, rect) = ui.allocate_space(Vec2::new(
                                     ui.available_width(),
@@ -397,16 +377,15 @@ impl Pui {
                                 ui.add_space(6.0);
                             }
                         } else {
-                            let mut indices = visible;
-                            indices.sort_by_key(|i| !branches[*i].pinned);
-                            for index in indices {
+                            for index in visible {
                                 if let Some(next) = self.branch_row(ui, &branches[index], 0, &query)
                                 {
                                     action = Some(next);
                                 }
                             }
                         }
-                        if (self.show_archived || self.prefs.chats.values().any(|m| m.archived))
+                        if !self.show_hidden
+                            && (self.show_archived || self.prefs.chats.values().any(|m| m.archived))
                             && ui
                                 .add(
                                     egui::Button::new(theme::small(
@@ -447,6 +426,7 @@ impl Pui {
                         cwd: cwd.clone(),
                         project: cwd,
                         title: "Parent chat".into(),
+                        created: None,
                         modified: std::time::SystemTime::UNIX_EPOCH,
                     });
                 }
@@ -478,10 +458,82 @@ impl Pui {
                 Action::Hide(path) => {
                     self.prefs.chats.entry(path).or_default().hidden = true;
                 }
+                Action::Restore(path) => {
+                    self.prefs.chats.entry(path).or_default().hidden = false;
+                }
                 _ => {}
             }
         }
     }
+    fn session_list_controls(&mut self, ui: &mut egui::Ui) -> [egui::Response; 2] {
+        // The header lays these out right-to-left: Filter, then Group visually.
+        let group = icons::button(ui, Icon::Group, "Group sessions");
+        group.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Group sessions")
+        });
+        egui::Popup::menu(&group)
+            .id(ui.make_persistent_id("session-group-menu"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(150.0);
+                ui.label(theme::caption(ui, "GROUP BY"));
+                ui.radio_value(&mut self.projects, false, "Recent");
+                ui.radio_value(&mut self.projects, true, "Project");
+                ui.separator();
+                ui.checkbox(&mut self.show_hidden, "Show hidden chats");
+            });
+        let filter = icons::button(ui, Icon::Filter, "Filter and sort sessions");
+        filter.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Filter and sort sessions")
+        });
+        egui::Popup::menu(&filter)
+            .id(ui.make_persistent_id("session-filter-menu"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(190.0);
+                ui.label(theme::caption(ui, "SORT BY"));
+                for sort in [
+                    sidebar_order::Sort::Activity,
+                    sidebar_order::Sort::Created,
+                    sidebar_order::Sort::Name,
+                ] {
+                    if ui
+                        .radio_value(&mut self.prefs.session_order.sort, sort, sort.label())
+                        .changed()
+                    {
+                        self.prefs.session_order.reverse = false;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    let names = self.prefs.session_order.sort == sidebar_order::Sort::Name;
+                    ui.radio_value(
+                        &mut self.prefs.session_order.reverse,
+                        false,
+                        if names { "A–Z" } else { "Newest first" },
+                    );
+                    ui.radio_value(
+                        &mut self.prefs.session_order.reverse,
+                        true,
+                        if names { "Z–A" } else { "Oldest first" },
+                    );
+                });
+                ui.separator();
+                ui.checkbox(&mut self.show_archived, "Show archived");
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.session_rx.is_none() && !self.demo,
+                        egui::Button::new("Refresh sessions"),
+                    )
+                    .clicked()
+                {
+                    self.refresh_sessions();
+                    ui.close();
+                }
+            });
+        [filter, group]
+    }
+
     fn begin_rename(&mut self, path: PathBuf) {
         self.rename_text = self
             .prefs
@@ -516,13 +568,20 @@ impl Pui {
         depth: usize,
         query: &str,
     ) -> Option<Action> {
-        if branch.hidden {
+        if !branch.pinned && branch.hidden != self.show_hidden {
             return None;
         }
         let colors = theme::palette(ui.ctx());
         let selected = branch.active(self);
+        let deleting = branch
+            .path
+            .as_deref()
+            .is_some_and(|p| self.deletion.deleting_chat(p));
         let expanded = !self.prefs.closed_threads.contains(&branch.key) || !query.is_empty();
-        let has_children = branch.children.iter().any(|c| !c.hidden);
+        let has_children = branch
+            .children
+            .iter()
+            .any(|c| c.pinned || c.hidden == self.show_hidden);
         let compact = depth > 0;
         let task_row = matches!(branch.target, sidebar_tree::Target::Task(_, None));
         let row_height = if compact {
@@ -603,7 +662,11 @@ impl Pui {
                                 colors.muted
                             },
                         );
-                        theme::status_dot(ui, icon_rect.right_bottom(), tint, 2.5);
+                        if deleting {
+                            deletion_spinner(ui, icon_rect.center());
+                        } else {
+                            theme::status_dot(ui, icon_rect.right_bottom(), tint, 2.5);
+                        }
                         paint_text(
                             ui,
                             &branch.title,
@@ -615,7 +678,11 @@ impl Pui {
                         if !compact {
                             paint_text(
                                 ui,
-                                &branch.status,
+                                if deleting {
+                                    "Deleting…"
+                                } else {
+                                    &branch.status
+                                },
                                 row.min + egui::vec2(28.0, 30.0),
                                 row.width() - 32.0,
                                 FontId::proportional(10.0),
@@ -630,6 +697,12 @@ impl Pui {
                                 format!("{} · {}", branch.title, branch.status),
                             )
                         });
+                        if deleting {
+                            response.on_hover_text(
+                                "Deleting chat… You can keep working in other chats.",
+                            );
+                            return;
+                        }
                         let delete_target = match target {
                             sidebar_tree::Target::Task(id, None) => {
                                 Some(deletion::Target::Task(id.clone()))
@@ -643,9 +716,8 @@ impl Pui {
                         );
                         let menu =
                             ui.interact(menu_rect, ui.id().with("delete-menu"), Sense::click());
-                        if delete_target.is_some()
-                            && (selected || response.hovered() || menu.hovered())
-                        {
+                        let has_menu = delete_target.is_some() || branch.path.is_some();
+                        if has_menu && (selected || response.hovered() || menu.hovered()) {
                             for dx in [-4.0, 0.0, 4.0] {
                                 ui.painter().circle_filled(
                                     menu_rect.center() + egui::vec2(dx, 0.0),
@@ -654,16 +726,32 @@ impl Pui {
                                 );
                             }
                         }
-                        if let Some(target) = delete_target {
+                        if has_menu {
                             let mut contents = |ui: &mut egui::Ui| {
-                                let label = if matches!(target, deletion::Target::Task(_)) {
-                                    "Delete task…"
-                                } else {
-                                    "Delete chat…"
-                                };
-                                if ui.button(RichText::new(label).color(colors.red)).clicked() {
-                                    action = Some(Action::Delete(target.clone()));
-                                    ui.close();
+                                if let Some(path) = &branch.path {
+                                    let meta = self.prefs.chats.entry(path.clone()).or_default();
+                                    if ui
+                                        .button(if meta.pinned { "Unpin" } else { "Pin" })
+                                        .clicked()
+                                    {
+                                        meta.pinned = !meta.pinned;
+                                        ui.close();
+                                    }
+                                    if meta.hidden && ui.button("Restore chat").clicked() {
+                                        action = Some(Action::Restore(path.clone()));
+                                        ui.close();
+                                    }
+                                }
+                                if let Some(target) = &delete_target {
+                                    let label = if matches!(target, deletion::Target::Task(_)) {
+                                        "Delete task…"
+                                    } else {
+                                        "Delete chat…"
+                                    };
+                                    if ui.button(RichText::new(label).color(colors.red)).clicked() {
+                                        action = Some(Action::Delete(target.clone()));
+                                        ui.close();
+                                    }
                                 }
                             };
                             egui::Popup::menu(&menu).show(&mut contents);
@@ -733,7 +821,11 @@ impl Pui {
                         },
                     ),
                 ));
-                let children = branch.children.iter().filter(|child| !child.hidden).count();
+                let children = branch
+                    .children
+                    .iter()
+                    .filter(|child| child.pinned || child.hidden == self.show_hidden)
+                    .count();
                 toggle.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::CollapsingHeader,
@@ -817,6 +909,7 @@ impl Pui {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
         let path = s.path.clone();
+        let deleting = self.deletion.deleting_chat(&path);
         let selected = !self.kanban.open
             && !self.tasks.open
             && (self
@@ -831,7 +924,9 @@ impl Pui {
             .values()
             .find(|n| n.path.as_ref() == Some(&path));
         let shared = self.other_window_status(&path).map(str::to_owned);
-        let (status, status_color) = if selected {
+        let (status, status_color) = if deleting {
+            ("Deleting…", colors.red)
+        } else if selected {
             self.run_label()
         } else if let Some(node) = node {
             (node.status.as_str(), node.color(colors))
@@ -849,20 +944,24 @@ impl Pui {
         };
         let title = self.session_title(s);
         let meta = self.prefs.chats.entry(path.clone()).or_default();
-        let editing = self.rename_chat.as_ref() == Some(&path);
+        let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 48.0));
         // Session identity, not layout position: filtering, pinning, regrouping or
         // asynchronous refresh must not move a pointer press to another chat.
         let response = ui.interact(
             rect,
             ui.make_persistent_id(("chat-row", &path)),
-            if editing {
+            if editing || deleting {
                 Sense::hover()
             } else {
                 Sense::click()
             },
         );
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = if deleting {
+            response.on_hover_text("Deleting chat… You can keep working in other chats.")
+        } else {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        };
         let response = if self.loading_chat && !selected {
             response.on_hover_text("Open this chat instead")
         } else {
@@ -879,7 +978,12 @@ impl Pui {
                 },
             );
         }
-        theme::status_dot(ui, rect.min + egui::vec2(10.0, 16.0), status_color, 3.0);
+        let indicator = rect.min + egui::vec2(10.0, 16.0);
+        if deleting {
+            deletion_spinner(ui, indicator);
+        } else {
+            theme::status_dot(ui, indicator, status_color, 3.0);
+        }
         if editing {
             let id = egui::Id::new(("chat-rename", &path));
             let focused = ui.memory(|m| m.has_focus(id));
@@ -916,7 +1020,7 @@ impl Pui {
         } else {
             paint_text(
                 ui,
-                &format!("{}{}", if meta.pinned { "• " } else { "" }, title),
+                &title,
                 rect.min + egui::vec2(24.0, 15.0),
                 rect.width() - 54.0,
                 FontId::proportional(12.0),
@@ -928,7 +1032,7 @@ impl Pui {
             &format!(
                 "{} · {}",
                 sessions::project_name(&s.project),
-                if selected || node.is_some() || shared.is_some() {
+                if deleting || selected || node.is_some() || shared.is_some() {
                     status.to_owned()
                 } else {
                     format!("Saved · {}", sessions::age(s.modified))
@@ -939,6 +1043,9 @@ impl Pui {
             FontId::proportional(10.5),
             colors.dim,
         );
+        if deleting {
+            return None;
+        }
         let menu_rect = egui::Rect::from_center_size(
             rect.right_center() - egui::vec2(12.0, 6.0),
             Vec2::splat(24.0),
@@ -1001,9 +1108,21 @@ impl Pui {
                 meta.archived = !meta.archived;
                 ui.close();
             }
-            if ui
-                .button(egui::RichText::new("Hide from Pui").color(colors.red))
-                .on_hover_text("Does not delete your Pi session file")
+            if meta.hidden {
+                if ui.button("Restore chat").clicked() {
+                    action = Some(Action::Restore(path.clone()));
+                    ui.close();
+                }
+            } else if ui
+                .add_enabled(
+                    !meta.pinned,
+                    egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red)),
+                )
+                .on_hover_text(if meta.pinned {
+                    "Unpin this chat before hiding it"
+                } else {
+                    "Does not delete your Pi session file"
+                })
                 .clicked()
             {
                 action = Some(Action::Hide(path.clone()));
@@ -1027,6 +1146,11 @@ impl Pui {
         }
         action
     }
+}
+fn deletion_spinner(ui: &egui::Ui, center: egui::Pos2) {
+    egui::Spinner::new()
+        .color(theme::palette(ui.ctx()).red)
+        .paint_at(ui, egui::Rect::from_center_size(center, Vec2::splat(12.0)));
 }
 fn paint_text(
     ui: &egui::Ui,
@@ -1346,6 +1470,7 @@ mod tests {
             cwd: app.prefs.cwd.clone(),
             project: app.prefs.cwd.clone(),
             title: "Untitled session".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         }];
         let (client, events) = rpc::Client::stub_with_events();
@@ -1406,6 +1531,263 @@ mod tests {
         app.shutdown_agents();
     }
 
+    fn label_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+        fn find(shape: &egui::Shape, label: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == label => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, label)),
+                _ => None,
+            }
+        }
+        output.shapes.iter().find_map(|s| find(&s.shape, label))
+    }
+    fn controls_frame(
+        ctx: &egui::Context,
+        app: &mut Pui,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, [egui::Rect; 2]) {
+        let mut rects = [egui::Rect::NOTHING; 2];
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        rects = app.session_list_controls(ui).map(|r| r.rect);
+                    });
+                });
+            },
+        );
+        (output, rects)
+    }
+    fn click_control(ctx: &egui::Context, app: &mut Pui, index: usize) {
+        let (_, rects) = controls_frame(ctx, app, vec![]);
+        click_controls_at(ctx, app, rects[index].center());
+    }
+    fn click_controls_at(ctx: &egui::Context, app: &mut Pui, pos: egui::Pos2) {
+        for pressed in [true, false] {
+            controls_frame(
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+    fn click_label(ctx: &egui::Context, app: &mut Pui, label: &str) {
+        let (output, _) = controls_frame(ctx, app, vec![]);
+        let pos = label_rect(&output, label)
+            .unwrap_or_else(|| panic!("Missing {label}"))
+            .center();
+        click_controls_at(ctx, app, pos);
+    }
+    #[test]
+    fn icon_menus_separate_grouping_from_filter_sort_and_restore_actions() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.prefs
+            .chats
+            .entry(app.sessions[0].path.clone())
+            .or_default()
+            .hidden = true;
+        for _ in 0..3 {
+            controls_frame(&ctx, &mut app, vec![]);
+        }
+        click_control(&ctx, &mut app, 1);
+        assert!(egui::Popup::is_any_open(&ctx));
+        let (output, _) = controls_frame(&ctx, &mut app, vec![]);
+        assert!(label_rect(&output, "GROUP BY").is_some());
+        assert!(label_rect(&output, "SORT BY").is_none());
+        click_label(&ctx, &mut app, "Project");
+        assert!(app.projects);
+        click_label(&ctx, &mut app, "Recent");
+        assert!(!app.projects);
+        click_label(&ctx, &mut app, "Show hidden chats");
+        assert!(app.show_hidden);
+        assert!(app.prefs.chats.values().any(|m| m.hidden));
+        click_control(&ctx, &mut app, 0);
+        let (output, _) = controls_frame(&ctx, &mut app, vec![]);
+        assert!(label_rect(&output, "SORT BY").is_some());
+        assert!(label_rect(&output, "GROUP BY").is_none());
+        click_label(&ctx, &mut app, "Name");
+        assert!(app.prefs.session_order.sort == sidebar_order::Sort::Name);
+        click_label(&ctx, &mut app, "Z–A");
+        assert!(app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Creation time");
+        assert!(app.prefs.session_order.sort == sidebar_order::Sort::Created);
+        assert!(!app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Oldest first");
+        assert!(app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Show archived");
+        assert!(app.show_archived);
+        assert!(label_rect(&output, "Restore hidden chats").is_none());
+        click_control(&ctx, &mut app, 0);
+        assert!(!egui::Popup::is_any_open(&ctx));
+    }
+    fn sidebar_click(
+        ctx: &egui::Context,
+        app: &mut Pui,
+        pos: egui::Pos2,
+        button: egui::PointerButton,
+    ) {
+        for pressed in [true, false] {
+            frame(
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+    #[test]
+    fn hidden_chats_are_shown_and_restored_individually_from_their_menu() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            app.sessions.truncate(2);
+            app.sessions[0].title = "Hidden first".into();
+            app.sessions[1].title = "Hidden second".into();
+            app.state.session_file = None;
+            app.new_chat = true;
+            for session in &app.sessions {
+                app.prefs
+                    .chats
+                    .entry(session.path.clone())
+                    .or_default()
+                    .hidden = true;
+            }
+            frame(&ctx, &mut app, vec![]);
+            let output = frame(&ctx, &mut app, vec![]);
+            assert!(label_rect(&output, "Hidden first").is_none());
+            assert!(label_rect(&output, "Restore hidden chats").is_none());
+            app.show_hidden = true;
+            for _ in 0..2 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            let output = frame(&ctx, &mut app, vec![]);
+            let pos = label_rect(&output, "Hidden first").unwrap().center();
+            assert!(label_rect(&output, "Hidden second").is_some());
+            sidebar_click(&ctx, &mut app, pos, egui::PointerButton::Secondary);
+            let output = frame(&ctx, &mut app, vec![]);
+            let restore = label_rect(&output, "Restore chat").unwrap().center();
+            sidebar_click(&ctx, &mut app, restore, egui::PointerButton::Primary);
+            assert!(!app.prefs.chats[&app.sessions[0].path].hidden);
+            assert!(app.prefs.chats[&app.sessions[1].path].hidden);
+            let output = frame(&ctx, &mut app, vec![]);
+            assert!(label_rect(&output, "Hidden first").is_none());
+            app.show_hidden = false;
+            frame(&ctx, &mut app, vec![]);
+            assert!(label_rect(&frame(&ctx, &mut app, vec![]), "Hidden first").is_some());
+        }
+    }
+    #[test]
+    fn pins_have_a_dedicated_section_above_groups_and_survive_filters_until_unpinned() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            app.sessions.truncate(2);
+            app.sessions[0].title = "Permanent favorite".into();
+            app.sessions[1].title = "Ordinary chat".into();
+            app.sessions[0].project = PathBuf::from("/fixture/favorite-project");
+            app.sessions[1].project = PathBuf::from("/fixture/ordinary-project");
+            app.state.session_file = None;
+            app.new_chat = true;
+            let path = app.sessions[0].path.clone();
+            app.prefs.chats.entry(path.clone()).or_default().pinned = true;
+            for _ in 0..2 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            let output = frame(&ctx, &mut app, vec![]);
+            let pinned = label_rect(&output, "PINNED").unwrap();
+            let favorite = label_rect(&output, "Permanent favorite").unwrap();
+            let ordinary = label_rect(&output, "Ordinary chat").unwrap();
+            assert!(pinned.bottom() < favorite.top() && favorite.bottom() < ordinary.top());
+            if projects {
+                assert!(
+                    label_rect(&output, "favorite-project").is_none(),
+                    "Pinned chats must not be duplicated inside project groups"
+                );
+                assert!(favorite.bottom() < label_rect(&output, "ordinary-project").unwrap().top());
+            }
+            app.search = "no matches".into();
+            app.show_archived = true;
+            app.show_hidden = true;
+            app.prefs.chats.get_mut(&path).unwrap().hidden = true;
+            frame(&ctx, &mut app, vec![]);
+            let output = frame(&ctx, &mut app, vec![]);
+            let favorite = label_rect(&output, "Permanent favorite").unwrap().center();
+            assert!(label_rect(&output, "PINNED").is_some());
+            sidebar_click(&ctx, &mut app, favorite, egui::PointerButton::Secondary);
+            let output = frame(&ctx, &mut app, vec![]);
+            let unpin = label_rect(&output, "Unpin").unwrap().center();
+            sidebar_click(&ctx, &mut app, unpin, egui::PointerButton::Primary);
+            assert!(!app.prefs.chats[&path].pinned);
+            let output = frame(&ctx, &mut app, vec![]);
+            assert!(label_rect(&output, "PINNED").is_none());
+            assert!(label_rect(&output, "Permanent favorite").is_none());
+        }
+    }
+    #[test]
+    fn sort_applies_to_visible_rows_in_recent_and_project_views() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            let template = app.sessions[0].clone();
+            app.sessions = [("Zebra", 30, 10), ("Alpha", 10, 30), ("Beta", 20, 20)]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (title, created, modified))| Session {
+                    path: PathBuf::from(format!("/fixture/{i}.jsonl")),
+                    title: title.into(),
+                    created: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(created)),
+                    modified: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified),
+                    ..template.clone()
+                })
+                .collect();
+            for (sort, expected) in [
+                (sidebar_order::Sort::Name, ["Alpha", "Beta", "Zebra"]),
+                (sidebar_order::Sort::Activity, ["Alpha", "Beta", "Zebra"]),
+                (sidebar_order::Sort::Created, ["Zebra", "Beta", "Alpha"]),
+            ] {
+                for reverse in [false, true] {
+                    app.prefs.session_order = sidebar_order::Options { sort, reverse };
+                    frame(&ctx, &mut app, vec![]);
+                    let output = frame(&ctx, &mut app, vec![]);
+                    let mut positions =
+                        expected.map(|s| label_rect(&output, s).unwrap().center().y);
+                    if reverse {
+                        positions.reverse();
+                    }
+                    assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+                }
+            }
+        }
+    }
     #[test]
     fn header_has_aligned_controls_below_native_traffic_light_clearance() {
         fn text(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
@@ -1440,8 +1822,11 @@ mod tests {
                 .find(|(s, _)| s == "Search sessions")
                 .unwrap()
                 .1;
-            let recent = labels.iter().find(|(s, _)| s == "Recent").unwrap().1;
-            let projects = labels.iter().find(|(s, _)| s == "Projects").unwrap().1;
+            let heading = labels.iter().find(|(s, _)| s == "SESSIONS").unwrap().1;
+            assert!(!labels.iter().any(|(s, _)| matches!(
+                s.as_str(),
+                "View" | "Filter" | "Group" | "Recent" | "Projects"
+            )));
             assert!(
                 title.left() < 70.0,
                 "Title should align with sidebar controls, not be displaced by traffic lights"
@@ -1453,10 +1838,17 @@ mod tests {
                 );
             }
             assert!(title.bottom() < search.top());
-            assert!(search.bottom() < recent.top());
+            assert!(search.bottom() < heading.top());
+            let (controls, [filter, group]) = controls_frame(&ctx, &mut app, vec![]);
+            assert!(filter.right() <= group.left());
+            assert!((filter.center().y - group.center().y).abs() <= 1.0 / zoom);
+            assert_eq!(filter.size(), group.size());
             assert!(
-                (recent.center().y - projects.center().y).abs() <= 1.0 / zoom,
-                "Segment labels must share a baseline within pixel rounding at scale {zoom}: {recent:?} / {projects:?}"
+                controls
+                    .shapes
+                    .iter()
+                    .all(|s| !matches!(&s.shape, egui::Shape::Text(_))),
+                "Buttons must be icons only"
             );
         }
     }
@@ -1974,6 +2366,7 @@ mod tests {
             cwd: cwd.clone(),
             project: cwd,
             title: "Target chat".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         };
         app.open_chat(session.clone());

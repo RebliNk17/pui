@@ -68,11 +68,10 @@ impl Pui {
                 .pending_messages
                 .iter()
                 .filter(|p| {
-                    p.text == receipt.text
-                        && p.images
-                            .iter()
-                            .map(|i| i.key)
-                            .eq(receipt.images.iter().map(|i| i.key))
+                    !matches!(
+                        p.status,
+                        protocol::DeliveryStatus::Cancelled | protocol::DeliveryStatus::Handled
+                    ) && receipt.matches_content(&p.text, &p.images)
                 })
                 .count();
         self.state.pending_messages.push(receipt);

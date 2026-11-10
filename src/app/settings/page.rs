@@ -97,6 +97,12 @@ pub(in crate::app) struct View {
 
 impl View {
     pub(in crate::app) fn select(&mut self, name: &str) {
+        if let Some(view) = name.strip_prefix("Resources/") {
+            self.page = Page::Resources;
+            self.resources.select_view(view);
+            self.search.clear();
+            return;
+        }
         if let Some(page) = Page::ALL
             .into_iter()
             .find(|p| p.title().eq_ignore_ascii_case(name))
@@ -311,7 +317,10 @@ impl Pui {
         let alerts_before = self.prefs.notifications;
         let theme_before = (self.prefs.theme, self.prefs.color_styles);
 
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && (self.settings_view.page != Page::Resources
+                || !self.settings_view.resources.escape())
+        {
             self.settings_open = false;
             self.focus_composer = true;
         }
@@ -389,6 +398,16 @@ impl Pui {
                     .drag_started()
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                if self.settings_view.page == Page::Resources {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(24, 12))
+                        .show(ui, |ui| {
+                            self.settings_view
+                                .resources
+                                .show(ui, &self.prefs.cwd, self.demo);
+                        });
+                    return;
                 }
                 egui::ScrollArea::vertical()
                     .id_salt(("settings-content", self.settings_view.page))
@@ -649,7 +668,7 @@ impl Pui {
                 row(
                     ui,
                     "Completion sound",
-                    "Play a short sound when an agent finishes successfully.",
+                    "Play a short sound when an agent finishes successfully or a chat is deleted.",
                     |ui| toggle(ui, &mut self.prefs.notifications.sound, "Completion sound"),
                 );
                 separator(ui);

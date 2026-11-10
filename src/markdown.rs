@@ -108,12 +108,15 @@ fn format(
     link: bool,
 ) -> TextFormat {
     let colors = crate::theme::palette(ctx);
+    // Inline code shares the surrounding text's size; a smaller monospace font
+    // has a shorter ascent and looks raised even with the same line height.
+    let size = if heading { 17.0 } else { 14.0 };
     TextFormat {
         font_id: if code {
-            FontId::monospace(12.0)
+            FontId::monospace(size)
         } else {
             FontId::new(
-                if heading { 17.0 } else { 14.0 },
+                size,
                 if bold || heading {
                     egui::FontFamily::Name("body-bold".into())
                 } else {
@@ -283,7 +286,7 @@ pub fn show(ui: &mut Ui, source: &str) {
                         ui.ctx(),
                         false,
                         false,
-                        false,
+                        heading,
                         true,
                         link.is_some() || local_file(&text),
                     ),
@@ -431,6 +434,49 @@ mod tests {
     use super::*;
     use egui::cache::ComputerMut;
     #[test]
+    fn inline_code_and_prose_share_a_baseline() {
+        for system_fonts in [false, true] {
+            for scale in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                if system_fonts {
+                    theme::install(&ctx);
+                } else {
+                    let mut fonts = egui::FontDefinitions::default();
+                    fonts.families.insert(
+                        egui::FontFamily::Name("body-bold".into()),
+                        fonts.families[&egui::FontFamily::Proportional].clone(),
+                    );
+                    ctx.set_fonts(fonts);
+                }
+                ctx.set_pixels_per_point(scale);
+                for source in [
+                    "Switch to `master`, delete `main`, and keep other branches unchanged.",
+                    "- `/Users/user/personal/pui` is now on `master`.",
+                    "## Switch to `master` now",
+                    "**Switch to `master` now**",
+                ] {
+                    for width in [230.0, 700.0] {
+                        let (texts, _) = render(&ctx, source, width);
+                        for text in texts {
+                            for row in &text.galley.rows {
+                                let baseline = row.glyphs[0].pos.y;
+                                for glyph in &row.glyphs {
+                                    assert!(
+                                        (glyph.pos.y - baseline).abs() <= 1.0,
+                                        "Inline glyph {:?} must share the prose baseline: {} != {baseline} ({source}, system={system_fonts}, scale={scale})",
+                                        glyph.chr,
+                                        glyph.pos.y,
+                                    );
+                                }
+                                assert_eq!(row.height(), 24.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn list_markers_inline_code_and_body_share_rows_without_double_spacing() {
         let ctx = egui::Context::default();
         theme::install(&ctx);
@@ -506,6 +552,39 @@ mod tests {
         (texts, rect)
     }
 
+    #[test]
+    fn hebrew_markdown_preserves_source_and_has_glyphs_in_all_formats() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for mode in [theme::Theme::Dark, theme::Theme::Light] {
+            mode.apply(&ctx);
+            let (texts, _) = render(
+                &ctx,
+                "שלום English 123\\n\\n**עברית מודגשת**\\n\\n`קוד בעברית`",
+                500.0,
+            );
+            for expected in ["שלום English 123", "עברית מודגשת", "קוד בעברית"]
+            {
+                let text = texts
+                    .iter()
+                    .find(|t| t.galley.job.text.contains(expected))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing {expected:?}: {:?}",
+                            texts.iter().map(|t| &t.galley.job.text).collect::<Vec<_>>()
+                        )
+                    });
+                for section in &text.galley.job.sections {
+                    ctx.fonts(|fonts| {
+                        assert!(fonts.has_glyphs(
+                            &section.format.font_id,
+                            &text.galley.job.text[section.byte_range.clone()]
+                        ))
+                    });
+                }
+            }
+        }
+    }
     #[test]
     fn tables_render_rows_alignment_inline_styles_and_surrounding_prose() {
         let source = "Before.\n\n| Usage | Key | Entries |\n| :--- | :---: | ---: |\n| **Backend** | `mock-key` | *One* and [two](https://example.com) |\n| Tools | a \\| b | |\n\nAfter.";

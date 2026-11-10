@@ -11,14 +11,28 @@ pub(super) enum Target {
 #[derive(Default)]
 pub(super) struct View {
     pub pending: Option<Target>,
-    job: Option<(Target, Receiver<Result<(), String>>)>,
+    jobs: Vec<(Target, Receiver<Result<(), String>>)>,
 }
 impl View {
+    // Task deletion retains its existing modal behavior; chats never block the workspace.
     pub fn in_progress(&self) -> bool {
-        self.job.is_some()
+        self.jobs
+            .iter()
+            .any(|(target, _)| matches!(target, Target::Task(_)))
     }
     pub fn confirming(&self) -> bool {
-        self.pending.is_some() || self.job.is_some()
+        self.pending.is_some() || self.in_progress()
+    }
+    fn contains(&self, target: &Target) -> bool {
+        self.jobs
+            .iter()
+            .any(|(pending, _)| match (pending, target) {
+                (Target::Chat(a), Target::Chat(b)) => same(a, b),
+                _ => pending == target,
+            })
+    }
+    pub fn deleting_chat(&self, path: &Path) -> bool {
+        self.contains(&Target::Chat(path.into()))
     }
 }
 fn same(a: &Path, b: &Path) -> bool {
@@ -26,12 +40,15 @@ fn same(a: &Path, b: &Path) -> bool {
 }
 impl Pui {
     pub(super) fn request_delete(&mut self, target: Target) {
-        if self.deletion.job.is_none() {
+        if !self.deletion.in_progress() && !self.deletion.contains(&target) {
             self.deletion.pending = Some(target);
             self.model_picker_open = false;
         }
     }
     fn deletion_blocked(&self, target: &Target) -> Option<String> {
+        if self.deletion.contains(target) {
+            return Some("This item is already being deleted.".into());
+        }
         if self.demo {
             return Some("Design preview only. No saved files can be deleted here.".into());
         }
@@ -110,36 +127,50 @@ impl Pui {
             }
         }
     }
-    pub(super) fn deletion_dialog(&mut self, ctx: &egui::Context) {
-        if let Some((target, rx)) = &self.deletion.job {
-            match rx.try_recv() {
-                Ok(result) => {
-                    let target = target.clone();
-                    self.deletion.job = None;
-                    match result {
-                        Ok(()) => self.finish_delete(&target),
-                        Err(error) => self.state.error = Some(format!("Deletion failed: {error}")),
+    pub(super) fn poll_deletions(&mut self) {
+        let mut index = 0;
+        while index < self.deletion.jobs.len() {
+            let result = match self.deletion.jobs[index].1.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Disconnected) => Err(
+                    "Deletion worker disconnected. Check the saved files before retrying.".into(),
+                ),
+                Err(mpsc::TryRecvError::Empty) => {
+                    index += 1;
+                    continue;
+                }
+            };
+            let (target, _) = self.deletion.jobs.remove(index);
+            match result {
+                Ok(()) => {
+                    self.finish_delete(&target);
+                    if matches!(target, Target::Chat(_))
+                        && notifications::Notifications::supported()
+                    {
+                        self.notifications.complete(
+                            &self.ctx,
+                            notifications::NotificationSettings {
+                                sound: self.prefs.notifications.sound,
+                                desktop: false,
+                            },
+                            "Chat deleted",
+                        );
                     }
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.deletion.job = None;
-                    self.state.error = Some(
-                        "Deletion worker disconnected. Check the saved files before retrying."
-                            .into(),
-                    );
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+                Err(error) => self.state.error = Some(format!("Deletion failed: {error}")),
             }
         }
-        let Some(target) = self
-            .deletion
-            .pending
-            .clone()
-            .or_else(|| self.deletion.job.as_ref().map(|(t, _)| t.clone()))
-        else {
+    }
+    pub(super) fn deletion_dialog(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.deletion.pending.clone().or_else(|| {
+            self.deletion
+                .jobs
+                .iter()
+                .find_map(|(t, _)| matches!(t, Target::Task(_)).then(|| t.clone()))
+        }) else {
             return;
         };
-        let working = self.deletion.job.is_some();
+        let working = self.deletion.contains(&target);
         let blocked = self.deletion_blocked(&target);
         let (title, description, confirm, name) = match &target {
             Target::Chat(path) => (
@@ -301,7 +332,27 @@ impl Pui {
                 rx
             }
         };
-        self.deletion.job = Some((target, rx));
+        self.deletion.pending = None;
+        self.deletion.jobs.push((target.clone(), rx));
+        if let Target::Chat(path) = &target {
+            // Detach in-memory links now too, so edits made while the worker
+            // runs cannot save a stale parent relationship back to task storage.
+            self.tasks.detach_deleted_chat(path);
+            if self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| same(Path::new(p), path))
+            {
+                let models = self.state.models.clone();
+                self.ensure_agent();
+                self.park_tree();
+                self.state.models = models;
+                self.new_chat = true;
+                self.output_revision = u64::MAX;
+                self.focus_composer = true;
+            }
+        }
         Ok(())
     }
     fn forget_session(&mut self, path: &Path) {
@@ -386,3 +437,7 @@ impl Pui {
 #[cfg(test)]
 #[path = "deletion_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deletion_background_tests.rs"]
+mod background_tests;

@@ -263,6 +263,7 @@ impl Pui {
                 cwd: project.clone(),
                 project: project.clone(),
                 title: title.clone(),
+                created: saved.and_then(|s| s.created),
                 modified: std::time::SystemTime::now(),
             };
             cards.push(AgentCard {
@@ -328,6 +329,11 @@ impl Pui {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.bg).inner_margin(24))
             .show(ctx, |ui| {
+                // Keep overflow discoverable and draggable, including without a trackpad.
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                // Nested scrollers consume only their own axis, not a wheel gesture
+                // intended for a column that has reached its top/bottom.
+                ui.style_mut().always_scroll_the_only_direction = false;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Agents board").size(25.0).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -373,7 +379,7 @@ impl Pui {
                 let height = (ui.available_height() - 58.0).max(180.0);
                 let gap = 14.0;
                 let width = ((ui.available_width() - gap * (statuses.len() - 1) as f32) / statuses.len() as f32).max(230.0);
-                egui::ScrollArea::horizontal().id_salt("agents-board-horizontal")
+                let board_scroll = egui::ScrollArea::horizontal().id_salt("agents-board-horizontal")
                     .max_height(height + 22.0).auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.x = gap;
                     ui.horizontal_top(|ui| {
@@ -385,14 +391,15 @@ impl Pui {
                                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                                 ui.set_width(width - 22.0);
                                 ui.set_min_height(height);
+                                let bottom = ui.cursor().top() + height;
                                 ui.horizontal(|ui| {
                                     dot(ui, status.color(colors));
                                     ui.label(RichText::new(status.label()).size(12.0));
                                     ui.label(RichText::new(items.len().to_string()).size(10.0).color(colors.dim));
                                 });
                                 ui.add_space(12.0);
-                                egui::ScrollArea::vertical().id_salt(("agents-board-column", status.label()))
-                                    .max_height((height - 42.0).max(100.0)).auto_shrink([false, false])
+                                let scroll = egui::ScrollArea::vertical().id_salt(("agents-board-column", status.label()))
+                                    .max_height((bottom - ui.cursor().top()).max(1.0)).auto_shrink([false, false])
                                     .show(ui, |ui| {
                                     if items.is_empty() {
                                         ui.label(RichText::new(if visible.is_empty() && cards.is_empty() {
@@ -407,11 +414,20 @@ impl Pui {
                                         ui.add_space(10.0);
                                     }
                                 });
+                                #[cfg(test)]
+                                ctx.data_mut(|data| data.insert_temp(egui::Id::new(("kanban-scroll", status.label())),
+                                    (scroll.id, scroll.inner_rect, scroll.content_size)));
+                                #[cfg(not(test))]
+                                let _ = scroll;
                                 });
                             });
                         }
                     });
                 });
+                #[cfg(test)]
+                ctx.data_mut(|data| data.insert_temp(egui::Id::new("kanban-horizontal-scroll"), board_scroll.id));
+                #[cfg(not(test))]
+                let _ = board_scroll;
                 ui.add_space(10.0);
                 ui.label(RichText::new("Click an agent to open its session · Statuses update automatically, no manual dragging")
                     .size(10.0).color(colors.dim));

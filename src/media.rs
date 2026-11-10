@@ -210,8 +210,14 @@ impl Gallery {
         let attachment = image.clone();
         let tx = self.tx.clone();
         let ctx = ui.ctx().clone();
+        // Keep the source resolution in the viewer, limited only by the GPU.
+        let side = if large {
+            ui.input(|i| i.max_texture_side).min(16000) as u32
+        } else {
+            480
+        };
         thread::spawn(move || {
-            let result = decode(&attachment, if large { 1600 } else { 480 });
+            let result = decode(&attachment, side);
             let _ = tx.send(Decoded {
                 key: attachment.key,
                 large,
@@ -379,6 +385,7 @@ impl Gallery {
                 ui.set_max_size(screen.size());
                 ui.painter()
                     .rect_filled(screen, 0, egui::Color32::from_black_alpha(245));
+                let backdrop = ui.interact(screen, ui.id().with("backdrop"), egui::Sense::click());
                 let toolbar = egui::Rect::from_min_size(
                     screen.min + egui::vec2(18.0, 12.0),
                     Vec2::new(screen.width() - 36.0, 36.0),
@@ -393,19 +400,14 @@ impl Gallery {
                                 .color(egui::Color32::WHITE),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("× Close").clicked() {
+                            if crate::icons::button(
+                                ui,
+                                crate::icons::Icon::Close,
+                                "Close image · Esc",
+                            )
+                            .clicked()
+                            {
                                 close = true;
-                            }
-                            if ui.button("Fit").clicked() {
-                                self.zoom = 1.0;
-                                self.pan = Vec2::ZERO;
-                            }
-                            if ui.button("+").on_hover_text("Zoom in").clicked() {
-                                self.zoom = (self.zoom * 1.25).min(8.0);
-                            }
-                            ui.label(format!("{:.0}%", self.zoom * 100.0));
-                            if ui.button("−").on_hover_text("Zoom out").clicked() {
-                                self.zoom = (self.zoom / 1.25).max(0.25);
                             }
                         });
                     },
@@ -414,35 +416,70 @@ impl Gallery {
                     screen.min + egui::vec2(64.0, 64.0),
                     screen.max - egui::vec2(64.0, if count > 1 { 110.0 } else { 28.0 }),
                 );
-                let response =
-                    ui.interact(stage, ui.id().with("stage"), egui::Sense::click_and_drag());
-                if response.dragged() {
-                    self.pan += ctx.input(|i| i.pointer.delta());
-                }
-                if response.hovered() {
-                    response.clone().on_hover_cursor(if self.zoom > 1.0 {
-                        egui::CursorIcon::Grab
-                    } else {
-                        egui::CursorIcon::ZoomIn
-                    });
-                }
-                if response.double_clicked() {
-                    self.zoom = 1.0;
-                    self.pan = Vec2::ZERO;
-                }
-                if response.hovered() {
-                    ctx.input_mut(|i| {
-                        let scroll = i.smooth_scroll_delta.y;
-                        i.smooth_scroll_delta = Vec2::ZERO;
-                        self.zoom =
-                            (self.zoom * (scroll * 0.003).exp() * i.zoom_delta()).clamp(0.25, 8.0);
-                    });
-                }
                 self.request(ui, &image, true);
                 match self.cache.get(&(image.key, true)).map(|c| &c.entry) {
                     Some(Entry::Ready(texture)) => {
-                        let size = fit(texture.size_vec2(), stage.size()) * self.zoom;
+                        // Texture dimensions are physical pixels; egui uses logical points.
+                        let native = texture.size_vec2() / ctx.pixels_per_point();
+                        let fitted = fit(native, stage.size());
+                        let size = fitted * self.zoom;
+                        self.pan = clamp_pan(self.pan, size, stage.size());
                         let rect = egui::Rect::from_center_size(stage.center() + self.pan, size);
+                        let can_pan = size.x > stage.width() || size.y > stage.height();
+                        let response = ui.interact(
+                            rect.intersect(stage),
+                            ui.id().with("image"),
+                            if can_pan {
+                                egui::Sense::click_and_drag()
+                            } else {
+                                egui::Sense::click()
+                            },
+                        );
+                        if can_pan && response.dragged() {
+                            self.pan += ctx.input(|i| i.pointer.delta());
+                        }
+                        let old_zoom = self.zoom;
+                        if response.clicked() {
+                            self.zoom = if self.zoom > 1.0 {
+                                1.0
+                            } else {
+                                (native.x / fitted.x).clamp(2.0, 8.0)
+                            };
+                        } else if response.hovered() {
+                            ctx.input_mut(|i| {
+                                let scroll = i.smooth_scroll_delta.y;
+                                i.smooth_scroll_delta = Vec2::ZERO;
+                                self.zoom = (self.zoom * (scroll * 0.003).exp() * i.zoom_delta())
+                                    .clamp(1.0, 8.0);
+                            });
+                        }
+                        if self.zoom != old_zoom {
+                            ctx.request_repaint();
+                            // Keep the detail under the pointer in place when zooming.
+                            let anchor = response.hover_pos().unwrap_or(stage.center());
+                            let ratio = self.zoom / old_zoom;
+                            self.pan = self.pan * ratio + (stage.center() - anchor) * (ratio - 1.0);
+                        }
+                        let size = fitted * self.zoom;
+                        self.pan = clamp_pan(self.pan, size, stage.size());
+                        let rect = egui::Rect::from_center_size(stage.center() + self.pan, size);
+                        response
+                            .on_hover_cursor(
+                                if can_pan && ctx.input(|i| i.pointer.is_decidedly_dragging()) {
+                                    egui::CursorIcon::Grabbing
+                                } else if self.zoom > 1.0 {
+                                    egui::CursorIcon::ZoomOut
+                                } else {
+                                    egui::CursorIcon::ZoomIn
+                                },
+                            )
+                            .on_hover_text(if can_pan {
+                                "Click to fit · Scroll to zoom · Drag to pan"
+                            } else if self.zoom > 1.0 {
+                                "Click to fit · Scroll to zoom"
+                            } else {
+                                "Click to zoom in · Scroll to zoom"
+                            });
                         let mut stage_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .id_salt("image-stage-paint")
@@ -532,6 +569,7 @@ impl Gallery {
                             });
                     });
                 }
+                close |= backdrop.clicked();
             });
         if let Some(index) = next {
             self.navigate(index);
@@ -545,6 +583,10 @@ impl Gallery {
 }
 fn fit(size: Vec2, max: Vec2) -> Vec2 {
     size * (max.x / size.x).min(max.y / size.y).min(1.0)
+}
+fn clamp_pan(pan: Vec2, size: Vec2, viewport: Vec2) -> Vec2 {
+    let limit = ((size - viewport) * 0.5).max(Vec2::ZERO);
+    pan.clamp(-limit, limit)
 }
 fn decode(image: &Attachment, side: u32) -> Result<ColorImage, String> {
     if !matches!(
@@ -578,11 +620,13 @@ fn decode(image: &Attachment, side: u32) -> Result<ColorImage, String> {
     limits.max_image_width = Some(16000);
     limits.max_image_height = Some(16000);
     reader.limits(limits);
-    let decoded = reader
-        .decode()
-        .map_err(|_| "Could not decode image")?
-        .thumbnail(side, side)
-        .into_rgba8();
+    let decoded = reader.decode().map_err(|_| "Could not decode image")?;
+    let decoded = if dimensions.0 > side || dimensions.1 > side {
+        decoded.resize(side, side, image::imageops::FilterType::Lanczos3)
+    } else {
+        decoded
+    }
+    .into_rgba8();
     Ok(ColorImage::from_rgba_unmultiplied(
         [decoded.width() as usize, decoded.height() as usize],
         decoded.as_raw(),
@@ -601,6 +645,223 @@ mod tests {
         let image = decode(&attachment, 128).unwrap();
         assert_eq!(image.size, [128, 128]);
     }
+    #[test]
+    fn viewer_decode_preserves_source_pixels_and_respects_gpu_limit() {
+        let source = image::RgbaImage::from_fn(2400, 24, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, (x % 2 * 255) as u8, 255])
+        });
+        let mut bytes = Cursor::new(Vec::new());
+        source
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let attachment = Attachment::from_bytes(bytes.get_ref()).unwrap();
+        let full = decode(&attachment, 4096).unwrap();
+        assert_eq!(full.size, [2400, 24]);
+        for x in [0, 1, 1599, 2399] {
+            assert_eq!(
+                full.pixels[x],
+                egui::Color32::from_rgba_unmultiplied(
+                    source.get_pixel(x as u32, 0).0[0],
+                    0,
+                    source.get_pixel(x as u32, 0).0[2],
+                    255
+                )
+            );
+        }
+        assert_eq!(decode(&attachment, 800).unwrap().size, [800, 8]);
+        assert_eq!(decode(&attachment, 480).unwrap().size, [480, 5]);
+    }
+    #[test]
+    fn pan_is_clamped_independently_on_each_overflowing_axis() {
+        let viewport = egui::vec2(1000.0, 700.0);
+        let pan = egui::vec2(900.0, -900.0);
+        assert_eq!(clamp_pan(pan, viewport, viewport), Vec2::ZERO);
+        assert_eq!(clamp_pan(pan, viewport * 0.5, viewport), Vec2::ZERO);
+        assert_eq!(
+            clamp_pan(pan, egui::vec2(1400.0, 500.0), viewport),
+            egui::vec2(200.0, 0.0)
+        );
+        assert_eq!(
+            clamp_pan(pan, egui::vec2(800.0, 1100.0), viewport),
+            egui::vec2(0.0, -200.0)
+        );
+    }
+
+    struct ViewerFixture {
+        ctx: egui::Context,
+        gallery: Gallery,
+        time: f64,
+    }
+    impl ViewerFixture {
+        fn new(size: [usize; 2], pixels_per_point: f32, count: usize) -> Self {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            ctx.set_pixels_per_point(pixels_per_point);
+            let mut gallery = Gallery::default();
+            let images: Vec<_> = (1..=count)
+                .map(|key| Attachment {
+                    key: key as u64,
+                    data: "unused fixture".into(),
+                    mime: "image/png".into(),
+                    file: None,
+                })
+                .collect();
+            for image in &images {
+                for large in [false, true] {
+                    gallery.cache.insert(
+                        (image.key, large),
+                        Cached {
+                            entry: Entry::Ready(ctx.load_texture(
+                                format!("fixture-{}-{large}", image.key),
+                                ColorImage::filled(
+                                    if large { size } else { [8, 8] },
+                                    egui::Color32::WHITE,
+                                ),
+                                TextureOptions::LINEAR,
+                            )),
+                            used: 0,
+                        },
+                    );
+                }
+            }
+            gallery.open(&images, 0);
+            let mut fixture = Self {
+                ctx,
+                gallery,
+                time: 0.0,
+            };
+            fixture.frame(vec![]);
+            fixture.frame(vec![]);
+            fixture
+        }
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.time += 0.1;
+            let _ = self.ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 800.0),
+                    )),
+                    time: Some(self.time),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| self.gallery.viewer(ctx),
+            );
+        }
+        fn pointer(&mut self, pos: egui::Pos2, pressed: bool) {
+            self.frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        fn click(&mut self, pos: egui::Pos2) {
+            self.pointer(pos, true);
+            self.pointer(pos, false);
+            // egui hit-tests against the preceding frame's widget geometry.
+            self.frame(vec![]);
+        }
+        fn drag(&mut self, from: egui::Pos2, to: egui::Pos2) {
+            self.pointer(from, true);
+            self.frame(vec![egui::Event::PointerMoved(to)]);
+            self.pointer(to, false);
+        }
+    }
+
+    #[test]
+    fn image_click_toggles_zoom_without_closing_and_drag_does_not_click() {
+        let mut fixture = ViewerFixture::new([800, 400], 1.0, 1);
+        let center = egui::pos2(600.0, 418.0);
+        fixture.drag(center, center + egui::vec2(50.0, 50.0));
+        assert_eq!(fixture.gallery.pan, Vec2::ZERO);
+        assert_eq!(fixture.gallery.zoom, 1.0);
+        fixture.click(center);
+        assert_eq!(fixture.gallery.zoom, 2.0);
+        assert!(fixture.gallery.is_open());
+        fixture.drag(center, center + egui::vec2(100.0, 150.0));
+        assert_eq!(fixture.gallery.pan, egui::vec2(100.0, 46.0));
+        assert_eq!(fixture.gallery.zoom, 2.0);
+        assert!(fixture.gallery.is_open());
+        fixture.click(center);
+        assert_eq!(fixture.gallery.zoom, 1.0);
+        assert_eq!(fixture.gallery.pan, Vec2::ZERO);
+        assert!(fixture.gallery.is_open());
+    }
+    #[test]
+    fn small_zoomed_images_cannot_pan() {
+        let mut fixture = ViewerFixture::new([160, 80], 1.0, 1);
+        let center = egui::pos2(600.0, 418.0);
+        fixture.click(center);
+        fixture.drag(center, center + egui::vec2(50.0, 40.0));
+        assert_eq!(fixture.gallery.zoom, 2.0);
+        assert_eq!(fixture.gallery.pan, Vec2::ZERO);
+        assert!(fixture.gallery.is_open());
+    }
+    #[test]
+    fn wheel_and_pinch_zoom_anchor_to_pointer_and_cannot_shrink_below_fit() {
+        let mut fixture = ViewerFixture::new([1600, 800], 1.0, 1);
+        let pointer = egui::pos2(800.0, 418.0);
+        fixture.frame(vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::Zoom(2.0),
+        ]);
+        assert_eq!(fixture.gallery.zoom, 2.0);
+        assert_eq!(fixture.gallery.pan, egui::vec2(-200.0, 0.0));
+        fixture.frame(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 40.0),
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(fixture.gallery.zoom > 2.0);
+        fixture.frame(vec![egui::Event::Zoom(0.01)]);
+        assert_eq!(fixture.gallery.zoom, 1.0);
+        assert_eq!(fixture.gallery.pan, Vec2::ZERO);
+        assert!(fixture.gallery.is_open());
+    }
+    #[test]
+    fn dragging_outside_image_does_not_dismiss_viewer() {
+        let mut fixture = ViewerFixture::new([800, 400], 1.0, 1);
+        fixture.click(egui::pos2(600.0, 418.0));
+        fixture.drag(egui::pos2(600.0, 418.0), egui::pos2(20.0, 200.0));
+        assert_eq!(fixture.gallery.zoom, 2.0);
+        assert!(fixture.gallery.is_open());
+    }
+    #[test]
+    fn retina_images_are_sized_in_physical_pixels() {
+        let mut fixture = ViewerFixture::new([800, 400], 2.0, 1);
+        // At 2x this image is 400 points wide, not 800.
+        fixture.click(egui::pos2(850.0, 418.0));
+        assert!(!fixture.gallery.is_open());
+    }
+    #[test]
+    fn backdrop_closes_both_inside_and_outside_stage() {
+        for pos in [egui::pos2(100.0, 418.0), egui::pos2(20.0, 200.0)] {
+            let mut fixture = ViewerFixture::new([800, 400], 1.0, 1);
+            fixture.click(pos);
+            assert!(
+                !fixture.gallery.is_open(),
+                "Backdrop click at {pos:?} must close"
+            );
+        }
+    }
+    #[test]
+    fn viewer_controls_navigate_without_closing_and_close_icon_works() {
+        let mut fixture = ViewerFixture::new([800, 400], 1.0, 3);
+        fixture.click(egui::pos2(1170.0, 377.0));
+        assert_eq!(fixture.gallery.index, 1);
+        assert!(fixture.gallery.is_open());
+        fixture.click(egui::pos2(100.0, 735.0));
+        assert_eq!(fixture.gallery.index, 0);
+        assert!(fixture.gallery.is_open());
+        fixture.click(egui::pos2(1168.0, 30.0));
+        assert!(!fixture.gallery.is_open());
+    }
+
     #[test]
     fn visible_attachment_creates_texture_and_opens_viewer() {
         let ctx = egui::Context::default();

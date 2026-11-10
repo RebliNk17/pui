@@ -1,3 +1,4 @@
+use super::privacy;
 use cef::{
     application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol},
     *,
@@ -53,6 +54,9 @@ pub fn prepare_application() {
 wrap_browser_process_handler! {
     struct PumpHandler { ctx: eframe::egui::Context }
     impl BrowserProcessHandler {
+        fn on_before_child_process_launch(&self, command_line: Option<&mut CommandLine>) {
+            if let Some(command_line) = command_line { privacy::configure_command_line(command_line); }
+        }
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
             self.ctx.request_repaint_after(std::time::Duration::from_millis(delay_ms.max(0) as u64));
         }
@@ -61,6 +65,9 @@ wrap_browser_process_handler! {
 wrap_app! {
     struct ChromiumApp { pump: BrowserProcessHandler }
     impl App {
+        fn on_before_command_line_processing(&self, _process_type: Option<&CefString>, command_line: Option<&mut CommandLine>) {
+            if let Some(command_line) = command_line { privacy::configure_command_line(command_line); }
+        }
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> { Some(self.pump.clone()) }
     }
 }
@@ -84,10 +91,7 @@ impl Runtime {
         }
         let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
         let args = cef::args::Args::new();
-        let cache = dirs::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("pui/chromium")
-            .join(format!("process-{}", std::process::id()));
+        let storage = privacy::settings()?;
         let settings = Settings {
             external_message_pump: 1,
             command_line_args_disabled: 1,
@@ -109,9 +113,8 @@ impl Runtime {
                     .to_string()
                     .as_str(),
             ),
-            root_cache_path: CefString::from(cache.display().to_string().as_str()),
             log_severity: LogSeverity::DISABLE,
-            ..Default::default()
+            ..storage
         };
         let mut app = ChromiumApp::new(PumpHandler::new(ctx.clone()));
         if cef::initialize(
@@ -122,6 +125,12 @@ impl Runtime {
         ) != 1
         {
             return Err("Chromium initialization failed.".into());
+        }
+        if !privacy::command_line_is_private() {
+            cef::shutdown();
+            return Err(
+                "Chromium did not activate Keychain-free preview mode; browser disabled.".into(),
+            );
         }
         INITIALIZED.set(true);
         Ok(Self {

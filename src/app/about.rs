@@ -44,6 +44,23 @@ pub(super) fn show(ctx: &egui::Context, open: &mut bool) {
                 ui.add(egui::Label::new(theme::small(ui, "Pi handles models, tools and authentication. Pui provides the desktop workspace.")).wrap());
                 ui.add(egui::Label::new(theme::small(ui, "Local build · signing and notarization status are not verified by this panel.")).wrap());
             });
+        crate::section::Section::new("Font license")
+            .summary("Bundled typeface attribution")
+            .icon(Icon::File)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(theme::small(
+                                ui,
+                                include_str!("../../assets/fonts/OFL-NotoSansHebrew.txt"),
+                            ))
+                            .wrap()
+                            .selectable(true),
+                        );
+                    });
+            });
         ui.add_space(14.0);
         ui.vertical_centered(|ui| {
             close |= prompt_ui::button(ui, "Done", prompt_ui::Button::Secondary, true).clicked();

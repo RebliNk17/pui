@@ -244,6 +244,7 @@ impl Pui {
                 cwd: task.source.clone(),
                 project: task.source,
                 title: "Task conversation".into(),
+                created: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
             });
         }
