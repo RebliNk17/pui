@@ -282,14 +282,15 @@ fn run(
                 Ok(line) => match serde_json::from_slice::<Value>(&line) {
                     Ok(record) => {
                         let event = if record["type"] == "response"
-                            && record["command"] == "get_messages"
+                            && record["command"] == "get_entries"
                             && record["success"] == true
                         {
-                            Event::History(crate::protocol::parse_history(
-                                record["data"]["messages"]
+                            Event::History(crate::history::from_entries(
+                                record["data"]["entries"]
                                     .as_array()
                                     .map(Vec::as_slice)
                                     .unwrap_or_default(),
+                                record["data"]["leafId"].as_str(),
                             ))
                         } else {
                             Event::Record(record)
@@ -427,13 +428,17 @@ mod tests {
         }
         assert!(settled && got_unicode && got_image);
         tx.send(Request::Record(
-            json!({"id":"history","type":"get_messages"}),
+            json!({"id":"history","type":"get_entries"}),
         ))
         .unwrap();
         match events.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::History(messages) => {
-                assert_eq!(messages.len(), 1);
+                assert_eq!(messages.len(), 4);
                 assert_eq!(messages[0].text, "saved history");
+                assert_eq!(messages[1].text, "original answer");
+                assert_eq!(messages[2].role, "compaction");
+                assert!(messages[2].text.is_empty());
+                assert_eq!(messages[3].text, "after compaction");
             }
             _ => panic!("History should be hydrated on the reader thread"),
         }

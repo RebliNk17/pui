@@ -192,7 +192,13 @@ impl Pui {
                 .map(|_| worker_launch(record.access == "read-only", &record.name, None, None));
             let state = State {
                 session_file: Some(record.path.display().to_string()),
-                session_name: record.name.clone(),
+                // Root names may have come from a compacted context. Rediscover
+                // their original title instead of treating that label as a rename.
+                session_name: if record.parent.is_some() {
+                    record.name.clone()
+                } else {
+                    String::new()
+                },
                 ..Default::default()
             };
             self.agents.parked.insert(
@@ -479,7 +485,7 @@ impl Pui {
         self.connected = false;
         for kind in [
             "get_state",
-            "get_messages",
+            "get_entries",
             "get_commands",
             "get_available_models",
             "get_available_thinking_levels",
@@ -1499,6 +1505,85 @@ mod tests {
         assert!(app.agents.parked[&child].client.is_none());
         assert!(app.agents.nodes[&child].launch.as_ref().unwrap().readonly);
         assert!(app.agents.nodes[&child].stopped);
+        assert!(app.agents.parked[&parent].state.session_name.is_empty());
+        let session = Session {
+            path: app.agents.nodes[&parent].path.clone().unwrap(),
+            cwd: app.prefs.cwd.clone(),
+            project: app.prefs.cwd.clone(),
+            title: "Original prompt before compaction".into(),
+            created: None,
+            modified: std::time::SystemTime::now(),
+        };
+        assert_eq!(
+            app.session_title(&session),
+            "Original prompt before compaction"
+        );
+        assert_eq!(
+            app.agents.parked[&child].state.session_name,
+            "Scoped reader"
+        );
+    }
+    #[test]
+    fn full_history_refreshes_after_settle_and_manual_compaction_without_losing_draft() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let (client, events, commands) = rpc::Client::stub_with_commands();
+        app.client = Some(client);
+        app.draft = "unsent draft".into();
+        app.state.messages = vec![Message {
+            role: "user".into(),
+            text: "original prompt".into(),
+            ..Default::default()
+        }];
+        events
+            .send(rpc::Event::Record(json!({"type":"agent_settled"})))
+            .unwrap();
+        app.poll_rpc();
+        let sent: Vec<_> = (0..3)
+            .map(|_| {
+                commands
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            sent.iter().filter(|c| c["type"] == "get_entries").count(),
+            1
+        );
+        assert!(!sent.iter().any(|c| c["type"] == "get_messages"));
+        assert_eq!(app.state.messages[0].text, "original prompt");
+        events.send(rpc::Event::Record(json!({"type":"compaction_end","reason":"manual","result":{"summary":"hidden"},"aborted":false}))).unwrap();
+        app.poll_rpc();
+        assert_eq!(
+            commands
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["type"],
+            "get_entries"
+        );
+        events
+            .send(rpc::Event::Record(
+                json!({"type":"compaction_end","reason":"manual","aborted":true}),
+            ))
+            .unwrap();
+        app.poll_rpc();
+        assert!(!commands.try_iter().any(|c| c["type"] == "get_entries"));
+        events
+            .send(rpc::Event::History(vec![
+                Message {
+                    role: "user".into(),
+                    text: "original prompt".into(),
+                    ..Default::default()
+                },
+                Message {
+                    role: "compaction".into(),
+                    ..Default::default()
+                },
+            ]))
+            .unwrap();
+        app.poll_rpc();
+        assert_eq!(app.state.messages.len(), 2);
+        assert_eq!(app.state.messages[1].role, "compaction");
+        assert_eq!(app.draft, "unsent draft");
     }
     #[test]
     fn stopped_worker_reconnect_retains_readonly_launch_and_its_session() {

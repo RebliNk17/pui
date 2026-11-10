@@ -15,8 +15,14 @@ for line in sys.stdin.buffer:
     data = {}
     if kind == "get_state":
         data = {"model": {"id": "fixture-model"}, "thinkingLevel": "high", "isStreaming": False}
-    if kind == "get_messages":
-        data = {"messages": [{"role": "user", "content": "saved history"}]}
+    if kind == "get_entries":
+        data = {"entries": [
+            {"type": "message", "id": "u", "parentId": None, "message": {"role": "user", "content": "saved history"}},
+            {"type": "message", "id": "a", "parentId": "u", "message": {"role": "assistant", "content": "original answer"}},
+            {"type": "compaction", "id": "c", "parentId": "a", "summary": "Hidden summary", "firstKeptEntryId": "a"},
+            {"type": "message", "id": "v", "parentId": "c", "message": {"role": "user", "content": "after compaction"}},
+            {"type": "message", "id": "other", "parentId": "u", "message": {"role": "user", "content": "abandoned branch"}},
+        ], "leafId": "v"}
     if kind == "prompt":
         emit({"type": "agent_start"})
         content = ([{"type": "text", "text": command["message"]}] + command["images"]) if command.get("images") else command["message"]

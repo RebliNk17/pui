@@ -558,7 +558,7 @@ impl Pui {
             self.client = Some(rpc::Client::stub());
         }
         self.send(protocol::command("get_state"));
-        self.send(protocol::command("get_messages"));
+        self.send(protocol::command("get_entries"));
         self.send(protocol::command("get_available_models"));
         self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_available_thinking_levels"));
@@ -786,7 +786,7 @@ impl Pui {
                     }
                     if kind == "response"
                         && !success
-                        && matches!(command.as_str(), "get_messages" | "new_session")
+                        && matches!(command.as_str(), "get_entries" | "new_session")
                     {
                         self.loading_chat = false;
                         self.pending_session = None;
@@ -816,10 +816,14 @@ impl Pui {
                         } else {
                             Value::Null
                         };
+                    let manual_compaction = record["reason"] == "manual"
+                        && record["result"].is_object()
+                        && record["aborted"] != true
+                        && !record["errorMessage"].is_string();
                     let user_message = matches!(kind.as_str(), "message_start" | "message_end")
                         && record["message"]["role"] == "user";
                     self.state.apply(record);
-                    if user_message || (kind == "response" && command == "get_messages") {
+                    if user_message || (kind == "response" && command == "get_entries") {
                         self.state.reconcile_pending_messages();
                     }
                     self.interrupt_response(&record_for_interrupt);
@@ -829,7 +833,7 @@ impl Pui {
                     if kind == "response" && command == "switch_session" {
                         if success && !cancelled {
                             self.send(protocol::command("get_state"));
-                            self.send(protocol::command("get_messages"));
+                            self.send(protocol::command("get_entries"));
                             self.send(protocol::command("get_available_thinking_levels"));
                             self.send(protocol::command("get_session_stats"));
                         } else {
@@ -843,8 +847,13 @@ impl Pui {
                                 );
                             }
                             self.send(protocol::command("get_state"));
-                            self.send(protocol::command("get_messages"));
+                            self.send(protocol::command("get_entries"));
                         }
+                    }
+                    // Boundary-hook compactions need not emit compaction_end.
+                    // Refresh at settle too, when Pi has persisted the full turn.
+                    if kind == "agent_settled" || (kind == "compaction_end" && manual_compaction) {
+                        self.send(protocol::command("get_entries"));
                     }
                     if kind == "response" && success && command == "prompt" {
                         self.send(protocol::command("get_commands"));
@@ -869,7 +878,7 @@ impl Pui {
                         self.send(protocol::command("get_state"));
                         self.send(protocol::command("get_available_thinking_levels"));
                         if command == "new_session" {
-                            self.send(protocol::command("get_messages"));
+                            self.send(protocol::command("get_entries"));
                             self.send(protocol::command("get_session_stats"));
                         }
                     }

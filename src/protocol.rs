@@ -216,6 +216,15 @@ pub fn content_text(content: &Value) -> String {
 
 impl Message {
     pub fn from_json(value: &Value) -> Self {
+        // A compaction is a display boundary, never assistant prose or an
+        // expandable summary. Also sanitize legacy compacted-context responses.
+        if matches!(string(value, "role"), "compaction" | "compactionSummary") {
+            return Self {
+                role: "compaction".into(),
+                timestamp: value["timestamp"].as_i64().unwrap_or_default(),
+                ..Default::default()
+            };
+        }
         let mut message = Self {
             role: string(value, "role").to_owned(),
             text: content_text(&value["content"]),
@@ -268,7 +277,7 @@ impl Message {
         if input + read + write > 0.0 {
             message.cached_pct = Some(100.0 * read / (input + read + write));
         }
-        if message.role == "compactionSummary" || message.role == "branchSummary" {
+        if message.role == "branchSummary" {
             message.text = string(value, "summary").to_owned();
         }
         if message.role == "bashExecution" {
@@ -336,10 +345,11 @@ impl State {
     }
 
     pub fn apply(&mut self, event: Value) {
-        if event["type"] == "message_end" || event["command"] == "get_messages" {
+        let history = matches!(string(&event, "command"), "get_messages" | "get_entries");
+        if event["type"] == "message_end" || history {
             self.prose_revision = self.prose_revision.wrapping_add(1);
         }
-        if event["type"] == "tool_execution_end" || event["command"] == "get_messages" {
+        if event["type"] == "tool_execution_end" || history {
             self.outputs_revision = self.outputs_revision.wrapping_add(1);
         }
         if matches!(
@@ -350,7 +360,7 @@ impl State {
                 | "tool_execution_start"
                 | "tool_execution_update"
                 | "tool_execution_end"
-        ) || (event["command"] == "get_messages")
+        ) || history
         {
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
         }
@@ -436,6 +446,16 @@ impl State {
                         self.compacting = data["isCompacting"] == true;
                         self.session_name = string(data, "sessionName").to_owned();
                         self.session_file = data["sessionFile"].as_str().map(str::to_owned);
+                    }
+                    "get_entries" => {
+                        self.stream = None;
+                        self.messages = crate::history::from_entries(
+                            data["entries"]
+                                .as_array()
+                                .map(Vec::as_slice)
+                                .unwrap_or_default(),
+                            data["leafId"].as_str(),
+                        );
                     }
                     "get_messages" => {
                         self.stream = None;
@@ -836,6 +856,22 @@ pub fn command(kind: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_summaries_are_sanitized_to_display_boundaries() {
+        let messages = parse_history(&[json!({
+            "role":"compactionSummary", "summary":"private summary", "timestamp":123,
+            "content":[{"type":"text","text":"hidden content"},{"type":"thinking","thinking":"hidden thinking"},{"type":"image","data":"AA==","mimeType":"image/png"}],
+            "usage":{"cost":{"total":1.0}}
+        })]);
+        assert_eq!(messages.len(), 1);
+        let marker = &messages[0];
+        assert_eq!(marker.role, "compaction");
+        assert_eq!(marker.timestamp, 123);
+        assert!(marker.text.is_empty() && marker.thinking.is_empty());
+        assert!(marker.tools.is_empty() && marker.blocks.is_empty() && marker.images.is_empty());
+        assert_eq!(marker.cost, 0.0);
+    }
 
     #[test]
     fn chat_title_uses_first_prompt_until_pi_names_the_session() {

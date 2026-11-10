@@ -110,6 +110,33 @@ fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
     }
 }
 
+fn compaction_separator(ui: &mut egui::Ui) {
+    let colors = crate::theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let label = "Context compacted";
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.into(), FontId::proportional(11.0), colors.muted);
+    let center = rect.center();
+    let gap = (galley.size().x / 2.0 + 12.0).min(rect.width() / 2.0);
+    for (left, right) in [
+        (rect.left(), center.x - gap),
+        (center.x + gap, rect.right()),
+    ] {
+        ui.painter().line_segment(
+            [egui::pos2(left, center.y), egui::pos2(right, center.y)],
+            egui::Stroke::new(1.0, colors.border),
+        );
+    }
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(center - galley.size() / 2.0, galley, colors.muted);
+    response.on_hover_text(
+        "The model's context was summarized here. Earlier messages remain visible in this chat.",
+    );
+}
+
 /// Each sent message gets exactly one mark. Clustered marks spread near the pointer.
 pub fn zoom_markers(positions: &[f32], focus: Option<f32>, height: f32) -> Vec<f32> {
     let Some(focus) = focus else {
@@ -290,6 +317,7 @@ impl Transcript {
                 revision.hash(&mut hasher);
                 task_output.hash(&mut hasher);
                 for m in group {
+                    m.role.hash(&mut hasher);
                     m.revision.hash(&mut hasher);
                     m.text.len().hash(&mut hasher);
                     m.tools.len().hash(&mut hasher);
@@ -345,6 +373,11 @@ impl Transcript {
                                     {
                                         message_action = Some((start, action));
                                     }
+                                } else if matches!(
+                                    group[0].role.as_str(),
+                                    "compaction" | "compactionSummary"
+                                ) {
+                                    compaction_separator(ui);
                                 } else if group[0].role == "custom" {
                                     egui::Frame::new()
                                         .fill(colors.sidebar)
@@ -1213,6 +1246,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compaction_is_a_bounded_separator_not_an_assistant_summary() {
+        fn labels(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((t.galley.job.text.clone(), t.pos.y)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        labels(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for mode in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+            for width in [320.0, 900.0] {
+                let ctx = egui::Context::default();
+                crate::theme::install(&ctx);
+                mode.apply(&ctx);
+                let mut transcript = Transcript::default();
+                let messages = vec![
+                    Message {
+                        role: "user".into(),
+                        text: "Before compaction".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "compaction".into(),
+                        text: "HIDDEN SUMMARY".into(),
+                        thinking: "HIDDEN THINKING".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "assistant".into(),
+                        text: "After compaction".into(),
+                        ..Default::default()
+                    },
+                ];
+                let mut rendered = Vec::new();
+                for _ in 0..3 {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 850.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                transcript.show(
+                                    ui,
+                                    &messages,
+                                    "model",
+                                    "high",
+                                    false,
+                                    "compaction-test",
+                                );
+                            });
+                        },
+                    );
+                    rendered.clear();
+                    for shape in output.shapes {
+                        labels(&shape.shape, &mut rendered);
+                    }
+                }
+                let y = |text: &str| rendered.iter().find(|(t, _)| t == text).unwrap().1;
+                assert!(y("Before compaction") < y("Context compacted"));
+                assert!(y("Context compacted") < y("After compaction"));
+                assert!(!rendered.iter().any(|(t, _)| t.contains("HIDDEN")));
+                assert_eq!(transcript.markers.len(), 1);
+                assert_eq!(transcript.positions.len(), 3);
+                assert!(transcript.message_action.is_none());
+
+                let mut isolated = Transcript {
+                    message_actions_enabled: true,
+                    ..Default::default()
+                };
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 850.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            isolated.show(
+                                ui,
+                                &messages[1..2],
+                                "model",
+                                "high",
+                                false,
+                                "only-compaction",
+                            );
+                        });
+                    },
+                );
+                let mut marker_labels = Vec::new();
+                for shape in output.shapes {
+                    labels(&shape.shape, &mut marker_labels);
+                }
+                assert_eq!(
+                    marker_labels
+                        .iter()
+                        .map(|(t, _)| t.as_str())
+                        .collect::<Vec<_>>(),
+                    ["Context compacted"]
+                );
+                assert!(isolated.markers.is_empty());
+                assert!(isolated.message_action.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn timestamps_use_local_24_hour_time_and_date_only_outside_today() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:15:00+05:30").unwrap();
         for (time, expected) in [
@@ -1735,14 +1883,47 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let file = std::fs::read_to_string(path).unwrap();
-        let raw: Vec<serde_json::Value> = file
+        let entries: Vec<serde_json::Value> = file
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|e| e["type"] == "message")
-            .map(|e| e["message"].clone())
+            .filter(|e| e["type"] != "session")
             .collect();
-        let mut state = crate::protocol::State::default();
-        state.apply(serde_json::json!({"type":"response","command":"get_messages","success":true,"data":{"messages":raw}}));
+        let leaf = entries.last().and_then(|e| e["id"].as_str());
+        let mut state = crate::protocol::State {
+            messages: crate::history::from_entries(&entries, leaf),
+            ..Default::default()
+        };
+        let compactions = state
+            .messages
+            .iter()
+            .filter(|m| m.role == "compaction")
+            .count();
+        assert!(
+            state
+                .messages
+                .iter()
+                .filter(|m| m.role == "compaction")
+                .all(|m| m.text.is_empty())
+        );
+        let first_user = entries
+            .iter()
+            .find(|e| e["message"]["role"] == "user")
+            .unwrap();
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .unwrap()
+                .text,
+            crate::protocol::content_text(&first_user["message"]["content"])
+        );
+        // Full raw history, not just the context retained after compaction.
+        eprintln!(
+            "Recovered {} user prompts and {compactions} compaction boundaries",
+            state.messages.iter().filter(|m| m.role == "user").count()
+        );
+        state.messages.shrink_to_fit();
         eprintln!(
             "Prepared {} messages in {:?}",
             state.messages.len(),

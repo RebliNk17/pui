@@ -320,7 +320,7 @@ impl Pui {
                 self.preview_partial = false;
             }
             self.send(protocol::command("get_state"));
-            self.send(protocol::command("get_messages"));
+            self.send(protocol::command("get_entries"));
             self.send(protocol::command("get_session_stats"));
             self.refresh_workspace();
         }
