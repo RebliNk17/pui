@@ -62,7 +62,7 @@ test('discovery skips missing installs and never returns MCP credentials/command
   assert.ok(!JSON.stringify(catalog).includes('fixture-token'));
   assert.ok(!JSON.stringify(catalog).includes('fixture-command'));
   assert.ok(!JSON.stringify(catalog).includes('https://fixture.invalid'));
-  assert.deepEqual(f.calls, ['resolve']);
+  assert.deepEqual(f.calls, ['resolve', 'resolve']);
 });
 
 test('stale confirmations fail before any mutation', async () => {
@@ -71,7 +71,7 @@ test('stale confirmations fail before any mutation', async () => {
   fs.writeFileSync(path.join(f.agentDir, 'settings.json'), '{"other":43}');
   await assert.rejects(manage({ action: 'remove', id: catalog.items[0].id, scope: 'user', revision: catalog.revision }, f.env), /Configuration changed/);
   assert.equal(fs.readFileSync(f.resourcePath, 'utf8').includes('Fixture'), true);
-  assert.deepEqual(f.calls, ['resolve', 'resolve']);
+  assert.deepEqual(f.calls, ['resolve', 'resolve', 'resolve', 'resolve']);
 });
 
 test('toggle preserves explicit discovery paths, unrelated settings and source files', async () => {

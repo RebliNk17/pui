@@ -129,6 +129,10 @@ export async function manage(request, { sdk, agentDir, cwd, validateMcp }) {
   const npmCommand = settings.getSettings?.().npmCommand;
   settings.applyOverrides({ npmCommand: ['npm'] });
   const resources = await manager.resolve(async () => 'skip');
+  const personalManager = new sdk.DefaultPackageManager({ cwd, agentDir, settingsManager: userSettings,
+    builtinExtensions: ['mcp', 'llama.cpp', 'codemode', 'tool-search'] });
+  userSettings.applyOverrides({ npmCommand: ['npm'] });
+  const personalResources = trusted ? await personalManager.resolve(async () => 'skip') : resources;
   const items = [];
   const warnings = [];
   for (const kind of Object.keys(PATH_SETTERS)) {
@@ -162,8 +166,12 @@ export async function manage(request, { sdk, agentDir, cwd, validateMcp }) {
       }
     } catch { warnings.push(`${scope === 'user' ? 'Personal' : 'Project'} MCP configuration cannot be read. Fix its JSON before editing.`); }
   }
+  enrichCatalog(items, resources, personalResources, settings, agentDir, cwd, trusted);
   for (const item of items) item.id = hash(`${item.kind}\0${item.scope}\0${item.path}\0${item.name}`);
   const currentRevision = revision(agentDir, cwd, trusted);
+  const context = { items, settings, manager, agentDir, cwd, trusted, currentRevision, validateMcp, npmCommand, sdk };
+  if (request.action === 'inspect') return inspectResource(request, context);
+  if (request.action === 'preview' || request.action === 'apply') return batchRequest(request, context);
   if (request.action && request.action !== 'list') {
     if (request.revision !== currentRevision) fail('Configuration changed. Refresh and review the action again.');
     const scope = request.scope;
@@ -233,8 +241,304 @@ export async function manage(request, { sdk, agentDir, cwd, validateMcp }) {
   }
   if (!trusted) warnings.push('Project resources are hidden until trusted in Pi. Personal resources are still manageable.');
   if (items.length > 2000) warnings.push('Showing the first 2,000 resources. Narrow your configuration to see more.');
-  return { revision: currentRevision, trusted, items: items.slice(0, 2000).map(({ metadata, ...item }) => item), warnings,
+  return { revision: currentRevision, trusted, items: items.slice(0, 2000).map(({ metadata, personalMetadata, ...item }) => item), warnings,
     userConfig: path.join(agentDir, 'settings.json'), projectConfig: path.join(cwd, '.pi/settings.json') };
+}
+
+// Manager v2: provenance, bounded explicit reads, and reviewed sequential edits.
+function resourceKey(kind, file) { return `${kind}\0${file}`; }
+function settingsBase(scope, agentDir, cwd) { return scope === 'project' ? path.join(cwd, '.pi') : agentDir; }
+function localSource(source, base) {
+  return !/^(npm:|git:|https?:|ssh:|git@)/.test(source) ? path.resolve(base, source.replace(/^~\//, `${process.env.HOME ?? ''}/`)) : source;
+}
+function overrideState(entries, patterns, emptyMeansOff = false) {
+  if (!entries) return 'inherit';
+  if (!entries.length && emptyMeansOff) return 'off';
+  let state = 'inherit';
+  for (const entry of entries) if (patterns.has(strip(entry))) state = /^[!-]/.test(entry) ? 'off' : 'on';
+  return state;
+}
+function enrichCatalog(items, resources, personal, settings, agentDir, cwd, trusted) {
+  const personalMap = new Map();
+  for (const kind of Object.keys(PATH_SETTERS)) for (const r of personal[kind] ?? []) personalMap.set(resourceKey(kind, r.path), r);
+  // A project filter can mask a personal resource; keep the personal identity so
+  // the inspector can edit the default separately from its project override.
+  for (const item of items.filter(i => PATH_SETTERS[i.kind])) {
+    const inherited = personalMap.get(resourceKey(item.kind, item.path));
+    item.personalEnabled = inherited?.enabled ?? null;
+    item.personalMetadata = inherited?.metadata;
+    item.inherited = !!inherited;
+    item.originScope = inherited ? 'user' : 'project';
+    const project = settings.getProjectSettings();
+    let entries;
+    let patterns;
+    let emptyOff = false;
+    if (item.metadata.origin === 'package') {
+      const source = localSource(item.metadata.source, settingsBase(item.scope, agentDir, cwd));
+      const pkg = (project.packages ?? []).find(p => localSource(sourceOf(p), settingsBase('project', agentDir, cwd)) === source);
+      entries = object(pkg) ? pkg[item.kind] : undefined;
+      patterns = new Set([resourcePattern(item, agentDir, cwd)]);
+      emptyOff = object(pkg) && pkg.autoload !== false;
+    } else {
+      entries = project[item.kind];
+      patterns = new Set([item.path, path.relative(settingsBase('project', agentDir, cwd), item.path).split(path.sep).join('/'), resourcePattern(item, agentDir, cwd)]);
+    }
+    item.projectState = trusted ? overrideState(entries, patterns, emptyOff) : 'inherit';
+    item.sourceLabel = item.metadata.source === 'builtin' ? 'Built into Pi' : item.metadata.origin === 'package' ? item.metadata.source : 'Local resource';
+    item.issue = false;
+    item.owner = item.metadata.origin === 'package' ? hash(localSource(item.metadata.source, settingsBase(item.scope, agentDir, cwd))) : '';
+  }
+  for (const item of items.filter(i => i.kind === 'packages')) {
+    item.owner = hash(localSource(item.source, settingsBase(item.scope, agentDir, cwd)));
+    item.installed = !!item.path && fs.existsSync(item.path);
+    item.issue = !item.installed;
+    item.sourceLabel = item.source;
+    item.originScope = item.scope;
+    item.inherited = false;
+    item.projectState = 'inherit';
+    item.version = '';
+    if (item.installed) {
+      try {
+        const manifest = readConfig(path.join(item.path, 'package.json'));
+        if (typeof manifest.version === 'string') item.version = manifest.version.slice(0, 80);
+        if (typeof manifest.name === 'string' && manifest.name) item.name = manifest.name.slice(0, 160);
+      } catch {}
+    }
+    item.resourceCount = items.filter(i => i.kind !== 'packages' && i.owner === item.owner).length;
+  }
+  const globalMcp = readConfigSafe(path.join(agentDir, 'mcp.json'));
+  const projectMcp = trusted ? readConfigSafe(path.join(cwd, '.pi/mcp.json')) : {};
+  for (const item of items.filter(i => i.kind === 'mcp')) {
+    const base = globalMcp.mcpServers?.[item.name];
+    const project = projectMcp.mcpServers?.[item.name];
+    const override = object(project) && !project.command && !project.url && !project.type;
+    const inherited = object(base) && (item.scope === 'user' || override);
+    item.inherited = inherited;
+    item.personalEnabled = inherited ? base.enabled !== false : null;
+    item.originScope = inherited ? 'user' : item.scope;
+    item.projectState = object(project) && typeof project.enabled === 'boolean' ? project.enabled ? 'on' : 'off' : 'inherit';
+    const effective = item.scope === 'user' && override ? { ...base, ...project } : item.scope === 'user' ? base : override ? { ...base, ...project } : project;
+    item.enabled = object(effective) && effective.enabled !== false;
+    item.transport = effective?.url ? 'HTTP' : effective?.command ? 'stdio' : 'Unknown';
+    item.exposure = ['direct', 'codemode', 'deferred', 'hidden'].includes(effective?.exposure) ? effective.exposure : 'codemode';
+    item.issue = !object(effective) || (!effective.url && !effective.command);
+    item.sourceLabel = inherited ? 'Personal MCP configuration' : 'Project MCP configuration';
+    item.owner = '';
+  }
+  // One row per effective server. Keep a project's actual declaration when it
+  // replaces the personal one; inherited-only patches remain linked to personal.
+  const projectNames = new Set(items.filter(i => i.kind === 'mcp' && i.scope === 'project').map(i => i.name));
+  for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'mcp' && items[i].scope === 'user' && projectNames.has(items[i].name)) items.splice(i, 1);
+}
+function readConfigSafe(file) { try { return readConfig(file); } catch { return {}; } }
+function assertRevision(request, context) {
+  if (request.revision !== context.currentRevision) fail('Configuration changed. Refresh and review the action again.');
+}
+function selectedResource(request, context) {
+  const item = context.items.find(i => i.id === request.id);
+  if (!item) fail('Resource no longer exists. Refresh before retrying.');
+  return item;
+}
+function inspectResource(request, context) {
+  assertRevision(request, context);
+  const item = selectedResource(request, context);
+  if (!['skills', 'prompts', 'extensions', 'themes'].includes(item.kind) || item.path.startsWith('builtin:')) fail('This resource has no local preview.');
+  let file = item.path;
+  if (fs.statSync(file).isDirectory()) file = path.join(file, 'SKILL.md');
+  assertWritableConfig(file); // same no-symlink traversal rule for reads
+  const stat = fs.statSync(file);
+  if (!stat.isFile() || stat.size > 65536) fail('Preview is limited to regular UTF-8 files under 64 KiB.');
+  const bytes = fs.readFileSync(file);
+  let content;
+  try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { fail('Preview requires UTF-8 text.'); }
+  if (content.includes('\0')) fail('Binary resources cannot be previewed.');
+  return { id: item.id, content, path: file };
+}
+function setResourceSelection(config, item, scope, state, context) {
+  const enabled = state === 'on';
+  const meta = scope === 'user' && item.personalMetadata ? item.personalMetadata : item.metadata;
+  if (!meta) fail('Resource metadata is unavailable. Refresh before retrying.');
+  const topBase = settingsBase(scope, context.agentDir, context.cwd);
+  const inherited = scope === 'project' && item.inherited;
+  if (meta.origin === 'package') {
+    config.packages ??= [];
+    const originalSource = localSource(meta.source, settingsBase(meta.scope, context.agentDir, context.cwd));
+    let index = config.packages.findIndex(p => localSource(sourceOf(p), topBase) === originalSource);
+    if (index < 0) {
+      if (state === 'inherit') return;
+      if (!inherited) fail('Package configuration changed. Refresh before retrying.');
+      const source = originalSource === meta.source ? meta.source : path.relative(topBase, originalSource) || '.';
+      config.packages.push({ source, autoload: false });
+      index = config.packages.length - 1;
+    }
+    const pkg = typeof config.packages[index] === 'string' ? { source: config.packages[index] } : config.packages[index];
+    const pattern = path.relative(meta.baseDir ?? path.dirname(item.path), item.path).split(path.sep).join('/');
+    const entries = (pkg[item.kind] ?? []).filter(p => strip(p) !== pattern);
+    if (state !== 'inherit') entries.push(`${enabled ? '+' : '-'}${pattern}`);
+    if (entries.length) pkg[item.kind] = entries;
+    else delete pkg[item.kind];
+    if (!Object.keys(PATH_SETTERS).some(k => pkg[k] !== undefined)) {
+      if (pkg.autoload === false) config.packages.splice(index, 1);
+      else config.packages[index] = pkg.source;
+    } else config.packages[index] = pkg;
+  } else {
+    const pattern = item.path.startsWith('builtin:') || inherited ? item.path : path.relative(meta.baseDir ?? topBase, item.path).split(path.sep).join('/');
+    const targets = new Set([pattern, item.path, path.relative(topBase, item.path).split(path.sep).join('/')]);
+    let entries = (config[item.kind] ?? []).filter(p => !( /^[!+-]/.test(p) && targets.has(strip(p))) && !(state === 'inherit' && inherited && p === pattern));
+    if (state !== 'inherit') {
+      if (inherited && !item.path.startsWith('builtin:') && !entries.includes(pattern)) entries.push(pattern);
+      entries.push(`${enabled ? '+' : '-'}${pattern}`);
+    }
+    config[item.kind] = entries;
+  }
+}
+function redactConfig(config, mcp) {
+  if (!mcp) return config;
+  const result = structuredClone(config);
+  for (const server of Object.values(result.mcpServers ?? {})) if (object(server)) {
+    for (const key of Object.keys(server)) if (!['enabled', 'exposure', 'toolExposure', 'type', 'timeout'].includes(key)) server[key] = '[redacted: open config to inspect]';
+  }
+  return result;
+}
+function changedFields(before, after, mcp) {
+  const keys = mcp ? ['mcpServers'] : [...Object.keys(PATH_SETTERS), 'packages'];
+  const a = {}, b = {};
+  for (const key of keys) if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) {
+    if (mcp) {
+      a[key] = {}; b[key] = {};
+      const names = new Set([...Object.keys(before[key] ?? {}), ...Object.keys(after[key] ?? {})]);
+      for (const name of names) if (JSON.stringify(before[key]?.[name]) !== JSON.stringify(after[key]?.[name])) {
+        if (Object.hasOwn(before[key] ?? {}, name)) a[key][name] = before[key][name];
+        if (Object.hasOwn(after[key] ?? {}, name)) b[key][name] = after[key][name];
+      }
+    } else { if (before[key] !== undefined) a[key] = before[key]; if (after[key] !== undefined) b[key] = after[key]; }
+  }
+  return { before: JSON.stringify(redactConfig(a, mcp), null, 2), after: JSON.stringify(redactConfig(b, mcp), null, 2), redacted: mcp };
+}
+function planOperation(op, context, configs) {
+  const { agentDir, cwd, trusted, items, validateMcp } = context;
+  if (!['user', 'project'].includes(op.scope)) fail('Choose a valid configuration scope.');
+  if (op.scope === 'project' && !trusted) fail('Project resources are not trusted. Use Pi /trust first.');
+  const item = op.id ? selectedResource(op, context) : undefined;
+  const mcp = item?.kind === 'mcp' || op.action.startsWith('mcp-');
+  const file = path.join(settingsBase(op.scope, agentDir, cwd), mcp ? 'mcp.json' : 'settings.json');
+  assertWritableConfig(file);
+  const before = structuredClone(configs.get(file) ?? readConfig(file));
+  const after = structuredClone(before);
+  let operation = '';
+  if (op.action === 'select') {
+    if (!item || item.kind === 'packages') fail('This resource does not support selection.');
+    if (!['on', 'off', 'inherit'].includes(op.state)) fail('Choose enable, disable or inherit.');
+    if (op.scope === 'user' && !item.inherited) fail('This resource has no personal default.');
+    if (op.scope === 'user' && op.state === 'inherit') fail('Personal defaults must be enabled or disabled.');
+    if (mcp) {
+      after.mcpServers ??= {};
+      const server = after.mcpServers[item.name];
+      if (op.scope === 'project' && item.inherited) {
+        if (op.state === 'inherit') {
+          if (object(server) && (server.command || server.url || server.type)) fail('A project server definition cannot be reset as an inherited override.');
+          if (object(server)) { delete server.enabled; if (!Object.keys(server).length) delete after.mcpServers[item.name]; }
+        } else { after.mcpServers[item.name] = { ...server, enabled: op.state === 'on' }; }
+      } else {
+        if (!object(server)) fail('MCP server definition changed. Refresh before retrying.');
+        server.enabled = op.state === 'on';
+      }
+    } else setResourceSelection(after, item, op.scope, op.state, context);
+  } else if (op.action === 'register') {
+    if (!PATH_SETTERS[op.kind]) fail('Choose a local resource type.');
+    let target = op.source?.trim();
+    if (!target || target.length > 4096) fail('Enter a local resource path.');
+    target = path.resolve(cwd, target.replace(/^~\//, `${process.env.HOME ?? ''}/`));
+    if (!fs.existsSync(target)) fail('Local resource path does not exist.');
+    after[op.kind] = [...(after[op.kind] ?? []).filter(p => strip(p) !== target), target, `+${target}`];
+  } else if (op.action === 'mcp-add' || op.action === 'mcp-edit') {
+    const name = item?.name ?? op.name?.trim();
+    if (!name || !/^[a-zA-Z0-9_-]+$/.test(name) || ['__proto__', 'constructor', 'prototype'].includes(name)) fail('Choose a valid, non-reserved MCP server name.');
+    let patch;
+    try { patch = JSON.parse(op.definition); } catch { fail('Server definition must be valid JSON.'); }
+    if (!object(patch)) fail('Server definition must be a JSON object.');
+    after.mcpServers ??= {};
+    if (!object(after.mcpServers)) fail('Invalid mcpServers object.');
+    if (op.action === 'mcp-add' && Object.hasOwn(after.mcpServers, name)) fail('Server already exists. Select it to edit.');
+    const next = { ...(op.action === 'mcp-edit' ? after.mcpServers[name] : {}), ...patch };
+    const override = op.scope === 'project' && !next.command && !next.url && !next.type;
+    const global = configs.get(path.join(agentDir, 'mcp.json')) ?? readConfigSafe(path.join(agentDir, 'mcp.json'));
+    const base = override ? global.mcpServers?.[name] : undefined;
+    if (override && (!object(base) || Object.keys(next).some(k => !['enabled', 'exposure', 'toolExposure'].includes(k)))) fail('Project overrides can only set enabled, exposure and toolExposure.');
+    if (typeof validateMcp(name, { ...base, ...next }) === 'string') fail('Invalid MCP definition. Check transport, command/args or URL and exposure.');
+    if (op.scope === 'project' && next.auth) fail('Provider auth is only allowed in personal MCP configuration.');
+    if (Object.keys(after.mcpServers).some(other => other !== name && other.replaceAll('-', '_') === name.replaceAll('-', '_'))) fail('Another MCP server uses the same normalized name.');
+    after.mcpServers[name] = next;
+  } else if (op.action === 'install') {
+    const source = op.source?.trim();
+    if (!source || source.length > 4096 || source.startsWith('-')) fail('Enter a valid package source.');
+    operation = `Install ${source}. Dependencies may execute code. Contents are unknown until installed. Pi normalizes the declaration when installation succeeds.`;
+  } else if (op.action === 'remove') {
+    if (!item?.removable) fail('Built-in resources cannot be removed. Disable them instead.');
+    if (item.kind === 'packages') {
+      if (op.scope !== item.scope) fail('Package removal must target its defining scope.');
+      operation = `Uninstall ${item.source}. Managed installation and declaration are removed; local source files are kept.`;
+    } else if (mcp) {
+      if (!Object.hasOwn(after.mcpServers ?? {}, item.name)) fail('MCP entry no longer exists in this scope.');
+      delete after.mcpServers[item.name];
+    } else setResourceSelection(after, item, op.scope, 'off', context);
+  } else fail('Unknown resource operation.');
+  configs.set(file, after);
+  return { op, item, file, before, after, operation, title: item?.name ?? op.name ?? op.source ?? op.kind };
+}
+async function batchRequest(request, context) {
+  assertRevision(request, context);
+  if (!Array.isArray(request.operations) || !request.operations.length || request.operations.length > 32 || request.operations.some(op => !object(op) || typeof op.action !== 'string')) fail('Review between 1 and 32 valid resource changes.');
+  const configs = new Map();
+  const steps = request.operations.map(op => planOperation(op, context, configs));
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i].op.action === 'remove' && steps[i].item && steps.slice(i + 1).some(s => s.op.id === steps[i].op.id)) fail('A removed resource cannot be edited later in the same review.');
+  }
+  // A package manager normalizes its own declaration. Mixing that with a later
+  // planned package-array replacement could discard its output. Keep such edits
+  // in a separate reviewed batch rather than pretend they are transactional.
+  for (let i = 0; i < steps.length; i++) if (steps[i].operation) {
+    if (steps.slice(i + 1).some(s => s.file === steps[i].file && JSON.stringify(s.before.packages) !== JSON.stringify(s.after.packages))) fail('Apply package installs/removals separately from later package-filter changes in the same scope.');
+  }
+  const token = hash(JSON.stringify({ revision: context.currentRevision, operations: request.operations, plans: steps.map(s => [s.file, s.after, s.operation]) }));
+  const summaries = steps.map((s, index) => {
+    const fields = changedFields(s.before, s.after, s.file.endsWith('mcp.json'));
+    const diff = context.sdk.generateUnifiedPatch ? context.sdk.generateUnifiedPatch(s.file, fields.before, fields.after, 3) : '';
+    return { index, title: s.title, file: s.file, operation: s.operation, ...fields, diff,
+      affected: s.item?.kind === 'packages' ? context.items.filter(i => i.kind !== 'packages' && i.owner === s.item.owner).map(i => i.name) : [] };
+  });
+  if (JSON.stringify(summaries).length > 2 * 1024 * 1024) fail('Review is too large. Split the changes into smaller batches.');
+  if (request.action === 'preview') return { token, steps: summaries };
+  if (request.token !== token) fail('Review is out of date. Review the changes again before applying.');
+  context.settings.applyOverrides({ npmCommand: context.npmCommand ?? ['npm'] });
+  const results = [];
+  let expectedRevision = context.currentRevision;
+  for (const [index, step] of steps.entries()) {
+    try {
+      if (revision(context.agentDir, context.cwd, context.trusted) !== expectedRevision) fail('Configuration changed while applying. Remaining operations were not run.');
+      if (step.operation) {
+        if (context.settings.reload) await context.settings.reload();
+        if (revision(context.agentDir, context.cwd, context.trusted) !== expectedRevision) fail('Configuration changed before the package operation. Refresh before retrying.');
+        if (step.op.action === 'install') await context.manager.installAndPersist(step.op.source.trim(), { local: step.op.scope === 'project' });
+        else await context.manager.removeAndPersist(step.item.source, { local: step.op.scope === 'project' });
+        await context.settings.flush();
+        if (context.settings.drainErrors().length) fail('Pi could not save package configuration.');
+      } else editConfig(step.file, current => {
+        // Patch only the reviewed resource fields; preserve unrelated config.
+        const keys = step.file.endsWith('mcp.json') ? ['mcpServers'] : [...Object.keys(PATH_SETTERS), 'packages'];
+        for (const key of keys) if (JSON.stringify(step.before[key]) !== JSON.stringify(step.after[key])) {
+          if (JSON.stringify(current[key]) !== JSON.stringify(step.before[key])) fail('Configuration changed while applying. Refresh before retrying.');
+          if (step.after[key] === undefined) delete current[key]; else current[key] = step.after[key];
+        }
+      });
+      results.push({ index, success: true, message: 'Applied' });
+      expectedRevision = revision(context.agentDir, context.cwd, context.trusted);
+    } catch (error) {
+      results.push({ index, success: false, message: error instanceof ResourceError ? error.message : 'Operation failed or partially completed. Refresh and review before retrying; no automatic retry.' });
+      break;
+    }
+  }
+  return { results, complete: results.length === steps.length && results.every(r => r.success) };
 }
 
 async function main() {
