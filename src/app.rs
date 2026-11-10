@@ -297,6 +297,16 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            if options.demo_languages {
+                app.state.session_name = "Language glyph preview".into();
+                app.state.messages = vec![Message {
+                    role: "assistant".into(),
+                    text: "**Glyph coverage preview**\n\nHebrew: שלום עולם — שָׁלוֹם\n\nGreek: Ελληνικά · Cyrillic: Привет\n\nArabic: مرحبا · Hindi: हिन्दी · Thai: ไทย\n\nCJK: 日本語 · 中文 · 한국어\n\n`שלום English 123`\n\nHebrew and mixed-direction text use Unicode bidirectional layout. Arabic/Indic complex-script shaping and precise vowel-mark positioning remain unsupported.".into(),
+                    ..Default::default()
+                }];
+                app.draft = "שלום עולם · English 123 · 日本語".into();
+                app.prefs.hide_inspector = true;
+            }
             app.menu.about = options.demo_about;
             // Preview only: opening Updates must not start a network check.
             app.updates.open = options.demo_updates;

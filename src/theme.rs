@@ -3,6 +3,9 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+#[cfg(test)]
+mod bidi_tests;
+mod fonts;
 mod styles;
 pub use styles::{DarkStyle, LightStyle, Styles};
 
@@ -126,61 +129,7 @@ pub fn palette(ctx: &egui::Context) -> &'static Palette {
 }
 
 pub fn install(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    // System typography on macOS; egui's bundled fonts remain the portable fallback.
-    #[cfg(target_os = "macos")]
-    for (name, path, family) in [
-        (
-            "system",
-            "/System/Library/Fonts/SFNS.ttf",
-            FontFamily::Proportional,
-        ),
-        (
-            "system-mono",
-            "/System/Library/Fonts/SFNSMono.ttf",
-            FontFamily::Monospace,
-        ),
-    ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts
-                .font_data
-                .insert(name.into(), Arc::new(FontData::from_owned(bytes)));
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .insert(0, name.into());
-        }
-    }
-    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Supplemental/Arial Bold.ttf") {
-        fonts
-            .font_data
-            .insert("body-bold".into(), Arc::new(FontData::from_owned(bytes)));
-        fonts.families.insert(
-            FontFamily::Name("body-bold".into()),
-            vec!["body-bold".into()],
-        );
-    } else {
-        fonts.families.insert(
-            FontFamily::Name("body-bold".into()),
-            fonts.families[&FontFamily::Proportional].clone(),
-        );
-    }
-    let serif = std::fs::read("/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf").ok();
-    if let Some(bytes) = serif {
-        fonts
-            .font_data
-            .insert("pi-serif".into(), Arc::new(FontData::from_owned(bytes)));
-        fonts
-            .families
-            .insert(FontFamily::Name("pi-serif".into()), vec!["pi-serif".into()]);
-    } else {
-        fonts.families.insert(
-            FontFamily::Name("pi-serif".into()),
-            fonts.families[&FontFamily::Proportional].clone(),
-        );
-    }
-    ctx.set_fonts(fonts);
+    ctx.set_fonts(fonts::definitions());
     Styles::default().apply(ctx, Theme::Dark);
 }
 
@@ -385,6 +334,56 @@ pub fn caption(ui: &egui::Ui, text: impl Into<String>) -> egui::RichText {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hebrew_letters_have_glyphs_in_every_text_family() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for family in [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name("body-bold".into()),
+                FontFamily::Name("pi-serif".into()),
+            ] {
+                let font = FontId::new(14.0, family);
+                ctx.fonts(|fonts| {
+                    for c in "אבגדהוזחטיךכלםמןנסעףפץצקרשת".chars() {
+                        assert!(
+                            fonts.has_glyph(&font, c),
+                            "Missing Hebrew glyph {c} in {font:?}"
+                        );
+                    }
+                });
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_language_fallbacks_cover_common_scripts() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for family in [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name("body-bold".into()),
+                FontFamily::Name("pi-serif".into()),
+            ] {
+                let font = FontId::new(14.0, family);
+                ctx.fonts(|fonts| {
+                    for c in "שלום Ελληνικά Привет مرحبا हिन्दी ไทย 日本語 中文 한국어"
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                    {
+                        assert!(
+                            fonts.has_glyph(&font, c),
+                            "Missing language glyph {c} in {font:?}"
+                        );
+                    }
+                });
+            }
+        });
+    }
     #[test]
     fn themes_are_context_local_and_keep_scale() {
         let dark = egui::Context::default();

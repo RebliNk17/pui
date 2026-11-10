@@ -27,6 +27,7 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub struct Options {
     pub demo: bool,
+    pub demo_languages: bool,
     pub demo_expanded: bool,
     pub demo_collapsed: bool,
     pub demo_theater: bool,
@@ -78,6 +79,10 @@ fn main() -> eframe::Result {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--demo" => options.demo = true,
+            "--demo-languages" => {
+                options.demo = true;
+                options.demo_languages = true;
+            }
             "--demo-expanded" => {
                 options.demo = true;
                 options.demo_expanded = true;

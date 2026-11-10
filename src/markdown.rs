@@ -507,6 +507,39 @@ mod tests {
     }
 
     #[test]
+    fn hebrew_markdown_preserves_source_and_has_glyphs_in_all_formats() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        for mode in [theme::Theme::Dark, theme::Theme::Light] {
+            mode.apply(&ctx);
+            let (texts, _) = render(
+                &ctx,
+                "שלום English 123\\n\\n**עברית מודגשת**\\n\\n`קוד בעברית`",
+                500.0,
+            );
+            for expected in ["שלום English 123", "עברית מודגשת", "קוד בעברית"]
+            {
+                let text = texts
+                    .iter()
+                    .find(|t| t.galley.job.text.contains(expected))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Missing {expected:?}: {:?}",
+                            texts.iter().map(|t| &t.galley.job.text).collect::<Vec<_>>()
+                        )
+                    });
+                for section in &text.galley.job.sections {
+                    ctx.fonts(|fonts| {
+                        assert!(fonts.has_glyphs(
+                            &section.format.font_id,
+                            &text.galley.job.text[section.byte_range.clone()]
+                        ))
+                    });
+                }
+            }
+        }
+    }
+    #[test]
     fn tables_render_rows_alignment_inline_styles_and_surrounding_prose() {
         let source = "Before.\n\n| Usage | Key | Entries |\n| :--- | :---: | ---: |\n| **Backend** | `mock-key` | *One* and [two](https://example.com) |\n| Tools | a \\| b | |\n\nAfter.";
         let ctx = egui::Context::default();
