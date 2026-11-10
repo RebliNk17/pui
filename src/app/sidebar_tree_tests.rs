@@ -86,6 +86,42 @@ fn click(app: &mut Pui, point: egui::Pos2) {
     }
 }
 #[test]
+fn light_sidebar_uses_larger_saturated_dots_for_chats_and_compact_children() {
+    for projects in [false, true] {
+        let mut app = fixture();
+        app.projects = projects;
+        theme::Theme::Light.apply(&app.ctx);
+        for _ in 0..3 {
+            render(&mut app, vec![]);
+        }
+        let output = render(&mut app, vec![]);
+        let dots: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Circle(c) if c.radius >= 4.0 && c.radius <= 4.5 => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            dots.iter()
+                .any(|c| c.radius == 4.5 && c.fill == Color32::from_rgb(0, 101, 50)),
+            "Root idle status stays green"
+        );
+        assert!(
+            dots.iter()
+                .any(|c| c.radius == 4.0 && c.fill == Color32::from_rgb(80, 42, 198)),
+            "Compact working status stays purple"
+        );
+        assert!(
+            dots.iter()
+                .any(|c| c.radius == 4.0 && c.fill == Color32::from_rgb(0, 101, 50)),
+            "Compact idle status stays green"
+        );
+    }
+}
+
+#[test]
 fn agent_sessions_are_deduplicated_and_nested_even_when_child_is_more_recent() {
     let app = fixture();
     let forest = forest(&app);

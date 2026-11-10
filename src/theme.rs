@@ -260,6 +260,32 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
     ctx.set_style_of(theme, style);
 }
 
+/// Tiny status indicators need more color and area than text in light mode.
+/// Keep dark-mode colors/geometry unchanged and preserve each semantic hue.
+pub fn status_dot(ui: &egui::Ui, center: egui::Pos2, color: Color32, radius: f32) {
+    let (color, radius) = if ui.ctx().theme() == egui::Theme::Light {
+        let color = if color == LIGHT.accent {
+            Color32::from_rgb(80, 42, 198)
+        } else if color == LIGHT.green {
+            Color32::from_rgb(0, 101, 50)
+        } else if color == LIGHT.red {
+            Color32::from_rgb(165, 30, 36)
+        } else if color == LIGHT.blue {
+            Color32::from_rgb(15, 80, 160)
+        } else if color == LIGHT.amber {
+            Color32::from_rgb(127, 72, 0)
+        } else if color == LIGHT.dim || color == LIGHT.muted {
+            Color32::from_rgb(82, 82, 76)
+        } else {
+            color
+        };
+        (color, radius + 1.5)
+    } else {
+        (color, radius)
+    };
+    ui.painter().circle_filled(center, radius, color);
+}
+
 /// Matching input geometry for settings search, resource forms and toolbars.
 pub fn text_field<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
     egui::TextEdit::singleline(text)
@@ -380,6 +406,53 @@ mod tests {
                 colors.user_bg,
             ] {
                 assert!(contrast(colors.selection_bg, surface) >= 1.5);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_status_dots_are_stronger_in_light_mode_and_unchanged_in_dark() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        for mode in [Theme::Light, Theme::Dark] {
+            mode.apply(&ctx);
+            let colors = mode.palette();
+            for color in [
+                colors.accent,
+                colors.green,
+                colors.red,
+                colors.blue,
+                colors.amber,
+                colors.dim,
+                colors.muted,
+            ] {
+                for radius in [2.5, 3.0] {
+                    let output = ctx.run(egui::RawInput::default(), |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            status_dot(ui, egui::pos2(30.0, 30.0), color, radius);
+                        });
+                    });
+                    let dot = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Circle(c) => Some(c),
+                            _ => None,
+                        })
+                        .expect("status dot is painted");
+                    assert_eq!(dot.fill.a(), 255);
+                    if mode == Theme::Light {
+                        assert_eq!(dot.radius, radius + 1.5);
+                        for background in [colors.sidebar, colors.surface, colors.hover] {
+                            let contrast =
+                                (luminance(background) + 0.05) / (luminance(dot.fill) + 0.05);
+                            assert!(contrast >= 5.5, "{color:?} on {background:?}: {contrast}");
+                        }
+                    } else {
+                        assert_eq!(dot.radius, radius);
+                        assert_eq!(dot.fill, color);
+                    }
+                }
             }
         }
     }

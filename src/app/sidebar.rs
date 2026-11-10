@@ -530,8 +530,7 @@ impl Pui {
                                 colors.dim
                             };
                         let title_y = if compact { row.height() / 2.0 } else { 13.0 };
-                        ui.painter()
-                            .circle_filled(row.min + egui::vec2(8.0, title_y), 2.5, tint);
+                        theme::status_dot(ui, row.min + egui::vec2(8.0, title_y), tint, 2.5);
                         paint_text(
                             ui,
                             &branch.title,
@@ -733,8 +732,7 @@ impl Pui {
                 },
             );
         }
-        ui.painter()
-            .circle_filled(rect.min + egui::vec2(10.0, 16.0), 3.0, status_color);
+        theme::status_dot(ui, rect.min + egui::vec2(10.0, 16.0), status_color, 3.0);
         paint_text(
             ui,
             &format!("{}{}", if meta.pinned { "• " } else { "" }, title),
