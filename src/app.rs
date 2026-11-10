@@ -424,6 +424,7 @@ impl Pui {
                 app.prefs.cards.collapsed = Card::ALL.into_iter().collect();
             }
         } else {
+            app.notifications.initialize(&cc.egui_ctx);
             app.restore_agents();
             app.refresh_sessions();
             app.refresh_workspace();
@@ -715,7 +716,7 @@ impl Pui {
     fn poll(&mut self) {
         self.poll_deletions();
         self.usage.poll();
-        self.notifications.poll();
+        self.poll_notifications();
         self.updates.poll();
         self.settings_view.resources.poll();
         self.poll_chat_folder();

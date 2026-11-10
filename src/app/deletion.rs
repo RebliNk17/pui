@@ -154,6 +154,7 @@ impl Pui {
                                 desktop: false,
                             },
                             "Chat deleted",
+                            None,
                         );
                     }
                 }

@@ -697,6 +697,7 @@ impl Pui {
                                 ctx,
                                 self.prefs.notifications,
                                 "Pui completion alert test",
+                                None,
                             );
                         }
                     },

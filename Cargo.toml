@@ -39,7 +39,7 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = {version="0.3",default-features=false,features=["std","NSEvent","NSPasteboard","NSSound","NSApplication","NSMenu","NSMenuItem","NSCell","NSResponder","NSWindow","NSView","block2"]}
 objc2-foundation = {version="0.3",default-features=false,features=["std","NSObject","NSString","NSError","NSBundle","NSGeometry"]}
-objc2-user-notifications = {version="0.3",default-features=false,features=["std","block2","UNNotification","UNNotificationContent","UNNotificationRequest","UNNotificationTrigger","UNUserNotificationCenter"]}
+objc2-user-notifications = {version="0.3",default-features=false,features=["std","block2","UNNotification","UNNotificationContent","UNNotificationRequest","UNNotificationResponse","UNNotificationTrigger","UNUserNotificationCenter"]}
 
 # egui 0.32 has no bidi layout; keep the renderer/input patches together.
 [patch.crates-io]
