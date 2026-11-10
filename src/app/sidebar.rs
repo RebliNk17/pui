@@ -508,7 +508,7 @@ impl Pui {
             .children
             .iter()
             .any(|c| c.pinned || c.hidden == self.show_hidden);
-        let compact = depth > 0;
+        let compact = self.projects || depth > 0;
         let task_row = matches!(branch.target, sidebar_tree::Target::Task(_, None));
         let row_height = if compact {
             32.0
@@ -535,7 +535,7 @@ impl Pui {
                     egui::pos2(rect.right(), ui.max_rect().bottom()),
                 )),
                 |ui| match &branch.target {
-                    sidebar_tree::Target::Session(index) if !compact => {
+                    sidebar_tree::Target::Session(index) if depth == 0 => {
                         action = self.chat_row(ui, *index)
                     }
                     target => {
@@ -873,7 +873,11 @@ impl Pui {
         let title = self.session_title(s);
         let meta = self.prefs.chats.entry(path.clone()).or_default();
         let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
-        let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 48.0));
+        let compact = self.projects;
+        let (_, rect) = ui.allocate_space(Vec2::new(
+            ui.available_width(),
+            if compact { 32.0 } else { 48.0 },
+        ));
         // Session identity, not layout position: filtering, pinning, regrouping or
         // asynchronous refresh must not move a pointer press to another chat.
         let response = ui.interact(
@@ -889,6 +893,11 @@ impl Pui {
             response.on_hover_text("Deleting chat… You can keep working in other chats.")
         } else {
             response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        };
+        let response = if compact {
+            response.on_hover_text(format!("{title}\n{status}"))
+        } else {
+            response
         };
         let response = if self.loading_chat && !selected {
             response.on_hover_text("Open this chat instead")
@@ -949,33 +958,35 @@ impl Pui {
             paint_text(
                 ui,
                 &title,
-                rect.min + egui::vec2(24.0, 15.0),
+                rect.min + egui::vec2(24.0, if compact { rect.height() / 2.0 } else { 15.0 }),
                 rect.width() - 54.0,
                 FontId::proportional(12.0),
                 colors.text,
             );
         }
-        paint_text(
-            ui,
-            &format!(
-                "{} · {}",
-                sessions::project_name(&s.project),
-                if deleting || selected || node.is_some() || shared.is_some() {
-                    status.to_owned()
-                } else {
-                    format!("Saved · {}", sessions::age(s.modified))
-                }
-            ),
-            rect.min + egui::vec2(24.0, 33.0),
-            rect.width() - 36.0,
-            FontId::proportional(10.5),
-            colors.dim,
-        );
+        if !compact {
+            paint_text(
+                ui,
+                &format!(
+                    "{} · {}",
+                    sessions::project_name(&s.project),
+                    if deleting || selected || node.is_some() || shared.is_some() {
+                        status.to_owned()
+                    } else {
+                        format!("Saved · {}", sessions::age(s.modified))
+                    }
+                ),
+                rect.min + egui::vec2(24.0, 33.0),
+                rect.width() - 36.0,
+                FontId::proportional(10.5),
+                colors.dim,
+            );
+        }
         if deleting {
             return None;
         }
         let menu_rect = egui::Rect::from_center_size(
-            rect.right_center() - egui::vec2(12.0, 6.0),
+            rect.right_center() - egui::vec2(12.0, if compact { 0.0 } else { 6.0 }),
             Vec2::splat(24.0),
         );
         let menu = ui

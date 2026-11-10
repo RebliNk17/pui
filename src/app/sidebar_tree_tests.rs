@@ -286,6 +286,90 @@ fn children_are_single_line_compact_rows_in_both_views_and_themes() {
     }
 }
 #[test]
+fn project_rows_are_single_line_with_dot_status_across_themes_and_zoom() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for zoom in [0.8, 1.0, 1.4] {
+            let mut app = fixture();
+            app.projects = true;
+            app.sessions
+                .push(session("/fixture/saved.jsonl", "Saved chat"));
+            let mut extra = fixture();
+            let mut standalone = extra.agents.nodes.remove(&extra.agents.active).unwrap();
+            standalone.id = "standalone".into();
+            standalone.name = "Standalone agent".into();
+            standalone.parent = None;
+            standalone.children.clear();
+            standalone.path = None;
+            standalone.status = "Stopped".into();
+            app.agents.nodes.insert(standalone.id.clone(), standalone);
+            for node in app.agents.nodes.values_mut() {
+                node.cwd = "/fixture/project".into();
+            }
+            mode.apply(&app.ctx);
+            app.ctx.set_zoom_factor(zoom);
+            for _ in 0..3 {
+                render(&mut app, vec![]);
+            }
+            let mut text = Vec::new();
+            for shape in render(&mut app, vec![]).shapes {
+                labels(&shape.shape, &mut text);
+            }
+            assert_eq!(text.iter().filter(|(s, _)| s == "project").count(), 1);
+            assert!(
+                !text.iter().any(|(s, _)| {
+                    s.starts_with("project ·")
+                        || ["Working…", "Idle", "Stopped", "Saved · status unknown"]
+                            .contains(&s.as_str())
+                }),
+                "Project rows must not paint project/status subtitles"
+            );
+            let mut rows: Vec<_> = [
+                "Parent agent",
+                "Inspect model capabilities",
+                "Review UI interactions",
+                "Saved chat",
+                "Standalone agent",
+            ]
+            .into_iter()
+            .map(|title| {
+                assert_eq!(text.iter().filter(|(s, _)| s == title).count(), 1);
+                text.iter().find(|(s, _)| s == title).unwrap().1
+            })
+            .collect();
+            rows.sort_by(|a, b| a.center().y.total_cmp(&b.center().y));
+            for pair in rows.windows(2) {
+                let pitch = pair[1].center().y - pair[0].center().y;
+                assert!(
+                    (32.0..=34.0).contains(&pitch),
+                    "All project rows must use the compact pitch: {pitch}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn recent_view_keeps_project_and_status_subtitles() {
+    let mut app = fixture();
+    app.projects = false;
+    for _ in 0..3 {
+        render(&mut app, vec![]);
+    }
+    let mut text = Vec::new();
+    for shape in render(&mut app, vec![]).shapes {
+        labels(&shape.shape, &mut text);
+    }
+    assert!(text.iter().any(|(s, _)| s.starts_with("project ·")));
+    let parent = text.iter().find(|(s, _)| s == "Parent agent").unwrap().1;
+    let child = text
+        .iter()
+        .find(|(s, _)| s == "Inspect model capabilities")
+        .unwrap()
+        .1;
+    assert!(child.center().y - parent.center().y > 48.0);
+}
+
+#[test]
 fn disclosure_keyboard_toggles_without_switching_chat() {
     let mut app = fixture();
     for _ in 0..3 {
