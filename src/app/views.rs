@@ -28,7 +28,9 @@ impl Pui {
                     if self.prefs.hide_sidebar {
                         self.app_menu(ui);
                     }
-                    let title = if self.tasks.open {
+                    let title = if self.kanban.open {
+                        "Agents board"
+                    } else if self.tasks.open {
                         self.tasks
                             .current()
                             .map(|t| {
@@ -77,6 +79,7 @@ impl Pui {
                             if self.tasks.selected.is_none() {
                                 self.new_task();
                             } else {
+                                self.kanban.open = false;
                                 self.tasks.open = !self.tasks.open;
                             }
                         }
@@ -103,6 +106,7 @@ impl Pui {
                             );
                         }
                         if response.clicked() {
+                            self.kanban.open = false;
                             self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                             self.focus_composer = !self.terminals.is_open();
                         }
@@ -116,6 +120,7 @@ impl Pui {
                             );
                         }
                         if response.clicked() {
+                            self.kanban.open = false;
                             self.files.toggle(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                         }
@@ -129,6 +134,7 @@ impl Pui {
                             icons::draw(ui, response.rect, Icon::File, colors.text);
                         }
                         if response.clicked() {
+                            self.kanban.open = false;
                             self.files.close();
                             self.inspector_panel = !self.inspector_panel;
                             self.prefs.hide_inspector = false;
@@ -150,6 +156,7 @@ impl Pui {
                             );
                         }
                         if response.clicked() {
+                            self.kanban.open = false;
                             if self.files.is_open() {
                                 self.files.close();
                                 self.prefs.hide_inspector = false;

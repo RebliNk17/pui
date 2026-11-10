@@ -27,6 +27,12 @@ pub(super) struct Request {
     questions: Vec<Question>,
 }
 impl Request {
+    pub(super) fn summary(&self) -> &str {
+        self.questions
+            .first()
+            .map(|q| q.question.as_str())
+            .unwrap_or(TITLE)
+    }
     pub(super) fn parse(dialog: &Value) -> Option<Self> {
         if dialog["method"] != "input" || dialog["title"] != TITLE {
             return None;

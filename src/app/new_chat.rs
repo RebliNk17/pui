@@ -157,6 +157,7 @@ impl Pui {
         self.draft_images = images;
     }
     pub(super) fn start_chat_in(&mut self, folder: PathBuf) {
+        self.kanban.open = false;
         self.tasks.open = false;
         if !folder.is_dir() {
             self.state.error =

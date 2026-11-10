@@ -52,6 +52,73 @@ impl Pui {
                     });
                 });
                 ui.add_space(10.0);
+                let count = self.board_cards().len();
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+                let selected = self.kanban.open;
+                ui.painter().rect_filled(
+                    rect,
+                    7,
+                    if selected {
+                        colors.accent_bg
+                    } else if response.hovered() {
+                        colors.hover
+                    } else {
+                        colors.bg
+                    },
+                );
+                ui.painter().rect_stroke(
+                    rect,
+                    7,
+                    Stroke::new(
+                        1.0,
+                        if selected {
+                            colors.accent
+                        } else {
+                            colors.border
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                let color = if selected {
+                    colors.accent
+                } else {
+                    colors.muted
+                };
+                icons::draw(
+                    ui,
+                    egui::Rect::from_center_size(
+                        rect.left_center() + egui::vec2(17.0, 0.0),
+                        Vec2::splat(16.0),
+                    ),
+                    Icon::Board,
+                    color,
+                );
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(34.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    "Agents board",
+                    FontId::proportional(12.0),
+                    if selected { colors.text } else { colors.muted },
+                );
+                ui.painter().text(
+                    rect.right_center() - egui::vec2(12.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    count.to_string(),
+                    FontId::proportional(11.0),
+                    color,
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Agents board")
+                });
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("View live agents across projects and Pui windows")
+                    .clicked()
+                {
+                    self.open_agents_board();
+                }
+                ui.add_space(10.0);
                 egui::Frame::new()
                     .fill(colors.bg)
                     .stroke(Stroke::new(1.0, colors.border))
@@ -469,12 +536,13 @@ impl Pui {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
         let path = s.path.clone();
-        let selected = self
-            .state
-            .session_file
-            .as_deref()
-            .is_some_and(|p| std::path::Path::new(p) == path)
-            || self.demo && index == 0;
+        let selected = !self.kanban.open
+            && (self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p) == path)
+                || self.demo && index == 0);
         let node = self
             .agents
             .nodes
@@ -1342,6 +1410,27 @@ mod tests {
                 .count(),
             9
         );
+        // The board entry takes an extra row: expanded projects may now extend
+        // below this viewport. Their collapse control must remain reachable.
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(egui::pos2(150.0, 600.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -400.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        for _ in 0..8 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        text.clear();
+        for s in frame(&ctx, &mut app, vec![]).shapes {
+            collect(&s.shape, &mut text);
+        }
         assert!(text.iter().any(|s| s == "Show less"));
     }
     #[test]

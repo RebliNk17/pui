@@ -74,6 +74,39 @@ fn process(app: &mut Pui, role: Role) {
         final_error: false,
     });
 }
+#[test]
+fn kanban_lists_live_task_agents_and_acceptance_approvals() {
+    let mut app = app();
+    live(&mut app, Phase::Building);
+    process(&mut app, Role::Builder);
+    let mut cards = Vec::new();
+    app.task_board_cards(&mut cards);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].status, kanban::Status::Working);
+    app.tasks.processes[0]
+        .state
+        .dialogs
+        .push_back(questions::demo_dialog());
+    cards.clear();
+    app.task_board_cards(&mut cards);
+    assert_eq!(cards[0].status, kanban::Status::Waiting);
+    let kanban::Target::Task { task, run } = cards.remove(0).target else {
+        panic!()
+    };
+    app.open_task_from_board(task.clone(), run);
+    assert!(app.tasks.open);
+    assert_eq!(app.tasks.selected.as_ref(), Some(&task));
+    assert_eq!(app.tasks.selected_run.as_deref(), Some("run"));
+    assert_eq!(app.tasks.processes[0].state.dialogs.len(), 1);
+    app.tasks.processes[0].ended = true;
+    app.tasks.live_mut().unwrap().phase = Phase::AwaitingApproval;
+    cards.clear();
+    app.task_board_cards(&mut cards);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].status, kanban::Status::Waiting);
+    assert_eq!(cards[0].action, "Review acceptance checks");
+    app.tasks.live = None;
+}
 fn event(app: &mut Pui, v: Value) {
     app.task_event(0, rpc::Event::Record(v));
 }
