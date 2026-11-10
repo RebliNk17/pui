@@ -78,14 +78,9 @@ impl Pui {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .gap(10.0)
             .width(width)
-            .frame(
-                egui::Frame::popup(&ctx.style())
-                    .fill(colors.surface)
-                    .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(12)
-                    .inner_margin(16),
-            )
+            .frame(prompt_ui::popup(ctx))
             .show(|ui| {
+                prompt_ui::style(ui);
                 ui.set_width(width - 32.0);
                 ui.spacing_mut().item_spacing.y = 12.0;
                 ui.horizontal(|ui| {

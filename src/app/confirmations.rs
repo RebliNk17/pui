@@ -49,33 +49,28 @@ impl<'a> Dialog<'a> {
             data.insert_temp(self.id.with("last-frame"), frame_number);
             previous.is_none_or(|previous| previous.saturating_add(1) < frame_number)
         });
-        let width = (ctx.screen_rect().width() - 64.0).clamp(200.0, 420.0);
-        let response = egui::Modal::new(self.id)
-            .frame(surface(ctx))
-            .backdrop_color(Color32::from_black_alpha(145))
-            .show(ctx, |ui| {
-                ui.set_width(width);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                heading(ui, self.title, self.description, self.destructive);
-                ui.add_space(16.0);
-                // Only the details scroll. The title and decision buttons stay visible.
-                egui::ScrollArea::vertical()
-                    .id_salt(self.id.with("details"))
-                    .max_height((ctx.screen_rect().height() - 238.0).max(64.0))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 6.0;
-                        body(ui);
-                    });
-                ui.add_space(22.0);
-                actions(
-                    ui,
-                    self.cancel,
-                    self.confirm,
-                    self.destructive,
-                    self.enabled,
-                    first,
-                )
-            });
+        let response = prompt_ui::modal(ctx, self.id, 360.0, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            heading(ui, self.title, self.description, self.destructive);
+            ui.add_space(16.0);
+            // Only the details scroll. The title and decision buttons stay visible.
+            egui::ScrollArea::vertical()
+                .id_salt(self.id.with("details"))
+                .max_height((ctx.screen_rect().height() - ui.min_rect().height() - 150.0).max(40.0))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    body(ui);
+                });
+            ui.add_space(22.0);
+            actions(
+                ui,
+                self.cancel,
+                self.confirm,
+                self.destructive,
+                self.enabled,
+                first,
+            )
+        });
         if response.should_close() {
             Some(Choice::Cancel)
         } else {
@@ -84,76 +79,21 @@ impl<'a> Dialog<'a> {
     }
 }
 
-pub(super) fn surface(ctx: &egui::Context) -> egui::Frame {
-    let colors = theme::palette(ctx);
-    egui::Frame::new()
-        .fill(colors.surface)
-        .stroke(Stroke::new(1.0, colors.border))
-        .corner_radius(16)
-        .inner_margin(24)
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 10],
-            blur: 32,
-            spread: 0,
-            color: Color32::from_black_alpha(65),
-        })
-}
-
 pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str, destructive: bool) {
-    let colors = theme::palette(ui.ctx());
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 12.0;
-        let (badge, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-        ui.painter().rect_filled(
-            badge,
-            10,
-            if destructive {
-                colors.error_bg
-            } else {
-                colors.accent_bg
-            },
-        );
-        icons::draw(
-            ui,
-            badge,
-            if destructive {
-                Icon::Stop
-            } else {
-                Icon::Branch
-            },
-            if destructive {
-                colors.red
-            } else {
-                colors.accent
-            },
-        );
-        ui.vertical(|ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 7.0;
-            ui.add(
-                egui::Label::new(RichText::new(title).size(18.0).strong().color(colors.text))
-                    .wrap(),
-            );
-            if !description.is_empty() {
-                ui.add(
-                    egui::Label::new(RichText::new(description).size(13.0).color(colors.muted))
-                        .wrap(),
-                );
-            }
-        });
-    });
+    prompt_ui::badge(
+        ui,
+        if destructive {
+            Icon::Stop
+        } else {
+            Icon::Branch
+        },
+        destructive,
+    );
+    prompt_ui::heading(ui, title, description);
 }
 
 pub(super) fn note(ui: &mut egui::Ui, text: &str) {
-    let colors = theme::palette(ui.ctx());
-    egui::Frame::new()
-        .fill(colors.bg)
-        .corner_radius(9)
-        .inner_margin(12)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.add(egui::Label::new(RichText::new(text).size(12.0).color(colors.muted)).wrap());
-        });
+    prompt_ui::note(ui, text);
 }
 
 pub(super) fn actions(
@@ -164,31 +104,17 @@ pub(super) fn actions(
     enabled: bool,
     focus_cancel: bool,
 ) -> Option<Choice> {
-    let colors = theme::palette(ui.ctx());
     let mut choice = None;
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.spacing_mut().button_padding = egui::vec2(14.0, 9.0);
-        let fill = if destructive {
-            Color32::from_rgb(177, 57, 49)
+    prompt_ui::footer(ui, |ui| {
+        let kind = if destructive {
+            prompt_ui::Button::Danger
         } else {
-            Color32::from_rgb(101, 78, 210)
+            prompt_ui::Button::Primary
         };
-        let action = egui::Button::new(RichText::new(confirm).size(12.5).color(Color32::WHITE))
-            .fill(fill)
-            .stroke(Stroke::new(1.0, fill))
-            .corner_radius(8)
-            .min_size(egui::vec2(100.0, 36.0));
-        if ui.add_enabled(enabled, action).clicked() {
+        if prompt_ui::button(ui, confirm, kind, enabled).clicked() {
             choice = Some(Choice::Confirm);
         }
-        let cancel = ui.add(
-            egui::Button::new(RichText::new(cancel).size(12.5).color(colors.text))
-                .fill(colors.surface)
-                .stroke(Stroke::new(1.0, colors.border))
-                .corner_radius(8)
-                .min_size(egui::vec2(100.0, 36.0)),
-        );
+        let cancel = prompt_ui::button(ui, cancel, prompt_ui::Button::Secondary, true);
         if focus_cancel {
             cancel.request_focus();
         }

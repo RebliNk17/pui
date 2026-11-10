@@ -58,11 +58,11 @@ fn field(ui: &mut egui::Ui, key: &str, value: &Value, depth: usize) {
     }
 }
 fn code(ui: &mut egui::Ui, text: &str, color: Color32) {
-    let colors = crate::theme::palette(ui.ctx());
     egui::Frame::new()
-        .fill(colors.bg)
+        .fill(prompt_ui::subtle(ui.ctx()))
+        .stroke(Stroke::new(1.0, prompt_ui::border(ui.ctx())))
         .corner_radius(7)
-        .inner_margin(10)
+        .inner_margin(12)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Text is selectable and wraps at the panel edge. Never JSON-escape or

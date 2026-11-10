@@ -302,9 +302,12 @@ impl Resources {
         let pending = self.pending.as_ref().unwrap();
         let mut confirm = false;
         let mut cancel = false;
-        section(ui, &pending.title, &pending.description);
-        card(ui, |ui| {
-            egui::Frame::new().inner_margin(16).show(ui, |ui| {
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            prompt_ui::style(ui);
+            prompt_ui::badge(ui, Icon::Folder, pending.request["action"] == "remove");
+            prompt_ui::heading(ui, &pending.title, &pending.description);
+            ui.add_space(14.0);
+            {
                 let scope = pending.request["scope"].as_str().unwrap_or("user");
                 ui.label(theme::small(
                     ui,
@@ -341,7 +344,14 @@ impl Resources {
                 match confirmations::actions(
                     ui,
                     "Cancel",
-                    "Confirm change",
+                    match pending.request["action"].as_str().unwrap_or("") {
+                        "install" => "Install package",
+                        "remove" => "Remove resource",
+                        "toggle" if pending.request["enabled"] == true => "Enable resource",
+                        "toggle" => "Disable resource",
+                        "update" => "Update resource",
+                        _ => "Save resource",
+                    },
                     pending.request["action"] == "remove",
                     !demo,
                     false,
@@ -350,7 +360,7 @@ impl Resources {
                     Some(confirmations::Choice::Confirm) => confirm = true,
                     None => {}
                 }
-            });
+            }
         });
         if cancel {
             self.pending = None;
@@ -370,8 +380,9 @@ impl Resources {
             },
             "",
         );
-        card(ui, |ui| {
-            egui::Frame::new().inner_margin(16).show(ui, |ui| {
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            prompt_ui::style(ui);
+            egui::Frame::new().show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 if self.scope.is_empty() { self.scope = "user".into(); }
                 ui.horizontal(|ui| {

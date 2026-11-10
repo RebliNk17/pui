@@ -36,6 +36,8 @@ pub struct Options {
     pub demo_settings: bool,
     pub settings: bool,
     pub settings_page: Option<String>,
+    pub demo_about: bool,
+    pub demo_updates: bool,
     pub demo_approval: bool,
     pub demo_questions: bool,
     pub demo_question_designs: bool,
@@ -146,6 +148,14 @@ fn main() -> eframe::Result {
             "--demo-questions" => {
                 options.demo = true;
                 options.demo_questions = true;
+            }
+            "--demo-about" => {
+                options.demo = true;
+                options.demo_about = true;
+            }
+            "--demo-updates" => {
+                options.demo = true;
+                options.demo_updates = true;
             }
             "--demo-approval" => {
                 options.demo = true;

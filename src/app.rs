@@ -1,3 +1,4 @@
+mod about;
 mod agents;
 mod approval_view;
 mod attachments;
@@ -14,6 +15,9 @@ mod notifications;
 mod permission_picker;
 #[cfg(test)]
 mod persistence_tests;
+mod prompt_ui;
+#[cfg(test)]
+mod prompt_ui_tests;
 mod prompts;
 mod questions;
 mod rewind;
@@ -284,6 +288,9 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            app.menu.about = options.demo_about;
+            // Preview only: opening Updates must not start a network check.
+            app.updates.open = options.demo_updates;
             if options.demo_approval {
                 app.state.busy = true;
                 let args = json!({"code":"const results = await Promise.all([\n  tools.read({ path: \"src/app/prompts.rs\" }),\n  tools.bash({ command: \"cargo test --all-targets\", timeout: 120 })\n]);\nfor (const result of results) text(result);"});
@@ -1290,7 +1297,10 @@ impl Pui {
                 .id(egui::Id::new("diff-viewer"))
                 .open(&mut open)
                 .default_size([850.0, 560.0])
+                .frame(prompt_ui::surface(ctx).inner_margin(20))
+                .collapsible(false)
                 .show(ctx, |ui| {
+                    prompt_ui::style(ui);
                     ui.label(theme::small(
                         ui,
                         "Read-only recorded change or working-tree diff · no files are modified",
@@ -1481,7 +1491,9 @@ impl eframe::App for Pui {
         }
         let confirming = self.agents.close_prompt
             || self.terminals.confirming_stop()
-            || self.history_view.is_open();
+            || self.history_view.is_open()
+            || self.menu.about
+            || self.updates.open;
         let terminal_input = !self.settings_open && self.terminals.focused(ctx);
         if !confirming && !self.settings_open && !self.tasks.open && !terminal_input {
             self.image_inputs(ctx);

@@ -61,15 +61,21 @@ impl Pui {
             self.task_dialog(ui);
             self.task_routing_details(ui, &task);
             if let Some(pending)=&task.pending_route {
-                ui.add(egui::Label::new(format!("Exceptional model requested: {} / {}\n{}",pending.selection.provider,pending.selection.model,pending.selection.reason)).wrap());
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Approve exceptional model · uses provider").clicked() { self.task_approve_exceptional(); }
-                    if ui.button("Decline exceptional model").clicked() { if let Some(t)=self.tasks.current_mut(){t.pending_route=None;t.note="Exceptional routing declined. No model call was made; start a new task to revise scope or policy.".into();}self.tasks.save(); }
+                prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+                    prompt_ui::style(ui);
+                    prompt_ui::heading(ui, "Exceptional model requested", &format!("{} / {}\n{}",pending.selection.provider,pending.selection.model,pending.selection.reason));
+                    ui.add_space(12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if prompt_ui::button(ui, "Approve exceptional model · uses provider", prompt_ui::Button::Primary, true).clicked() { self.task_approve_exceptional(); }
+                        if prompt_ui::button(ui, "Decline exceptional model", prompt_ui::Button::Secondary, true).clicked() { if let Some(t)=self.tasks.current_mut(){t.pending_route=None;t.note="Exceptional routing declined. No model call was made; start a new task to revise scope or policy.".into();}self.tasks.save(); }
+                    });
                 });
             }
             if task.phase==Phase::AwaitingApproval {
                 egui::ScrollArea::vertical().id_salt("task-contract-approval").show(ui,|ui|{
-                    ui.label(RichText::new(&task.objective).strong());
+                  prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+                    prompt_ui::style(ui);
+                    prompt_ui::heading(ui, "Agree on the checks first.", &task.objective);
                     ui.label(theme::small(ui,"Approve observable requirements and exact commands. Commands run through the existing Pi permission gate and may execute project code; this is not an OS sandbox."));
                     let t=self.tasks.current_mut().unwrap();
                     for c in &mut t.proposed.criteria {
@@ -86,9 +92,10 @@ impl Pui {
                     }
                     ui.add_space(10.0);ui.label(theme::small(ui,"Approval starts provider-backed implementation and fresh verification, including up to two automatic repair rounds under the displayed routing policy. Fable/Astra require separate approval. Each process has a 30-minute deadline. No automatic commits, merges or deployments. Model tools are bounded; test commands keep existing permissions."));
                     ui.horizontal_wrapped(|ui|{
-                        if ui.add_enabled(!self.demo,egui::Button::new("Approve checks and start · uses provider")).clicked(){self.task_start();}
+                        if prompt_ui::button(ui, "Approve checks and start · uses provider", prompt_ui::Button::Primary, !self.demo).clicked(){self.task_start();}
                         if ui.button("Cancel task").clicked(){if let Some(t)=self.tasks.current_mut(){t.phase=Phase::Cancelled;t.note="Cancelled before implementation.".into();}self.tasks.save();}
                     });
+                  });
                 });
                 if self.tasks.current().is_some_and(|t| serde_json::to_value(&t.proposed).ok() != serde_json::to_value(&task.proposed).ok()) { self.tasks.save(); }
                 return;
@@ -190,17 +197,20 @@ impl Pui {
             self.tasks.dialog_text = protocol::string(&dialog, "prefill").into();
         }
         if let Some(request) = questions::Request::parse(&dialog) {
-            if let Some(answer) = self
-                .tasks
-                .questions
-                .show(ui, &dialog, &request, false, true)
-            {
+            if let Some(answer) = self.tasks.questions.show(
+                ui,
+                &dialog,
+                &request,
+                false,
+                prompt_ui::keyboard_available(ui),
+            ) {
                 self.task_answer(&run, id, answer);
             }
             return;
         }
         let mut answer = None;
-        egui::Frame::group(ui.style()).show(ui, |ui| {
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            prompt_ui::style(ui);
             ui.label(
                 RichText::new(format!(
                     "{} · action required",
@@ -220,7 +230,7 @@ impl Pui {
                 .max_height(210.0)
                 .show(ui, |ui| {
                     if let Some(p) = &permission {
-                        ui.label(&p.title);
+                        prompt_ui::heading(ui, &p.title, "");
                         ui.add(egui::Label::new(&p.explanation).wrap());
                         approval_view::arguments(ui, &p.args);
                     } else {
@@ -230,16 +240,28 @@ impl Pui {
                 });
             ui.horizontal_wrapped(|ui| {
                 if let Some(p) = &permission {
-                    if ui.button("Allow once").clicked() {
+                    if prompt_ui::button(ui, "Allow once", prompt_ui::Button::Primary, true)
+                        .clicked()
+                    {
                         answer = Some(super::super::prompts::permission_response(p, false));
                     }
-                    if p.always && ui.button("Always allow exact action").clicked() {
+                    if p.always
+                        && prompt_ui::button(
+                            ui,
+                            "Always allow exact action",
+                            prompt_ui::Button::Secondary,
+                            true,
+                        )
+                        .clicked()
+                    {
                         answer = Some(super::super::prompts::permission_response(p, true));
                     }
                 } else {
                     match protocol::string(&dialog, "method") {
                         "confirm" => {
-                            if ui.button("Confirm").clicked() {
+                            if prompt_ui::button(ui, "Confirm", prompt_ui::Button::Primary, true)
+                                .clicked()
+                            {
                                 answer = Some(json!({"confirmed":true}));
                             }
                         }
@@ -257,7 +279,14 @@ impl Pui {
                                 egui::TextEdit::multiline(&mut self.tasks.dialog_text)
                                     .desired_rows(2),
                             );
-                            if ui.button("Send answer").clicked() {
+                            if prompt_ui::button(
+                                ui,
+                                "Send answer",
+                                prompt_ui::Button::Primary,
+                                true,
+                            )
+                            .clicked()
+                            {
                                 answer = Some(json!({"value":self.tasks.dialog_text}));
                             }
                         }
@@ -266,7 +295,9 @@ impl Pui {
                         }
                     }
                 }
-                if ui.button("Deny / cancel").clicked() {
+                if prompt_ui::button(ui, "Deny / cancel", prompt_ui::Button::Secondary, true)
+                    .clicked()
+                {
                     answer = Some(json!({"cancelled":true}));
                 }
             });

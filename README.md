@@ -199,6 +199,7 @@ src/inspector.rs  content-sized cards, bounded scrolling, disclosures, menus, re
 src/transcript.rs cached/culled turns, message rail and expandable activity
 src/activity.rs   tool summaries and successful recorded outputs
 src/context.rs    reported context metadata and usage disclosure
+src/app/prompt_ui.rs Quiet Mac dialogs, inline prompts, anchored popovers and explicit actions
 src/theme.rs      colors, typography, shared surfaces
 src/icons.rs      vector icons, no icon font dependency
 src/markdown.rs   selectable CommonMark and diff rendering
@@ -218,6 +219,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 node --test tests/*.test.mjs
 cargo run -- --demo --screenshot /tmp/pui.png
+cargo run -- --demo-about --light --screenshot /tmp/pui-about.png
+cargo run -- --demo-updates --light --screenshot /tmp/pui-updates.png
 cargo run -- --demo-questions --screenshot /tmp/pui-questions.png
 cargo run -- --demo-files --light --screenshot /tmp/pui-files.png
 cargo run -- --demo-changes --light --screenshot /tmp/pui-changes.png

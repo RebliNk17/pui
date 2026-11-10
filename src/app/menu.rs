@@ -334,13 +334,7 @@ impl Pui {
     }
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
         self.updates.show(ctx);
-        if self.menu.about {
-            egui::Window::new("About Pui").open(&mut self.menu.about).resizable(false).collapsible(false).default_width(320.0).show(ctx,|ui|{
-                ui.heading("Pui");ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));ui.add_space(8.0);ui.label("A native desktop workspace for Pi.");
-                ui.add(egui::Label::new(theme::small(ui,"Pi handles your models, tools and authentication. Pui provides the desktop workspace.")).wrap());
-                ui.label(theme::small(ui,"Local ad-hoc signed build · not notarized"));
-            });
-        }
+        about::show(ctx, &mut self.menu.about);
     }
 }
 

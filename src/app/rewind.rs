@@ -149,8 +149,9 @@ impl Pui {
                 } else {
                     for (mode,title,description) in [(Mode::Messages,"Messages only","Return the conversation to this point. Leave files as they are."),(Mode::Both,"Code + messages","Restore captured files and rewind the conversation."),(Mode::Code,"Code only","Restore captured files. Keep the current conversation.")] {
                         let available = mode == Mode::Messages || (request.point.code_reason.is_none() && self.workspace_restore_idle());
-                        ui.add_enabled_ui(available, |ui| {ui.radio_value(&mut request.mode,mode,title);});
-                        ui.add(egui::Label::new(theme::small(ui,description)).wrap());
+                        ui.add_enabled_ui(available, |ui| {
+                            if prompt_ui::option(ui, title, description, request.mode == mode).clicked() { request.mode = mode; }
+                        });
                     }
                     if let Some(reason)=&request.point.code_reason {ui.add(egui::Label::new(theme::small(ui,reason)).wrap());}
                     if !self.workspace_restore_idle() {ui.add(egui::Label::new(theme::small(ui,"File restore requires other agents in this window to finish or stop. Other windows and external writers cannot be locked by Pui; conflicts are checked before restoring.")).wrap());}

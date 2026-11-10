@@ -131,7 +131,7 @@ pub fn install(ctx: &egui::Context) {
     for (name, path, family) in [
         (
             "system",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
             FontFamily::Proportional,
         ),
         (
