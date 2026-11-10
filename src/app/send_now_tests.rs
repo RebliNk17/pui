@@ -445,6 +445,304 @@ fn receipt_deduplication_handles_identical_prompts_and_images() {
     assert!(app.state.pending_messages.is_empty());
 }
 #[test]
+fn resized_screenshot_receipt_is_removed_before_the_reply_and_never_reappears() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state.busy = false;
+    app.state.run_observed = false;
+    let (client, tx) = rpc::Client::stub_with_events();
+    app.client = Some(client);
+    let original =
+        crate::media::Attachment::from_bytes(include_bytes!("../../assets/icon.png")).unwrap();
+    let normalized = crate::media::Attachment::from_json(
+        &json!({"type":"image","data":"pi-normalized-image","mimeType":"image/jpeg"}),
+    )
+    .unwrap();
+    assert_ne!(original.key, normalized.key);
+    let text = "Please fix the scale control";
+    assert!(app.deliver_message(
+        WaitingMessage {
+            text: text.into(),
+            images: vec![original],
+            ..Default::default()
+        },
+        "prompt",
+    ));
+    let id = app.deliveries[0].id.clone();
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"response","command":"prompt","id":id,"success":true,"data":{"disposition":"started"}}),
+    );
+    assert_eq!(
+        app.state.pending_messages[0].status,
+        DeliveryStatus::AwaitingAgent
+    );
+    let user = json!({"role":"user","content":[
+        {"type":"text","text":format!("{text}\n\n[Image: original 3842x2100, displayed at 2000x1093. Multiply coordinates by 1.92 to map to original image.]")},
+        normalized.to_json(),
+    ]});
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"message_start","message":user}),
+    );
+    assert!(
+        app.state.pending_messages.is_empty(),
+        "Pi's resized image must replace the original optimistic bubble"
+    );
+    inject(&mut app, &tx, json!({"type":"message_end","message":user}));
+    inject(&mut app, &tx, json!({"type":"agent_start"}));
+    let answer =
+        json!({"role":"assistant","content":[{"type":"text","text":"Fixed the scale control."}]});
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"message_start","message":answer}),
+    );
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"message_end","message":answer}),
+    );
+    inject(&mut app, &tx, json!({"type":"agent_settled"}));
+    assert!(app.state.pending_messages.is_empty());
+    assert_eq!(
+        app.state
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .count(),
+        1
+    );
+    for _ in 0..3 {
+        let output = ctx.run(egui::RawInput::default(), |ctx| app.conversation(ctx));
+        let mut labels = Vec::new();
+        for shape in output.shapes {
+            texts(&shape.shape, &mut labels);
+        }
+        assert!(
+            !labels
+                .iter()
+                .any(|s| s == DeliveryStatus::AwaitingAgent.label())
+        );
+    }
+}
+
+#[test]
+fn repeated_text_with_different_screenshots_consumes_one_receipt_per_new_user_message() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state.busy = false;
+    let image = |data: &str| {
+        crate::media::Attachment::from_json(
+            &json!({"type":"image","data":data,"mimeType":"image/png"}),
+        )
+        .unwrap()
+    };
+    let text = "check this screenshot";
+    // The previous turn already contains a normalized copy of an earlier image.
+    let canonical = Message {
+        role: "user".into(),
+        text: text.into(),
+        images: vec![image("previous-normalized-image")],
+        ..Default::default()
+    };
+    app.state.messages.push(canonical.clone());
+    for data in ["first-original-image", "second-original-image"] {
+        assert!(app.deliver_message(
+            WaitingMessage {
+                text: text.into(),
+                images: vec![image(data)],
+                ..Default::default()
+            },
+            "steer",
+        ));
+    }
+    assert_eq!(app.state.pending_messages[0].observed, 1);
+    assert_eq!(app.state.pending_messages[1].observed, 2);
+    app.state.reconcile_pending_messages();
+    assert_eq!(
+        app.state.pending_messages.len(),
+        2,
+        "Old history is not delivery evidence"
+    );
+    app.state.messages.push(Message {
+        images: vec![image("first-normalized-image")],
+        ..canonical.clone()
+    });
+    app.state.reconcile_pending_messages();
+    assert_eq!(app.state.pending_messages.len(), 1);
+    app.state.messages.push(Message {
+        images: vec![image("second-normalized-image")],
+        ..canonical
+    });
+    app.state.reconcile_pending_messages();
+    assert!(app.state.pending_messages.is_empty());
+    // Late acknowledgements cannot recreate already consumed receipts.
+    let ids: Vec<_> = app.deliveries.iter().map(|d| d.id.clone()).collect();
+    for id in ids {
+        app.delivery_response(&json!({"id":id,"success":true}));
+    }
+    assert!(app.state.pending_messages.is_empty());
+    assert_eq!(
+        app.state.messages.len(),
+        3,
+        "Never deduplicate actual user turns"
+    );
+}
+
+#[test]
+fn normalized_screenshot_in_authoritative_history_confirms_uncertain_delivery() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let (client, tx) = rpc::Client::stub_with_events();
+    app.client = Some(client);
+    let image = crate::media::Attachment::from_json(
+        &json!({"type":"image","data":"original-image","mimeType":"image/png"}),
+    )
+    .unwrap();
+    assert!(app.deliver_message(
+        WaitingMessage {
+            images: vec![image],
+            ..Default::default()
+        },
+        "steer",
+    ));
+    app.uncertain_deliveries();
+    let canonical = Message::from_json(&json!({"role":"user","content":[
+        {"type":"image","data":"normalized-image","mimeType":"image/jpeg"},
+        {"type":"text","text":"[Image: original 3842x2100, displayed at 2000x1093. Multiply coordinates by 1.92 to map to original image.]"},
+    ]}));
+    tx.send(rpc::Event::History(vec![canonical.clone()]))
+        .unwrap();
+    app.poll_rpc();
+    assert!(app.state.pending_messages.is_empty());
+    assert_eq!(
+        app.state.messages[0].text, canonical.text,
+        "Keep canonical history unchanged"
+    );
+    assert!(
+        app.deliveries.is_empty(),
+        "History confirmation must never resend"
+    );
+}
+
+#[test]
+fn user_message_end_can_confirm_a_normalized_attachment_missing_at_start() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let (client, tx) = rpc::Client::stub_with_events();
+    app.client = Some(client);
+    let image = crate::media::Attachment::from_json(
+        &json!({"type":"image","data":"original-image","mimeType":"image/png"}),
+    )
+    .unwrap();
+    assert!(app.deliver_message(
+        WaitingMessage {
+            text: "inspect".into(),
+            images: vec![image],
+            ..Default::default()
+        },
+        "steer",
+    ));
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"message_start","message":{"role":"user","content":"inspect"}}),
+    );
+    assert_eq!(app.state.pending_messages.len(), 1);
+    inject(
+        &mut app,
+        &tx,
+        json!({"type":"message_end","message":{"role":"user","content":[
+            {"type":"text","text":"inspect"},
+            {"type":"image","data":"normalized-image","mimeType":"image/jpeg"},
+        ]}}),
+    );
+    assert!(app.state.pending_messages.is_empty());
+    assert_eq!(app.state.messages.len(), 1);
+}
+
+#[test]
+fn cancelled_and_handled_receipts_do_not_consume_later_matching_deliveries() {
+    for status in [DeliveryStatus::Cancelled, DeliveryStatus::Handled] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let message = WaitingMessage {
+            text: "try this again".into(),
+            ..Default::default()
+        };
+        assert!(app.deliver_message(message.clone(), "steer"));
+        app.state.pending_messages[0].status = status;
+        assert!(app.deliver_message(message.clone(), "steer"));
+        assert_eq!(app.state.pending_messages[1].observed, 0);
+        app.state.messages.push(Message {
+            role: "user".into(),
+            text: message.text,
+            ..Default::default()
+        });
+        app.state.reconcile_pending_messages();
+        assert_eq!(app.state.pending_messages.len(), 1);
+        assert_eq!(app.state.pending_messages[0].status, status);
+    }
+}
+
+#[test]
+fn unrelated_or_incomplete_attachment_messages_do_not_confirm_uncertain_delivery() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let image = crate::media::Attachment::from_json(
+        &json!({"type":"image","data":"original-image","mimeType":"image/png"}),
+    )
+    .unwrap();
+    assert!(app.deliver_message(
+        WaitingMessage {
+            text: "inspect this".into(),
+            images: vec![image.clone()],
+            ..Default::default()
+        },
+        "steer"
+    ));
+    app.uncertain_deliveries();
+    app.state.messages.extend([
+        Message {
+            role: "user".into(),
+            text: "different prompt".into(),
+            images: vec![image.clone()],
+            ..Default::default()
+        },
+        Message {
+            role: "user".into(),
+            text: "inspect this".into(),
+            ..Default::default()
+        },
+        Message {
+            role: "assistant".into(),
+            text: "inspect this".into(),
+            images: vec![image.clone()],
+            ..Default::default()
+        },
+        Message {
+            role: "user".into(),
+            text: "inspect this".into(),
+            images: vec![image.clone(), image],
+            ..Default::default()
+        },
+    ]);
+    app.state.reconcile_pending_messages();
+    assert_eq!(app.state.pending_messages.len(), 1);
+    assert_eq!(
+        app.state.pending_messages[0].status,
+        DeliveryStatus::Uncertain
+    );
+    assert!(
+        app.deliveries.is_empty(),
+        "Never resend an uncertain delivery"
+    );
+}
+
+#[test]
 fn file_attachment_receipt_is_replaced_when_pi_emits_the_manifest_backed_message() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
@@ -464,6 +762,14 @@ fn file_attachment_receipt_is_replaced_when_pi_emits_the_manifest_backed_message
     app.state.messages.push(Message::from_json(
         &json!({"role":"user","content":record["message"]}),
     ));
+    let mut different_file = app.state.messages[0].clone();
+    different_file.text = "read this report".into();
+    different_file.images[0] = crate::media::Attachment::from_file(crate::media::FileAttachment {
+        path: PathBuf::from("/fixture/other.csv"),
+        name: "other.csv".into(),
+        size: 12,
+    });
+    assert!(!app.state.pending_messages[0].matches(&different_file));
     app.state.reconcile_pending_messages();
     assert!(
         app.state.pending_messages.is_empty(),
