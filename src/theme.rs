@@ -3,6 +3,16 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+#[cfg(test)]
+mod bidi_tests;
+mod fonts;
+mod styles;
+pub use styles::{DarkStyle, LightStyle, Styles};
+
+/// Shared logical-pixel height for app controls. Chat controls opt into compact spacing.
+pub const CONTROL_HEIGHT: f32 = 32.0;
+pub const COMPACT_HEIGHT: f32 = 28.0;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Theme {
     #[default]
@@ -11,10 +21,7 @@ pub enum Theme {
 }
 impl Theme {
     pub fn palette(self) -> &'static Palette {
-        match self {
-            Self::Dark => &DARK,
-            Self::Light => &LIGHT,
-        }
+        Styles::default().palette(self)
     }
     pub fn apply(self, ctx: &egui::Context) {
         ctx.set_theme(match self {
@@ -54,7 +61,7 @@ pub struct Palette {
     pub switch_off: Color32,
 }
 
-const DARK: Palette = Palette {
+const NEUTRAL_DARK: Palette = Palette {
     bg: Color32::from_rgb(25, 25, 25),
     sidebar: Color32::from_rgb(32, 32, 32),
     surface: Color32::from_rgb(32, 32, 32),
@@ -83,7 +90,7 @@ const DARK: Palette = Palette {
     switch_off: Color32::from_rgb(63, 63, 63),
 };
 
-const LIGHT: Palette = Palette {
+const NEUTRAL_LIGHT: Palette = Palette {
     bg: Color32::from_rgb(250, 250, 248),
     sidebar: Color32::from_rgb(242, 242, 239),
     surface: Color32::from_rgb(255, 255, 253),
@@ -114,79 +121,47 @@ const LIGHT: Palette = Palette {
 
 /// Resolve per context, not globally: windows and tests may use different themes.
 pub fn palette(ctx: &egui::Context) -> &'static Palette {
-    match ctx.theme() {
-        egui::Theme::Dark => &DARK,
-        egui::Theme::Light => &LIGHT,
-    }
+    let mode = match ctx.theme() {
+        egui::Theme::Dark => Theme::Dark,
+        egui::Theme::Light => Theme::Light,
+    };
+    styles(ctx).palette(mode)
 }
 
 pub fn install(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    // System typography on macOS; egui's bundled fonts remain the portable fallback.
-    #[cfg(target_os = "macos")]
-    for (name, path, family) in [
-        (
-            "system",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            FontFamily::Proportional,
-        ),
-        (
-            "system-mono",
-            "/System/Library/Fonts/SFNSMono.ttf",
-            FontFamily::Monospace,
-        ),
-    ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts
-                .font_data
-                .insert(name.into(), Arc::new(FontData::from_owned(bytes)));
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .insert(0, name.into());
-        }
-    }
-    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Supplemental/Arial Bold.ttf") {
-        fonts
-            .font_data
-            .insert("body-bold".into(), Arc::new(FontData::from_owned(bytes)));
-        fonts.families.insert(
-            FontFamily::Name("body-bold".into()),
-            vec!["body-bold".into()],
-        );
-    } else {
-        fonts.families.insert(
-            FontFamily::Name("body-bold".into()),
-            fonts.families[&FontFamily::Proportional].clone(),
-        );
-    }
-    let serif = std::fs::read("/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf").ok();
-    if let Some(bytes) = serif {
-        fonts
-            .font_data
-            .insert("pi-serif".into(), Arc::new(FontData::from_owned(bytes)));
-        fonts
-            .families
-            .insert(FontFamily::Name("pi-serif".into()), vec!["pi-serif".into()]);
-    } else {
-        fonts.families.insert(
-            FontFamily::Name("pi-serif".into()),
-            fonts.families[&FontFamily::Proportional].clone(),
-        );
-    }
-    ctx.set_fonts(fonts);
-    for (mode, theme) in [
-        (Theme::Dark, egui::Theme::Dark),
-        (Theme::Light, egui::Theme::Light),
-    ] {
-        install_style(ctx, mode, theme);
-    }
-    Theme::Dark.apply(ctx);
+    ctx.set_fonts(fonts::definitions());
+    Styles::default().apply(ctx, Theme::Dark);
 }
 
-fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
-    let colors = mode.palette();
+pub fn styles(ctx: &egui::Context) -> Styles {
+    ctx.data(|data| data.get_temp(egui::Id::new("color-styles")))
+        .unwrap_or_default()
+}
+
+impl Styles {
+    pub fn apply(self, ctx: &egui::Context, mode: Theme) {
+        let installed = ctx.data(|data| data.get_temp::<Styles>(egui::Id::new("color-styles")));
+        if installed != Some(self) {
+            install_style(
+                ctx,
+                Theme::Dark,
+                egui::Theme::Dark,
+                self.palette(Theme::Dark),
+            );
+            install_style(
+                ctx,
+                Theme::Light,
+                egui::Theme::Light,
+                self.palette(Theme::Light),
+            );
+            ctx.data_mut(|data| data.insert_temp(egui::Id::new("color-styles"), self));
+            ctx.request_repaint();
+        }
+        mode.apply(ctx);
+    }
+}
+
+fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme, colors: &Palette) {
     let mut style = (*ctx.style_of(theme)).clone();
     style.visuals = match mode {
         Theme::Dark => Visuals::dark(),
@@ -217,9 +192,11 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
     }
     style.visuals.widgets.inactive.bg_fill = colors.surface;
     style.visuals.widgets.inactive.weak_bg_fill = colors.surface;
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, colors.border);
     style.visuals.widgets.hovered.weak_bg_fill = colors.hover;
     style.visuals.widgets.active.weak_bg_fill = colors.hover;
     style.visuals.widgets.hovered.bg_fill = colors.hover;
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, colors.dim);
     style.visuals.widgets.active.bg_fill = colors.hover;
     for widget in [
         &mut style.visuals.widgets.noninteractive,
@@ -235,7 +212,8 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, colors.border);
     style.visuals.hyperlink_color = colors.accent;
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 7.0);
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.scroll.bar_width = 4.0;
     style.spacing.scroll.floating = true;
     style
@@ -251,6 +229,92 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
         .text_styles
         .insert(TextStyle::Monospace, FontId::monospace(12.0));
     ctx.set_style_of(theme, style);
+}
+
+/// Tiny status indicators need more color and area than text in light mode.
+/// Keep dark-mode colors/geometry unchanged and preserve each semantic hue.
+pub fn status_dot(ui: &egui::Ui, center: egui::Pos2, color: Color32, radius: f32) {
+    let colors = palette(ui.ctx());
+    let (color, radius) = if ui.ctx().theme() == egui::Theme::Light {
+        let color = if color == colors.accent {
+            if styles(ui.ctx()).light == LightStyle::Neutral {
+                Color32::from_rgb(80, 42, 198)
+            } else {
+                Color32::from_rgb(
+                    (color.r() as f32 * 0.8) as u8,
+                    (color.g() as f32 * 0.8) as u8,
+                    (color.b() as f32 * 0.8) as u8,
+                )
+            }
+        } else if color == colors.green {
+            Color32::from_rgb(0, 101, 50)
+        } else if color == colors.red {
+            Color32::from_rgb(165, 30, 36)
+        } else if color == colors.blue {
+            Color32::from_rgb(15, 80, 160)
+        } else if color == colors.amber {
+            Color32::from_rgb(127, 72, 0)
+        } else if color == colors.dim || color == colors.muted {
+            Color32::from_rgb(82, 82, 76)
+        } else {
+            color
+        };
+        let color = if styles(ui.ctx()).light == LightStyle::Neutral {
+            color
+        } else {
+            Color32::from_rgb(
+                (color.r() as f32 * 0.9) as u8,
+                (color.g() as f32 * 0.9) as u8,
+                (color.b() as f32 * 0.9) as u8,
+            )
+        };
+        (color, radius + 1.5)
+    } else {
+        (color, radius)
+    };
+    ui.painter().circle_filled(center, radius, color);
+}
+
+/// Matching input geometry for settings search, resource forms and toolbars.
+pub fn text_field<'a>(text: &'a mut String, hint: &str) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(text)
+        .hint_text(hint)
+        .font(FontId::proportional(12.0))
+        .margin(egui::Margin::symmetric(10, 7))
+        .min_size(egui::vec2(0.0, CONTROL_HEIGHT))
+}
+
+/// A quiet selected state shared by settings choices and resource filters.
+pub fn choice(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> egui::Response {
+    let colors = palette(ui.ctx());
+    ui.add(
+        egui::Button::new(egui::RichText::new(label).size(12.0).color(if selected {
+            colors.accent
+        } else {
+            colors.muted
+        }))
+        .selected(selected)
+        .fill(if selected {
+            colors.accent_bg
+        } else {
+            Color32::TRANSPARENT
+        })
+        .stroke(Stroke::NONE)
+        .corner_radius(7)
+        .min_size(egui::vec2(0.0, CONTROL_HEIGHT)),
+    )
+}
+
+pub fn slider_style(ui: &mut egui::Ui) {
+    let colors = palette(ui.ctx());
+    ui.spacing_mut().slider_rail_height = 4.0;
+    ui.visuals_mut().widgets.inactive.bg_fill = colors.border;
+    ui.visuals_mut().slider_trailing_fill = true;
+}
+
+pub fn compact_controls(ui: &mut egui::Ui) {
+    ui.spacing_mut().interact_size.y = COMPACT_HEIGHT;
+    ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
 }
 
 pub fn small(ui: &egui::Ui, text: impl Into<String>) -> egui::RichText {
@@ -271,6 +335,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hebrew_letters_have_glyphs_in_every_text_family() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for family in [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name("body-bold".into()),
+                FontFamily::Name("pi-serif".into()),
+            ] {
+                let font = FontId::new(14.0, family);
+                ctx.fonts(|fonts| {
+                    for c in "אבגדהוזחטיךכלםמןנסעףפץצקרשת".chars() {
+                        assert!(
+                            fonts.has_glyph(&font, c),
+                            "Missing Hebrew glyph {c} in {font:?}"
+                        );
+                    }
+                });
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_language_fallbacks_cover_common_scripts() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            for family in [
+                FontFamily::Proportional,
+                FontFamily::Monospace,
+                FontFamily::Name("body-bold".into()),
+                FontFamily::Name("pi-serif".into()),
+            ] {
+                let font = FontId::new(14.0, family);
+                ctx.fonts(|fonts| {
+                    for c in "שלום Ελληνικά Привет مرحبا हिन्दी ไทย 日本語 中文 한국어"
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                    {
+                        assert!(
+                            fonts.has_glyph(&font, c),
+                            "Missing language glyph {c} in {font:?}"
+                        );
+                    }
+                });
+            }
+        });
+    }
+    #[test]
     fn themes_are_context_local_and_keep_scale() {
         let dark = egui::Context::default();
         let light = egui::Context::default();
@@ -288,8 +402,75 @@ mod tests {
             assert_eq!(visuals.hyperlink_color, colors.accent);
             assert_eq!(visuals.dark_mode, mode == Theme::Dark);
             assert_eq!(light.zoom_factor(), 1.2);
-            assert_eq!(palette(&dark).bg, DARK.bg);
+            assert_eq!(palette(&dark).bg, Theme::Dark.palette().bg);
             assert!(dark.style().visuals.dark_mode);
+        }
+    }
+
+    #[test]
+    fn classic_is_the_default_and_preserves_the_original_colors() {
+        let defaults = Styles::default();
+        assert_eq!(defaults.dark, DarkStyle::Neutral);
+        assert_eq!(defaults.light, LightStyle::Neutral);
+        assert_eq!(DarkStyle::ALL[0].label(), "Classic");
+        assert_eq!(LightStyle::ALL[0].label(), "Classic");
+        let dark = defaults.palette(Theme::Dark);
+        assert_eq!(dark.bg, Color32::from_rgb(25, 25, 25));
+        assert_eq!(dark.sidebar, Color32::from_rgb(32, 32, 32));
+        assert_eq!(dark.accent, Color32::from_rgb(139, 124, 255));
+        assert_eq!(dark.dim, Color32::from_rgb(119, 119, 115));
+        let light = defaults.palette(Theme::Light);
+        assert_eq!(light.bg, Color32::from_rgb(250, 250, 248));
+        assert_eq!(light.accent, Color32::from_rgb(101, 78, 210));
+        // Existing saved Neutral selections still map to the original palette.
+        let saved: Styles =
+            serde_json::from_str(r#"{"dark":"Neutral","light":"Neutral"}"#).unwrap();
+        assert_eq!(saved, defaults);
+    }
+
+    fn all_styles() -> Vec<(Theme, Styles)> {
+        DarkStyle::ALL
+            .into_iter()
+            .map(|dark| {
+                (
+                    Theme::Dark,
+                    Styles {
+                        dark,
+                        ..Default::default()
+                    },
+                )
+            })
+            .chain(LightStyle::ALL.into_iter().map(|light| {
+                (
+                    Theme::Light,
+                    Styles {
+                        light,
+                        ..Default::default()
+                    },
+                )
+            }))
+            .collect()
+    }
+
+    #[test]
+    fn styles_update_native_widgets_without_leaking_across_contexts() {
+        let first = egui::Context::default();
+        let second = egui::Context::default();
+        install(&first);
+        install(&second);
+        first.set_zoom_factor(1.15);
+        let _ = first.run(egui::RawInput::default(), |_| {});
+        for (mode, selected) in all_styles() {
+            selected.apply(&first, mode);
+            let colors = selected.palette(mode);
+            assert_eq!(palette(&first).bg, colors.bg);
+            assert_eq!(palette(&first).accent, colors.accent);
+            assert_eq!(first.style().visuals.panel_fill, colors.bg);
+            assert_eq!(first.style().visuals.hyperlink_color, colors.accent);
+            assert_eq!(first.style().visuals.selection.bg_fill, colors.selection_bg);
+            assert_eq!(first.zoom_factor(), 1.15);
+            assert_eq!(styles(&second), Styles::default());
+            assert_eq!(palette(&second).bg, Theme::Dark.palette().bg);
         }
     }
 
@@ -317,9 +498,9 @@ mod tests {
         };
         let ctx = egui::Context::default();
         install(&ctx);
-        for theme in [Theme::Dark, Theme::Light] {
-            theme.apply(&ctx);
-            let colors = theme.palette();
+        for (theme, styles) in all_styles() {
+            styles.apply(&ctx, theme);
+            let colors = styles.palette(theme);
             assert_eq!(ctx.style().visuals.selection.bg_fill, colors.selection_bg);
             assert_eq!(colors.selection_bg.a(), 255);
             assert!(contrast(colors.text, colors.selection_bg) >= 4.5);
@@ -336,24 +517,83 @@ mod tests {
     }
 
     #[test]
-    fn light_text_and_status_colors_have_readable_contrast() {
-        let colors = Theme::Light.palette();
-        for background in [colors.bg, colors.sidebar, colors.surface] {
-            for foreground in [
-                colors.text,
-                colors.muted,
-                colors.dim,
+    fn sidebar_status_dots_are_stronger_in_light_mode_and_unchanged_in_dark() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        for (mode, selected) in all_styles() {
+            selected.apply(&ctx, mode);
+            let colors = selected.palette(mode);
+            for color in [
                 colors.accent,
                 colors.green,
                 colors.red,
                 colors.blue,
                 colors.amber,
+                colors.dim,
+                colors.muted,
             ] {
-                let contrast = (luminance(background) + 0.05) / (luminance(foreground) + 0.05);
-                assert!(
-                    contrast >= 4.5,
-                    "{foreground:?} on {background:?}: {contrast}"
-                );
+                for radius in [2.5, 3.0] {
+                    let output = ctx.run(egui::RawInput::default(), |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            status_dot(ui, egui::pos2(30.0, 30.0), color, radius);
+                        });
+                    });
+                    let dot = output
+                        .shapes
+                        .iter()
+                        .find_map(|s| match &s.shape {
+                            egui::Shape::Circle(c) => Some(c),
+                            _ => None,
+                        })
+                        .expect("status dot is painted");
+                    assert_eq!(dot.fill.a(), 255);
+                    if mode == Theme::Light {
+                        assert_eq!(dot.radius, radius + 1.5);
+                        for background in [colors.sidebar, colors.surface, colors.hover] {
+                            let contrast =
+                                (luminance(background) + 0.05) / (luminance(dot.fill) + 0.05);
+                            assert!(contrast >= 5.5, "{color:?} on {background:?}: {contrast}");
+                        }
+                    } else {
+                        assert_eq!(dot.radius, radius);
+                        assert_eq!(dot.fill, color);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_styles_keep_text_and_status_colors_readable() {
+        for (mode, styles) in all_styles() {
+            let colors = styles.palette(mode);
+            for background in [colors.bg, colors.sidebar, colors.surface] {
+                for foreground in [
+                    colors.text,
+                    colors.muted,
+                    colors.dim,
+                    colors.accent,
+                    colors.green,
+                    colors.red,
+                    colors.blue,
+                    colors.amber,
+                ] {
+                    let (a, b) = (luminance(background), luminance(foreground));
+                    let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    // Preserve the original Classic dark palette exactly, including its dim metadata.
+                    let minimum = if mode == Theme::Dark
+                        && styles.dark == DarkStyle::Neutral
+                        && foreground == colors.dim
+                    {
+                        3.0
+                    } else {
+                        4.5
+                    };
+                    assert!(
+                        contrast >= minimum,
+                        "{styles:?} {foreground:?} on {background:?}: {contrast}"
+                    );
+                }
             }
         }
     }

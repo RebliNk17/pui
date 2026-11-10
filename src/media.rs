@@ -14,13 +14,35 @@ const MAX_ENCODED: usize = 32 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_TEXTURES: usize = 32;
 
+/// Non-image files are retained locally; Pi reads them through its normal tools.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FileAttachment {
+    pub path: std::path::PathBuf,
+    pub name: String,
+    pub size: u64,
+}
+
+pub const FILE_MARKER: &str = "\n\nPui attached files (local paths; read with tools as needed):\n";
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Attachment {
     pub key: u64,
     pub data: Arc<str>,
     pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<FileAttachment>,
 }
 impl Attachment {
+    pub fn from_file(file: FileAttachment) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        file.path.hash(&mut hasher);
+        Self {
+            key: hasher.finish(),
+            data: Arc::from(""),
+            mime: "application/octet-stream".into(),
+            file: Some(file),
+        }
+    }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > 8 * 1024 * 1024 {
             return Err("Image is larger than 8 MB".into());
@@ -62,8 +84,19 @@ impl Attachment {
             key: hasher.finish(),
             data: Arc::from(data),
             mime: block["mimeType"].as_str().unwrap_or("image/png").into(),
+            file: None,
         })
     }
+}
+
+/// Only recognize a complete trailing manifest. No filesystem reads on history load.
+pub fn file_manifest(text: &str) -> Option<(&str, Vec<FileAttachment>)> {
+    let (body, manifest) = text.rsplit_once(FILE_MARKER)?;
+    let files: Vec<FileAttachment> = serde_json::from_str(manifest).ok()?;
+    if files.is_empty() || files.len() > 8 || files.iter().any(|f| !f.path.is_absolute()) {
+        return None;
+    }
+    Some((body, files))
 }
 
 pub fn attachments(content: &Value) -> Vec<Attachment> {
@@ -197,9 +230,25 @@ impl Gallery {
         if images.is_empty() {
             return;
         }
-        self.collection = images.to_vec();
-        self.index = index.min(images.len() - 1);
-        self.selected = Some(images[self.index].clone());
+        let selected = &images[index.min(images.len() - 1)];
+        if selected.file.is_some() {
+            return;
+        }
+        let selected_key = selected.key;
+        self.collection = images
+            .iter()
+            .filter(|i| i.file.is_none())
+            .cloned()
+            .collect();
+        if self.collection.is_empty() {
+            return;
+        }
+        self.index = self
+            .collection
+            .iter()
+            .position(|i| i.key == selected_key)
+            .unwrap_or(0);
+        self.selected = Some(self.collection[self.index].clone());
         self.zoom = 1.0;
         self.pan = Vec2::ZERO;
     }
@@ -217,6 +266,27 @@ impl Gallery {
         image: &Attachment,
         size: Vec2,
     ) -> egui::Response {
+        if let Some(file) = &image.file {
+            let colors = crate::theme::palette(ui.ctx());
+            let (slot, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+            ui.painter().rect_filled(slot, 8, colors.surface);
+            let mut job = egui::text::LayoutJob::simple(
+                format!("{}\n{} bytes", file.name, file.size),
+                egui::FontId::proportional(10.0),
+                colors.text,
+                (size.x - 10.0).max(1.0),
+            );
+            job.wrap.max_rows = 3;
+            let galley = ui.painter().layout_job(job);
+            ui.painter()
+                .galley(slot.center() - galley.size() / 2.0, galley, colors.text);
+            return response.on_hover_text(format!(
+                "{}\n{} bytes\n{}",
+                file.name,
+                file.size,
+                file.path.display()
+            ));
+        }
         let colors = crate::theme::palette(ui.ctx());
         let (slot, response) = ui.allocate_exact_size(size, egui::Sense::click());
         if !ui.is_rect_visible(slot) {
@@ -272,7 +342,7 @@ impl Gallery {
         self.selected.is_some()
     }
     pub fn viewer(&mut self, ctx: &egui::Context) {
-        let colors = crate::theme::Theme::Dark.palette();
+        let colors = crate::theme::styles(ctx).palette(crate::theme::Theme::Dark);
         let Some(image) = self.selected.clone() else {
             return;
         };
@@ -633,6 +703,7 @@ mod tests {
                     key: key as u64,
                     data: "unused fixture".into(),
                     mime: "image/png".into(),
+                    file: None,
                 })
                 .collect();
             for image in &images {
@@ -853,6 +924,7 @@ mod tests {
             key: 1,
             data: "invalid".into(),
             mime: "image/png".into(),
+            file: None,
         };
         let mut heights = Vec::new();
         for state in 0..3 {
@@ -888,6 +960,7 @@ mod tests {
             key: 1,
             data: "invalid".into(),
             mime: "image/png".into(),
+            file: None,
         };
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -908,6 +981,7 @@ mod tests {
                 key,
                 data: "invalid".into(),
                 mime: "image/png".into(),
+                file: None,
             })
             .collect();
         gallery.open(&images, 0);
@@ -950,13 +1024,42 @@ mod tests {
         assert!(!gallery.is_open());
     }
     #[test]
+    fn file_cards_have_fixed_geometry_and_never_start_image_decoders() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut gallery = Gallery::default();
+        let file = Attachment::from_file(FileAttachment {
+            path: "/fixture/report.csv".into(),
+            name: "very-long-report-name.csv".repeat(8),
+            size: 123,
+        });
+        let mut rect = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rect = Some(gallery.thumbnail(ui, &file, Vec2::new(65.0, 55.0)).rect);
+            });
+        });
+        assert_eq!(rect.unwrap().size(), Vec2::new(65.0, 55.0));
+        assert_eq!(gallery.pending, 0);
+        gallery.open(std::slice::from_ref(&file), 0);
+        assert!(!gallery.is_open());
+        assert!(file_manifest(&format!("text{FILE_MARKER}[]")).is_none());
+        assert!(
+            file_manifest(&format!(
+                "text{FILE_MARKER}[{{\"path\":\"relative.csv\",\"name\":\"x\",\"size\":1}}]"
+            ))
+            .is_none()
+        );
+    }
+    #[test]
     fn invalid_image_is_a_visible_error() {
         assert!(
             decode(
                 &Attachment {
                     key: 0,
                     data: "not base64".into(),
-                    mime: "image/png".into()
+                    mime: "image/png".into(),
+                    file: None,
                 },
                 128
             )

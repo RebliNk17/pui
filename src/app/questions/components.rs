@@ -66,15 +66,23 @@ pub(super) fn choice(
         rect,
         10,
         if active || response.hovered() {
-            colors.hover
+            colors.accent_bg
         } else {
-            colors.sidebar
+            prompt_ui::background(ui.ctx())
         },
-        Stroke::new(1.0, if active { colors.accent } else { colors.border }),
+        Stroke::new(
+            1.0,
+            if active {
+                colors.accent
+            } else {
+                prompt_ui::border(ui.ctx())
+            },
+        ),
         egui::StrokeKind::Inside,
     );
     let badge = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 10.0), Vec2::splat(24.0));
-    ui.painter().rect_filled(badge, 5, colors.bg);
+    ui.painter()
+        .rect_filled(badge, 5, prompt_ui::subtle(ui.ctx()));
     // Keep the shortcut visible even when selected. Selection has its own check.
     ui.painter().text(
         badge.center(),
@@ -115,7 +123,7 @@ pub(super) fn editor(
     let colors = theme::palette(ui.ctx());
     let focused = focus || ui.memory(|m| m.has_focus(id));
     egui::Frame::new()
-        .fill(colors.bg)
+        .fill(prompt_ui::subtle(ui.ctx()))
         .stroke(Stroke::new(
             1.0,
             if focused {
@@ -156,22 +164,14 @@ pub(super) fn editor(
 }
 
 pub(super) fn submit(ui: &mut egui::Ui, enabled: bool, last: bool) -> egui::Response {
-    let colors = theme::palette(ui.ctx());
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(
-            RichText::new(if last {
-                "Submit & continue"
-            } else {
-                "Next question"
-            })
-            .color(if enabled { colors.bg } else { colors.dim }),
-        )
-        .fill(if enabled {
-            colors.accent
+    prompt_ui::button(
+        ui,
+        if last {
+            "Submit & continue"
         } else {
-            colors.surface
-        })
-        .corner_radius(7),
+            "Next question"
+        },
+        prompt_ui::Button::Primary,
+        enabled,
     )
 }

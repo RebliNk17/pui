@@ -41,6 +41,10 @@ fn save_and_reopen_restore_the_visible_chat_and_both_sidebar_views() {
         app.demo = false;
         app.new_chat = false;
         app.projects = projects;
+        app.prefs.session_order = sidebar_order::Options {
+            sort: sidebar_order::Sort::Name,
+            reverse: true,
+        };
         app.prefs.cwd = cwd.clone();
         app.state = State {
             session_file: Some(path.display().to_string()),
@@ -52,6 +56,8 @@ fn save_and_reopen_restore_the_visible_chat_and_both_sidebar_views() {
 
         let restored = reopen(&storage, Options::default());
         assert_eq!(restored.projects, projects);
+        assert!(restored.prefs.session_order.sort == sidebar_order::Sort::Name);
+        assert!(restored.prefs.session_order.reverse);
         assert_eq!(restored.prefs.cwd, cwd);
         assert_eq!(restored.pending_session.as_ref(), Some(&path));
         assert_eq!(restored.state.session_file.as_deref(), path.to_str());
@@ -211,6 +217,50 @@ fn saving_during_a_chat_switch_remembers_the_requested_chat_not_the_old_one() {
     let restored = reopen(&storage, Options::default());
     assert_eq!(restored.pending_session.as_ref(), Some(&path));
     assert!(restored.projects);
+}
+
+#[test]
+fn both_color_styles_survive_save_and_reopen_in_the_selected_mode() {
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = true;
+    app.state = State::default();
+    app.prefs.color_styles = theme::Styles {
+        dark: theme::DarkStyle::Plum,
+        light: theme::LightStyle::Sage,
+    };
+    app.prefs.theme = theme::Theme::Light;
+    eframe::App::save(&mut app, &mut storage);
+    let restored = reopen(&storage, Options::default());
+    assert_eq!(restored.prefs.color_styles, app.prefs.color_styles);
+    assert_eq!(restored.prefs.theme, theme::Theme::Light);
+    assert_eq!(
+        theme::palette(&restored.ctx).bg,
+        theme::LightStyle::Sage.palette().bg
+    );
+    assert_eq!(
+        restored.ctx.style().visuals.hyperlink_color,
+        theme::LightStyle::Sage.palette().accent
+    );
+    let overridden = reopen(
+        &storage,
+        Options {
+            theme: Some(theme::Theme::Dark),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        theme::palette(&overridden.ctx).bg,
+        theme::DarkStyle::Plum.palette().bg
+    );
+    assert_eq!(overridden.prefs.color_styles.light, theme::LightStyle::Sage);
 }
 
 #[test]

@@ -20,6 +20,12 @@ pub(super) struct LivePath {
     pub path: PathBuf,
     pub revision: u64,
     pub label: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub cwd: PathBuf,
+    #[serde(default)]
+    pub model: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Endpoint {
@@ -72,8 +78,9 @@ struct RemoteCommand {
     reply: mpsc::Sender<Reply>,
 }
 enum Work {
-    Publish(PathBuf, u64, String),
+    Publish(LivePath),
     Scan,
+    Forget(PathBuf),
     Fetch(PathBuf, Endpoint, u64),
     Act(PathBuf, Endpoint, u64, Action),
     Stop,
@@ -116,7 +123,13 @@ fn key(path: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 pub(super) fn identity(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|p| p.canonicalize().ok())
+            .zip(path.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
 }
 fn private_open(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
@@ -176,6 +189,23 @@ fn call(
         },
     )?;
     read_frame(&mut stream)
+}
+fn write_endpoint(directory: &Path, endpoint: &Endpoint) -> std::io::Result<()> {
+    // Streaming serde_json directly into File issues a syscall for every JSON
+    // token. Encode first so each publication needs just one bounded write.
+    let bytes = serde_json::to_vec(endpoint).map_err(std::io::Error::other)?;
+    let temp = directory.join(format!("{}.tmp", endpoint.id));
+    let mut file = private_open(&temp)?;
+    file.set_len(0)?;
+    file.write_all(&bytes)?;
+    std::fs::rename(temp, directory.join(format!("{}.json", endpoint.id)))
+}
+fn registry_changed(event: &notify::Event, own: &Path) -> bool {
+    (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
+        && event
+            .paths
+            .iter()
+            .any(|p| p != own && p.extension().is_some_and(|e| e == "json"))
 }
 fn registry(directory: &Path, own: &str) -> Vec<Endpoint> {
     std::fs::read_dir(directory)
@@ -305,20 +335,17 @@ impl WindowSync {
                 while let Ok(job) = work.recv() {
                     match job {
                         Work::Stop => break,
-                        Work::Publish(path, revision, label) => {
+                        Work::Publish(live) => {
+                            endpoint.paths.retain(|p| p.path != live.path);
+                            endpoint.paths.push(live);
+                            let _ = write_endpoint(&dir, &endpoint);
+                            // No self-repaint on publication; peer watchers handle updates.
+                            continue;
+                        }
+                        Work::Forget(path) => {
                             endpoint.paths.retain(|p| p.path != path);
-                            endpoint.paths.push(LivePath {
-                                path,
-                                revision,
-                                label,
-                            });
-                            let temp = dir.join(format!("{}.tmp", endpoint.id));
-                            if let Ok(mut file) = private_open(&temp) {
-                                let _ = file.set_len(0);
-                                if serde_json::to_writer(&mut file, &endpoint).is_ok() {
-                                    let _ = std::fs::rename(&temp, &metadata);
-                                }
-                            }
+                            let _ = write_endpoint(&dir, &endpoint);
+                            continue;
                         }
                         Work::Scan => {
                             let _ =
@@ -367,20 +394,14 @@ impl WindowSync {
                 }
                 let _ = std::fs::remove_file(metadata);
             }));
-            let repaint = ctx.clone();
+            let own_metadata = directory.join(format!("{}.json", this.id));
             let mut watcher =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
-                        if (event.kind.is_create()
-                            || event.kind.is_modify()
-                            || event.kind.is_remove())
-                            && event
-                                .paths
-                                .iter()
-                                .any(|p| p.extension().is_some_and(|e| e == "json"))
-                        {
+                        if registry_changed(&event, &own_metadata) {
+                            // The scan worker wakes the UI once its result is
+                            // ready. Never scan/repaint for our own publications.
                             let _ = tx.send(Work::Scan);
-                            repaint.request_repaint();
                         }
                     }
                 })
@@ -400,6 +421,39 @@ impl WindowSync {
     }
     pub fn enabled(&self) -> bool {
         self.directory.is_some()
+    }
+    /// Reuse an owned lock or acquire a temporary lock. Never delete another
+    /// window's live transcript, even if its cached status says Idle.
+    pub(super) fn deletion_lock(&self, path: &Path) -> Result<Option<File>, String> {
+        let path = identity(path);
+        if self.owned.contains_key(&path) {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        if self.directory.is_none() {
+            return Ok(None);
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or("Live session coordination is unavailable; deletion was refused")?;
+        let file = private_open(&directory.join(format!("{}.lock", key(&path))))
+            .map_err(|_| "Cannot lock chat for deletion")?;
+        file.try_lock_exclusive().map_err(
+            |_| "This chat is open in another Pui window. Close it there before deleting it.",
+        )?;
+        Ok(Some(file))
+    }
+    pub(super) fn forget_deleted(&mut self, path: &Path) {
+        let path = identity(path);
+        self.owned.remove(&path);
+        self.endpoints.remove(&path);
+        self.pending.remove(&path);
+        self.revisions.remove(&path);
+        if self.mirror.as_ref() == Some(&path) {
+            self.mirror = None;
+        }
+        let _ = self.tx.send(Work::Forget(path));
     }
     pub fn detach_mirror(&mut self) {
         self.mirror = None;
@@ -467,6 +521,14 @@ impl WindowSync {
             self.pending.insert(path.clone());
             let _ = self.tx.send(Work::Fetch(path, peer.clone(), revision));
         }
+    }
+    pub fn live_sessions(&self) -> Vec<LivePath> {
+        self.endpoints
+            .iter()
+            .filter(|(path, _)| !self.owns(path))
+            .filter_map(|(path, endpoint)| endpoint.paths.iter().find(|p| &p.path == path))
+            .cloned()
+            .collect()
     }
     pub fn act(&mut self, path: &Path, action: Action) -> Result<(), String> {
         let path = identity(path);
@@ -625,6 +687,15 @@ impl Pui {
             self.ultracode_ready,
         )
             .hash(&mut hash);
+        for receipt in &self.state.pending_messages {
+            receipt.id.hash(&mut hash);
+            receipt.text.hash(&mut hash);
+            receipt.status.label().hash(&mut hash);
+            receipt.observed.hash(&mut hash);
+            for image in &receipt.images {
+                image.key.hash(&mut hash);
+            }
+        }
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
@@ -633,6 +704,12 @@ impl Pui {
         self.prefs.notifications.sound.hash(&mut hash);
         self.prefs.notifications.desktop.hash(&mut hash);
         self.state.session_name.hash(&mut hash);
+        self.state.model_name.hash(&mut hash);
+        self.prefs.cwd.hash(&mut hash);
+        for command in &self.state.commands {
+            command.name.hash(&mut hash);
+            command.description.hash(&mut hash);
+        }
         self.state.permission_classifier.hash(&mut hash);
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);
@@ -660,10 +737,21 @@ impl Pui {
         owner.revision += 1;
         owner.published = std::time::Instant::now();
         let revision = self.sync.owned[&path].revision;
-        let _ = self
-            .sync
-            .tx
-            .send(Work::Publish(path, revision, self.run_label().0.into()));
+        let _ = self.sync.tx.send(Work::Publish(LivePath {
+            path,
+            revision,
+            label: if self.state.dialogs.is_empty()
+                && self.state.ready()
+                && self.state.error.is_some()
+            {
+                "Failed".into()
+            } else {
+                self.run_label().0.into()
+            },
+            title: self.state.chat_title().unwrap_or_default(),
+            cwd: self.prefs.cwd.clone(),
+            model: self.state.model_name.clone(),
+        }));
     }
     pub(super) fn poll_window_sync(&mut self) {
         let events: Vec<_> = self.sync.rx.try_iter().collect();
@@ -889,6 +977,9 @@ impl Pui {
                 "This chat is not active in its owning window. Switch to it there first.".into(),
             );
         }
+        if self.deletion.in_progress() || self.deletion.deleting_chat(path) {
+            return Err("Deletion is in progress for this chat in the owning window.".into());
+        }
         if self.loading_chat {
             return Err("Owning window is connecting; try again when ready.".into());
         }
@@ -929,18 +1020,8 @@ impl Pui {
                         {
                             return Err("Wait for compaction/approval before sending now.".into());
                         }
-                        let message = queue.remove(index);
-                        let kind = if self.state.ready() {
-                            "prompt"
-                        } else {
-                            "steer"
-                        };
-                        if !self.deliver_message(message.clone(), kind) {
-                            self.waiting
-                                .entry(queue_path.clone())
-                                .or_default()
-                                .insert(index, message);
-                            return Err("Owner could not send; message retained".into());
+                        if !self.send_now(index) {
+                            return Err("Owner could not interrupt/send; message retained".into());
                         }
                     }
                     _ => unreachable!(),
@@ -990,6 +1071,7 @@ impl Pui {
                     return Err("This approval dialog is no longer active".into());
                 }
                 if kind == "clear_queue" {
+                    self.cancel_send_now();
                     self.waiting.remove(&queue_path);
                 }
                 if kind == "extension_ui_response" {
@@ -1047,6 +1129,161 @@ mod tests {
             "cross-window operation timed out: {:?} / {:?}",
             a.state.error,
             b.state.error
+        );
+    }
+    #[test]
+    fn kanban_discovers_other_windows_without_attaching_or_duplicating_sessions() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut observer = app(&directory, &path);
+        observer.state = State::default();
+        observer.connected = false;
+        owner.client = Some(rpc::Client::stub());
+        owner.prefs.cwd = directory.clone();
+        owner.state.session_name = "Live agent in another window".into();
+        owner.state.model_name = "Example model".into();
+        owner.state.busy = true;
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            !b.sync.live_sessions().is_empty()
+        });
+        let cards = observer.board_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, "Live agent in another window");
+        assert_eq!(cards[0].project, directory);
+        assert_eq!(cards[0].model, "Example model");
+        assert_eq!(cards[0].status, kanban::Status::Working);
+        assert!(observer.client.is_none());
+        assert!(
+            observer.sync.mirror.is_none(),
+            "Board discovery must not attach a session"
+        );
+        owner.state.dialogs.push_back(questions::demo_dialog());
+        std::thread::sleep(Duration::from_millis(130));
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            b.board_cards()
+                .iter()
+                .any(|c| c.status == kanban::Status::Waiting)
+        });
+        observer.state.session_file = Some(path.display().to_string());
+        observer.connected = true;
+        assert_eq!(
+            observer.board_cards().len(),
+            1,
+            "Mirrored paths must be deduplicated"
+        );
+        owner.state.dialogs.clear();
+        owner.state.busy = false;
+        owner.state.error = Some("Provider disconnected".into());
+        owner.publish_live();
+        spin(&mut owner, &mut observer, |_, b| {
+            b.sync.live_sessions().iter().any(|p| p.label == "Failed")
+        });
+        observer.state = State::default();
+        observer.connected = false;
+        assert_eq!(observer.board_cards()[0].status, kanban::Status::Error);
+        // Registry additions are backwards compatible with older metadata.
+        let legacy: LivePath =
+            serde_json::from_value(json!({"path":"old.jsonl","revision":1,"label":"Idle"}))
+                .unwrap();
+        assert!(legacy.title.is_empty());
+    }
+    #[test]
+    fn registry_watcher_ignores_own_publications_and_temporary_files() {
+        use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+        let root = Path::new("registry");
+        let own = root.join("own.json");
+        let peer = root.join("peer.json");
+        for kind in [
+            notify::EventKind::Create(CreateKind::File),
+            notify::EventKind::Modify(ModifyKind::Any),
+            notify::EventKind::Remove(RemoveKind::File),
+        ] {
+            let event = notify::Event::new(kind);
+            assert!(!registry_changed(
+                &event.clone().add_path(own.clone()),
+                &own
+            ));
+            assert!(!registry_changed(
+                &event.clone().add_path(root.join("own.tmp")),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.clone().add_path(peer.clone()),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.add_path(own.clone()).add_path(peer.clone()),
+                &own
+            ));
+        }
+        assert!(!registry_changed(
+            &notify::Event::new(notify::EventKind::Access(AccessKind::Any)).add_path(peer),
+            &own
+        ));
+    }
+    #[test]
+    fn publication_updates_registry_without_waking_its_own_ui() {
+        let (directory, path) = location();
+        let ctx = egui::Context::default();
+        let (wake, wakes) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        // Clear egui's initial repaint before starting the registry worker.
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        }
+        wakes.try_iter().for_each(drop);
+        let mut sync = WindowSync::new_at(&ctx, false, Some(directory.join("registry")));
+        assert!(sync.error.is_none(), "{:?}", sync.error);
+        wakes.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        }
+        assert!(!ctx.has_requested_repaint());
+        sync.tx
+            .send(Work::Publish(LivePath {
+                path: path.clone(),
+                revision: 1,
+                label: "Working…".into(),
+                title: String::new(),
+                cwd: PathBuf::new(),
+                model: String::new(),
+            }))
+            .unwrap();
+        // Stop is a barrier: the publication must finish before we inspect the
+        // repaint state. The watcher remains active throughout publication.
+        sync.tx.send(Work::Stop).unwrap();
+        sync.worker.take().unwrap().join().unwrap();
+        assert!(!ctx.has_requested_repaint());
+        let endpoint = Endpoint {
+            id: sync.id.clone(),
+            port: sync.port,
+            token: "test-token".into(),
+            paths: vec![LivePath {
+                path,
+                revision: 1,
+                label: "Working…".into(),
+                title: String::new(),
+                cwd: PathBuf::new(),
+                model: String::new(),
+            }],
+        };
+        let registry = sync.directory.as_ref().unwrap();
+        write_endpoint(registry, &endpoint).unwrap();
+        let metadata = registry.join(format!("{}.json", sync.id));
+        let saved: Endpoint = serde_json::from_reader(File::open(&metadata).unwrap()).unwrap();
+        assert_eq!(saved.paths[0].revision, 1);
+        let mut endpoint = endpoint;
+        endpoint.paths.clear();
+        write_endpoint(registry, &endpoint).unwrap();
+        let saved: Endpoint = serde_json::from_reader(File::open(metadata).unwrap()).unwrap();
+        assert!(
+            saved.paths.is_empty(),
+            "shorter updates must truncate old JSON"
         );
     }
     #[test]
@@ -1151,6 +1388,70 @@ mod tests {
         assert!(owner.state.busy);
         assert!(owner.client.is_some());
     }
+    #[test]
+    fn shared_send_now_interrupts_owner_and_publishes_immediate_receipt() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        let (client, tx, commands) = rpc::Client::stub_with_commands();
+        owner.client = Some(client);
+        owner.state.busy = true;
+        owner.state.run_observed = true;
+        assert!(owner.attach_or_claim(&path));
+        owner.waiting.insert(
+            path.clone(),
+            vec![run_status::WaitingMessage {
+                text: "interrupt from attached window".into(),
+                ..Default::default()
+            }],
+        );
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.waiting.get(&path).is_some_and(|q| q.len() == 1)
+        });
+        mirror.remote_action(Action::SendNow(0));
+        spin(&mut owner, &mut mirror, |a, b| {
+            a.interrupt.is_some() && b.state.pending_messages.len() == 1
+        });
+        assert_eq!(
+            mirror.state.pending_messages[0].status,
+            protocol::DeliveryStatus::Interrupting
+        );
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(1)).unwrap()["type"],
+            "abort_bash"
+        );
+        let abort = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(abort["type"], "abort");
+        assert!(owner.deliveries.is_empty());
+        tx.send(rpc::Event::Record(
+            json!({"type":"agent_settled","aborted":true}),
+        ))
+        .unwrap();
+        tx.send(rpc::Event::Record(
+            json!({"type":"response","command":"abort","id":abort["id"],"success":true}),
+        ))
+        .unwrap();
+        owner.poll_rpc();
+        assert_eq!(owner.deliveries.len(), 1);
+        let id = owner.deliveries[0].id.clone();
+        tx.send(rpc::Event::Record(json!({"type":"response","command":"prompt","id":id,"success":true,"data":{"disposition":"started"}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state
+                .pending_messages
+                .first()
+                .is_some_and(|p| p.status == protocol::DeliveryStatus::AwaitingAgent)
+        });
+        assert!(mirror.state.messages.is_empty());
+        tx.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":"interrupt from attached window","timestamp":42}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.messages.len() == 1 && b.state.pending_messages.is_empty()
+        });
+    }
+
     #[test]
     fn shared_queue_edit_remove_and_stale_revision_are_authoritative() {
         let (directory, path) = location();
@@ -1345,6 +1646,27 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    #[test]
+    fn deletion_cannot_take_another_windows_session_and_releases_its_own_claim() {
+        let (directory, path) = location();
+        let mut owner = WindowSync::new_at(
+            &egui::Context::default(),
+            false,
+            Some(directory.join("registry")),
+        );
+        let other = WindowSync::new_at(
+            &egui::Context::default(),
+            false,
+            Some(directory.join("registry")),
+        );
+        assert!(owner.claim(&path).unwrap());
+        assert!(other.deletion_lock(&path).is_err());
+        assert!(owner.deletion_lock(&path).unwrap().is_none());
+        owner.forget_deleted(&path);
+        let lock = other.deletion_lock(&path).unwrap();
+        assert!(lock.is_some());
+        assert!(owner.deletion_lock(&path).is_err());
     }
     #[test]
     fn second_process_lock_probe() {

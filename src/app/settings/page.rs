@@ -1,6 +1,10 @@
 //! Full-window settings, independent of the conversation and its agent lifecycle.
 use super::*;
 
+#[cfg(test)]
+#[path = "design_tests.rs"]
+mod design_tests;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Hash)]
 enum Page {
     #[default]
@@ -51,7 +55,9 @@ impl Page {
     fn keywords(self) -> &'static str {
         match self {
             Self::General => "steer queue messages enter context compact tokens worker concurrency",
-            Self::Appearance => "layout sidebar inspector scale zoom reset dark light theme",
+            Self::Appearance => {
+                "layout sidebar inspector scale zoom reset dark light theme color styles midnight ivory forest sage plum rose classic neutral"
+            }
             Self::Notifications => {
                 "sound completion alerts desktop macos permission notification test"
             }
@@ -91,6 +97,12 @@ pub(in crate::app) struct View {
 
 impl View {
     pub(in crate::app) fn select(&mut self, name: &str) {
+        if let Some(view) = name.strip_prefix("Resources/") {
+            self.page = Page::Resources;
+            self.resources.select_view(view);
+            self.search.clear();
+            return;
+        }
         if let Some(page) = Page::ALL
             .into_iter()
             .find(|p| p.title().eq_ignore_ascii_case(name))
@@ -103,19 +115,19 @@ impl View {
 
 pub(super) fn section(ui: &mut egui::Ui, title: &str, description: &str) {
     let colors = crate::theme::palette(ui.ctx());
-    ui.add_space(30.0);
-    ui.label(RichText::new(title).size(13.0).color(colors.text));
+    ui.add_space(24.0);
+    ui.label(RichText::new(title).size(13.0).strong().color(colors.text));
     if !description.is_empty() {
-        ui.label(RichText::new(description).size(12.0).color(colors.muted));
+        ui.add(egui::Label::new(RichText::new(description).size(12.0).color(colors.muted)).wrap());
     }
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 }
 pub(super) fn card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     let colors = crate::theme::palette(ui.ctx());
     egui::Frame::new()
         .fill(colors.settings_card)
         .stroke(Stroke::new(1.0, colors.border))
-        .corner_radius(14)
+        .corner_radius(10)
         .inner_margin(egui::Margin::ZERO)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -123,7 +135,21 @@ pub(super) fn card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
             body(ui);
         });
 }
-fn separator(ui: &mut egui::Ui) {
+pub(super) fn note(ui: &mut egui::Ui, title: &str, description: &str) {
+    let colors = theme::palette(ui.ctx());
+    card(ui, |ui| {
+        egui::Frame::new().inner_margin(18).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(RichText::new(title).size(13.0).strong().color(colors.text));
+            ui.add(
+                egui::Label::new(RichText::new(description).size(12.0).color(colors.muted)).wrap(),
+            );
+        });
+    });
+}
+
+pub(super) fn separator(ui: &mut egui::Ui) {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(
@@ -140,10 +166,10 @@ pub(super) fn row(
 ) {
     let colors = crate::theme::palette(ui.ctx());
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(18, 15))
+        .inner_margin(egui::Margin::symmetric(18, 16))
         .show(ui, |ui| {
             let width = ui.available_width();
-            let controls = (width * 0.35).clamp(125.0, 240.0);
+            let controls = (width * 0.40).clamp(180.0, 260.0);
             // Pin both columns to the card's edges. A horizontal auto-sized
             // child shrinks to its label and makes the control drift per row.
             let origin = ui.cursor().min;
@@ -166,7 +192,7 @@ pub(super) fn row(
                         .wrap(),
                 );
             }
-            let height = labels.min_rect().height().max(30.0);
+            let height = labels.min_rect().height().max(theme::CONTROL_HEIGHT);
             let mut right = ui.new_child(
                 egui::UiBuilder::new()
                     .id_salt((title, "control"))
@@ -188,7 +214,9 @@ pub(super) fn row(
 }
 pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool, title: &str) {
     let colors = theme::palette(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(34.0, 20.0), Sense::click());
+    let (target, response) =
+        ui.allocate_exact_size(Vec2::new(38.0, theme::CONTROL_HEIGHT), Sense::click());
+    let rect = egui::Rect::from_center_size(target.center(), Vec2::new(34.0, 20.0));
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Space)))
     {
@@ -210,6 +238,14 @@ pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool, title: &str) {
     };
     ui.painter()
         .circle_filled(egui::pos2(x, rect.center().y), 8.0, Color32::from_gray(245));
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            target.expand(2.0),
+            7,
+            Stroke::new(1.0, colors.accent),
+            egui::StrokeKind::Outside,
+        );
+    }
 }
 fn keycaps(ui: &mut egui::Ui, keys: &[&str]) {
     let colors = crate::theme::palette(ui.ctx());
@@ -226,14 +262,16 @@ fn keycaps(ui: &mut egui::Ui, keys: &[&str]) {
 }
 fn navigation(ui: &mut egui::Ui, page: Page, selected: bool) -> egui::Response {
     let colors = crate::theme::palette(ui.ctx());
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 31.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
+        Sense::click(),
+    );
     if selected || response.hovered() {
         ui.painter().rect_filled(
             rect,
             8,
             if selected {
-                colors.hover
+                colors.accent_bg
             } else {
                 colors.surface
             },
@@ -246,14 +284,18 @@ fn navigation(ui: &mut egui::Ui, page: Page, selected: bool) -> egui::Response {
             Vec2::splat(16.0),
         ),
         page.icon(),
-        colors.muted,
+        if selected {
+            colors.accent
+        } else {
+            colors.muted
+        },
     );
     ui.painter().text(
         rect.left_center() + egui::vec2(34.0, 0.0),
         egui::Align2::LEFT_CENTER,
         page.title(),
         FontId::proportional(12.0),
-        colors.text,
+        if selected { colors.accent } else { colors.text },
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -273,9 +315,12 @@ impl Pui {
         }
         let before = self.prefs.settings.clone();
         let alerts_before = self.prefs.notifications;
-        let theme_before = self.prefs.theme;
+        let theme_before = (self.prefs.theme, self.prefs.color_styles);
 
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && (self.settings_view.page != Page::Resources
+                || !self.settings_view.resources.escape())
+        {
             self.settings_open = false;
             self.focus_composer = true;
         }
@@ -312,23 +357,11 @@ impl Pui {
                     }
                 });
                 ui.add_space(15.0);
-                egui::Frame::new()
-                    .fill(colors.surface)
-                    .corner_radius(10)
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            icons::inline(ui, Icon::Search, colors.dim);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.settings_view.search)
-                                    .id_salt("settings-search")
-                                    .hint_text("Search settings")
-                                    .font(FontId::proportional(12.0))
-                                    .frame(false)
-                                    .desired_width((ui.available_width() - 4.0).max(50.0)),
-                            );
-                        });
-                    });
+                ui.add(
+                    theme::text_field(&mut self.settings_view.search, "Search settings")
+                        .id_salt("settings-search")
+                        .desired_width(ui.available_width()),
+                );
                 ui.add_space(13.0);
                 for (group, pages) in [("App", &Page::ALL[..4]), ("Agent", &Page::ALL[4..])] {
                     let visible: Vec<_> = pages
@@ -366,25 +399,44 @@ impl Pui {
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
+                if self.settings_view.page == Page::Resources {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(24, 12))
+                        .show(ui, |ui| {
+                            self.settings_view
+                                .resources
+                                .show(ui, &self.prefs.cwd, self.demo);
+                        });
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt(("settings-content", self.settings_view.page))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let width = (ui.available_width() - 64.0).clamp(320.0, 744.0);
+                        let width = (ui.available_width() - 64.0).clamp(320.0, 820.0);
                         let padding = ((ui.available_width() - width) / 2.0).max(24.0);
                         ui.horizontal(|ui| {
                             ui.add_space(padding);
                             ui.vertical(|ui| {
                                 ui.set_width(width);
-                                ui.add_space(84.0);
+                                ui.add_space(72.0);
                                 let page = self.settings_view.page;
-                                ui.label(RichText::new(page.title()).size(23.0).color(colors.text));
-                                ui.add_space(1.0);
                                 ui.label(
-                                    RichText::new(page.subtitle())
-                                        .size(12.5)
-                                        .color(colors.muted),
+                                    RichText::new(page.title())
+                                        .size(26.0)
+                                        .strong()
+                                        .color(colors.text),
                                 );
+                                ui.add_space(1.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(page.subtitle())
+                                            .size(12.5)
+                                            .color(colors.muted),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add_space(8.0);
                                 match page {
                                     Page::General => self.settings_general(ui),
                                     Page::Appearance => self.settings_appearance(ui, ctx),
@@ -405,8 +457,8 @@ impl Pui {
                     });
             });
         self.propagate_notifications(ctx, alerts_before);
-        if theme_before != self.prefs.theme {
-            self.prefs.theme.apply(ctx);
+        if theme_before != (self.prefs.theme, self.prefs.color_styles) {
+            self.prefs.color_styles.apply(ctx, self.prefs.theme);
             ctx.request_repaint();
         }
         self.propagate_settings(&before);
@@ -420,16 +472,15 @@ impl Pui {
                 "Messages while working",
                 "Steer at the next opening, or queue until the current response finishes.",
                 |ui| {
-                    ui.selectable_value(
-                        &mut self.prefs.settings.delivery,
-                        DeliveryMode::Queue,
-                        "Queue",
-                    );
-                    ui.selectable_value(
-                        &mut self.prefs.settings.delivery,
-                        DeliveryMode::Steer,
-                        "Steer",
-                    );
+                    for (mode, label) in [
+                        (DeliveryMode::Queue, "Queue"),
+                        (DeliveryMode::Steer, "Steer"),
+                    ] {
+                        if theme::choice(ui, self.prefs.settings.delivery == mode, label).clicked()
+                        {
+                            self.prefs.settings.delivery = mode;
+                        }
+                    }
                 },
             );
             separator(ui);
@@ -467,7 +518,7 @@ impl Pui {
                     "Percentage of the model context window used before summarizing.",
                     |ui| {
                         ui.spacing_mut().slider_width = 115.0;
-                        ui.visuals_mut().widgets.inactive.bg_fill = colors.border;
+                        theme::slider_style(ui);
                         ui.add(
                             egui::Slider::new(&mut self.prefs.settings.compact_percent, 50..=95)
                                 .suffix("%")
@@ -512,14 +563,20 @@ impl Pui {
         card(ui, |ui| {
             row(
                 ui,
-                "Color theme",
-                "Choose a light or dark palette for this window. Your choice is saved automatically.",
+                "Mode",
+                "Choose light or dark, then pick a theme below. Your choices are saved automatically.",
                 |ui| {
-                    ui.selectable_value(&mut self.prefs.theme, theme::Theme::Light, "Light");
-                    ui.selectable_value(&mut self.prefs.theme, theme::Theme::Dark, "Dark");
+                    for (mode, label) in
+                        [(theme::Theme::Light, "Light"), (theme::Theme::Dark, "Dark")]
+                    {
+                        if theme::choice(ui, self.prefs.theme == mode, label).clicked() {
+                            self.prefs.theme = mode;
+                        }
+                    }
                 },
             )
         });
+        super::appearance::styles(ui, self.prefs.theme, &mut self.prefs.color_styles);
         section(ui, "Workspace", "");
         card(ui, |ui| {
             row(
@@ -564,6 +621,7 @@ impl Pui {
                 |ui| {
                     let mut zoom = ctx.zoom_factor();
                     ui.spacing_mut().slider_width = 110.0;
+                    theme::slider_style(ui);
                     if ui
                         .add(
                             egui::Slider::new(&mut zoom, 0.8..=1.4)
@@ -610,7 +668,7 @@ impl Pui {
                 row(
                     ui,
                     "Completion sound",
-                    "Play a short sound when an agent finishes successfully.",
+                    "Play a short sound when an agent finishes successfully or a chat is deleted.",
                     |ui| toggle(ui, &mut self.prefs.notifications.sound, "Completion sound"),
                 );
                 separator(ui);
@@ -739,7 +797,6 @@ impl Pui {
         });
     }
     fn settings_permissions(&mut self, ui: &mut egui::Ui) {
-        let colors = crate::theme::palette(ui.ctx());
         section(
             ui,
             "Tool access",
@@ -756,10 +813,10 @@ impl Pui {
         });
         self.permission_confirmation(ui);
         ui.add_space(12.0);
-        ui.label(
-            RichText::new(self.prefs.settings.permission.description())
-                .size(12.0)
-                .color(colors.muted),
+        note(
+            ui,
+            self.prefs.settings.permission.label(),
+            self.prefs.settings.permission.description(),
         );
         if self.prefs.settings.permission == PermissionMode::Auto {
             section(ui, "Auto classifier", "");
@@ -796,16 +853,11 @@ impl Pui {
             });
         }
         section(ui, "Safety", "");
-        card(ui, |ui| {
-            row(
-                ui,
-                "Trusted extensions",
-                "Extensions can run their own code. Bypass skips Pui approvals, not OS permissions or read-only worker restrictions.",
-                |ui| {
-                    ui.label(theme::small(ui, "Tool-level controls"));
-                },
-            )
-        });
+        note(
+            ui,
+            "Trusted extensions",
+            "Extensions can run their own code. Bypass skips Pui approvals, not OS permissions or read-only worker restrictions. These are tool-level controls, not a security sandbox.",
+        );
     }
     fn settings_models(&mut self, ui: &mut egui::Ui) {
         section(
@@ -986,11 +1038,19 @@ mod tests {
     fn theme_preferences_default_to_dark_and_roundtrip() {
         let mut prefs: Preferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.theme, theme::Theme::Dark);
+        assert_eq!(prefs.color_styles, theme::Styles::default());
+        assert_eq!(prefs.color_styles.dark, theme::DarkStyle::Neutral);
+        assert_eq!(prefs.color_styles.light, theme::LightStyle::Neutral);
+        prefs.color_styles = theme::Styles {
+            dark: theme::DarkStyle::Forest,
+            light: theme::LightStyle::Rose,
+        };
         for mode in [theme::Theme::Light, theme::Theme::Dark] {
             prefs.theme = mode;
             let saved = serde_json::to_string(&prefs).unwrap();
             let restored: Preferences = serde_json::from_str(&saved).unwrap();
             assert_eq!(restored.theme, mode);
+            assert_eq!(restored.color_styles, prefs.color_styles);
         }
     }
 
@@ -1059,6 +1119,153 @@ mod tests {
             assert!(app.state.busy);
             assert_eq!(app.draft, "keep this draft");
             assert_eq!(ctx.zoom_factor(), 1.1);
+        }
+    }
+
+    #[test]
+    fn color_style_cards_preview_and_remember_independent_mode_choices() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                ..Default::default()
+            },
+        );
+        app.settings_view.search = "forest".into();
+        app.state.busy = true;
+        app.draft = "unsent draft".into();
+        let mut window = eframe::Frame::_new_kittest();
+        let mut frame = |app: &mut Pui, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1480.0, 1100.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut window),
+            )
+        };
+        frame(&mut app, vec![]);
+        for (label, mode, expected_dark, expected_light) in [
+            (
+                "Forest",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Light",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Rose",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Dark",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Light",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Classic",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Dark",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Classic",
+                theme::Theme::Dark,
+                theme::DarkStyle::Neutral,
+                theme::LightStyle::Neutral,
+            ),
+        ] {
+            let output = frame(&mut app, vec![]);
+            let mut text = Vec::new();
+            for shape in output.shapes {
+                texts(&shape.shape, &mut text);
+            }
+            let (visible, hidden) = match app.prefs.theme {
+                theme::Theme::Dark => (["Midnight", "Forest", "Plum"], ["Ivory", "Sage", "Rose"]),
+                theme::Theme::Light => (["Ivory", "Sage", "Rose"], ["Midnight", "Forest", "Plum"]),
+            };
+            for name in visible {
+                assert!(
+                    text.iter().any(|(label, _)| label == name),
+                    "Missing theme {name}"
+                );
+            }
+            for name in hidden {
+                assert!(
+                    !text.iter().any(|(label, _)| label == name),
+                    "Other mode's theme {name} should be hidden"
+                );
+            }
+            assert_eq!(
+                text.iter().filter(|(label, _)| label == "Classic").count(),
+                1
+            );
+            let pos = text
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap()
+                .1
+                .center();
+            for pressed in [true, false] {
+                frame(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            frame(&mut app, vec![]);
+            assert_eq!(app.settings_view.page, Page::Appearance);
+            assert_eq!(app.prefs.theme, mode);
+            assert_eq!(
+                app.prefs.color_styles,
+                theme::Styles {
+                    dark: expected_dark,
+                    light: expected_light
+                }
+            );
+            assert_eq!(
+                theme::palette(&ctx).accent,
+                app.prefs.color_styles.palette(mode).accent
+            );
+            assert_eq!(
+                ctx.style().visuals.hyperlink_color,
+                app.prefs.color_styles.palette(mode).accent
+            );
+            assert!(app.state.busy);
+            assert_eq!(app.draft, "unsent draft");
         }
     }
 

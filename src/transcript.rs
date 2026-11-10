@@ -29,6 +29,8 @@ pub struct Transcript {
     pub progress: Option<Progress>,
     pub message_action: Option<(usize, MessageAction)>,
     pub message_actions_enabled: bool,
+    pub task_output: bool,
+    pub pending_messages: Vec<crate::protocol::PendingMessage>,
     progress_phase: Option<(Progress, f64)>,
 }
 
@@ -41,6 +43,7 @@ pub enum MessageAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
+    Interrupting,
     Working,
     Compacting,
     Waiting,
@@ -63,6 +66,7 @@ impl Progress {
             "Making progress…",
         ];
         match self {
+            Self::Interrupting => "Interrupting current run…",
             Self::Working => WORDS[(elapsed.max(0.0) / 4.0) as usize % WORDS.len()],
             Self::Compacting => "Compacting context…",
             Self::Waiting => "Waiting for input",
@@ -72,7 +76,7 @@ impl Progress {
 }
 fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
     let colors = crate::theme::palette(ui.ctx());
-    let color = if progress == Progress::Waiting {
+    let color = if matches!(progress, Progress::Waiting | Progress::Interrupting) {
         colors.amber
     } else {
         colors.accent
@@ -209,6 +213,7 @@ impl Transcript {
             0.0
         };
         let progress = self.progress;
+        let pending_messages = &self.pending_messages;
         // Textures replace fixed-size thumbnail slots; loading must not invalidate
         // every offscreen turn and restart image decoding across the whole history.
         self.gallery.poll(ui.ctx());
@@ -238,6 +243,7 @@ impl Transcript {
         let revision = self.view_revision;
         let mut layout_changed = false;
         let expand = self.expand_activity;
+        let task_output = self.task_output;
         let gallery = &mut self.gallery;
         let mut message_action = None;
         let actions_enabled = self.message_actions_enabled;
@@ -268,6 +274,7 @@ impl Transcript {
                 }
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 revision.hash(&mut hasher);
+                task_output.hash(&mut hasher);
                 for m in group {
                     m.revision.hash(&mut hasher);
                     m.text.len().hash(&mut hasher);
@@ -340,6 +347,7 @@ impl Transcript {
                                         model,
                                         thinking,
                                         (busy && index == messages.len(), expand, actions_enabled),
+                                        task_output,
                                         gallery,
                                     );
                                     layout_changed |= changed;
@@ -354,6 +362,53 @@ impl Transcript {
                     self.heights
                         .insert(start, (signature, column, ui.cursor().top() - before));
                 }
+            }
+            for pending in pending_messages {
+                let before = ui.cursor().top();
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt(("pending-message", &pending.id))
+                        .max_rect(Rect::from_min_size(
+                            egui::pos2(ui.min_rect().left() + padding, before),
+                            Vec2::new(column, 1.0),
+                        ))
+                        .layout(Layout::top_down(Align::LEFT)),
+                    |ui| {
+                        ui.set_width(column);
+                        let message = Message {
+                            role: "user".into(),
+                            text: pending.text.clone(),
+                            images: pending.images.clone(),
+                            ..Default::default()
+                        };
+                        let status_width = footer_text_width(ui, pending.status.label());
+                        let footer_width = status_width + footer_action_width(ui, "Copy") + 10.0;
+                        user_bubble(ui, &message, gallery, footer_width);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.set_min_height(ui.spacing().interact_size.y);
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            ui.add_sized(
+                                [status_width, ui.spacing().interact_size.y],
+                                egui::Label::new(
+                                    RichText::new(pending.status.label()).size(10.0).color(
+                                        if pending.status
+                                            == crate::protocol::DeliveryStatus::Uncertain
+                                        {
+                                            colors.amber
+                                        } else {
+                                            colors.muted
+                                        },
+                                    ),
+                                )
+                                .truncate(),
+                            );
+                            if icons::labeled_button(ui, Icon::Copy, "Copy", true).clicked() {
+                                ui.ctx().copy_text(pending.text.clone());
+                            }
+                        });
+                    },
+                );
+                ui.add_space(24.0);
             }
             if let Some(progress) = progress {
                 let before = ui.cursor().top();
@@ -545,12 +600,23 @@ pub(crate) fn user_display_text(message: &Message) -> &str {
             break;
         }
         notes += 1;
-        if notes > message.images.len() {
+        if notes > message.images.iter().filter(|a| a.file.is_none()).count() {
             return original;
         }
         text = prefix.trim_end();
     }
-    if notes == 0 { original } else { text }
+    let text = if notes == 0 { original } else { text };
+    crate::media::file_manifest(text)
+        .filter(|(_, files)| {
+            files.iter().all(|f| {
+                message
+                    .images
+                    .iter()
+                    .any(|a| a.file.as_ref().is_some_and(|a| a.path == f.path))
+            })
+        })
+        .map(|(body, _)| body)
+        .unwrap_or(text)
 }
 fn image_dimension_note(line: &str) -> bool {
     fn dimensions(value: &str) -> bool {
@@ -593,9 +659,44 @@ fn user_actions(
     gallery: &mut crate::media::Gallery,
     enabled: bool,
 ) -> Option<MessageAction> {
+    let footer_width = footer_text_width(ui, &time_label(message.timestamp))
+        + ["Copy", "Edit", "Rewind"]
+            .into_iter()
+            .map(|label| footer_action_width(ui, label))
+            .sum::<f32>()
+        + 30.0;
+    user_bubble(ui, message, gallery, footer_width);
+    user_footer(ui, user_display_text(message), message.timestamp, enabled)
+}
+
+fn footer_text_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text.into(),
+            FontId::proportional(10.0),
+            crate::theme::palette(ui.ctx()).dim,
+        )
+        .size()
+        .x
+}
+
+fn footer_action_width(ui: &egui::Ui, label: &str) -> f32 {
+    footer_text_width(ui, label) + 16.0 // 12px icon + 4px gap, matching icons::labeled_button.
+}
+
+fn user_bubble(
+    ui: &mut egui::Ui,
+    message: &Message,
+    gallery: &mut crate::media::Gallery,
+    footer_width: f32,
+) {
     let colors = crate::theme::palette(ui.ctx());
     let text = user_display_text(message);
-    let max = (ui.available_width() * 0.86).max(140.0);
+    let available = ui.available_width();
+    let max = (available * 0.86)
+        .max(footer_width.min(available))
+        .max(140.0)
+        .min(available);
     let mut job = egui::text::LayoutJob::simple(
         text.to_owned(),
         FontId::proportional(14.0),
@@ -606,11 +707,14 @@ fn user_actions(
         section.format.line_height = Some(23.0);
     }
     let galley = ui.fonts(|f| f.layout_job(job));
-    let width = (galley.size().x + 34.0).max(if message.images.is_empty() {
-        0.0
-    } else {
-        max.min(274.0)
-    });
+    let width = (galley.size().x + 34.0)
+        .max(footer_width.min(max))
+        .max(if message.images.is_empty() {
+            0.0
+        } else {
+            max.min(274.0)
+        })
+        .min(available);
     let left = ui.max_rect().right() - width;
     let top = ui.cursor().top();
     ui.scope_builder(
@@ -633,6 +737,7 @@ fn user_actions(
                     })
                     .inner_margin(egui::Margin::symmetric(17, 13))
                     .show(ui, |ui| {
+                        ui.set_min_width((width - 34.0).max(0.0));
                         gallery.user_thumbnails(ui, &message.images);
                         if !message.images.is_empty() && !text.is_empty() {
                             ui.add_space(6.0);
@@ -644,7 +749,6 @@ fn user_actions(
             });
         },
     );
-    user_footer(ui, text, message.timestamp, enabled)
 }
 
 fn user_footer(
@@ -689,6 +793,7 @@ fn assistant(
     model: &str,
     thinking: &str,
     flags: (bool, bool, bool),
+    task_output: bool,
     gallery: &mut crate::media::Gallery,
 ) -> (bool, bool) {
     let colors = crate::theme::palette(ui.ctx());
@@ -740,7 +845,9 @@ fn assistant(
                     pending.clear();
                     group_index += 1;
                 }
-                markdown::show(ui, &message.text);
+                if !task_output || !crate::task_output::show(ui, &message.text) {
+                    markdown::show(ui, &message.text);
+                }
             }
             if !message.thinking.is_empty() {
                 pending.push(ActivityItem::Thinking(&message.thinking));
@@ -766,7 +873,9 @@ fn assistant(
                             pending.clear();
                             group_index += 1;
                         }
-                        markdown::show(ui, text);
+                        if !task_output || !crate::task_output::show(ui, text) {
+                            markdown::show(ui, text);
+                        }
                     }
                     Block::Thinking(text) => pending.push(ActivityItem::Thinking(text)),
                     Block::Tool(id) => {
@@ -1053,21 +1162,60 @@ fn activity(
 }
 
 pub fn time_label(timestamp: i64) -> String {
+    time_label_at(timestamp, chrono::Local::now())
+}
+
+fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -> String {
     if timestamp == 0 {
         return String::new();
     }
-    // UTC is explicitly labeled; no platform timezone dependency or background clock.
-    let mins = timestamp.div_euclid(60000);
-    format!(
-        "{:02}:{:02} UTC",
-        mins.div_euclid(60).rem_euclid(24),
-        mins.rem_euclid(60)
-    )
+    let Some(time) = chrono::DateTime::from_timestamp_millis(timestamp) else {
+        return String::new();
+    };
+    let local = time.with_timezone(&now.timezone()).naive_local();
+    local
+        .format(if local.date() == now.date_naive() {
+            "%H:%M"
+        } else {
+            "%Y-%m-%d %H:%M"
+        })
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_use_local_24_hour_time_and_date_only_outside_today() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:15:00+05:30").unwrap();
+        for (time, expected) in [
+            ("2025-12-31T18:30:00Z", "00:00"),
+            ("2026-01-01T08:04:00+05:30", "08:04"),
+            ("2026-01-01T23:59:59+05:30", "23:59"),
+            ("2025-12-31T18:29:59Z", "2025-12-31 23:59"),
+            ("2026-01-02T00:00:00+05:30", "2026-01-02 00:00"),
+            ("2025-01-01T00:15:00+05:30", "2025-01-01 00:15"),
+        ] {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(time)
+                .unwrap()
+                .timestamp_millis();
+            assert_eq!(time_label_at(timestamp, now), expected, "{time}");
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T23:30:00-07:00").unwrap();
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-02T06:04:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(time_label_at(timestamp, now), "23:04");
+    }
+
+    #[test]
+    fn missing_or_invalid_timestamps_have_no_label() {
+        for timestamp in [0, i64::MIN, i64::MAX] {
+            assert_eq!(time_label(timestamp), "");
+        }
+    }
+
     const DIMENSION_NOTE: &str = "[Image: original 3024x1910, displayed at 2000x1263. Multiply coordinates by 1.51 to map to original image.]";
     fn image_message(text: String, count: usize) -> Message {
         Message {
@@ -1147,6 +1295,7 @@ mod tests {
                                 "model",
                                 "high",
                                 (running, false, false),
+                                false,
                                 &mut gallery,
                             );
                             heights.push(ui.cursor().top() - top);
@@ -1176,6 +1325,93 @@ mod tests {
                 heights[3..].iter().all(|h| (h - heights[3]).abs() < 0.5),
                 "answer card height must stay stable"
             );
+        }
+    }
+
+    #[test]
+    fn short_user_bubbles_cover_their_action_footer_with_or_without_images() {
+        fn collect(
+            shape: &egui::Shape,
+            fill: egui::Color32,
+            bubbles: &mut Vec<Rect>,
+            labels: &mut Vec<(String, Rect)>,
+        ) {
+            match shape {
+                egui::Shape::Rect(r) if r.fill == fill => bubbles.push(r.rect),
+                egui::Shape::Text(t) => labels.push((
+                    t.galley.job.text.clone(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                )),
+                egui::Shape::Vec(shapes) => shapes
+                    .iter()
+                    .for_each(|s| collect(s, fill, bubbles, labels)),
+                _ => {}
+            }
+        }
+        for mode in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            for zoom in [0.8, 1.0, 1.4] {
+                for with_image in [false, true] {
+                    let ctx = egui::Context::default();
+                    crate::theme::install(&ctx);
+                    mode.apply(&ctx);
+                    ctx.set_zoom_factor(zoom);
+                    let message = Message {
+                        role: "user".into(),
+                        text: "ok".into(),
+                        timestamp: 60000,
+                        images: if with_image {
+                            vec![
+                                crate::media::Attachment::from_bytes(include_bytes!(
+                                    "../assets/icon.png"
+                                ))
+                                .unwrap(),
+                            ]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    };
+                    let mut gallery = crate::media::Gallery::default();
+                    for _ in 0..3 {
+                        let output = ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(420.0, 500.0),
+                                )),
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                egui::CentralPanel::default().show(ctx, |ui| {
+                                    user_actions(ui, &message, &mut gallery, false);
+                                });
+                            },
+                        );
+                        let mut bubbles = vec![];
+                        let mut labels = vec![];
+                        for shape in &output.shapes {
+                            collect(
+                                &shape.shape,
+                                crate::theme::palette(&ctx).user_bg,
+                                &mut bubbles,
+                                &mut labels,
+                            );
+                        }
+                        let timestamp = labels
+                            .iter()
+                            .find(|(s, _)| s == &time_label(message.timestamp))
+                            .unwrap()
+                            .1;
+                        let rewind = labels.iter().find(|(s, _)| s == "Rewind").unwrap().1;
+                        assert!(
+                            bubbles.iter().any(|r| r.left() <= timestamp.left() + 1.0
+                                && r.right() >= rewind.right() - 1.0
+                                && r.bottom() <= timestamp.top()),
+                            "Bubble must span footer: {bubbles:?}, {labels:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1235,7 +1471,11 @@ mod tests {
                         .iter()
                         .any(|(t, _)| t.contains("Fork") || t == "Message actions")
                 );
-                let timestamp = text.iter().find(|(t, _)| t.ends_with(" UTC")).unwrap().1;
+                let timestamp = text
+                    .iter()
+                    .find(|(t, _)| t == &time_label(60000))
+                    .unwrap()
+                    .1;
                 let mut previous = timestamp;
                 for label in ["Copy", "Edit", "Rewind"] {
                     let rect = text.iter().find(|(t, _)| t == label).expect(label).1;
@@ -1407,6 +1647,7 @@ mod tests {
                         key: i,
                         data: "invalid".into(),
                         mime: "image/png".into(),
+                        file: None,
                     }]
                 } else {
                     Vec::new()

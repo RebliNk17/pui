@@ -24,9 +24,34 @@ fn private_dir(home: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+pub fn lock(home: &Path, id: &str) -> Result<fs::File, String> {
+    use fs2::FileExt;
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid task ID")?;
+    private_dir(home)?;
+    let path = home.join(format!("{id}.lock"));
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err("Task lock cannot be a symlink.".into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(|e| e.to_string())?;
+    file.try_lock_exclusive().map_err(|_| "This task is open in another Pui window. Close it there before changing or deleting it.")?;
+    Ok(file)
+}
 pub fn save(home: &Path, task: &Task) -> Result<(), String> {
     uuid::Uuid::parse_str(&task.id).map_err(|_| "Invalid task ID")?;
     private_dir(home)?;
+    if home.join(format!("{}.deleted", task.id)).exists() {
+        return Err("This task was deleted in another window.".into());
+    }
     let bytes = serde_json::to_vec(task).map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_RECORD {
         return Err("Task record exceeded its storage bound.".into());
@@ -46,13 +71,61 @@ pub fn save(home: &Path, task: &Task) -> Result<(), String> {
     fs::rename(temp, home.join(format!("{}.json", task.id))).map_err(|e| e.to_string())?;
     Ok(())
 }
+pub fn delete(home: &Path, id: &str, sessions: &[PathBuf]) -> Result<(), String> {
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid task ID")?;
+    private_dir(home)?;
+    let record = home.join(format!("{id}.json"));
+    if record
+        .symlink_metadata()
+        .is_ok_and(|m| !m.is_file() || m.file_type().is_symlink())
+    {
+        return Err("Invalid task record path; nothing was deleted.".into());
+    }
+    // Validate every transcript before removing anything. Keep the record on failure
+    // so a partially failed deletion remains visible and retryable.
+    for path in sessions {
+        crate::sessions::validate_delete(path)?;
+    }
+    for path in sessions {
+        crate::sessions::delete(path)?;
+    }
+    match fs::remove_file(record) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Cannot delete task: {error}")),
+    }
+    // Contains no user data. Prevent a stale window/queued save resurrecting the task.
+    let marker = home.join(format!("{id}.deleted"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                fs::File::open(marker)
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn load(home: &Path) -> Result<Vec<Task>, String> {
     if !home.exists() {
         return Ok(vec![]);
     }
     private_dir(home)?;
     let mut tasks = Vec::new();
-    for entry in fs::read_dir(home).map_err(|e| e.to_string())?.take(1000) {
+    for entry in fs::read_dir(home)
+        .map_err(|e| e.to_string())?
+        .filter(|entry| {
+            entry.as_ref().map_or(true, |e| {
+                e.path().extension().is_some_and(|ext| ext == "json")
+            })
+        })
+        .take(1000)
+    {
         let e = entry.map_err(|e| e.to_string())?;
         if e.path().extension().is_none_or(|e| e != "json") {
             continue;
@@ -69,6 +142,9 @@ pub fn load(home: &Path) -> Result<Vec<Task>, String> {
         {
             continue;
         }
+        if home.join(format!("{}.deleted", t.id)).exists() {
+            continue;
+        }
         t.recover();
         tasks.push(t);
     }
@@ -78,6 +154,59 @@ pub fn load(home: &Path) -> Result<Vec<Task>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deleting_task_preserves_worktree_and_other_records_and_rejects_stale_writes() {
+        let home =
+            std::env::temp_dir().join(format!("pui-task-delete-store-{}", uuid::Uuid::new_v4()));
+        let mut task = Task::new(
+            "/project".into(),
+            "provider".into(),
+            "model".into(),
+            "high".into(),
+        );
+        let other = Task::new(
+            "/project".into(),
+            "provider".into(),
+            "model".into(),
+            "high".into(),
+        );
+        let worktree = home.join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join("keep.txt"), "project contents").unwrap();
+        task.workspace = Some(worktree.clone());
+        task.isolated = true;
+        save(&home, &task).unwrap();
+        save(&home, &other).unwrap();
+        let transcript = home.join("run.jsonl");
+        fs::write(&transcript, "{\"type\":\"session\"}\n").unwrap();
+        let guard = lock(&home, &task.id).unwrap();
+        assert!(lock(&home, &task.id).is_err());
+        delete(&home, &task.id, &[transcript.clone()]).unwrap();
+        drop(guard);
+        assert!(!transcript.exists());
+        assert!(worktree.join("keep.txt").exists());
+        assert_eq!(load(&home).unwrap()[0].id, other.id);
+        assert!(save(&home, &task).is_err());
+        assert!(delete(&home, "../../outside", &[]).is_err());
+        delete(&home, &task.id, &[transcript]).unwrap();
+    }
+    #[test]
+    fn invalid_transcript_keeps_task_record_for_retry() {
+        let home =
+            std::env::temp_dir().join(format!("pui-task-delete-invalid-{}", uuid::Uuid::new_v4()));
+        let task = Task::new(
+            "/project".into(),
+            "provider".into(),
+            "model".into(),
+            "high".into(),
+        );
+        save(&home, &task).unwrap();
+        let path = home.join("not-a-session.jsonl");
+        fs::write(&path, "not a session").unwrap();
+        assert!(delete(&home, &task.id, &[path.clone()]).is_err());
+        assert!(path.exists());
+        assert_eq!(load(&home).unwrap().len(), 1);
+    }
     #[test]
     fn private_roundtrip_recovers_without_running_anything() {
         let home = std::env::temp_dir().join(format!("pui-task-store-{}", uuid::Uuid::new_v4()));

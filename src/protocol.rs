@@ -23,6 +23,62 @@ pub struct Message {
     pub revision: u64,
 }
 
+/// UI-only delivery receipt, never part of Pi's canonical messages or model context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingMessage {
+    pub id: String,
+    pub text: String,
+    pub images: Vec<crate::media::Attachment>,
+    pub status: DeliveryStatus,
+    pub observed: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryStatus {
+    Interrupting,
+    Cancelled,
+    Handled,
+    Sending,
+    AwaitingAgent,
+    Uncertain,
+}
+impl DeliveryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interrupting => "Interrupting current run…",
+            Self::Cancelled => "Not sent · interruption cancelled",
+            Self::Handled => "Handled by Pi extension",
+            Self::Sending => "Sending to Pi…",
+            Self::AwaitingAgent => "Sent to Pi · waiting for agent",
+            Self::Uncertain => "Delivery uncertain · not automatically retried",
+        }
+    }
+}
+impl PendingMessage {
+    pub fn matches(&self, message: &Message) -> bool {
+        message.role == "user"
+            && self.matches_content(
+                crate::transcript::user_display_text(message),
+                &message.images,
+            )
+    }
+
+    pub(crate) fn matches_content(&self, text: &str, images: &[crate::media::Attachment]) -> bool {
+        self.text == text
+            && self.images.len() == images.len()
+            && self.images.iter().zip(images).all(|(a, b)| {
+                // Pi normalizes inline images before emitting the canonical user
+                // message, so their encoded-byte keys need not survive delivery.
+                // Reconciliation uses the occurrence count captured before send;
+                // this is receipt matching, never general history deduplication.
+                match (&a.file, &b.file) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.path == b.path,
+                    _ => false,
+                }
+            })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Block {
     Text(String),
@@ -86,12 +142,21 @@ pub struct HistoryPoint {
     #[serde(rename = "codeReason")]
     pub code_reason: Option<String>,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
     pub messages: Vec<Message>,
+    pub pending_messages: Vec<PendingMessage>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
+    pub commands: Vec<SlashCommand>,
     pub model: String,
     pub model_name: String,
     pub provider: String,
@@ -159,6 +224,15 @@ impl Message {
             effort: string(value, "thinkingLevel").to_owned(),
             ..Default::default()
         };
+        if message.role == "user" {
+            if let Some((_, files)) =
+                crate::media::file_manifest(crate::transcript::user_display_text(&message))
+            {
+                message
+                    .images
+                    .extend(files.into_iter().map(crate::media::Attachment::from_file));
+            }
+        }
         if let Some(blocks) = value["content"].as_array() {
             for block in blocks {
                 match string(block, "type") {
@@ -214,8 +288,34 @@ impl State {
             self.diagnostics.push(text);
         }
     }
+    pub fn reconcile_pending_messages(&mut self) {
+        self.pending_messages.retain(|pending| {
+            matches!(
+                pending.status,
+                DeliveryStatus::Interrupting | DeliveryStatus::Cancelled | DeliveryStatus::Handled
+            ) || self.messages.iter().filter(|m| pending.matches(m)).count() <= pending.observed
+        });
+    }
     pub fn ready(&self) -> bool {
         !self.busy && !self.pending && !self.compacting
+    }
+
+    pub fn chat_title(&self) -> Option<String> {
+        if !self.session_name.trim().is_empty()
+            && !matches!(
+                self.session_name.as_str(),
+                "Untitled session" | "New conversation" | "Opening chat…"
+            )
+        {
+            return Some(self.session_name.clone());
+        }
+        self.messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .find_map(|message| {
+                crate::sessions::prompt_title(&message.text)
+                    .or_else(|| (!message.images.is_empty()).then(|| "Image attachment".into()))
+            })
     }
 
     pub fn tool_mut(&mut self, id: &str) -> Option<&mut Tool> {
@@ -342,6 +442,22 @@ impl State {
                                 .map(Vec::as_slice)
                                 .unwrap_or_default(),
                         );
+                    }
+                    "get_commands" => {
+                        self.commands = data["commands"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                    }
+                    "set_model" => {
+                        // Pi acknowledgments are authoritative. Keep the old model
+                        // and effort options if a selection is rejected.
+                        self.model = string(data, "id").to_owned();
+                        self.model_name = string(data, "name").to_owned();
+                        self.provider = string(data, "provider").to_owned();
+                        self.levels.clear();
                     }
                     "get_available_models" => {
                         self.models = data["models"]
@@ -717,6 +833,34 @@ pub fn command(kind: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_title_uses_first_prompt_until_pi_names_the_session() {
+        let mut state = State::default();
+        assert_eq!(state.chat_title(), None);
+        state.apply(json!({"type":"message_start","message":{"role":"user","content":"  Fix the\n sidebar name  "}}));
+        assert_eq!(state.chat_title().as_deref(), Some("Fix the sidebar name"));
+        state.session_name = "Untitled session".into();
+        assert_eq!(state.chat_title().as_deref(), Some("Fix the sidebar name"));
+        state.apply(
+            json!({"type":"message_start","message":{"role":"user","content":"A follow-up"}}),
+        );
+        assert_eq!(state.chat_title().as_deref(), Some("Fix the sidebar name"));
+        state.apply(json!({"type":"session_info_changed","name":"Sidebar naming fix"}));
+        assert_eq!(state.chat_title().as_deref(), Some("Sidebar naming fix"));
+    }
+
+    #[test]
+    fn chat_title_is_bounded_and_attachment_only_prompts_have_no_title() {
+        let mut state = State::default();
+        state.messages.push(Message {
+            role: "user".into(),
+            ..Default::default()
+        });
+        assert_eq!(state.chat_title(), None);
+        state.messages[0].text = "🦀".repeat(120);
+        assert_eq!(state.chat_title().unwrap().chars().count(), 100);
+    }
     #[test]
     fn mcp_notifications_are_deduplicated_diagnostics_not_composer_notices() {
         let mut state = State::default();
@@ -784,6 +928,17 @@ mod tests {
         assert_eq!(message.text, "See this");
         assert_eq!(message.images.len(), 1);
         assert_eq!(message.images[0].data.as_ref(), "aGVsbG8=");
+    }
+    #[test]
+    fn command_catalog_survives_an_acknowledged_model_change() {
+        let mut state = State::default();
+        state.apply(json!({"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review current changes"}]}}));
+        state.apply(json!({"type":"response","command":"set_model","success":true,"data":{"id":"gemini-4-argon","name":"Gemini 4 Argon","provider":"local"}}));
+        assert_eq!(state.commands.len(), 1);
+        assert_eq!(state.commands[0].name, "review");
+        assert_eq!(state.model, "gemini-4-argon");
+        assert_eq!(state.model_name, "Gemini 4 Argon");
+        assert_eq!(state.provider, "local");
     }
     #[test]
     fn model_metadata_comes_from_pi() {

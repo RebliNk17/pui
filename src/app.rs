@@ -1,10 +1,15 @@
+mod about;
 mod agents;
 mod approval_view;
 mod attachments;
 mod changes;
+mod completions;
 mod composer_history;
+mod confirmations;
+mod deletion;
 mod diagnostics;
 mod files;
+mod kanban;
 mod menu;
 mod model_picker;
 mod new_chat;
@@ -12,17 +17,23 @@ mod notifications;
 mod permission_picker;
 #[cfg(test)]
 mod persistence_tests;
+mod prompt_ui;
+#[cfg(test)]
+mod prompt_ui_tests;
 mod prompts;
 mod questions;
 mod rewind;
 mod run_status;
 mod settings;
 mod sidebar;
+mod sidebar_order;
+mod sidebar_tree;
 mod sync;
 mod tasks;
 mod terminal;
 mod updates;
 mod views;
+mod webview;
 
 use crate::{
     Options,
@@ -53,6 +64,7 @@ struct Preferences {
     settings: settings::Settings,
     notifications: notifications::NotificationSettings,
     theme: theme::Theme,
+    color_styles: theme::Styles,
     agent_concurrency: usize,
     agent_tree: Vec<agents::AgentRecord>,
     hide_sidebar: bool,
@@ -61,6 +73,8 @@ struct Preferences {
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,
     projects_view: bool,
+    session_order: sidebar_order::Options,
+    closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
 }
 
@@ -90,6 +104,8 @@ pub struct Pui {
     demo: bool,
     agents: agents::Agents,
     tasks: tasks::Tasks,
+    kanban: kanban::Board,
+    deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
     effort_draft: Option<(String, usize)>,
@@ -109,9 +125,11 @@ pub struct Pui {
     history_drafts: Vec<run_status::WaitingMessage>,
     waiting: std::collections::BTreeMap<PathBuf, Vec<run_status::WaitingMessage>>,
     deliveries: Vec<run_status::Delivery>,
+    interrupt: Option<run_status::Interrupt>,
     draft: String,
     recall: composer_history::Recall,
     recall_width: f32,
+    completions: completions::View,
     draft_images: attachments::DraftImages,
     image_picker_rx: Option<Receiver<Vec<PathBuf>>>,
     new_chat: bool,
@@ -128,6 +146,7 @@ pub struct Pui {
     model_query: String,
     model_provider: String,
     show_archived: bool,
+    show_hidden: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
     rename_chat: Option<PathBuf>,
@@ -166,7 +185,9 @@ impl Pui {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
-        options.theme.unwrap_or(prefs.theme).apply(&cc.egui_ctx);
+        prefs
+            .color_styles
+            .apply(&cc.egui_ctx, options.theme.unwrap_or(prefs.theme));
         if let Some(theme) = options.theme {
             prefs.theme = theme;
         }
@@ -197,6 +218,8 @@ impl Pui {
             demo: options.demo,
             agents: Default::default(),
             tasks: tasks::Tasks::new(&cc.egui_ctx, !options.demo && !cfg!(test)),
+            kanban: Default::default(),
+            deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
             effort_draft: None,
@@ -216,9 +239,11 @@ impl Pui {
             history_drafts: Vec::new(),
             waiting: Default::default(),
             deliveries: Vec::new(),
+            interrupt: None,
             draft: String::new(),
             recall: Default::default(),
             recall_width: 700.0,
+            completions: Default::default(),
             draft_images: Default::default(),
             image_picker_rx: None,
             new_chat: session.is_none() && !options.demo,
@@ -235,6 +260,7 @@ impl Pui {
             model_query: String::new(),
             model_provider: String::new(),
             show_archived: false,
+            show_hidden: false,
             closed_projects: Default::default(),
             expanded_projects: Default::default(),
             rename_chat: None,
@@ -275,6 +301,19 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            if options.demo_languages {
+                app.state.session_name = "Language glyph preview".into();
+                app.state.messages = vec![Message {
+                    role: "assistant".into(),
+                    text: "**Glyph coverage preview**\n\nHebrew: שלום עולם — שָׁלוֹם\n\nGreek: Ελληνικά · Cyrillic: Привет\n\nArabic: مرحبا · Hindi: हिन्दी · Thai: ไทย\n\nCJK: 日本語 · 中文 · 한국어\n\n`שלום English 123`\n\nHebrew and mixed-direction text use Unicode bidirectional layout. Arabic/Indic complex-script shaping and precise vowel-mark positioning remain unsupported.".into(),
+                    ..Default::default()
+                }];
+                app.draft = "שלום עולם · English 123 · 日本語".into();
+                app.prefs.hide_inspector = true;
+            }
+            app.menu.about = options.demo_about;
+            // Preview only: opening Updates must not start a network check.
+            app.updates.open = options.demo_updates;
             if options.demo_approval {
                 app.state.busy = true;
                 let args = json!({"code":"const results = await Promise.all([\n  tools.read({ path: \"src/app/prompts.rs\" }),\n  tools.bash({ command: \"cargo test --all-targets\", timeout: 120 })\n]);\nfor (const result of results) text(result);"});
@@ -288,11 +327,17 @@ impl Pui {
                 app.model_picker_open = true;
                 app.ultracode_ready = true;
             }
-            if options.demo_agents {
+            if options.demo_kanban {
+                app.demo_kanban_agents();
+                app.open_agents_board();
+            } else if options.demo_agents {
                 app.demo_agent_tree();
             }
             if options.demo_task {
                 app.demo_task();
+                if options.demo_task_proposal {
+                    app.tasks.demo_proposal();
+                }
             }
             if options.demo_working {
                 app.state.busy = true;
@@ -334,10 +379,23 @@ impl Pui {
             if options.demo_changes {
                 app.inspector_panel = true;
             }
+            if options.demo_confirmation {
+                app.agents.close_prompt = true;
+            }
             if options.demo_notifications {
                 app.state.notice = Some("Returned to the selected prompt. Review the draft, then send when ready. Nothing was rerun.".into());
                 app.state.add_diagnostic("MCP server unavailable (HTTP 503). The remote service could not be reached. Local chat is still available.".into());
                 app.diagnostics_open = true;
+            }
+            if options.demo_send_now {
+                app.state.busy = true;
+                app.state.pending_messages.push(protocol::PendingMessage {
+                    id: "demo-interrupt".into(),
+                    text: "Stop the browser search and use the CSV I attached instead.".into(),
+                    images: vec![],
+                    status: protocol::DeliveryStatus::Interrupting,
+                    observed: 0,
+                });
             }
             app.transcript.expand_activity = options.demo_expanded;
             if options.demo_collapsed {
@@ -354,6 +412,21 @@ impl Pui {
                 app.connect(&cc.egui_ctx, session);
             }
         }
+        if let Some(target) = options.open {
+            if let Err(error) = app.files.open_target(&cc.egui_ctx, &app.prefs.cwd, &target) {
+                app.state.notice = Some(error);
+            }
+        }
+        if let Some(device) = options.browser_device {
+            if let Err(error) = app
+                .files
+                .configure_browser(&device, options.browser_console)
+            {
+                app.state.notice = Some(error);
+            }
+        } else if options.browser_console {
+            let _ = app.files.configure_browser("responsive", true);
+        }
         app
     }
 
@@ -364,8 +437,15 @@ impl Pui {
         let (tx, rx) = mpsc::channel();
         self.session_rx = Some(rx);
         let ctx = self.ctx.clone();
+        let retained = self
+            .prefs
+            .chats
+            .iter()
+            .filter(|(_, prefs)| prefs.pinned || prefs.hidden)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         std::thread::spawn(move || {
-            let _ = tx.send(sessions::discover());
+            let _ = tx.send(sessions::discover(&retained));
             ctx.request_repaint();
         });
     }
@@ -385,6 +465,19 @@ impl Pui {
     }
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
+        if session
+            .as_deref()
+            .is_some_and(|p| self.deletion.deleting_chat(p))
+        {
+            return;
+        }
+        #[cfg(not(test))]
+        if session.as_ref().is_some_and(|p| !p.is_file()) {
+            self.loading_chat = false;
+            self.state.error =
+                Some("This chat was deleted or its session file is unavailable.".into());
+            return;
+        }
         #[cfg(not(test))]
         if !self.demo && !self.sync.enabled() {
             self.sync = sync::WindowSync::new(ctx, false);
@@ -403,15 +496,24 @@ impl Pui {
         self.current_dialog.clear();
         self.pending_dialog = None;
         self.connected = false;
+        self.completions = Default::default();
         self.ultracode = false;
         self.ultracode_ready = false;
         self.loading_chat = true;
         self.pending_session = session.clone();
         self.preview_rx = None;
         self.preview_partial = false;
+        self.uncertain_deliveries();
+        let pending_messages =
+            if self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref() {
+                std::mem::take(&mut self.state.pending_messages)
+            } else {
+                Vec::new()
+            };
         let models = std::mem::take(&mut self.state.models);
         self.state = State {
             models,
+            pending_messages,
             ..Default::default()
         };
         self.transcript.clear();
@@ -458,6 +560,7 @@ impl Pui {
         self.send(protocol::command("get_state"));
         self.send(protocol::command("get_messages"));
         self.send(protocol::command("get_available_models"));
+        self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_available_thinking_levels"));
         self.send(protocol::command("get_session_stats"));
         self.refresh_workspace();
@@ -478,6 +581,10 @@ impl Pui {
     }
 
     fn open_chat(&mut self, session: Session) {
+        if self.deletion.in_progress() || self.deletion.deleting_chat(&session.path) {
+            return;
+        }
+        self.kanban.open = false;
         self.tasks.open = false;
         let path = session.path.clone();
         if !self.loading_chat
@@ -580,6 +687,7 @@ impl Pui {
     }
 
     fn poll(&mut self) {
+        self.poll_deletions();
         self.usage.poll();
         self.notifications.poll();
         self.updates.poll();
@@ -615,6 +723,7 @@ impl Pui {
                     self.transcript
                         .replace_history(&self.state.messages, &messages);
                     self.state.messages = messages;
+                    self.state.reconcile_pending_messages();
                     if !self.state.messages.is_empty() {
                         self.new_chat = false;
                     }
@@ -649,6 +758,9 @@ impl Pui {
                         if self.agents.active != history_source {
                             break;
                         }
+                        continue;
+                    }
+                    if self.open_request(&record) {
                         continue;
                     }
                     if self.control_request(&record) {
@@ -698,21 +810,21 @@ impl Pui {
                         self.agent_failed(protocol::string(&record, "error"));
                     }
                     let cancelled = record["data"]["cancelled"] == true;
+                    let record_for_interrupt =
+                        if self.interrupt.is_some() && kind == "response" && command == "abort" {
+                            record.clone()
+                        } else {
+                            Value::Null
+                        };
+                    let user_message = matches!(kind.as_str(), "message_start" | "message_end")
+                        && record["message"]["role"] == "user";
                     self.state.apply(record);
-                    if self.state.session_name.is_empty() {
-                        if let Some(title) = self
-                            .sessions
-                            .iter()
-                            .find(|s| {
-                                self.state
-                                    .session_file
-                                    .as_deref()
-                                    .is_some_and(|p| std::path::Path::new(p) == s.path)
-                            })
-                            .map(|s| s.title.clone())
-                        {
-                            self.state.session_name = title;
-                        }
+                    if user_message || (kind == "response" && command == "get_messages") {
+                        self.state.reconcile_pending_messages();
+                    }
+                    self.interrupt_response(&record_for_interrupt);
+                    if kind == "session_info_changed" {
+                        self.refresh_sessions();
                     }
                     if kind == "response" && command == "switch_session" {
                         if success && !cancelled {
@@ -733,6 +845,9 @@ impl Pui {
                             self.send(protocol::command("get_state"));
                             self.send(protocol::command("get_messages"));
                         }
+                    }
+                    if kind == "response" && success && command == "prompt" {
+                        self.send(protocol::command("get_commands"));
                     }
                     if kind == "agent_settled" {
                         if !self.demo {
@@ -760,10 +875,12 @@ impl Pui {
                     }
                 }
                 rpc::Event::Error(error) => {
+                    self.uncertain_deliveries();
                     self.agent_failed(&error);
                     self.state.error = Some(error);
                 }
                 rpc::Event::Exited => {
+                    self.uncertain_deliveries();
                     self.completion_run = Default::default();
                     if let Some(client) = self.client.take() {
                         client.retire();
@@ -783,11 +900,56 @@ impl Pui {
                 }
             }
         }
+        self.update_session_title();
+    }
+    fn update_session_title(&mut self) {
+        let Some(path) = self.state.session_file.as_deref() else {
+            return;
+        };
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.path == std::path::Path::new(path));
+        if self.state.session_name.trim().is_empty()
+            || matches!(
+                self.state.session_name.as_str(),
+                "Untitled session" | "New conversation" | "Opening chat…"
+            )
+        {
+            self.state.session_name = session
+                .as_ref()
+                .filter(|s| {
+                    !s.title.trim().is_empty()
+                        && !matches!(
+                            s.title.as_str(),
+                            "Untitled session" | "New conversation" | "Opening chat…"
+                        )
+                })
+                .map(|s| s.title.clone())
+                .or_else(|| {
+                    self.state
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == "user")
+                        .find_map(|m| {
+                            sessions::prompt_title(&m.text).or_else(|| {
+                                (!m.images.is_empty()).then(|| "Image attachment".into())
+                            })
+                        })
+                })
+                .unwrap_or_default();
+        }
+        if let Some(session) = session {
+            if !self.state.session_name.is_empty() {
+                session.title = self.state.session_name.clone();
+            }
+        }
     }
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.sessions = result;
             self.session_rx = None;
+            self.update_session_title();
         }
         if let Some(result) = self.workspace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.workspace = result;
@@ -813,6 +975,12 @@ impl Pui {
     }
 
     fn submit_mode(&mut self, ctx: &egui::Context, mode: settings::DeliveryMode) {
+        if self.deletion.confirming() {
+            return;
+        }
+        if self.submit_command() {
+            return;
+        }
         if self.is_mirror() {
             self.queue_draft_mode(mode);
             return;
@@ -861,6 +1029,7 @@ impl Pui {
             self.tasks.stop();
             return;
         }
+        self.cancel_send_now();
         if self.is_mirror() {
             self.remote_action(sync::Action::Rpc(protocol::command("clear_queue")));
             self.remote_action(sync::Action::Rpc(protocol::command("abort")));
@@ -992,6 +1161,7 @@ impl Pui {
         self.propagate_settings(&settings_before);
         let mut submit = false;
         let mut alternate = false;
+        let mut completion_anchor = None;
         egui::Frame::new()
             .fill(colors.sidebar)
             .stroke(Stroke::new(1.0, colors.border))
@@ -1006,6 +1176,8 @@ impl Pui {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 self.draft_images.show(ui);
                 self.recall_width = ui.available_width();
+                let completing = self.completion_active(ctx);
+                self.completion_keys(ctx);
                 self.recall_before_edit(ctx);
                 let response = ui.add(
                     egui::TextEdit::multiline(&mut self.draft)
@@ -1014,12 +1186,13 @@ impl Pui {
                             RichText::new(if self.demo {
                                 "Start a real session to talk to Pi…"
                             } else {
-                                "Message Pi… (paste or drop images)"
+                                "Message Pi… (/ commands, @ files, or drop files)"
                             })
                             .color(colors.dim),
                         )
                         .font(FontId::proportional(14.0))
                         .frame(false)
+                        .lock_focus(completing)
                         .desired_width(f32::INFINITY)
                         .desired_rows(1)
                         .return_key(egui::KeyboardShortcut::new(
@@ -1027,6 +1200,7 @@ impl Pui {
                             egui::Key::Enter,
                         )),
                 );
+                completion_anchor = Some((response.rect, ui.layer_id()));
                 if self.focus_composer {
                     response.request_focus();
                     self.focus_composer = false;
@@ -1039,11 +1213,14 @@ impl Pui {
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.set_height(28.0);
-                    ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
+                    ui.set_height(theme::COMPACT_HEIGHT);
+                    theme::compact_controls(ui);
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let attach =
-                        icons::button(ui, Icon::Plus, "Attach images · right-click for clipboard");
+                    let attach = icons::button(
+                        ui,
+                        Icon::Plus,
+                        "Attach files · right-click to paste an image",
+                    );
                     if attach.clicked() {
                         self.pick_images();
                     }
@@ -1155,6 +1332,9 @@ impl Pui {
                 .color(colors.dim),
             );
         });
+        if let Some((anchor, layer)) = completion_anchor {
+            self.completion_popup(ctx, anchor, layer);
+        }
         if submit {
             if alternate {
                 self.submit_mode(ctx, self.prefs.settings.delivery.opposite());
@@ -1171,7 +1351,10 @@ impl Pui {
                 .id(egui::Id::new("diff-viewer"))
                 .open(&mut open)
                 .default_size([850.0, 560.0])
+                .frame(prompt_ui::surface(ctx).inner_margin(20))
+                .collapsible(false)
                 .show(ctx, |ui| {
+                    prompt_ui::style(ui);
                     ui.label(theme::small(
                         ui,
                         "Read-only recorded change or working-tree diff · no files are modified",
@@ -1337,6 +1520,7 @@ impl Pui {
                 _ => "/demo/AlteryraMVP",
             }),
             title: (*title).into(),
+            created: Some(now - Duration::from_secs((i as u64 + 1) * 86400)),
             modified: now - Duration::from_secs(i as u64 * 3900),
         })
         .collect();
@@ -1350,16 +1534,30 @@ impl Pui {
 }
 
 impl eframe::App for Pui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.prefs.theme.apply(ctx);
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::chromium::Runtime::pump();
+        self.files.begin_frame();
+        self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
         self.poll();
         self.menu_commands(ctx);
-        if self.screenshot.is_none() {
+        if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
         }
-        let terminal_input = !self.settings_open && self.terminals.focused(ctx);
-        if !self.settings_open && !self.tasks.open && !terminal_input {
+        let confirming = self.agents.close_prompt
+            || self.terminals.confirming_stop()
+            || self.history_view.is_open()
+            || self.deletion.confirming()
+            || self.menu.about
+            || self.updates.open;
+        let terminal_input =
+            !self.settings_open && !self.kanban.open && self.terminals.focused(ctx);
+        if !confirming
+            && !self.settings_open
+            && !self.kanban.open
+            && !self.tasks.open
+            && !terminal_input
+        {
             self.image_inputs(ctx);
         }
         let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
@@ -1392,6 +1590,7 @@ impl eframe::App for Pui {
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I))
         {
+            self.kanban.open = false;
             self.files.close();
             self.inspector_panel = false;
             self.prefs.hide_inspector = !self.prefs.hide_inspector;
@@ -1405,15 +1604,29 @@ impl eframe::App for Pui {
             self.focus_composer = false;
         }
         if !self.settings_open
+            && !confirming
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
         {
             self.new_session();
         }
-        if !self.settings_open
+        let leaving_board = !confirming
+            && !self.settings_open
+            && self.kanban.open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if leaving_board {
+            self.kanban.open = false;
+            self.focus_composer = true;
+        }
+        if !leaving_board
+            && !self.settings_open
+            && !self.kanban.open
+            && !confirming
             && !terminal_input
             && !self.diagnostics_open
+            && self.rename_chat.is_none()
             && self.state.dialogs.is_empty()
+            && !self.completion_active(ctx)
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && !self.transcript.gallery.is_open()
             && !self.draft_images.gallery.is_open()
@@ -1433,12 +1646,16 @@ impl eframe::App for Pui {
                 self.sidebar(ctx);
             }
             self.top_bar(ctx);
-            let terminal_expanded =
-                self.terminals.is_open() && self.terminals.show(ctx, &self.prefs.cwd, self.demo);
+            let terminal_expanded = !self.kanban.open
+                && self.terminals.is_open()
+                && self.terminals.show(ctx, &self.prefs.cwd, self.demo);
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if terminal_expanded {
+            let central = if self.kanban.open {
+                self.agents_board(ctx);
+                true
+            } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
                 self.files.show(ctx, &self.prefs.cwd)
@@ -1475,6 +1692,21 @@ impl eframe::App for Pui {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);
         }
+        if !self.settings_open
+            && !self.kanban.open
+            && !theater
+            && !confirming
+            && !self.model_picker_open
+            && self.state.dialogs.is_empty()
+            && self.selected_diff.is_none()
+            && !egui::Popup::is_any_open(ctx)
+        {
+            self.files.show_web(frame, ctx);
+        } else {
+            self.files.hide_web();
+        }
+        self.process_open_links(ctx);
+        self.deletion_dialog(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
         self.refresh_menu(ctx);

@@ -37,6 +37,7 @@ pub(super) enum Command {
     Steer,
     Queue,
     Terminal,
+    Browser,
 }
 impl Command {
     #[cfg(any(target_os = "macos", test))]
@@ -74,6 +75,7 @@ impl Command {
         Self::Steer,
         Self::Queue,
         Self::Terminal,
+        Self::Browser,
     ];
     #[cfg(any(target_os = "macos", test))]
     pub fn from_tag(tag: isize) -> Option<Self> {
@@ -190,6 +192,7 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
             A("Session Sidebar", Command::Sidebar),
             A("Session Details", Command::Inspector),
             A("Workspace Files", Command::Files),
+            A("Browser", Command::Browser),
             A("Changes", Command::Changes),
             A("Terminal", Command::Terminal),
             S,
@@ -219,6 +222,7 @@ pub(super) struct MenuState {
     pub inspector: bool,
     pub inspector_available: bool,
     pub files: bool,
+    pub browser: bool,
     pub changes: bool,
     pub terminal: bool,
     pub terminal_focused: bool,
@@ -239,6 +243,7 @@ impl MenuState {
             Command::Sidebar => self.sidebar,
             Command::Inspector => self.inspector && self.inspector_available,
             Command::Files => self.files,
+            Command::Browser => self.browser,
             Command::Changes => self.changes,
             Command::Terminal => self.terminal,
             Command::Fullscreen => self.fullscreen,

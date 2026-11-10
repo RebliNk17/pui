@@ -407,6 +407,7 @@ fn keyboard_answers_and_chat_switches_preserve_the_composer_and_question_state()
         cwd: app.prefs.cwd.clone(),
         project: app.prefs.cwd.clone(),
         title: "Questions".into(),
+        created: None,
         modified: std::time::SystemTime::now(),
     };
     let other = Session {

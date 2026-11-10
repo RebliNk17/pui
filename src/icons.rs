@@ -6,10 +6,20 @@ pub enum Icon {
     Plus,
     Search,
     Sidebar,
+    Board,
     Sliders,
+    Filter,
+    Group,
     Folder,
     ArrowUp,
     ArrowLeft,
+    ArrowRight,
+    Globe,
+    Desktop,
+    Tablet,
+    Phone,
+    Rotate,
+    Inspect,
     Bell,
     Shield,
     Stop,
@@ -64,12 +74,29 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             outline(-7.0, -6.0, 14.0, 12.0, 2);
             line((-2.0, -6.0), (-2.0, 6.0));
         }
+        Icon::Board => {
+            outline(-7.0, -6.0, 14.0, 12.0, 2);
+            line((-2.5, -6.0), (-2.5, 6.0));
+            line((2.5, -6.0), (2.5, 6.0));
+            line((-5.0, -3.0), (-5.0, 1.0));
+            line((0.0, -3.0), (0.0, -1.0));
+            line((5.0, -3.0), (5.0, 3.0));
+        }
         Icon::Sliders => {
             for (y, x) in [(-4.0, -2.0), (3.0, 3.0)] {
                 line((-6.0, y), (6.0, y));
                 p.circle_filled(pt(x, y), 2.3 * scale, colors.bg);
                 p.circle_stroke(pt(x, y), 2.3 * scale, s);
             }
+        }
+        Icon::Filter => {
+            for (y, width) in [(-4.0, 7.0), (0.0, 4.5), (4.0, 2.0)] {
+                line((-width, y), (width, y));
+            }
+        }
+        Icon::Group => {
+            outline(-7.0, -6.0, 14.0, 5.0, 1);
+            outline(-7.0, 2.0, 14.0, 5.0, 1);
         }
         Icon::Folder => {
             p.add(egui::Shape::closed_line(
@@ -93,6 +120,46 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((6.0, 0.0), (-6.0, 0.0));
             line((-6.0, 0.0), (-2.0, -4.0));
             line((-6.0, 0.0), (-2.0, 4.0));
+        }
+        Icon::ArrowRight => {
+            line((-6.0, 0.0), (6.0, 0.0));
+            line((6.0, 0.0), (2.0, -4.0));
+            line((6.0, 0.0), (2.0, 4.0));
+        }
+        Icon::Globe => {
+            p.circle_stroke(c, 6.5 * scale, s);
+            outline(-3.0, -6.5, 6.0, 13.0, 4);
+            line((-6.0, 0.0), (6.0, 0.0));
+        }
+        Icon::Desktop => {
+            outline(-7.0, -6.0, 14.0, 10.0, 2);
+            line((0.0, 4.0), (0.0, 7.0));
+            line((-4.0, 7.0), (4.0, 7.0));
+        }
+        Icon::Tablet | Icon::Phone => {
+            let width = if matches!(icon, Icon::Phone) {
+                9.0
+            } else {
+                12.0
+            };
+            outline(-width / 2.0, -7.0, width, 14.0, 2);
+            line((-1.5, 4.5), (1.5, 4.5));
+        }
+        Icon::Rotate => {
+            outline(-4.0, -5.0, 8.0, 10.0, 2);
+            p.add(egui::Shape::line(
+                vec![pt(-7.0, 2.0), pt(-7.0, -7.0), pt(3.0, -7.0)],
+                s,
+            ));
+            line((3.0, -7.0), (0.0, -10.0));
+            line((3.0, -7.0), (0.0, -4.0));
+        }
+        Icon::Inspect => {
+            outline(-6.0, -6.0, 12.0, 12.0, 2);
+            p.add(egui::Shape::closed_line(
+                vec![pt(-2.0, -2.0), pt(6.0, 1.0), pt(2.0, 3.0), pt(0.0, 7.0)],
+                s,
+            ));
         }
         Icon::Bell => {
             p.add(egui::Shape::line(
@@ -298,7 +365,8 @@ pub fn chevron(ui: &Ui, rect: Rect, open: bool, color: Color32) {
 
 pub fn button(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
     let colors = crate::theme::palette(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(ui.spacing().interact_size.y), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, 6, colors.hover);
     }
@@ -328,7 +396,7 @@ pub fn labeled_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> Re
         let gap = 4.0;
         // Match egui's horizontal-row height so preceding metadata labels do not
         // stay centered on a shorter row while this action extends below them.
-        let height = ui.spacing().interact_size.y.max(galley.size().y);
+        let height = 18.0_f32.max(galley.size().y);
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(galley.size().x + icon_size + gap, height),
             Sense::click(),

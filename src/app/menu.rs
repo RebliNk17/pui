@@ -113,7 +113,8 @@ impl Pui {
             sidebar: !self.prefs.hide_sidebar,
             inspector: !self.prefs.hide_inspector && !self.files.is_open() && !self.inspector_panel,
             inspector_available: ctx.screen_rect().width() > 1110.0,
-            files: self.files.is_open(),
+            files: self.files.files_open(),
+            browser: self.files.browser_open(),
             changes: self.inspector_panel,
             terminal: self.terminals.is_open(),
             terminal_focused: !self.settings_open && self.terminals.focused(ctx),
@@ -264,22 +265,33 @@ impl Pui {
             }
             Sidebar => self.prefs.hide_sidebar = !self.prefs.hide_sidebar,
             Inspector => {
+                self.kanban.open = false;
                 let shown = self.menu_state(ctx).inspector;
                 self.files.close();
                 self.inspector_panel = false;
                 self.prefs.hide_inspector = shown;
             }
             Terminal => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                 self.focus_composer = !self.terminals.is_open();
             }
             Files => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }
+            Browser => {
+                self.kanban.open = false;
+                self.settings_open = false;
+                self.files.toggle_browser(ctx, &self.prefs.cwd);
+                self.inspector_panel = false;
+                self.terminals.close(ctx);
+            }
             Changes => {
+                self.kanban.open = false;
                 self.settings_open = false;
                 self.files.close();
                 self.inspector_panel = !self.inspector_panel;
@@ -327,13 +339,7 @@ impl Pui {
     }
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
         self.updates.show(ctx);
-        if self.menu.about {
-            egui::Window::new("About Pui").open(&mut self.menu.about).resizable(false).collapsible(false).default_width(320.0).show(ctx,|ui|{
-                ui.heading("Pui");ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));ui.add_space(8.0);ui.label("A native desktop workspace for Pi.");
-                ui.add(egui::Label::new(theme::small(ui,"Pi handles your models, tools and authentication. Pui provides the desktop workspace.")).wrap());
-                ui.label(theme::small(ui,"Local ad-hoc signed build · not notarized"));
-            });
-        }
+        about::show(ctx, &mut self.menu.about);
     }
 }
 
