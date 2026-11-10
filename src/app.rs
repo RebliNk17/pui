@@ -63,6 +63,7 @@ struct Preferences {
     settings: settings::Settings,
     notifications: notifications::NotificationSettings,
     theme: theme::Theme,
+    color_styles: theme::Styles,
     agent_concurrency: usize,
     agent_tree: Vec<agents::AgentRecord>,
     hide_sidebar: bool,
@@ -181,7 +182,9 @@ impl Pui {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
-        options.theme.unwrap_or(prefs.theme).apply(&cc.egui_ctx);
+        prefs
+            .color_styles
+            .apply(&cc.egui_ctx, options.theme.unwrap_or(prefs.theme));
         if let Some(theme) = options.theme {
             prefs.theme = theme;
         }
@@ -1505,7 +1508,7 @@ impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::chromium::Runtime::pump();
         self.files.begin_frame();
-        self.prefs.theme.apply(ctx);
+        self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
         self.poll();
         self.menu_commands(ctx);

@@ -214,6 +214,50 @@ fn saving_during_a_chat_switch_remembers_the_requested_chat_not_the_old_one() {
 }
 
 #[test]
+fn both_color_styles_survive_save_and_reopen_in_the_selected_mode() {
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = true;
+    app.state = State::default();
+    app.prefs.color_styles = theme::Styles {
+        dark: theme::DarkStyle::Plum,
+        light: theme::LightStyle::Sage,
+    };
+    app.prefs.theme = theme::Theme::Light;
+    eframe::App::save(&mut app, &mut storage);
+    let restored = reopen(&storage, Options::default());
+    assert_eq!(restored.prefs.color_styles, app.prefs.color_styles);
+    assert_eq!(restored.prefs.theme, theme::Theme::Light);
+    assert_eq!(
+        theme::palette(&restored.ctx).bg,
+        theme::LightStyle::Sage.palette().bg
+    );
+    assert_eq!(
+        restored.ctx.style().visuals.hyperlink_color,
+        theme::LightStyle::Sage.palette().accent
+    );
+    let overridden = reopen(
+        &storage,
+        Options {
+            theme: Some(theme::Theme::Dark),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        theme::palette(&overridden.ctx).bg,
+        theme::DarkStyle::Plum.palette().bg
+    );
+    assert_eq!(overridden.prefs.color_styles.light, theme::LightStyle::Sage);
+}
+
+#[test]
 fn older_preferences_default_to_recent_and_a_blank_chat() {
     let prefs: Preferences = serde_json::from_str("{}").unwrap();
     assert!(!prefs.projects_view);

@@ -55,7 +55,9 @@ impl Page {
     fn keywords(self) -> &'static str {
         match self {
             Self::General => "steer queue messages enter context compact tokens worker concurrency",
-            Self::Appearance => "layout sidebar inspector scale zoom reset dark light theme",
+            Self::Appearance => {
+                "layout sidebar inspector scale zoom reset dark light theme color styles midnight ivory forest sage plum rose classic neutral"
+            }
             Self::Notifications => {
                 "sound completion alerts desktop macos permission notification test"
             }
@@ -307,7 +309,7 @@ impl Pui {
         }
         let before = self.prefs.settings.clone();
         let alerts_before = self.prefs.notifications;
-        let theme_before = self.prefs.theme;
+        let theme_before = (self.prefs.theme, self.prefs.color_styles);
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             self.settings_open = false;
@@ -436,8 +438,8 @@ impl Pui {
                     });
             });
         self.propagate_notifications(ctx, alerts_before);
-        if theme_before != self.prefs.theme {
-            self.prefs.theme.apply(ctx);
+        if theme_before != (self.prefs.theme, self.prefs.color_styles) {
+            self.prefs.color_styles.apply(ctx, self.prefs.theme);
             ctx.request_repaint();
         }
         self.propagate_settings(&before);
@@ -542,8 +544,8 @@ impl Pui {
         card(ui, |ui| {
             row(
                 ui,
-                "Color theme",
-                "Choose a light or dark palette for this window. Your choice is saved automatically.",
+                "Mode",
+                "Choose light or dark, then pick a theme below. Your choices are saved automatically.",
                 |ui| {
                     for (mode, label) in
                         [(theme::Theme::Light, "Light"), (theme::Theme::Dark, "Dark")]
@@ -555,6 +557,7 @@ impl Pui {
                 },
             )
         });
+        super::appearance::styles(ui, self.prefs.theme, &mut self.prefs.color_styles);
         section(ui, "Workspace", "");
         card(ui, |ui| {
             row(
@@ -1016,11 +1019,19 @@ mod tests {
     fn theme_preferences_default_to_dark_and_roundtrip() {
         let mut prefs: Preferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.theme, theme::Theme::Dark);
+        assert_eq!(prefs.color_styles, theme::Styles::default());
+        assert_eq!(prefs.color_styles.dark, theme::DarkStyle::Neutral);
+        assert_eq!(prefs.color_styles.light, theme::LightStyle::Neutral);
+        prefs.color_styles = theme::Styles {
+            dark: theme::DarkStyle::Forest,
+            light: theme::LightStyle::Rose,
+        };
         for mode in [theme::Theme::Light, theme::Theme::Dark] {
             prefs.theme = mode;
             let saved = serde_json::to_string(&prefs).unwrap();
             let restored: Preferences = serde_json::from_str(&saved).unwrap();
             assert_eq!(restored.theme, mode);
+            assert_eq!(restored.color_styles, prefs.color_styles);
         }
     }
 
@@ -1089,6 +1100,153 @@ mod tests {
             assert!(app.state.busy);
             assert_eq!(app.draft, "keep this draft");
             assert_eq!(ctx.zoom_factor(), 1.1);
+        }
+    }
+
+    #[test]
+    fn color_style_cards_preview_and_remember_independent_mode_choices() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                ..Default::default()
+            },
+        );
+        app.settings_view.search = "forest".into();
+        app.state.busy = true;
+        app.draft = "unsent draft".into();
+        let mut window = eframe::Frame::_new_kittest();
+        let mut frame = |app: &mut Pui, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1480.0, 1100.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut window),
+            )
+        };
+        frame(&mut app, vec![]);
+        for (label, mode, expected_dark, expected_light) in [
+            (
+                "Forest",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Light",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Rose",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Dark",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Light",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Rose,
+            ),
+            (
+                "Classic",
+                theme::Theme::Light,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Dark",
+                theme::Theme::Dark,
+                theme::DarkStyle::Forest,
+                theme::LightStyle::Neutral,
+            ),
+            (
+                "Classic",
+                theme::Theme::Dark,
+                theme::DarkStyle::Neutral,
+                theme::LightStyle::Neutral,
+            ),
+        ] {
+            let output = frame(&mut app, vec![]);
+            let mut text = Vec::new();
+            for shape in output.shapes {
+                texts(&shape.shape, &mut text);
+            }
+            let (visible, hidden) = match app.prefs.theme {
+                theme::Theme::Dark => (["Midnight", "Forest", "Plum"], ["Ivory", "Sage", "Rose"]),
+                theme::Theme::Light => (["Ivory", "Sage", "Rose"], ["Midnight", "Forest", "Plum"]),
+            };
+            for name in visible {
+                assert!(
+                    text.iter().any(|(label, _)| label == name),
+                    "Missing theme {name}"
+                );
+            }
+            for name in hidden {
+                assert!(
+                    !text.iter().any(|(label, _)| label == name),
+                    "Other mode's theme {name} should be hidden"
+                );
+            }
+            assert_eq!(
+                text.iter().filter(|(label, _)| label == "Classic").count(),
+                1
+            );
+            let pos = text
+                .iter()
+                .find(|(text, _)| text == label)
+                .unwrap()
+                .1
+                .center();
+            for pressed in [true, false] {
+                frame(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            frame(&mut app, vec![]);
+            assert_eq!(app.settings_view.page, Page::Appearance);
+            assert_eq!(app.prefs.theme, mode);
+            assert_eq!(
+                app.prefs.color_styles,
+                theme::Styles {
+                    dark: expected_dark,
+                    light: expected_light
+                }
+            );
+            assert_eq!(
+                theme::palette(&ctx).accent,
+                app.prefs.color_styles.palette(mode).accent
+            );
+            assert_eq!(
+                ctx.style().visuals.hyperlink_color,
+                app.prefs.color_styles.palette(mode).accent
+            );
+            assert!(app.state.busy);
+            assert_eq!(app.draft, "unsent draft");
         }
     }
 

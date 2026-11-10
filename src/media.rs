@@ -336,7 +336,7 @@ impl Gallery {
         self.selected.is_some()
     }
     pub fn viewer(&mut self, ctx: &egui::Context) {
-        let colors = crate::theme::Theme::Dark.palette();
+        let colors = crate::theme::styles(ctx).palette(crate::theme::Theme::Dark);
         let Some(image) = self.selected.clone() else {
             return;
         };

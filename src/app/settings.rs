@@ -112,6 +112,7 @@ impl Settings {
         json!({"permission":self.permission.key(),"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)})
     }
 }
+mod appearance;
 mod page;
 mod resources;
 pub(super) use page::View;
