@@ -1,25 +1,19 @@
-//! Quiet Mac prompt primitives. Presentation only: callers own consent and state.
+//! Theme-aware prompt primitives. Presentation only: callers own consent and state.
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) fn background(ctx: &egui::Context) -> Color32 {
-    match ctx.theme() {
-        egui::Theme::Light => Color32::from_rgb(253, 252, 254),
-        egui::Theme::Dark => Color32::from_rgb(36, 35, 43),
-    }
+    theme::palette(ctx).surface
 }
 
 pub(super) fn subtle(ctx: &egui::Context) -> Color32 {
-    match ctx.theme() {
-        egui::Theme::Light => Color32::from_rgb(246, 245, 249),
-        egui::Theme::Dark => Color32::from_rgb(29, 28, 35),
-    }
+    theme::palette(ctx).bg
 }
 
 pub(super) fn border(ctx: &egui::Context) -> Color32 {
-    match ctx.theme() {
-        egui::Theme::Light => Color32::from_rgb(225, 223, 232),
-        egui::Theme::Dark => Color32::from_rgb(62, 59, 73),
-    }
+    theme::palette(ctx).border
 }
 
 pub(super) fn surface(ctx: &egui::Context) -> egui::Frame {
@@ -43,7 +37,7 @@ pub(super) fn inline(ctx: &egui::Context) -> egui::Frame {
 }
 
 pub(super) fn popup(ctx: &egui::Context) -> egui::Frame {
-    surface(ctx).inner_margin(16)
+    surface(ctx).inner_margin(10).corner_radius(10)
 }
 
 pub(super) fn keyboard_available(ui: &egui::Ui) -> bool {
@@ -147,9 +141,9 @@ pub(super) fn button(
     let colors = theme::palette(ui.ctx());
     let (fill, text) = match kind {
         Button::Secondary => (background(ui.ctx()), colors.text),
-        // White text keeps contrast in both themes; do not use the page background.
-        Button::Primary => (Color32::from_rgb(112, 86, 185), Color32::WHITE),
-        Button::Danger => (Color32::from_rgb(177, 57, 49), Color32::WHITE),
+        // Palette accents/status colors contrast with the page background in every style.
+        Button::Primary => (colors.accent, colors.bg),
+        Button::Danger => (colors.red, colors.bg),
     };
     let stroke = match kind {
         Button::Secondary => border(ui.ctx()),

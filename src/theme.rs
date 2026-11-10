@@ -317,6 +317,18 @@ pub fn compact_controls(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
 }
 
+/// Desktop menus use tighter rows than forms and question cards. Call inside the popup.
+pub fn menu_controls(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 2.0);
+    ui.spacing_mut().interact_size.y = 24.0;
+    ui.spacing_mut().button_padding = egui::vec2(8.0, 3.0);
+    for style in [TextStyle::Body, TextStyle::Button] {
+        ui.style_mut()
+            .text_styles
+            .insert(style, FontId::proportional(12.0));
+    }
+}
+
 pub fn small(ui: &egui::Ui, text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text)
         .size(11.0)

@@ -475,6 +475,7 @@ impl Pui {
             .id(ui.make_persistent_id("session-group-menu"))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
+                theme::menu_controls(ui);
                 ui.set_min_width(150.0);
                 ui.label(theme::caption(ui, "GROUP BY"));
                 ui.radio_value(&mut self.projects, false, "Recent");
@@ -490,6 +491,7 @@ impl Pui {
             .id(ui.make_persistent_id("session-filter-menu"))
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
+                theme::menu_controls(ui);
                 ui.set_min_width(190.0);
                 ui.label(theme::caption(ui, "SORT BY"));
                 for sort in [
@@ -519,17 +521,6 @@ impl Pui {
                 });
                 ui.separator();
                 ui.checkbox(&mut self.show_archived, "Show archived");
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        self.session_rx.is_none() && !self.demo,
-                        egui::Button::new("Refresh sessions"),
-                    )
-                    .clicked()
-                {
-                    self.refresh_sessions();
-                    ui.close();
-                }
             });
         [filter, group]
     }
@@ -1624,6 +1615,7 @@ mod tests {
         let (output, _) = controls_frame(&ctx, &mut app, vec![]);
         assert!(label_rect(&output, "SORT BY").is_some());
         assert!(label_rect(&output, "GROUP BY").is_none());
+        assert!(label_rect(&output, "Refresh sessions").is_none());
         click_label(&ctx, &mut app, "Name");
         assert!(app.prefs.session_order.sort == sidebar_order::Sort::Name);
         click_label(&ctx, &mut app, "Z–A");

@@ -1,3 +1,6 @@
+mod watch;
+pub use watch::Watch;
+
 use crate::protocol::{content_text, string};
 use serde_json::Value;
 use std::{
