@@ -2,6 +2,7 @@
 
 mod activity;
 mod app;
+mod chromium;
 mod context;
 mod history;
 mod icons;
@@ -43,6 +44,9 @@ pub struct Options {
     pub demo_changes: bool,
     pub demo_terminal: bool,
     pub demo_notifications: bool,
+    pub open: Option<String>,
+    pub browser_device: Option<String>,
+    pub browser_console: bool,
     pub cwd: Option<PathBuf>,
     pub session: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
@@ -139,12 +143,15 @@ fn main() -> eframe::Result {
             }
             "--light" => options.theme = Some(theme::Theme::Light),
             "--dark" => options.theme = Some(theme::Theme::Dark),
+            "--open" => options.open = args.next(),
+            "--browser-device" => options.browser_device = args.next(),
+            "--browser-console" => options.browser_console = true,
             "--cwd" => options.cwd = args.next().map(PathBuf::from),
             "--session" => options.session = args.next().map(PathBuf::from),
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
-                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--screenshot PATH]\n\nPi must be installed and authenticated separately. Set PUI_PI_BIN to override its executable."
+                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n\nPi must be installed and authenticated separately. Set PUI_PI_BIN to override its executable."
                 );
                 return Ok(());
             }
@@ -154,6 +161,7 @@ fn main() -> eframe::Result {
             }
         }
     }
+    chromium::prepare_application();
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(if options.demo_question_designs {

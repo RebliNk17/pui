@@ -23,6 +23,7 @@ mod tasks;
 mod terminal;
 mod updates;
 mod views;
+mod webview;
 
 use crate::{
     Options,
@@ -354,6 +355,21 @@ impl Pui {
                 app.connect(&cc.egui_ctx, session);
             }
         }
+        if let Some(target) = options.open {
+            if let Err(error) = app.files.open_target(&cc.egui_ctx, &app.prefs.cwd, &target) {
+                app.state.notice = Some(error);
+            }
+        }
+        if let Some(device) = options.browser_device {
+            if let Err(error) = app
+                .files
+                .configure_browser(&device, options.browser_console)
+            {
+                app.state.notice = Some(error);
+            }
+        } else if options.browser_console {
+            let _ = app.files.configure_browser("responsive", true);
+        }
         app
     }
 
@@ -649,6 +665,9 @@ impl Pui {
                         if self.agents.active != history_source {
                             break;
                         }
+                        continue;
+                    }
+                    if self.open_request(&record) {
                         continue;
                     }
                     if self.control_request(&record) {
@@ -1350,7 +1369,9 @@ impl Pui {
 }
 
 impl eframe::App for Pui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::chromium::Runtime::pump();
+        self.files.begin_frame();
         self.prefs.theme.apply(ctx);
         self.frames += 1;
         self.poll();
@@ -1475,6 +1496,18 @@ impl eframe::App for Pui {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);
         }
+        if !self.settings_open
+            && !theater
+            && !self.model_picker_open
+            && self.state.dialogs.is_empty()
+            && self.selected_diff.is_none()
+            && !egui::Popup::is_any_open(ctx)
+        {
+            self.files.show_web(frame, ctx);
+        } else {
+            self.files.hide_web();
+        }
+        self.process_open_links(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
         self.refresh_menu(ctx);

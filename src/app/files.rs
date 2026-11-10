@@ -1,4 +1,5 @@
-//! Docked, read-only file browser. Only explicit file clicks read content.
+//! Docked, read-only file and page viewer. Reads require a click or pui_open.
+mod chrome;
 use super::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,10 +34,23 @@ struct Directory {
     listing: Option<Result<Listing, String>>,
     rx: Option<Receiver<Result<Listing, String>>>,
 }
+enum Content {
+    Text(String),
+    Image(egui::ColorImage),
+}
 struct OpenFile {
     path: PathBuf,
-    content: Option<Result<String, String>>,
-    rx: Option<Receiver<Result<String, String>>>,
+    content: Option<Result<Content, String>>,
+    rx: Option<Receiver<Result<Content, String>>>,
+    texture: Option<egui::TextureHandle>,
+    source: bool,
+    external: bool,
+}
+struct WebPreview {
+    rect: egui::Rect,
+    key: String,
+    url: Option<String>,
+    html: Option<String>,
 }
 struct Search {
     entries: Vec<Entry>,
@@ -60,6 +74,12 @@ pub(super) struct Browser {
     search: Option<Result<Search, String>>,
     search_rx: Option<Receiver<Result<Search, String>>>,
     search_cancel: Arc<AtomicBool>,
+    urls: Vec<String>,
+    selected_url: Option<String>,
+    address: String,
+    address_error: Option<String>,
+    web: super::webview::BrowserView,
+    web_preview: Option<WebPreview>,
 }
 
 impl Drop for Browser {
@@ -75,6 +95,7 @@ impl Browser {
 
     pub(super) fn close(&mut self) {
         self.open = false;
+        self.web.hide();
     }
 
     pub(super) fn toggle(&mut self, ctx: &egui::Context, root: &Path) {
@@ -92,6 +113,10 @@ impl Browser {
             self.expanded_dirs.clear();
             self.tabs.clear();
             self.selected = None;
+            self.urls.clear();
+            self.selected_url = None;
+            self.web.clear();
+            self.address.clear();
             self.query.clear();
             self.search = None;
             self.search_rx = None;
@@ -143,12 +168,18 @@ impl Browser {
     }
 
     fn select(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.select_file(ctx, path, false);
+    }
+
+    fn select_file(&mut self, ctx: &egui::Context, path: PathBuf, external: bool) {
+        self.selected_url = None;
         self.selected = Some(path.clone());
         if self.tabs.iter().any(|tab| tab.path == path) {
             return;
         }
         if self.tabs.len() == MAX_TABS {
-            self.tabs.remove(0);
+            let old = self.tabs.remove(0);
+            self.web.close(&old.path.display().to_string());
         }
         let root = self.root.clone();
         let ctx = ctx.clone();
@@ -157,24 +188,32 @@ impl Browser {
             path: path.clone(),
             content: None,
             rx: Some(rx),
+            texture: None,
+            source: false,
+            external,
         });
         std::thread::spawn(move || {
-            let _ = tx.send(read_preview(&root, &path));
+            let _ = tx.send(read_content(&root, &path, external));
             ctx.request_repaint();
         });
     }
 
     fn close_tab(&mut self, index: usize) {
         let tab = self.tabs.remove(index);
+        self.web.close(&tab.path.display().to_string());
         if self.selected.as_ref() == Some(&tab.path) {
             self.selected = self
                 .tabs
                 .get(index.min(self.tabs.len().saturating_sub(1)))
                 .map(|tab| tab.path.clone());
+            if self.selected.is_none() {
+                self.selected_url = self.urls.last().cloned();
+            }
         }
     }
 
     fn refresh(&mut self, ctx: &egui::Context) {
+        self.web.reload();
         let paths: Vec<_> = std::iter::once(self.root.clone())
             .chain(self.expanded_dirs.iter().cloned())
             .collect();
@@ -184,9 +223,9 @@ impl Browser {
         }
         if let Some(path) = self.selected.clone() {
             if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
-                self.tabs.remove(index);
+                let external = self.tabs.remove(index).external;
+                self.select_file(ctx, path, external);
             }
-            self.select(ctx, path);
         }
         self.search_files(ctx);
     }
@@ -214,7 +253,102 @@ impl Browser {
         });
     }
 
+    pub(super) fn open_target(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        target: &str,
+    ) -> Result<(), String> {
+        if target.is_empty() || target.len() > 8192 || target.chars().any(char::is_control) {
+            return Err("Invalid file path or URL.".into());
+        }
+        self.workspace(ctx, root);
+        if super::webview::web_url(target) {
+            if !cfg!(target_os = "macos") {
+                return Err("Bundled Chromium is currently packaged for macOS only.".into());
+            }
+            if !self.urls.iter().any(|url| url == target) {
+                if self.urls.len() >= MAX_TABS {
+                    let old = self.urls.remove(0);
+                    self.web.close(&old);
+                }
+                self.urls.push(target.into());
+            }
+            self.selected_url = Some(target.into());
+            self.selected = None;
+        } else {
+            if target.contains("://")
+                || target.starts_with("javascript:")
+                || target.starts_with("data:")
+                || target.starts_with("mailto:")
+            {
+                return Err("Only HTTP/HTTPS pages and local file paths are supported.".into());
+            }
+            let path = if let Some(relative) = target.strip_prefix("~/") {
+                dirs::home_dir()
+                    .ok_or("Cannot resolve home directory.")?
+                    .join(relative)
+            } else {
+                root.join(target.strip_prefix('@').unwrap_or(target))
+            };
+            if path.components().any(|part| {
+                matches!(part, Component::ParentDir)
+                    || matches!(part, Component::Normal(name) if sensitive(name))
+            }) {
+                return Err(
+                    "Sensitive files and parent-directory traversal cannot be previewed.".into(),
+                );
+            }
+            self.select_file(ctx, path, true);
+        }
+        self.open = true;
+        self.address = target.into();
+        self.address_error = None;
+        Ok(())
+    }
+
+    pub(super) fn configure_browser(&mut self, device: &str, console: bool) -> Result<(), String> {
+        let key = self
+            .selected_url
+            .as_deref()
+            .ok_or("Open a web page before selecting a device.")?;
+        self.web.configure(key, device, console)
+    }
+
+    pub(super) fn begin_frame(&mut self) {
+        self.web_preview = None;
+    }
+
+    pub(super) fn hide_web(&mut self) {
+        self.web.hide();
+    }
+
+    pub(super) fn show_web(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
+        if !self.open {
+            self.web.hide();
+            return;
+        }
+        if let Some(preview) = &self.web_preview {
+            let result = self.web.show(
+                frame,
+                preview.rect,
+                &preview.key,
+                preview.url.as_deref(),
+                preview.html.as_deref(),
+                ctx,
+            );
+            if let Err(error) = result {
+                self.address_error = Some(error);
+            }
+        } else {
+            self.web.hide();
+        }
+    }
+
     fn poll(&mut self) {
+        if let Some(location) = self.web.take_location() {
+            self.address = location;
+        }
         for directory in self.directories.values_mut() {
             if let Some(result) = directory.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 directory.listing = Some(result);
@@ -262,108 +396,73 @@ impl Browser {
     fn contents(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
         let ctx = ui.ctx().clone();
-        egui::TopBottomPanel::top("files-heading")
-            .exact_height(44.0)
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 0)))
-            .show_inside(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("Files").size(13.0).color(colors.muted));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(
-                            ui,
-                            if self.expanded {
-                                Icon::Collapse
-                            } else {
-                                Icon::Expand
-                            },
-                            if self.expanded {
-                                "Restore files panel"
-                            } else {
-                                "Expand files panel"
-                            },
-                        )
-                        .clicked()
-                        {
-                            self.expanded = !self.expanded;
-                        }
-                        if icons::button(ui, Icon::Refresh, "Refresh files and selected preview")
-                            .clicked()
-                        {
-                            self.refresh(&ctx);
-                        }
-                        if self.directories.values().any(|d| d.rx.is_some())
-                            || self.tabs.iter().any(|t| t.rx.is_some())
-                            || self.search_rx.is_some()
-                        {
-                            ui.label(theme::small(ui, "Loading…"));
-                        }
-                    });
-                });
-            });
+        self.chrome(ui);
         let tree_width = (ui.available_width() * 0.38).clamp(170.0, 300.0);
-        egui::SidePanel::right("files-tree")
-            .default_width(tree_width)
-            .width_range(150.0..=(ui.available_width() * 0.65).max(150.0))
-            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 16)))
-            .show_inside(ui, |ui| {
-                let search = egui::Frame::new()
-                    .fill(colors.surface)
-                    .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(7)
-                    .inner_margin(egui::Margin::symmetric(10, 7))
-                    .show(ui, |ui| {
-                        ui.add_sized(
-                            [ui.available_width(), 18.0],
-                            egui::TextEdit::singleline(&mut self.query)
-                                .frame(false)
-                                .hint_text("Search files…")
-                                .id_salt("workspace-file-search"),
-                        )
-                    })
-                    .inner;
-                if search.changed() {
-                    self.search_files(&ctx);
-                }
-                ui.add_space(18.0);
-                let mut actions = Vec::new();
-                egui::ScrollArea::both()
-                    .id_salt("workspace-file-tree")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if self.query.trim().is_empty() {
-                            self.tree(ui, &self.root, 0, &mut actions);
-                        } else {
-                            match &self.search {
-                                None => {
-                                    ui.label(theme::small(ui, "Searching file names…"));
-                                }
-                                Some(Err(error)) => {
-                                    ui.label(theme::small(ui, error));
-                                }
-                                Some(Ok(search)) => {
-                                    if search.entries.is_empty() {
-                                        ui.label(theme::small(ui, "No matching files."));
+        if self.selected_url.is_none() {
+            egui::SidePanel::right("files-tree")
+                .default_width(tree_width)
+                .width_range(150.0..=(ui.available_width() * 0.65).max(150.0))
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 16)))
+                .show_inside(ui, |ui| {
+                    let search = egui::Frame::new()
+                        .fill(colors.surface)
+                        .stroke(Stroke::new(1.0, colors.border))
+                        .corner_radius(7)
+                        .inner_margin(egui::Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.add_sized(
+                                [ui.available_width(), 18.0],
+                                egui::TextEdit::singleline(&mut self.query)
+                                    .frame(false)
+                                    .hint_text("Search files…")
+                                    .id_salt("workspace-file-search"),
+                            )
+                        })
+                        .inner;
+                    if search.changed() {
+                        self.search_files(&ctx);
+                    }
+                    ui.add_space(18.0);
+                    let mut actions = Vec::new();
+                    egui::ScrollArea::both()
+                        .id_salt("workspace-file-tree")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.query.trim().is_empty() {
+                                self.tree(ui, &self.root, 0, &mut actions);
+                            } else {
+                                match &self.search {
+                                    None => {
+                                        ui.label(theme::small(ui, "Searching file names…"));
                                     }
-                                    for entry in &search.entries {
-                                        self.row(ui, entry, 0, true, &mut actions);
+                                    Some(Err(error)) => {
+                                        ui.label(theme::small(ui, error));
                                     }
-                                    if search.limited {
-                                        ui.label(theme::small(
-                                            ui,
-                                            "Search limited. Browse folders for more files.",
-                                        ));
+                                    Some(Ok(search)) => {
+                                        if search.entries.is_empty() {
+                                            ui.label(theme::small(ui, "No matching files."));
+                                        }
+                                        for entry in &search.entries {
+                                            self.row(ui, entry, 0, true, &mut actions);
+                                        }
+                                        if search.limited {
+                                            ui.label(theme::small(
+                                                ui,
+                                                "Search limited. Browse folders for more files.",
+                                            ));
+                                        }
                                     }
                                 }
                             }
+                        });
+                    for action in actions {
+                        match action {
+                            Action::Expand(path) => self.expand(&ctx, path),
+                            Action::Select(path) => self.select(&ctx, path),
                         }
-                    });
-                for action in actions {
-                    match action {
-                        Action::Expand(path) => self.expand(&ctx, path),
-                        Action::Select(path) => self.select(&ctx, path),
                     }
-                }
-            });
+                });
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(0))
             .show_inside(ui, |ui| self.preview(ui));
@@ -492,51 +591,18 @@ impl Browser {
 
     fn preview(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        if !self.tabs.is_empty() {
-            let mut select = None;
-            let mut close = None;
-            egui::TopBottomPanel::top("open-file-tabs")
-                .exact_height(36.0)
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)))
-                .show_inside(ui, |ui| {
-                    egui::ScrollArea::horizontal()
-                        .id_salt("file-tabs-scroll")
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                for (index, tab) in self.tabs.iter().enumerate() {
-                                    ui.push_id(&tab.path, |ui| {
-                                        let active = self.selected.as_ref() == Some(&tab.path);
-                                        if ui
-                                            .selectable_label(
-                                                active,
-                                                tab.path
-                                                    .file_name()
-                                                    .unwrap_or_default()
-                                                    .to_string_lossy(),
-                                            )
-                                            .on_hover_text(tab.path.display().to_string())
-                                            .clicked()
-                                        {
-                                            select = Some(tab.path.clone());
-                                        }
-                                        if icons::button(ui, Icon::Close, "Close file").clicked() {
-                                            close = Some(index);
-                                        }
-                                    });
-                                }
-                            });
-                        });
-                });
-            if let Some(path) = select {
-                self.selected = Some(path);
-            }
-            if let Some(index) = close {
-                self.close_tab(index);
-            }
+        if let Some(url) = self.selected_url.clone() {
+            self.web_preview = Some(WebPreview {
+                rect: self.web.viewport(ui, &url),
+                key: url.clone(),
+                url: Some(url),
+                html: None,
+            });
+            return;
         }
         let Some(tab) = self
             .tabs
-            .iter()
+            .iter_mut()
             .find(|tab| Some(&tab.path) == self.selected.as_ref())
         else {
             ui.vertical_centered(|ui| {
@@ -554,7 +620,7 @@ impl Browser {
                 ui.label(RichText::new("Pick a file in the tree to read it.").size(12.0).color(colors.muted));
                 ui.add_space(8.0);
                 ui.add(egui::Label::new(theme::small(ui,
-                    "Explicit reads only. Sensitive, binary, oversized and symlinked files are blocked."))
+                    "Open a file or HTTP/HTTPS page above, or select a workspace file. Sensitive and oversized files are blocked."))
                     .wrap().halign(Align::Center));
             });
             return;
@@ -571,6 +637,26 @@ impl Browser {
                 ))
                 .selectable(true),
             );
+            let extension = tab
+                .path
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            let markdown = matches!(extension.as_str(), "md" | "markdown" | "mdown");
+            let html = matches!(extension.as_str(), "html" | "htm");
+            if markdown || html {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut tab.source, false, "Preview");
+                    ui.selectable_value(&mut tab.source, true, "Source");
+                    if html {
+                        ui.label(theme::small(
+                            ui,
+                            "Safe preview · scripts & network disabled",
+                        ));
+                    }
+                });
+            }
             ui.add_space(12.0);
             match &tab.content {
                 None => {
@@ -579,20 +665,148 @@ impl Browser {
                 Some(Err(error)) => {
                     ui.add(egui::Label::new(theme::small(ui, error)).wrap());
                 }
-                Some(Ok(content)) => {
+                Some(Ok(Content::Text(content))) if html && !tab.source => {
+                    self.web_preview = Some(WebPreview {
+                        rect: ui.available_rect_before_wrap(),
+                        key: tab.path.display().to_string(),
+                        url: None,
+                        html: Some(content.clone()),
+                    });
+                }
+                Some(Ok(Content::Text(content))) => {
                     egui::ScrollArea::both()
-                        .id_salt(("file-content", &tab.path))
+                        .id_salt(("file-content", &tab.path, tab.source))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            if markdown && !tab.source {
+                                ui.set_max_width(ui.available_width().min(840.0));
+                                markdown::show_file(ui, content, &tab.path);
+                            } else {
+                                ui.horizontal_top(|ui| {
+                                    let numbers = (1..=content.lines().count().max(1))
+                                        .map(|n| n.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(numbers)
+                                                .monospace()
+                                                .size(12.0)
+                                                .color(colors.dim),
+                                        )
+                                        .extend(),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(content).monospace().size(12.0),
+                                        )
+                                        .extend()
+                                        .selectable(true),
+                                    );
+                                });
+                            }
+                        });
+                }
+                Some(Ok(Content::Image(image))) => {
+                    let texture = tab.texture.get_or_insert_with(|| {
+                        ui.ctx().load_texture(
+                            tab.path.display().to_string(),
+                            image.clone(),
+                            egui::TextureOptions::LINEAR,
+                        )
+                    });
+                    egui::ScrollArea::both()
+                        .id_salt(("file-image", &tab.path))
+                        .show(ui, |ui| {
                             ui.add(
-                                egui::Label::new(RichText::new(content).monospace().size(12.0))
-                                    .wrap_mode(egui::TextWrapMode::Extend)
-                                    .selectable(true),
+                                egui::Image::new(&*texture)
+                                    .max_width(ui.available_width())
+                                    .shrink_to_fit(),
                             );
                         });
                 }
             }
         });
+    }
+}
+
+impl Pui {
+    pub(super) fn open_request(&mut self, record: &Value) -> bool {
+        if record["type"] != "extension_ui_request"
+            || record["method"] != "input"
+            || record["title"] != "Pui open"
+        {
+            return false;
+        }
+        let result = if self.agents.background {
+            Err("Cannot open a viewer from a background chat. Ask the parent to present the deliverable.".into())
+        } else {
+            serde_json::from_str::<Value>(protocol::string(record, "placeholder"))
+                .map_err(|_| "Invalid open request.".to_owned())
+                .and_then(|request| {
+                    if request["version"] != 1 {
+                        return Err("Unsupported open request version.".into());
+                    }
+                    let target = request["target"]
+                        .as_str()
+                        .ok_or("Missing file path or URL.")?;
+                    self.files.open_target(&self.ctx, &self.prefs.cwd, target)
+                })
+        };
+        let value = match result {
+            Ok(()) => {
+                self.settings_open = false;
+                self.inspector_panel = false;
+                self.terminals.close(&self.ctx);
+                json!({"opening":true})
+            }
+            Err(error) => json!({"error":error}),
+        };
+        self.send(
+            json!({"type":"extension_ui_response","id":record["id"],"value":value.to_string()}),
+        );
+        true
+    }
+
+    pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
+        // Keep egui's normal link hit-testing/selection behavior, but consume
+        // HTTP/file commands before eframe can launch an external browser.
+        let mut targets = Vec::new();
+        ctx.output_mut(|output| {
+            output.commands.retain(|command| {
+                if let egui::OutputCommand::OpenUrl(url) = command {
+                    if super::webview::web_url(&url.url) {
+                        targets.push(url.url.clone());
+                        return false;
+                    }
+                    if let Ok(url) = url::Url::parse(&url.url)
+                        && url.scheme() == "file"
+                        && let Ok(path) = url.to_file_path()
+                    {
+                        targets.push(path.display().to_string());
+                        return false;
+                    }
+                    if !url.url.contains(':')
+                        && !url.url.starts_with('#')
+                        && std::path::Path::new(&url.url).extension().is_some()
+                    {
+                        targets.push(url.url.clone());
+                        return false;
+                    }
+                }
+                true
+            })
+        });
+        for target in targets {
+            if let Err(error) = self.files.open_target(ctx, &self.prefs.cwd, &target) {
+                self.state.notice = Some(error);
+            } else {
+                self.inspector_panel = false;
+                self.terminals.close(ctx);
+                self.files.hide_web();
+            }
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -688,6 +902,70 @@ fn list(root: &Path, directory: &Path) -> Result<Listing, String> {
         )
     });
     Ok(Listing { entries, truncated })
+}
+
+fn read_content(root: &Path, path: &Path, external: bool) -> Result<Content, String> {
+    // Explicit opens may name reports outside the tree (e.g. /tmp). Resolve OS
+    // aliases such as macOS /tmp, then recheck the canonical sensitive path.
+    let path = if external {
+        if fs::symlink_metadata(path)
+            .map_err(|e| format!("Cannot open file: {e}"))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("Symlinked files cannot be previewed.".into());
+        }
+        let resolved = path
+            .canonicalize()
+            .map_err(|e| format!("Cannot open file: {e}"))?;
+        if path
+            .components()
+            .chain(resolved.components())
+            .any(|part| matches!(part, Component::Normal(name) if sensitive(name)))
+        {
+            return Err("Sensitive files and folders cannot be previewed.".into());
+        }
+        resolved
+    } else {
+        within_workspace(root, path)?
+    };
+    let parent = path.parent().ok_or("File has no parent folder.")?;
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        let file = fs::File::open(&path).map_err(|e| format!("Cannot open image: {e}"))?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+            return Err("Image must be a regular file under 16 MiB.".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err("Image exceeds 16 MiB.".into());
+        }
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(64 * 1024 * 1024);
+        reader.limits(limits);
+        let image = reader
+            .decode()
+            .map_err(|e| format!("Cannot decode image: {e}"))?
+            .into_rgba8();
+        return Ok(Content::Image(egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        )));
+    }
+    read_preview(parent, &path).map(Content::Text)
 }
 
 fn read_preview(root: &Path, path: &Path) -> Result<String, String> {

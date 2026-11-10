@@ -15,8 +15,29 @@ struct Link {
     range: std::ops::Range<usize>,
     url: String,
 }
+fn local_file(value: &str) -> bool {
+    !value.chars().any(char::is_whitespace)
+        && (value.starts_with('/') || value.starts_with("./") || value.starts_with("~/"))
+        && std::path::Path::new(value).extension().is_some()
+}
 fn safe_url(url: &str) -> bool {
-    url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:")
+    url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("mailto:")
+        || url.starts_with("file://")
+        || local_file(url)
+        || (!url.contains(':')
+            && !url.starts_with('#')
+            && std::path::Path::new(url).extension().is_some())
+}
+
+pub fn show_file(ui: &mut Ui, source: &str, path: &std::path::Path) {
+    let id = egui::Id::new("markdown-file-base");
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id, path.parent().unwrap_or(path).to_path_buf()));
+    show(ui, source);
+    ui.ctx()
+        .data_mut(|data| data.remove::<std::path::PathBuf>(id));
 }
 fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     if job.text.is_empty() {
@@ -47,7 +68,18 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
                     crate::pulls::inline(ui.ctx(), &link.url).unwrap_or_default()
                 ));
             if response.clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(&link.url));
+                let mut target = link.url.clone();
+                if !target.contains(':') {
+                    let base = ui.ctx().data(|data| {
+                        data.get_temp::<std::path::PathBuf>(egui::Id::new("markdown-file-base"))
+                    });
+                    if let Some(base) = base {
+                        target = url::Url::from_file_path(base.join(&target))
+                            .map(|url| url.to_string())
+                            .unwrap_or(target);
+                    }
+                }
+                ui.ctx().open_url(egui::OpenUrl::new_tab(target));
             }
         }
     }
@@ -204,11 +236,30 @@ pub fn show(ui: &mut Ui, source: &str) {
                 }
             }
             Event::Text(text) if code => code_text.push_str(&text),
-            Event::Code(text) => job.append(
-                &text,
-                0.0,
-                format(ui.ctx(), false, false, false, true, link.is_some()),
-            ),
+            Event::Code(text) => {
+                let start = job.text.len();
+                job.append(
+                    &text,
+                    0.0,
+                    format(
+                        ui.ctx(),
+                        false,
+                        false,
+                        false,
+                        true,
+                        link.is_some() || local_file(&text),
+                    ),
+                );
+                if let Some(url) = link
+                    .as_deref()
+                    .or_else(|| local_file(&text).then_some(text.as_ref()))
+                {
+                    links.push(Link {
+                        range: start..job.text.len(),
+                        url: url.into(),
+                    });
+                }
+            }
             Event::Text(mut text) => {
                 if let Some(url) = &link {
                     if let Some(symbol) = crate::pulls::symbol(ui.ctx(), url) {
@@ -236,7 +287,11 @@ pub fn show(ui: &mut Ui, source: &str) {
                             })
                     {
                         let url = word.trim().trim_end_matches(['.', ',', ')', ']', ';']);
-                        if safe_url(url) {
+                        if url.starts_with("https://")
+                            || url.starts_with("http://")
+                            || url.starts_with("mailto:")
+                            || local_file(url)
+                        {
                             links.push(Link {
                                 range: start + offset..start + offset + url.len(),
                                 url: url.into(),
@@ -366,6 +421,59 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn inline_report_paths_and_document_relative_links_are_openable() {
+        for (source, base, expected) in [
+            ("`/tmp/review.md`", None, "/tmp/review.md"),
+            (
+                "[Notes](notes.md)",
+                Some("/tmp/report.md"),
+                "file:///tmp/notes.md",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let pos = egui::pos2(35.0, 18.0);
+            let mut commands = Vec::new();
+            for pressed in [None, Some(true), Some(false)] {
+                let output = ctx.run(
+                    egui::RawInput {
+                        events: pressed
+                            .map(|pressed| {
+                                vec![
+                                    egui::Event::PointerMoved(pos),
+                                    egui::Event::PointerButton {
+                                        pos,
+                                        button: egui::PointerButton::Primary,
+                                        pressed,
+                                        modifiers: egui::Modifiers::NONE,
+                                    },
+                                ]
+                            })
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            if let Some(path) = base {
+                                show_file(ui, source, std::path::Path::new(path));
+                            } else {
+                                show(ui, source);
+                            }
+                        });
+                    },
+                );
+                commands.extend(output.platform_output.commands);
+            }
+            assert!(
+                commands
+                    .iter()
+                    .any(|c| matches!(c, egui::OutputCommand::OpenUrl(url) if url.url == expected)),
+                "{source}"
+            );
+        }
+    }
+
     #[test]
     fn links_open_browser_only_on_click_not_selection_drag() {
         let ctx = egui::Context::default();

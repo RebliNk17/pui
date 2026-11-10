@@ -32,6 +32,11 @@ impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
+    pub(super) fn close(&mut self, ctx: &egui::Context) {
+        self.open = false;
+        self.focus = false;
+        ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+    }
     pub(super) fn focused(&self, ctx: &egui::Context) -> bool {
         self.open && ctx.memory(|m| m.has_focus(terminal_id()))
     }

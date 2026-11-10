@@ -5,6 +5,7 @@ import { installPermissions, localPath } from "./permissions.ts";
 import { installCompaction } from "./compaction.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
+import { installOpen } from "./open.ts";
 
 export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan a compact workflow using your tools and codemode.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
@@ -22,6 +23,7 @@ export default function puiExtension(pi: any) {
   const compaction = installCompaction(pi, initial);
   installRewind(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only" });
   installQuestions(pi);
+  installOpen(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",
     handler: (args: string, ctx: any) => {

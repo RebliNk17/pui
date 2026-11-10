@@ -10,6 +10,13 @@ pub enum Icon {
     Folder,
     ArrowUp,
     ArrowLeft,
+    ArrowRight,
+    Globe,
+    Desktop,
+    Tablet,
+    Phone,
+    Rotate,
+    Inspect,
     Bell,
     Shield,
     Stop,
@@ -93,6 +100,46 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((6.0, 0.0), (-6.0, 0.0));
             line((-6.0, 0.0), (-2.0, -4.0));
             line((-6.0, 0.0), (-2.0, 4.0));
+        }
+        Icon::ArrowRight => {
+            line((-6.0, 0.0), (6.0, 0.0));
+            line((6.0, 0.0), (2.0, -4.0));
+            line((6.0, 0.0), (2.0, 4.0));
+        }
+        Icon::Globe => {
+            p.circle_stroke(c, 6.5 * scale, s);
+            outline(-3.0, -6.5, 6.0, 13.0, 4);
+            line((-6.0, 0.0), (6.0, 0.0));
+        }
+        Icon::Desktop => {
+            outline(-7.0, -6.0, 14.0, 10.0, 2);
+            line((0.0, 4.0), (0.0, 7.0));
+            line((-4.0, 7.0), (4.0, 7.0));
+        }
+        Icon::Tablet | Icon::Phone => {
+            let width = if matches!(icon, Icon::Phone) {
+                9.0
+            } else {
+                12.0
+            };
+            outline(-width / 2.0, -7.0, width, 14.0, 2);
+            line((-1.5, 4.5), (1.5, 4.5));
+        }
+        Icon::Rotate => {
+            outline(-4.0, -5.0, 8.0, 10.0, 2);
+            p.add(egui::Shape::line(
+                vec![pt(-7.0, 2.0), pt(-7.0, -7.0), pt(3.0, -7.0)],
+                s,
+            ));
+            line((3.0, -7.0), (0.0, -10.0));
+            line((3.0, -7.0), (0.0, -4.0));
+        }
+        Icon::Inspect => {
+            outline(-6.0, -6.0, 12.0, 12.0, 2);
+            p.add(egui::Shape::closed_line(
+                vec![pt(-2.0, -2.0), pt(6.0, 1.0), pt(2.0, 3.0), pt(0.0, 7.0)],
+                s,
+            ));
         }
         Icon::Bell => {
             p.add(egui::Shape::line(
