@@ -198,6 +198,15 @@ impl Pui {
         if !completed || self.demo || self.is_mirror() || self.client.is_none() {
             return;
         }
+        // Workers report to their parent; only root chats should alert the user.
+        if self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .is_some_and(|node| node.parent.is_some())
+        {
+            return;
+        }
         if self.state.session_file.as_ref().is_some_and(|p| {
             self.waiting
                 .get(&PathBuf::from(p))

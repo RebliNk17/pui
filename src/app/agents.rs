@@ -2020,6 +2020,70 @@ mod tests {
         assert!(!app.agents.nodes[&child].needs_report);
     }
     #[test]
+    fn subagent_completion_reports_to_parent_without_user_alerts() {
+        for background in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.prefs.notifications = notifications::NotificationSettings {
+                sound: true,
+                desktop: true,
+            };
+            let (client, _, commands) = rpc::Client::stub_with_commands();
+            app.client = Some(client);
+            let parent = app.agents.active.clone();
+            let child = spawn(&mut app, &parent);
+            app.start_waiting_agents();
+            app.view_agent(&child);
+            let (client, events) = rpc::Client::stub_with_events();
+            app.client = Some(client);
+            app.connected = true;
+            app.state.pending = false;
+            app.state.session_file = Some("/fixture/child.jsonl".into());
+            app.state.messages.push(Message {
+                role: "assistant".into(),
+                text: "Worker evidence for parent".into(),
+                ..Default::default()
+            });
+            if background {
+                app.view_agent(&parent);
+            }
+            for record in [
+                json!({"type":"agent_start"}),
+                json!({"type":"agent_settled","aborted":false}),
+            ] {
+                events.send(rpc::Event::Record(record)).unwrap();
+            }
+            if !background {
+                app.poll_rpc();
+            }
+            app.poll_other_agents();
+            assert!(app.notifications.sent.is_empty());
+            let report = commands
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("subagent completion must still report to its parent");
+            assert_eq!(report["type"], "prompt");
+            assert!(
+                report["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Worker evidence for parent")
+            );
+            assert_eq!(
+                &app.agents.active,
+                if background { &parent } else { &child }
+            );
+
+            // Root completions still alert, even when the root has children.
+            app.view_agent(&parent);
+            app.completion_event(&json!({"type":"agent_start"}));
+            app.completion_event(&json!({"type":"agent_settled","aborted":false}));
+            assert_eq!(app.notifications.sent.len(), 1);
+            assert!(app.notifications.sent[0].sound);
+            assert!(app.notifications.sent[0].desktop);
+            app.shutdown_agents();
+        }
+    }
+    #[test]
     fn background_poll_cannot_swap_visible_conversation_or_workspace() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);
