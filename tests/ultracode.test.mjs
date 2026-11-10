@@ -8,7 +8,7 @@ async function host(readonly = false, taskRole = '') {
   // Only type annotations/import resolution differ from the Pi extension host.
   const { stripTypeScriptTypes } = await import('node:module');
   let raw = await readFile(new URL('../scripts/ultracode.ts', import.meta.url), 'utf8');
-  for (const name of ['permissions', 'compaction', 'rewind', 'questions']) {
+  for (const name of ['permissions', 'compaction', 'rewind', 'questions', 'open']) {
     const dependency = stripTypeScriptTypes((await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8')).replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });'));
     raw = raw.replace(`"./${name}.ts"`, JSON.stringify(`data:text/javascript;base64,${Buffer.from(dependency).toString('base64')}`));
   }
@@ -69,6 +69,12 @@ test('task check runner still uses existing permission policy and has no model t
   h.ctx.ui.select=async()=> 'Deny';
   assert.equal((await h.events.get('user_bash')({command:'npm test'},h.ctx)).result.exitCode,1);
   assert.equal((await h.events.get('tool_call')({toolName:'write',input:{path:'file'}},h.ctx)).block,true);
+});
+test('dynamic model router cannot invoke tools or shell even with bypass enabled', async () => {
+  const h=await host(true,'router'); Object.assign(h.ctx,{cwd:tmpdir(),hasUI:true});
+  h.commands.get('pui-settings').handler(JSON.stringify({permission:'bypassPermissions',compactPercent:85,keepRecentTokens:20000}),h.ctx);
+  for(const toolName of ['read','bash','write','codemode','pui_ask_questions']) assert.equal((await h.events.get('tool_call')({toolName,input:{}},h.ctx)).block,true);
+  assert.equal((await h.events.get('user_bash')({command:'pwd'},h.ctx)).result.exitCode,1);
 });
 test('explicit mailbox delivery is compact, visible and non-interrupting', async () => {
   const h = await host(); h.commands.get('pui-agent-message').handler(JSON.stringify({text:'Clarify the file ownership'}), h.ctx);

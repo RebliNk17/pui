@@ -157,6 +157,9 @@ impl Pui {
         self.draft_images = images;
     }
     pub(super) fn start_chat_in(&mut self, folder: PathBuf) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.tasks.open = false;
         if !folder.is_dir() {
             self.state.error =

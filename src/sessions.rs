@@ -71,11 +71,16 @@ fn collect(root: &Path, files: &mut Vec<(PathBuf, SystemTime)>) {
 
 fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     let file = fs::File::open(path).ok()?;
-    // Read a bounded prefix for the first prompt, and a bounded suffix for a later name.
-    let reader = BufReader::new(file.take(96 * 1024));
+    // Finish JSONL records instead of cutting off (and discarding) a large first
+    // prompt. Stop after the usual prefix once a prompt is found; keep a hard
+    // bound for image-heavy/malformed sessions. Discovery runs on a worker.
+    let reader = BufReader::new(file.take(96 * 1024 * 1024));
+    let mut prefix_bytes = 0;
     let mut cwd = None;
-    let mut title = None;
+    let mut prompt = None;
+    let mut name = None;
     for line in reader.lines().map_while(Result::ok) {
+        prefix_bytes += line.len() + 1;
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -84,20 +89,28 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         }
         if string(&entry, "type") == "message"
             && string(&entry["message"], "role") == "user"
-            && title.is_none()
+            && prompt.is_none()
         {
-            title = Some(
-                content_text(&entry["message"]["content"])
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .take(100)
-                    .collect(),
-            );
+            let content = &entry["message"]["content"];
+            prompt = prompt_title(&content_text(content)).or_else(|| {
+                content.as_array().and_then(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|b| b["type"] == "image")
+                        .then(|| "Image attachment".into())
+                })
+            });
         }
         if string(&entry, "type") == "session_info" {
-            title = entry["name"].as_str().map(str::to_owned).or(title);
+            name = entry["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or(name);
+        }
+        if prefix_bytes >= 96 * 1024 && prompt.is_some() {
+            break;
         }
     }
     let mut tail = fs::File::open(path).ok()?;
@@ -109,7 +122,12 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     for line in bytes.split(|b| *b == b'\n') {
         if let Ok(entry) = serde_json::from_slice::<Value>(line) {
             if string(&entry, "type") == "session_info" {
-                title = entry["name"].as_str().map(str::to_owned).or(title);
+                name = entry["name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or(name);
             }
         }
     }
@@ -117,11 +135,53 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         path: path.to_path_buf(),
         cwd: cwd.clone()?,
         project: cwd?,
-        title: title
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "Untitled session".into()),
+        title: name.or(prompt).unwrap_or_else(|| "New conversation".into()),
         modified,
     })
+}
+
+pub fn prompt_title(text: &str) -> Option<String> {
+    // Bound the output without collecting every word of a potentially huge prompt.
+    let title: String = text
+        .split_whitespace()
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+        .take(100)
+        .collect();
+    let title = title.trim_end();
+    (!title.is_empty()).then(|| title.to_owned())
+}
+
+/// Deletion accepts only ordinary Pi JSONL session files, never directories or symlinks.
+pub fn validate_delete(path: &Path) -> Result<(), String> {
+    if path.extension().is_none_or(|e| e != "jsonl") {
+        return Err("Only Pi .jsonl session files can be deleted.".into());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            let file = fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut header = String::new();
+            BufReader::new(file.take(64 * 1024))
+                .read_line(&mut header)
+                .map_err(|e| e.to_string())?;
+            let header: Value =
+                serde_json::from_str(&header).map_err(|_| "Not a Pi session file")?;
+            if header["type"] != "session" {
+                return Err("Not a Pi session file".into());
+            }
+            Ok(())
+        }
+        Ok(_) => Err("Refusing to delete a symlink or non-file session path.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+pub fn delete(path: &Path) -> Result<(), String> {
+    validate_delete(path)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Cannot delete session: {error}")),
+    }
 }
 
 pub fn export_markdown(path: &Path, destination: &Path) -> Result<(), String> {
@@ -217,6 +277,75 @@ pub fn project_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture(entries: &[Value]) -> Session {
+        let path =
+            std::env::temp_dir().join(format!("pui-session-title-{}.jsonl", uuid::Uuid::new_v4()));
+        let text = std::iter::once(serde_json::json!({"type":"session", "cwd":"/fixture"}))
+            .chain(entries.iter().cloned())
+            .map(|entry| serde_json::to_string(&entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, text + "\n").unwrap();
+        let session = read_session(&path, SystemTime::now()).unwrap();
+        fs::remove_file(path).unwrap();
+        session
+    }
+    #[test]
+    fn title_survives_first_prompt_crossing_old_prefix_limit() {
+        let session = fixture(&[serde_json::json!({
+            "type":"message", "message":{"role":"user", "content":[
+                {"type":"text", "text":format!("Fix session titles\n{}", "context ".repeat(20000))},
+                {"type":"image", "data":"a".repeat(200000)}
+            ]}
+        })]);
+        assert!(session.title.starts_with("Fix session titles context"));
+        assert_eq!(session.title.chars().count(), 100);
+    }
+    #[test]
+    fn title_finds_prompt_after_large_metadata() {
+        let session = fixture(&[
+            serde_json::json!({"type":"custom", "data":"x".repeat(200000)}),
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":"  Actual\n prompt  "}}),
+        ]);
+        assert_eq!(session.title, "Actual prompt");
+    }
+    #[test]
+    fn blank_prompts_and_names_do_not_mask_useful_titles() {
+        let session = fixture(&[
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":"\n  "}}),
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":"Useful title"}}),
+            serde_json::json!({"type":"session_info", "name":"  "}),
+        ]);
+        assert_eq!(session.title, "Useful title");
+    }
+    #[test]
+    fn latest_explicit_name_wins_in_tail() {
+        let session = fixture(&[
+            serde_json::json!({"type":"session_info", "name":"Original name"}),
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":"Prompt title"}}),
+            serde_json::json!({"type":"message", "message":{"role":"assistant", "content":"x".repeat(200000)}}),
+            serde_json::json!({"type":"session_info", "name":" Renamed chat "}),
+            serde_json::json!({"type":"session_info", "name":""}),
+        ]);
+        assert_eq!(session.title, "Renamed chat");
+    }
+    #[test]
+    fn image_only_and_empty_sessions_have_honest_fallbacks() {
+        let image = fixture(&[
+            serde_json::json!({"type":"message", "message":{"role":"user", "content":[{"type":"image", "data":"a".repeat(200000)}]}}),
+        ]);
+        assert_eq!(image.title, "Image attachment");
+        assert_eq!(fixture(&[]).title, "New conversation");
+    }
+    #[test]
+    fn prompt_titles_are_normalized_bounded_and_unicode_safe() {
+        assert_eq!(prompt_title(" \n \t "), None);
+        assert_eq!(
+            prompt_title(" Hello\n  world \t"),
+            Some("Hello world".into())
+        );
+        assert_eq!(prompt_title(&"界".repeat(200)), Some("界".repeat(100)));
+    }
     #[test]
     fn project_subfolders_resolve_to_repository_folder() {
         let root = std::env::temp_dir().join(format!("pui-repository-test-{}", std::process::id()));

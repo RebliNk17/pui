@@ -73,7 +73,8 @@ impl Pui {
             let keyboard = !self.transcript.gallery.is_open()
                 && !self.draft_images.gallery.is_open()
                 && !self.settings_open
-                && !self.model_picker_open;
+                && !self.model_picker_open
+                && prompt_ui::keyboard_available(ui);
             if let Some(response) = self
                 .questions
                 .show(ui, &dialog, &request, waiting, keyboard)
@@ -83,12 +84,8 @@ impl Pui {
             return;
         }
         let mut response = None;
-        egui::Frame::new()
-            .fill(colors.sidebar)
-            .stroke(Stroke::new(1.0, colors.border))
-            .corner_radius(14)
-            .inner_margin(14)
-            .show(ui, |ui| {
+        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+                prompt_ui::style(ui);
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     icons::inline(
@@ -100,11 +97,7 @@ impl Pui {
                         },
                         colors.accent,
                     );
-                    ui.label(
-                        RichText::new(permission.as_ref().map(|p| p.title.as_str()).unwrap_or_else(|| protocol::string(&dialog, "title")))
-                            .size(14.0)
-                            .strong(),
-                    );
+                    ui.add(egui::Label::new(RichText::new(if permission.is_some() { "Pui needs your permission" } else { "Agent question" }).size(11.0).color(colors.muted)).wrap());
                     if self.state.dialogs.len() > 1 {
                         ui.label(theme::small(ui, format!(
                             "+{} waiting",
@@ -112,6 +105,8 @@ impl Pui {
                         )));
                     }
                 });
+                ui.add_space(8.0);
+                prompt_ui::heading(ui, permission.as_ref().map(|p| p.title.as_str()).unwrap_or_else(|| protocol::string(&dialog, "title")), "");
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .id_salt(("inline-question", id))
@@ -144,8 +139,8 @@ impl Pui {
                                     for option in options.iter().filter_map(Value::as_str) {
                                         if ui
                                             .add_sized(
-                                                [ui.available_width(), 28.0],
-                                                egui::Button::new(option).frame(false),
+                                                [ui.available_width(), 32.0],
+                                                egui::Button::new(option).fill(prompt_ui::background(ui.ctx())).stroke(Stroke::new(1.0, prompt_ui::border(ui.ctx()))).corner_radius(7),
                                             )
                                             .clicked()
                                         {
@@ -167,34 +162,27 @@ impl Pui {
                             self.focus_composer = false;
                         }
                     }
-                    ui.horizontal(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    prompt_ui::footer(ui, |ui| {
                             if let Some(permission) = &permission {
-                                if ui.button("Allow once").on_hover_text("⌘Enter / Ctrl+Enter").clicked() {
+                                if prompt_ui::button(ui, "Allow once", prompt_ui::Button::Primary, true).on_hover_text("⌘Enter / Ctrl+Enter").clicked() {
                                     response = Some(permission_response(permission, false));
                                 }
-                                if permission.always && ui.button("Always allow").on_hover_text("Remember this exact tool + arguments + workspace for this chat only. Clears when permission mode changes or the connection closes. Nested tool calls still need their own approval.").clicked() {
+                                if permission.always && prompt_ui::button(ui, "Always allow", prompt_ui::Button::Secondary, true).on_hover_text("Remember this exact tool + arguments + workspace for this chat only. Clears when permission mode changes or the connection closes. Nested tool calls still need their own approval.").clicked() {
                                     response = Some(permission_response(permission, true));
                                 }
-                            } else if method == "confirm" && ui.button("Confirm").clicked() {
+                            } else if method == "confirm" && prompt_ui::button(ui, "Confirm", prompt_ui::Button::Primary, true).clicked() {
                                 response = Some(json!({"confirmed":true}));
                             }
                             if matches!(method, "input" | "editor")
-                                && ui.button("Send answer").clicked()
+                                && prompt_ui::button(ui, "Send answer", prompt_ui::Button::Primary, true).clicked()
                             {
                                 response = Some(json!({"value":self.dialog_text}));
                             }
-                            if ui
-                                .button(if method == "confirm" || permission.is_some() {
-                                    "Deny"
-                                } else {
-                                    "Cancel"
-                                })
-                                .clicked()
+                            if prompt_ui::button(ui, if method == "confirm" || permission.is_some() { "Deny" } else { "Cancel" }, prompt_ui::Button::Secondary, true).clicked()
                             {
                                 response = Some(json!({"cancelled":true}));
                             }
-                        });
                     });
                 });
                 if permission.is_some() {
@@ -207,7 +195,7 @@ impl Pui {
                 if waiting {
                     ui.label(theme::small(ui, "Waiting for the owning window…"));
                 }
-                if !self.transcript.gallery.is_open() && !self.draft_images.gallery.is_open() {
+                if !self.transcript.gallery.is_open() && !self.draft_images.gallery.is_open() && prompt_ui::keyboard_available(ui) {
                     if let Some(permission) = &permission {
                         // Consume even during mirror acknowledgment so a repeated
                         // approval shortcut cannot unexpectedly send the draft.
@@ -220,6 +208,7 @@ impl Pui {
                     }
                 }
                 if !waiting
+                    && prompt_ui::keyboard_available(ui)
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
                 {
                     response = Some(json!({"cancelled":true}));

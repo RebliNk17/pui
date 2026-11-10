@@ -67,6 +67,21 @@ fn effort_slider(
     .inner
 }
 impl Pui {
+    fn model_change_blocked(&self) -> Option<&'static str> {
+        if self.demo {
+            Some("Design preview only. Start a real chat to change models.")
+        } else if !self.connected || (!self.is_mirror() && self.client.is_none()) {
+            Some("Connect to Pi before changing models.")
+        } else if self.loading_chat {
+            Some("Wait for this chat to finish loading.")
+        } else if self.state.compacting {
+            Some("Wait for context compaction to finish before changing models.")
+        } else if self.history_pending.is_some() || self.restoring_code() {
+            Some("Wait for history navigation to finish before changing models.")
+        } else {
+            None
+        }
+    }
     pub(super) fn model_button(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
         let label = format!(
@@ -127,6 +142,7 @@ impl Pui {
         let mut selection = None;
         let mut effort = None;
         let mut ultra = None;
+        let blocked = self.model_change_blocked();
         let width = 400.0_f32.min(ctx.screen_rect().width() - 24.0);
         egui::Popup::new(
             egui::Id::new("model-picker-dropdown"),
@@ -139,9 +155,13 @@ impl Pui {
         .align_alternatives(&[])
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(width)
+        .frame(prompt_ui::popup(ctx))
         .gap(12.0)
         .show(|ui| {
-            ui.set_width(width - 20.0);
+            theme::compact_controls(ui);
+            // Preserve the compact chat picker's original density, including popup options.
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.set_width(width - 32.0);
             ui.label(RichText::new("Model").size(12.0).color(colors.muted));
             let search=egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0,colors.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(9,7)).show(ui,|ui|{
                 ui.horizontal(|ui|{ui.spacing_mut().item_spacing.x=7.0;icons::inline(ui,Icon::Search,colors.dim);ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search").font(FontId::proportional(12.0)).frame(false).hint_text("Search models…").desired_width(ui.available_width()))}).inner
@@ -192,6 +212,12 @@ impl Pui {
                 })
                 .collect();
             let count = filtered.len();
+            if let Some(reason) = blocked {
+                ui.add(egui::Label::new(theme::small(ui, reason)).wrap());
+            } else if !self.state.ready() {
+                ui.add(egui::Label::new(theme::small(ui, "Changes apply to subsequent model requests. The response in progress is not restarted.")).wrap());
+            }
+            if let Some(error) = &self.state.error { ui.add(egui::Label::new(RichText::new(error).size(11.0).color(colors.red)).wrap()); }
             egui::ScrollArea::vertical()
                 .id_salt("model-results")
                 .max_height((anchor.top() - 210.0).clamp(90.0, 260.0))
@@ -201,11 +227,11 @@ impl Pui {
                         let model = filtered[index];
                         let selected =
                             self.state.model == model.id && self.state.provider == model.provider;
-                        let (rect, response) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 44.0),
-                            Sense::click(),
-                        );
-                        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let (rect, response) = ui.add_enabled_ui(blocked.is_none(), |ui| ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 44.0), Sense::click(),
+                        )).inner;
+                        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, blocked.is_none(), selected, &model.name));
+                        let response = response.on_hover_cursor(if blocked.is_none() { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed });
                         if selected || response.hovered() {
                             ui.painter().rect_filled(
                                 rect,
@@ -218,7 +244,7 @@ impl Pui {
                             egui::Align2::LEFT_CENTER,
                             &model.name,
                             FontId::proportional(13.0),
-                            colors.text,
+                            if blocked.is_none() { colors.text } else { colors.dim },
                         );
                         ui.painter().text(
                             rect.min + egui::vec2(12.0, 31.0),
@@ -233,7 +259,7 @@ impl Pui {
                             FontId::proportional(10.0),
                             colors.muted,
                         );
-                        if response.clicked() && self.state.ready() && !self.loading_chat {
+                        if response.clicked() && blocked.is_none() {
                             selection = Some((model.provider.clone(), model.id.clone()));
                         }
                     }
@@ -280,7 +306,6 @@ impl Pui {
         self.model_picker_open = open;
         if let Some((provider, id)) = selection {
             self.effort_draft = None;
-            self.state.levels.clear();
             self.send(json!({"type":"set_model","provider":provider,"modelId":id}));
             self.model_picker_open = false;
         }
@@ -296,6 +321,125 @@ impl Pui {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn busy_chat_can_select_gemini_and_only_pi_acknowledgment_changes_model() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.demo = false;
+        app.connected = true;
+        app.loading_chat = false;
+        let (client, events, requests) = rpc::Client::stub_with_records();
+        app.client = Some(client);
+        app.state.busy = true;
+        app.state.model = "old".into();
+        app.state.provider = "litellm".into();
+        app.state.model_name = "Old model".into();
+        app.state.models = vec![protocol::Model {
+            id: "gemini-4-argon".into(),
+            name: "Gemini 4 Argon".into(),
+            provider: "litellm".into(),
+            context_window: 600000,
+            input_cost: 2.0,
+            output_cost: 10.0,
+        }];
+        app.state.levels = vec!["low".into(), "high".into()];
+        app.draft = "keep draft".into();
+        app.model_picker_open = true;
+        app.model_query = "arg".into();
+        app.model_anchor = Some((
+            egui::Rect::from_min_size(egui::pos2(220.0, 800.0), egui::vec2(150.0, 28.0)),
+            egui::LayerId::background(),
+        ));
+        fn locate(shape: &egui::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == "Gemini 4 Argon" => {
+                    Some(t.pos + t.galley.size() / 2.0)
+                }
+                egui::Shape::Vec(v) => v.iter().find_map(locate),
+                _ => None,
+            }
+        }
+        let render = |app: &mut Pui, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.model_picker(ctx),
+            )
+        };
+        for _ in 0..3 {
+            render(&mut app, vec![]);
+        }
+        let output = render(&mut app, vec![]);
+        let point = output.shapes.iter().find_map(|s| locate(&s.shape)).unwrap();
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(!app.model_picker_open, "Busy chat must accept the click");
+        assert_eq!(app.state.model, "old");
+        assert_eq!(app.state.levels.len(), 2);
+        let sent = requests.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(sent["type"], "set_model");
+        assert_eq!(sent["provider"], "litellm");
+        assert_eq!(sent["modelId"], "gemini-4-argon");
+        assert!(
+            requests.try_recv().is_err(),
+            "Exactly one model change, no abort or prompt"
+        );
+        events.send(rpc::Event::Record(json!({"type":"response","command":"set_model","success":true,"data":{"id":"gemini-4-argon","name":"Gemini 4 Argon","provider":"litellm"}}))).unwrap();
+        app.poll_rpc();
+        assert_eq!(app.state.model, "gemini-4-argon");
+        assert_eq!(app.state.model_name, "Gemini 4 Argon");
+        assert!(app.state.levels.is_empty());
+        assert!(app.state.busy);
+        assert_eq!(app.draft, "keep draft");
+    }
+    #[test]
+    fn rejected_or_unavailable_model_changes_preserve_current_model_and_levels() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.demo = false;
+        app.state.model = "old".into();
+        app.state.levels = vec!["high".into()];
+        assert!(app.model_change_blocked().unwrap().contains("Connect"));
+        app.connected = true;
+        app.client = Some(rpc::Client::stub());
+        app.loading_chat = false;
+        app.state.compacting = true;
+        assert!(app.model_change_blocked().unwrap().contains("compaction"));
+        app.state.apply(json!({"type":"response","command":"set_model","success":false,"error":"No API key for litellm/gemini-4-argon"}));
+        assert_eq!(app.state.model, "old");
+        assert_eq!(app.state.levels, vec!["high"]);
+        assert!(app.state.error.as_ref().unwrap().contains("No API key"));
+    }
     #[test]
     fn effort_slider_uses_the_full_column_without_an_inline_value() {
         for width in [260.0, 400.0] {

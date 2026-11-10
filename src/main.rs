@@ -2,6 +2,7 @@
 
 mod activity;
 mod app;
+mod chromium;
 mod context;
 mod history;
 mod icons;
@@ -12,6 +13,7 @@ mod protocol;
 mod pulls;
 mod rpc;
 mod sessions;
+mod task_output;
 mod tasks;
 mod terminal;
 mod theme;
@@ -34,17 +36,26 @@ pub struct Options {
     pub demo_settings: bool,
     pub settings: bool,
     pub settings_page: Option<String>,
+    pub demo_about: bool,
+    pub demo_updates: bool,
     pub demo_approval: bool,
     pub demo_questions: bool,
     pub demo_question_designs: bool,
     pub demo_agents: bool,
     pub demo_task: bool,
+    pub demo_task_proposal: bool,
     pub demo_files: bool,
     pub demo_changes: bool,
     pub demo_terminal: bool,
     pub demo_notifications: bool,
+    pub open: Option<String>,
+    pub browser_device: Option<String>,
+    pub browser_console: bool,
+    pub demo_confirmation: bool,
+    pub demo_send_now: bool,
     pub cwd: Option<PathBuf>,
     pub session: Option<PathBuf>,
+    pub task_proposal: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub theme: Option<theme::Theme>,
 }
@@ -78,9 +89,17 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_files = true;
             }
+            "--demo-confirmation" => {
+                options.demo = true;
+                options.demo_confirmation = true;
+            }
             "--demo-notifications" => {
                 options.demo = true;
                 options.demo_notifications = true;
+            }
+            "--demo-send-now" => {
+                options.demo = true;
+                options.demo_send_now = true;
             }
             "--demo-terminal" => {
                 options.demo = true;
@@ -97,6 +116,11 @@ fn main() -> eframe::Result {
             "--demo-task" => {
                 options.demo = true;
                 options.demo_task = true;
+            }
+            "--demo-task-proposal" => {
+                options.demo = true;
+                options.demo_task = true;
+                options.demo_task_proposal = true;
             }
             "--demo-agents" => {
                 options.demo = true;
@@ -125,6 +149,14 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_questions = true;
             }
+            "--demo-about" => {
+                options.demo = true;
+                options.demo_about = true;
+            }
+            "--demo-updates" => {
+                options.demo = true;
+                options.demo_updates = true;
+            }
             "--demo-approval" => {
                 options.demo = true;
                 options.demo_approval = true;
@@ -139,12 +171,22 @@ fn main() -> eframe::Result {
             }
             "--light" => options.theme = Some(theme::Theme::Light),
             "--dark" => options.theme = Some(theme::Theme::Dark),
+            "--open" => options.open = args.next(),
+            "--browser-device" => options.browser_device = args.next(),
+            "--browser-console" => options.browser_console = true,
             "--cwd" => options.cwd = args.next().map(PathBuf::from),
             "--session" => options.session = args.next().map(PathBuf::from),
+            "--task-proposal" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--task-proposal requires a request JSON path");
+                    return Ok(());
+                };
+                options.task_proposal = Some(path.into());
+            }
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
-                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--screenshot PATH]\n\nPi must be installed and authenticated separately. Set PUI_PI_BIN to override its executable."
+                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n\nPi must be installed and authenticated separately. Set PUI_PI_BIN to override its executable."
                 );
                 return Ok(());
             }
@@ -154,6 +196,19 @@ fn main() -> eframe::Result {
             }
         }
     }
+    #[cfg(not(test))]
+    if let Some(path) = options.task_proposal.take() {
+        if options.demo || options.screenshot.is_some() {
+            eprintln!("Proposal execution cannot be combined with demo/screenshot flags.");
+            return Ok(());
+        }
+        if let Err(e) = app::Pui::run_task_proposal(&path) {
+            eprintln!("Proposal stopped: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    chromium::prepare_application();
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(if options.demo_question_designs {
