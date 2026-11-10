@@ -409,9 +409,15 @@ impl Pui {
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
         }
-        let old = self.ensure_agent();
-        let current = self.take_chat();
-        self.agents.parked.insert(old, current);
+        // An empty workspace (for example after deletion) is not a chat.
+        if !self.agents.active.is_empty()
+            || self.client.is_some()
+            || self.state.session_file.is_some()
+        {
+            let old = self.ensure_agent();
+            let current = self.take_chat();
+            self.agents.parked.insert(old, current);
+        }
         let next = self.agents.parked.remove(id).unwrap();
         self.agents.active = id.into();
         self.put_chat(next);
@@ -544,6 +550,12 @@ impl Pui {
         }
     }
     fn agent_status(&mut self) {
+        if self.agents.active.is_empty()
+            && self.client.is_none()
+            && self.state.session_file.is_none()
+        {
+            return;
+        }
         let id = self.ensure_agent();
         let label = self.run_label().0;
         if let Some(node) = self.agents.nodes.get_mut(&id) {
@@ -939,7 +951,12 @@ impl Pui {
         let original = self.agents.active.clone();
         let cwd = self.prefs.cwd.clone();
         let current = self.take_chat();
-        self.agents.parked.insert(original.clone(), current);
+        let placeholder = if original.is_empty() {
+            Some(current)
+        } else {
+            self.agents.parked.insert(original.clone(), current);
+            None
+        };
         self.agents.background = true;
         let ids: Vec<_> = self
             .agents
@@ -967,7 +984,7 @@ impl Pui {
         self.agents.background = false;
         self.agents.active = original.clone();
         self.prefs.cwd = cwd;
-        let current = self.agents.parked.remove(&original).unwrap();
+        let current = placeholder.unwrap_or_else(|| self.agents.parked.remove(&original).unwrap());
         self.put_chat(current);
         self.report_agent_result();
         self.start_waiting_agents();
