@@ -255,6 +255,7 @@ impl BrowserView {
             let dimensions = options.dimensions().map(|(w, h)| format!("{w} × {h}")).unwrap_or_else(|| "Auto".into());
             let size = chrome::label_button(ui, &dimensions, false).on_hover_text("Viewport size and device settings");
             egui::Popup::menu(&size).show(|ui| {
+                theme::menu_controls(ui);
                 ui.set_min_width(210.0);
                 ui.label(RichText::new("Viewport").size(12.0).strong());
                 ui.add_space(6.0);
@@ -283,6 +284,7 @@ impl BrowserView {
                 if response.clicked() { options.console = !console; }
                 let zoom = chrome::label_button(ui, &format!("{}%", (options.zoom * 100.0) as u32), false).on_hover_text("Page zoom");
                 egui::Popup::menu(&zoom).show(|ui| {
+                    theme::menu_controls(ui);
                     for value in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
                         if ui.selectable_value(&mut options.zoom, value, format!("{}%", (value * 100.0) as u32)).clicked() { ui.close(); }
                     }

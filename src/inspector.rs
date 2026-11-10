@@ -70,6 +70,7 @@ impl CardLayout {
         self.order.insert(index.min(self.order.len()), source);
     }
     pub fn menu(&mut self, ui: &mut egui::Ui) {
+        crate::theme::menu_controls(ui);
         ui.set_min_width(200.0);
         ui.label(crate::theme::caption(ui, "SHOW"));
         ui.add_space(5.0);
@@ -132,11 +133,13 @@ pub fn stack(
                 .fill(if dragging { colors.surface } else { colors.bg })
                 .stroke(Stroke::new(1.0, colors.border))
                 .corner_radius(15)
-                .inner_margin(12);
+                .inner_margin(10);
             frame.show(ui, |ui| {
-                ui.set_width((width - 26.0).max(40.0));
-                ui.set_max_width((width - 26.0).max(40.0));
-                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.set_width((width - 22.0).max(40.0));
+                ui.set_max_width((width - 22.0).max(40.0));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
                 ui.horizontal(|ui| {
                     let button = header_action.filter(|(target, _)| *target == card);
                     let button_width = 46.0;
@@ -149,7 +152,7 @@ pub fn stack(
                         })
                     .max(30.0);
                     let (rect, response) = ui.allocate_exact_size(
-                        Vec2::new(label_width, crate::theme::CONTROL_HEIGHT),
+                        Vec2::new(label_width, crate::theme::COMPACT_HEIGHT),
                         Sense::click(),
                     );
                     let response = response
@@ -212,7 +215,7 @@ pub fn stack(
                     if let Some((_, label)) = button {
                         let response = ui
                             .add_sized(
-                                [button_width, crate::theme::CONTROL_HEIGHT],
+                                [button_width, crate::theme::COMPACT_HEIGHT],
                                 egui::Button::new(egui::RichText::new(label).size(11.0)),
                             )
                             .on_hover_text(label);
@@ -228,7 +231,7 @@ pub fn stack(
                         }
                     }
                     let (grip_rect, _) = ui.allocate_exact_size(
-                        Vec2::new(20.0, crate::theme::CONTROL_HEIGHT),
+                        Vec2::new(20.0, crate::theme::COMPACT_HEIGHT),
                         Sense::hover(),
                     );
                     let grip = ui.interact(grip_rect, id.with("grip"), Sense::click_and_drag());
@@ -248,6 +251,7 @@ pub fn stack(
                         }
                     }
                     grip.context_menu(|ui| {
+                        crate::theme::menu_controls(ui);
                         if ui
                             .add_enabled(index > 0, egui::Button::new("Move up"))
                             .clicked()
@@ -274,15 +278,17 @@ pub fn stack(
                     ui.add(egui::Label::new(crate::theme::small(ui, summary(card))).truncate());
                 }
                 if !collapsed {
-                    ui.add_space(7.0);
+                    ui.add_space(4.0);
                     let max_height = (ui.ctx().screen_rect().height() * 0.55).clamp(160.0, 420.0);
                     egui::ScrollArea::vertical()
                         .id_salt(("card-body", card))
                         .max_height(max_height)
-                        .min_scrolled_height(0.0)
+                        // Reserve the body budget even below the outer viewport, then
+                        // shrink to content. A zero minimum squeezes later cards shut.
+                        .min_scrolled_height(max_height)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            ui.set_width((width - 32.0).max(40.0));
+                            ui.set_width((width - 28.0).max(40.0));
                             contents(ui, card);
                         });
                 }
@@ -326,7 +332,7 @@ pub fn stack(
         if let Some(payload) = source.response.dnd_release_payload::<Card>() {
             dropped = Some((*payload, card));
         }
-        ui.add_space(10.0);
+        ui.add_space(6.0);
     }
     if let Some((source, target)) = dropped.or(move_by) {
         layout.move_to(source, target);
@@ -464,12 +470,78 @@ mod tests {
             layout.collapsed.insert(Card::Environment);
             let collapsed = render(&mut layout, true);
             assert!(
-                (collapsed - (crate::theme::CONTROL_HEIGHT + 44.0)).abs() < 1.0,
+                (collapsed - (crate::theme::COMPACT_HEIGHT + 36.0)).abs() < 1.0,
                 "Collapsed card must contain only the shared-height header, frame margins and stack spacing: {collapsed}"
             );
             assert_eq!(renders, 2, "Collapsed content must not be rendered");
         }
     }
+    #[test]
+    fn nested_card_bodies_keep_their_height_below_the_sidebar_viewport() {
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            for viewport_height in [360.0, 600.0] {
+                let ctx = egui::Context::default();
+                crate::theme::install(&ctx);
+                theme.apply(&ctx);
+                let mut layout = CardLayout::default();
+                for _ in 0..3 {
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(350.0, viewport_height),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    let mut last_body_bottom = 0.0_f32;
+                                    stack(ui, &mut layout, |_| String::new(), None, |ui, card| {
+                                        for _ in 0..if card == Card::Environment { 8 } else { 2 } {
+                                            ui.label("Card content must fit, even below the viewport.");
+                                        }
+                                        last_body_bottom = ui.min_rect().bottom();
+                                    });
+                                    assert!(
+                                        ui.min_rect().bottom() >= last_body_bottom,
+                                        "The outer sidebar must include the last card's entire body"
+                                    );
+                                });
+                            });
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn environment_detail_rows_are_compact() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut layout = CardLayout::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                stack(
+                    ui,
+                    &mut layout,
+                    |_| String::new(),
+                    None,
+                    |ui, card| {
+                        if card == Card::Environment {
+                            let top = ui.cursor().top();
+                            for label in ["Status", "Repository", "Branch", "Started", "Cost"] {
+                                detail(ui, label, "value");
+                            }
+                            assert!(ui.cursor().top() - top <= 120.0);
+                        }
+                    },
+                );
+            });
+        });
+    }
+
     #[test]
     fn right_click_header_opens_visibility_menu() {
         let ctx = egui::Context::default();

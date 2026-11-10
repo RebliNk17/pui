@@ -266,6 +266,10 @@ impl Transcript {
                 .max_rect(content)
                 .layout(Layout::top_down(Align::LEFT)),
         );
+        // Transcript labels and footers are not 32pt form controls.
+        child.spacing_mut().item_spacing.y = 4.0;
+        child.spacing_mut().interact_size.y = 22.0;
+        child.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
         let column = (content.width() - 64.0).clamp(180.0, 736.0);
         let padding = ((content.width() - column) / 2.0).max(12.0);
         let mut area = egui::ScrollArea::vertical()
@@ -290,7 +294,7 @@ impl Transcript {
         let actions_enabled = self.message_actions_enabled;
         let output = area.show_viewport(&mut child, |ui, viewport| {
             let top = ui.cursor().top();
-            ui.add_space(25.0);
+            ui.add_space(16.0);
             let mut index = 0;
             while index < messages.len() {
                 let start = index;
@@ -405,7 +409,7 @@ impl Transcript {
                             });
                         },
                     );
-                    ui.add_space(if group[0].role == "user" { 27.0 } else { 30.0 });
+                    ui.add_space(if group[0].role == "user" { 16.0 } else { 20.0 });
                     self.heights
                         .insert(start, (signature, column, ui.cursor().top() - before));
                 }
@@ -455,7 +459,7 @@ impl Transcript {
                         });
                     },
                 );
-                ui.add_space(24.0);
+                ui.add_space(16.0);
             }
             if let Some(progress) = progress {
                 let before = ui.cursor().top();
@@ -796,7 +800,7 @@ fn user_bubble(
                         sw: 18,
                         se: 4,
                     })
-                    .inner_margin(egui::Margin::symmetric(17, 13))
+                    .inner_margin(egui::Margin::symmetric(17, 10))
                     .show(ui, |ui| {
                         ui.set_min_width((width - 34.0).max(0.0));
                         gallery.user_thumbnails(ui, &message.images);
@@ -894,7 +898,7 @@ fn assistant(
             .color(colors.muted),
         );
     });
-    ui.add_space(10.0);
+    ui.add_space(6.0);
     let mut changed = false;
     let mut pending: Vec<ActivityItem<'_>> = Vec::new();
     let mut group_index = 0;
@@ -970,7 +974,7 @@ fn assistant(
         .collect();
     gallery.thumbnails(ui, &images);
     if !running {
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         let last = messages.last().unwrap();
         let cost: f64 = messages.iter().map(|m| m.cost).sum();
         ui.horizontal(|ui| {
@@ -1066,7 +1070,7 @@ fn activity(
     expand: bool,
 ) -> bool {
     let colors = crate::theme::palette(ui.ctx());
-    ui.add_space(10.0);
+    ui.add_space(4.0);
     let id = ui.make_persistent_id(("activity", index));
     let mut open = ui
         .ctx()
@@ -1216,7 +1220,7 @@ fn activity(
                 }
             }
         });
-    ui.add_space(12.0);
+    ui.add_space(6.0);
     before != open || earlier_changed
 }
 
@@ -1356,6 +1360,75 @@ mod tests {
                 );
                 assert!(isolated.markers.is_empty());
                 assert!(isolated.message_action.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn chat_prose_lists_and_turns_use_compact_spacing_without_changing_form_defaults() {
+        fn collect(shape: &egui::Shape, labels: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    labels.push((text.galley.job.text.clone(), text.pos.y));
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            theme.apply(&ctx);
+            let mut transcript = Transcript::default();
+            let messages = vec![
+                Message {
+                    role: "user".into(),
+                    text: "A short prompt".into(),
+                    ..Default::default()
+                },
+                Message {
+                    role: "assistant".into(),
+                    text: "First paragraph.\n\nSecond paragraph.\n\n- First item\n- Second item"
+                        .into(),
+                    ..Default::default()
+                },
+            ];
+            for _ in 0..3 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            transcript.show(ui, &messages, "model", "", false, "compact");
+                            assert_eq!(ui.spacing().interact_size.y, crate::theme::CONTROL_HEIGHT);
+                            assert_eq!(ui.spacing().item_spacing.y, 8.0);
+                        });
+                    },
+                );
+                let mut labels = Vec::new();
+                for shape in output.shapes {
+                    collect(&shape.shape, &mut labels);
+                }
+                let y = |needle: &str| {
+                    labels
+                        .iter()
+                        .find(|(label, _)| label.contains(needle))
+                        .unwrap()
+                        .1
+                };
+                assert!(y("model") - y("A short prompt") < 100.0);
+                assert!(y("First paragraph") - y("model") < 48.0);
+                assert!(y("Second paragraph") - y("First paragraph") <= 32.0);
+                assert!(y("Second item") - y("First item") <= 27.0);
             }
         }
     }

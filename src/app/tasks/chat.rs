@@ -123,6 +123,7 @@ impl Pui {
                 self.new_task();
             }
             ui.menu_button("More", |ui| {
+                theme::menu_controls(ui);
                 if let Some(id) = self.tasks.selected.clone() {
                     if ui
                         .button(RichText::new("Delete task…").color(colors.red))
