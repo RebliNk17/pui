@@ -41,6 +41,10 @@ fn save_and_reopen_restore_the_visible_chat_and_both_sidebar_views() {
         app.demo = false;
         app.new_chat = false;
         app.projects = projects;
+        app.prefs.session_order = sidebar_order::Options {
+            sort: sidebar_order::Sort::Name,
+            reverse: true,
+        };
         app.prefs.cwd = cwd.clone();
         app.state = State {
             session_file: Some(path.display().to_string()),
@@ -52,6 +56,8 @@ fn save_and_reopen_restore_the_visible_chat_and_both_sidebar_views() {
 
         let restored = reopen(&storage, Options::default());
         assert_eq!(restored.projects, projects);
+        assert!(restored.prefs.session_order.sort == sidebar_order::Sort::Name);
+        assert!(restored.prefs.session_order.reverse);
         assert_eq!(restored.prefs.cwd, cwd);
         assert_eq!(restored.pending_session.as_ref(), Some(&path));
         assert_eq!(restored.state.session_file.as_deref(), path.to_str());

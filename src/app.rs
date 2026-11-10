@@ -26,6 +26,7 @@ mod rewind;
 mod run_status;
 mod settings;
 mod sidebar;
+mod sidebar_order;
 mod sidebar_tree;
 mod sync;
 mod tasks;
@@ -72,6 +73,7 @@ struct Preferences {
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,
     projects_view: bool,
+    session_order: sidebar_order::Options,
     closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
 }
@@ -144,6 +146,7 @@ pub struct Pui {
     model_query: String,
     model_provider: String,
     show_archived: bool,
+    show_hidden: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
     rename_chat: Option<PathBuf>,
@@ -257,6 +260,7 @@ impl Pui {
             model_query: String::new(),
             model_provider: String::new(),
             show_archived: false,
+            show_hidden: false,
             closed_projects: Default::default(),
             expanded_projects: Default::default(),
             rename_chat: None,
@@ -423,8 +427,15 @@ impl Pui {
         let (tx, rx) = mpsc::channel();
         self.session_rx = Some(rx);
         let ctx = self.ctx.clone();
+        let retained = self
+            .prefs
+            .chats
+            .iter()
+            .filter(|(_, prefs)| prefs.pinned || prefs.hidden)
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         std::thread::spawn(move || {
-            let _ = tx.send(sessions::discover());
+            let _ = tx.send(sessions::discover(&retained));
             ctx.request_repaint();
         });
     }
@@ -444,6 +455,12 @@ impl Pui {
     }
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
+        if session
+            .as_deref()
+            .is_some_and(|p| self.deletion.deleting_chat(p))
+        {
+            return;
+        }
         #[cfg(not(test))]
         if session.as_ref().is_some_and(|p| !p.is_file()) {
             self.loading_chat = false;
@@ -554,7 +571,7 @@ impl Pui {
     }
 
     fn open_chat(&mut self, session: Session) {
-        if self.deletion.in_progress() {
+        if self.deletion.in_progress() || self.deletion.deleting_chat(&session.path) {
             return;
         }
         self.kanban.open = false;
@@ -660,6 +677,7 @@ impl Pui {
     }
 
     fn poll(&mut self) {
+        self.poll_deletions();
         self.usage.poll();
         self.notifications.poll();
         self.updates.poll();
@@ -1492,6 +1510,7 @@ impl Pui {
                 _ => "/demo/AlteryraMVP",
             }),
             title: (*title).into(),
+            created: Some(now - Duration::from_secs((i as u64 + 1) * 86400)),
             modified: now - Duration::from_secs(i as u64 * 3900),
         })
         .collect();
