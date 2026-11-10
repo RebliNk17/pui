@@ -401,21 +401,7 @@ impl Pui {
                 Action::Open(index) if !self.demo => {
                     self.open_chat(self.sessions[index].clone());
                 }
-                Action::Rename(path) => {
-                    self.rename_text = self
-                        .prefs
-                        .chats
-                        .get(&path)
-                        .and_then(|m| m.title.clone())
-                        .or_else(|| {
-                            self.sessions
-                                .iter()
-                                .find(|s| s.path == path)
-                                .map(|s| s.title.clone())
-                        })
-                        .unwrap_or_default();
-                    self.rename_chat = Some(path);
-                }
+                Action::Rename(path) => self.begin_rename(path),
                 Action::Move(path) => {
                     if let Some(folder) = rfd::FileDialog::new()
                         .set_title("Organize under project (does not change working directory)")
@@ -443,27 +429,33 @@ impl Pui {
                 _ => {}
             }
         }
-        if let Some(path) = self.rename_chat.clone() {
-            egui::Modal::new(egui::Id::new("rename-chat")).show(ctx, |ui| {
-                ui.set_width(340.0);
-                ui.heading("Rename chat");
-                ui.label(theme::small(
-                    ui,
-                    "Display name in Pui; the Pi session file is unchanged.",
-                ));
-                ui.text_edit_singleline(&mut self.rename_text);
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.rename_chat = None;
-                    }
-                    if ui.button("Save").clicked() && !self.rename_text.trim().is_empty() {
-                        self.prefs.chats.entry(path.clone()).or_default().title =
-                            Some(self.rename_text.trim().into());
-                        self.rename_chat = None;
-                    }
-                });
-            });
-        }
+    }
+    fn begin_rename(&mut self, path: PathBuf) {
+        self.rename_text = self
+            .prefs
+            .chats
+            .get(&path)
+            .and_then(|m| m.title.clone())
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .find(|s| s.path == path)
+                    .map(|s| s.title.clone())
+            })
+            .unwrap_or_default();
+        let id = egui::Id::new(("chat-rename", &path));
+        let mut state = egui::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(self.rename_text.chars().count()),
+            )));
+        state.store(&self.ctx, id);
+        self.ctx.memory_mut(|m| m.request_focus(id));
+        self.focus_composer = false;
+        self.rename_chat = Some(path);
+        self.ctx.request_repaint();
     }
     fn chat_row(&mut self, ui: &mut egui::Ui, index: usize) -> Option<Action> {
         let colors = crate::theme::palette(ui.ctx());
@@ -499,13 +491,18 @@ impl Pui {
         };
         let meta = self.prefs.chats.entry(path.clone()).or_default();
         let title = meta.title.as_deref().unwrap_or(&s.title);
+        let editing = self.rename_chat.as_ref() == Some(&path);
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 48.0));
         // Session identity, not layout position: filtering, pinning, regrouping or
         // asynchronous refresh must not move a pointer press to another chat.
         let response = ui.interact(
             rect,
             ui.make_persistent_id(("chat-row", &path)),
-            Sense::click(),
+            if editing {
+                Sense::hover()
+            } else {
+                Sense::click()
+            },
         );
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let response = if self.loading_chat && !selected {
@@ -526,14 +523,49 @@ impl Pui {
         }
         ui.painter()
             .circle_filled(rect.min + egui::vec2(10.0, 16.0), 3.0, status_color);
-        paint_text(
-            ui,
-            &format!("{}{}", if meta.pinned { "• " } else { "" }, title),
-            rect.min + egui::vec2(24.0, 15.0),
-            rect.width() - 54.0,
-            FontId::proportional(12.0),
-            colors.text,
-        );
+        if editing {
+            let id = egui::Id::new(("chat-rename", &path));
+            let focused = ui.memory(|m| m.has_focus(id));
+            // Consume before TextEdit handles Enter/Escape, and before the composer renders.
+            let cancel = focused
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            let save =
+                focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let edit = ui.put(
+                egui::Rect::from_min_size(
+                    rect.min + egui::vec2(22.0, 3.0),
+                    egui::vec2((rect.width() - 52.0).max(20.0), 24.0),
+                ),
+                egui::TextEdit::singleline(&mut self.rename_text)
+                    .id(id)
+                    .font(FontId::proportional(12.0))
+                    .margin(egui::vec2(2.0, 3.0)),
+            );
+            if cancel {
+                edit.surrender_focus();
+                self.rename_chat = None;
+            } else if save {
+                if self.rename_text.trim().is_empty() {
+                    edit.request_focus();
+                } else {
+                    meta.title = Some(self.rename_text.trim().into());
+                    edit.surrender_focus();
+                    self.rename_chat = None;
+                }
+            } else if edit.lost_focus() {
+                // Only Enter saves; clicking elsewhere leaves the original title intact.
+                self.rename_chat = None;
+            }
+        } else {
+            paint_text(
+                ui,
+                &format!("{}{}", if meta.pinned { "• " } else { "" }, title),
+                rect.min + egui::vec2(24.0, 15.0),
+                rect.width() - 54.0,
+                FontId::proportional(12.0),
+                colors.text,
+            );
+        }
         paint_text(
             ui,
             &format!(
@@ -671,6 +703,267 @@ mod tests {
             },
             |ctx| app.sidebar(ctx),
         )
+    }
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    #[test]
+    fn inline_rename_selects_title_and_enter_saves_trimmed_text_in_both_views() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            app.sessions.truncate(1);
+            let path = app.sessions[0].path.clone();
+            app.prefs.chats.entry(path.clone()).or_default().title = Some("Custom title".into());
+            for _ in 0..2 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            app.begin_rename(path.clone());
+            frame(&ctx, &mut app, vec![]);
+            let id = egui::Id::new(("chat-rename", &path));
+            assert!(ctx.memory(|m| m.has_focus(id)));
+            let state = egui::text_edit::TextEditState::load(&ctx, id).unwrap();
+            assert_eq!(
+                state.cursor.char_range().unwrap().sorted_cursors()[1].index,
+                "Custom title".len()
+            );
+            frame(
+                &ctx,
+                &mut app,
+                vec![egui::Event::Text("  New title  ".into())],
+            );
+            assert_eq!(app.rename_text, "  New title  ");
+            assert_eq!(
+                app.prefs.chats[&path].title.as_deref(),
+                Some("Custom title")
+            );
+            frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+            assert!(app.rename_chat.is_none());
+            assert_eq!(app.prefs.chats[&path].title.as_deref(), Some("New title"));
+            assert!(!ctx.memory(|m| m.has_focus(id)));
+        }
+    }
+    #[test]
+    fn rename_menu_opens_focused_inline_editor_without_modal() {
+        fn label(shape: &egui::Shape, text: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == text => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()))
+                }
+                egui::Shape::Vec(v) => v.iter().find_map(|s| label(s, text)),
+                _ => None,
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.sessions.truncate(1);
+        let path = app.sessions[0].path.clone();
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        let output = frame(&ctx, &mut app, vec![]);
+        let title = output
+            .shapes
+            .iter()
+            .find_map(|s| label(&s.shape, &app.sessions[0].title))
+            .unwrap();
+        let pos = egui::pos2(230.0, title.center().y + 3.0);
+        for pressed in [true, false] {
+            frame(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let output = frame(&ctx, &mut app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| label(&s.shape, "Rename"))
+            .expect("Rename menu item")
+            .center();
+        for pressed in [true, false] {
+            frame(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let output = frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.rename_chat.as_ref(), Some(&path));
+        assert!(ctx.memory(|m| m.has_focus(egui::Id::new(("chat-rename", &path)))));
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|s| label(&s.shape, "Rename chat").is_some())
+        );
+        frame(&ctx, &mut app, vec![egui::Event::Text("From menu".into())]);
+        frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert_eq!(app.prefs.chats[&path].title.as_deref(), Some("From menu"));
+    }
+    #[test]
+    fn inline_rename_escape_and_focus_loss_discard_changes() {
+        for escape in [true, false] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.sessions.truncate(1);
+            let path = app.sessions[0].path.clone();
+            let title = app.sessions[0].title.clone();
+            for _ in 0..2 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            app.begin_rename(path.clone());
+            frame(&ctx, &mut app, vec![]);
+            frame(&ctx, &mut app, vec![egui::Event::Text("Discard me".into())]);
+            if escape {
+                frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+            } else {
+                let pos = egui::pos2(100.0, 115.0);
+                frame(
+                    &ctx,
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                frame(&ctx, &mut app, vec![]);
+            }
+            assert!(app.rename_chat.is_none());
+            assert!(app.prefs.chats[&path].title.is_none());
+            assert_eq!(app.sessions[0].title, title);
+        }
+    }
+    #[test]
+    fn inline_rename_rejects_blank_title_and_follows_path_after_reorder() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.sessions.truncate(2);
+        let path = app.sessions[0].path.clone();
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        app.begin_rename(path.clone());
+        frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![egui::Event::Text("   ".into())]);
+        frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert_eq!(app.rename_chat.as_ref(), Some(&path));
+        assert!(app.prefs.chats[&path].title.is_none());
+        app.sessions.swap(0, 1);
+        app.rename_text = "Still the same chat".into();
+        frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert_eq!(
+            app.prefs.chats[&path].title.as_deref(),
+            Some("Still the same chat")
+        );
+        assert!(app.prefs.chats[&app.sessions[0].path].title.is_none());
+    }
+    #[test]
+    fn inline_rename_escape_does_not_stop_run_and_enter_does_not_send_draft() {
+        for key_code in [egui::Key::Escape, egui::Key::Enter] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.sessions.truncate(1);
+            app.state.busy = true;
+            app.draft = "Do not send this".into();
+            app.client = Some(rpc::Client::stub());
+            let mut window = eframe::Frame::_new_kittest();
+            let mut full_frame = |app: &mut Pui, events| {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1500.0, 950.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(app, ctx, &mut window),
+                )
+            };
+            full_frame(&mut app, vec![]);
+            full_frame(&mut app, vec![]);
+            app.begin_rename(app.sessions[0].path.clone());
+            full_frame(&mut app, vec![]);
+            app.rename_text = "Updated title".into();
+            let before = app
+                .client
+                .as_mut()
+                .unwrap()
+                .enqueue(protocol::command("get_state"))
+                .unwrap();
+            full_frame(&mut app, vec![key(key_code)]);
+            assert!(app.rename_chat.is_none());
+            assert_eq!(app.draft, "Do not send this");
+            assert!(app.state.busy);
+            let after = app
+                .client
+                .as_mut()
+                .unwrap()
+                .enqueue(protocol::command("get_state"))
+                .unwrap();
+            let sequence = |id: &str| id.strip_prefix("pui-").unwrap().parse::<u64>().unwrap();
+            assert_eq!(
+                sequence(&after),
+                sequence(&before) + 1,
+                "Rename keys must not send any RPC commands"
+            );
+        }
+    }
+    #[test]
+    fn live_prompt_and_pi_names_replace_stale_discovery_titles_without_changing_local_rename() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.sessions.truncate(1);
+        let path = app.sessions[0].path.clone();
+        app.sessions[0].title = "Untitled session".into();
+        app.state.session_file = Some(path.display().to_string());
+        app.state.session_name = "Untitled session".into();
+        app.state.messages = vec![Message {
+            role: "user".into(),
+            text: "Fix\n the sidebar".into(),
+            ..Default::default()
+        }];
+        app.prefs.chats.entry(path.clone()).or_default().title = Some("My local name".into());
+        app.update_session_title();
+        assert_eq!(app.state.session_name, "Fix the sidebar");
+        assert_eq!(app.sessions[0].title, "Fix the sidebar");
+        app.state.session_name = "Pi named this chat".into();
+        app.update_session_title();
+        assert_eq!(app.sessions[0].title, "Pi named this chat");
+        assert_eq!(
+            app.prefs.chats[&path].title.as_deref(),
+            Some("My local name")
+        );
     }
     #[test]
     fn header_has_aligned_controls_below_native_traffic_light_clearance() {

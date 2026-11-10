@@ -699,20 +699,8 @@ impl Pui {
                     }
                     let cancelled = record["data"]["cancelled"] == true;
                     self.state.apply(record);
-                    if self.state.session_name.is_empty() {
-                        if let Some(title) = self
-                            .sessions
-                            .iter()
-                            .find(|s| {
-                                self.state
-                                    .session_file
-                                    .as_deref()
-                                    .is_some_and(|p| std::path::Path::new(p) == s.path)
-                            })
-                            .map(|s| s.title.clone())
-                        {
-                            self.state.session_name = title;
-                        }
+                    if kind == "session_info_changed" {
+                        self.refresh_sessions();
                     }
                     if kind == "response" && command == "switch_session" {
                         if success && !cancelled {
@@ -783,11 +771,56 @@ impl Pui {
                 }
             }
         }
+        self.update_session_title();
+    }
+    fn update_session_title(&mut self) {
+        let Some(path) = self.state.session_file.as_deref() else {
+            return;
+        };
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.path == std::path::Path::new(path));
+        if self.state.session_name.trim().is_empty()
+            || matches!(
+                self.state.session_name.as_str(),
+                "Untitled session" | "New conversation" | "Opening chat…"
+            )
+        {
+            self.state.session_name = session
+                .as_ref()
+                .filter(|s| {
+                    !s.title.trim().is_empty()
+                        && !matches!(
+                            s.title.as_str(),
+                            "Untitled session" | "New conversation" | "Opening chat…"
+                        )
+                })
+                .map(|s| s.title.clone())
+                .or_else(|| {
+                    self.state
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == "user")
+                        .find_map(|m| {
+                            sessions::prompt_title(&m.text).or_else(|| {
+                                (!m.images.is_empty()).then(|| "Image attachment".into())
+                            })
+                        })
+                })
+                .unwrap_or_default();
+        }
+        if let Some(session) = session {
+            if !self.state.session_name.is_empty() {
+                session.title = self.state.session_name.clone();
+            }
+        }
     }
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.sessions = result;
             self.session_rx = None;
+            self.update_session_title();
         }
         if let Some(result) = self.workspace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.workspace = result;
@@ -1413,6 +1446,7 @@ impl eframe::App for Pui {
         if !self.settings_open
             && !terminal_input
             && !self.diagnostics_open
+            && self.rename_chat.is_none()
             && self.state.dialogs.is_empty()
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && !self.transcript.gallery.is_open()
