@@ -70,7 +70,7 @@ impl Pui {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .small_button("Tasks")
+                            .button("Tasks")
                             .on_hover_text("Verified tasks and workflow evidence")
                             .clicked()
                         {
@@ -340,7 +340,7 @@ impl Pui {
                                     );
                                     if !self.demo
                                         && self.client.is_none()
-                                        && ui.small_button("Connect to Pi").clicked()
+                                        && ui.button("Connect to Pi").clicked()
                                         && !self.resume_agent()
                                     {
                                         self.connect(

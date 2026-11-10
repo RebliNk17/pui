@@ -138,7 +138,7 @@ pub fn stack(
                 ui.horizontal(|ui| {
                     let label_width = (ui.available_width() - 36.0).max(30.0);
                     let (rect, response) =
-                        ui.allocate_exact_size(Vec2::new(label_width, 25.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::new(label_width, crate::theme::CONTROL_HEIGHT), Sense::click());
                     let response = response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text(if collapsed {
@@ -196,8 +196,10 @@ pub fn stack(
                         }
                     }
                     response.context_menu(|ui| layout.menu(ui));
-                    let (grip_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(20.0, 25.0), Sense::hover());
+                    let (grip_rect, _) = ui.allocate_exact_size(
+                        Vec2::new(20.0, crate::theme::CONTROL_HEIGHT),
+                        Sense::hover(),
+                    );
                     let grip = ui.interact(grip_rect, id.with("grip"), Sense::click_and_drag());
                     icons::draw(ui, grip_rect, Icon::Grip, colors.dim);
                     grip.dnd_set_drag_payload(card);

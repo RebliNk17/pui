@@ -97,7 +97,7 @@ impl Pui {
                 ui.horizontal_wrapped(|ui|{
                     ui.label(theme::small(ui,if task.isolated{"Isolated worktree"}else{"Working in place · non-Git"}));
                     ui.add(egui::Label::new(theme::small(ui,path.display().to_string())).selectable(true).wrap());
-                    if ui.small_button("Copy path").clicked(){ui.ctx().copy_text(path.display().to_string());}
+                    if ui.button("Copy path").clicked(){ui.ctx().copy_text(path.display().to_string());}
                 });
             }
             ui.horizontal_wrapped(|ui|{

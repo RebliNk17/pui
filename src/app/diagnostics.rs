@@ -9,7 +9,8 @@ impl Pui {
     pub(super) fn notifications_button(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let colors = theme::palette(ui.ctx());
         let count = self.state.diagnostics.len() + usize::from(self.state.notice.is_some());
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(52.0, 28.0), Sense::click());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(52.0, theme::CONTROL_HEIGHT), Sense::click());
         if response.hovered() || self.diagnostics_open {
             ui.painter().rect_filled(rect, 7, colors.hover);
         }

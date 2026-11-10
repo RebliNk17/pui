@@ -157,6 +157,9 @@ impl Pui {
         .width(width)
         .gap(12.0)
         .show(|ui| {
+            theme::compact_controls(ui);
+            // Preserve the compact chat picker's original density, including popup options.
+            ui.spacing_mut().interact_size.y = 18.0;
             ui.set_width(width - 20.0);
             ui.label(RichText::new("Model").size(12.0).color(colors.muted));
             let search=egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0,colors.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(9,7)).show(ui,|ui|{

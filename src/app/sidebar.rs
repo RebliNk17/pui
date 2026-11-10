@@ -40,7 +40,7 @@ impl Pui {
                 #[cfg(target_os = "macos")]
                 ui.add_space((32.0 / ctx.zoom_factor() - 12.0).max(12.0));
                 ui.horizontal(|ui| {
-                    ui.set_height(28.0);
+                    ui.set_height(theme::CONTROL_HEIGHT);
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if icons::button(ui, Icon::Sidebar, "Hide sessions · ⌘B").clicked() {
                         self.prefs.hide_sidebar = true;
@@ -50,7 +50,7 @@ impl Pui {
                         if icons::button(ui, Icon::Plus, "New chat · ⌘N").clicked() {
                             action = Some(Action::NewChat(self.prefs.cwd.clone()));
                         }
-                        if ui.small_button("New task").clicked() {
+                        if ui.button("New task").clicked() {
                             action = Some(Action::NewTask);
                         }
                     });
@@ -100,7 +100,7 @@ impl Pui {
                                 let selected = self.projects == (index == 1);
                                 if ui
                                     .add_sized(
-                                        [width, 27.0],
+                                        [width, theme::CONTROL_HEIGHT],
                                         egui::Button::new(RichText::new(*label).size(11.5).color(
                                             if selected { colors.text } else { colors.muted },
                                         ))
@@ -176,7 +176,7 @@ impl Pui {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         if self.prefs.chats.values().any(|m| m.hidden)
-                            && ui.small_button("Restore hidden chats").clicked()
+                            && ui.button("Restore hidden chats").clicked()
                         {
                             for meta in self.prefs.chats.values_mut() {
                                 meta.hidden = false;
@@ -200,11 +200,13 @@ impl Pui {
                             for (project, mut indices) in groups {
                                 indices.sort_by_key(|i| std::cmp::Reverse(branches[*i].modified));
                                 let open = !self.closed_projects.contains(&project);
-                                let (_, rect) =
-                                    ui.allocate_space(Vec2::new(ui.available_width(), 30.0));
+                                let (_, rect) = ui.allocate_space(Vec2::new(
+                                    ui.available_width(),
+                                    theme::CONTROL_HEIGHT,
+                                ));
                                 let plus_rect = egui::Rect::from_center_size(
-                                    rect.right_center() - egui::vec2(12.0, 0.0),
-                                    Vec2::splat(24.0),
+                                    rect.right_center() - egui::vec2(16.0, 0.0),
+                                    Vec2::splat(theme::CONTROL_HEIGHT),
                                 );
                                 let header_rect = egui::Rect::from_min_max(
                                     rect.min,
@@ -312,6 +314,7 @@ impl Pui {
                                                         format!("Show {} more", count - 5)
                                                     },
                                                 ))
+                                                .small()
                                                 .frame(false),
                                             )
                                             .clicked()

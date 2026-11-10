@@ -1061,8 +1061,8 @@ impl Pui {
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.set_height(28.0);
-                    ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
+                    ui.set_height(theme::COMPACT_HEIGHT);
+                    theme::compact_controls(ui);
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let attach = icons::button(
                         ui,
