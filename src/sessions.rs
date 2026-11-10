@@ -151,6 +151,39 @@ pub fn prompt_title(text: &str) -> Option<String> {
     (!title.is_empty()).then(|| title.to_owned())
 }
 
+/// Deletion accepts only ordinary Pi JSONL session files, never directories or symlinks.
+pub fn validate_delete(path: &Path) -> Result<(), String> {
+    if path.extension().is_none_or(|e| e != "jsonl") {
+        return Err("Only Pi .jsonl session files can be deleted.".into());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            let file = fs::File::open(path).map_err(|e| e.to_string())?;
+            let mut header = String::new();
+            BufReader::new(file.take(64 * 1024))
+                .read_line(&mut header)
+                .map_err(|e| e.to_string())?;
+            let header: Value =
+                serde_json::from_str(&header).map_err(|_| "Not a Pi session file")?;
+            if header["type"] != "session" {
+                return Err("Not a Pi session file".into());
+            }
+            Ok(())
+        }
+        Ok(_) => Err("Refusing to delete a symlink or non-file session path.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+pub fn delete(path: &Path) -> Result<(), String> {
+    validate_delete(path)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Cannot delete session: {error}")),
+    }
+}
+
 pub fn export_markdown(path: &Path, destination: &Path) -> Result<(), String> {
     let file = fs::File::open(path).map_err(|e| format!("Cannot open session: {e}"))?;
     // Follow the active leaf rather than exporting abandoned branches as conversation.

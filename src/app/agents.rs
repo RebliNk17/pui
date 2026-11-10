@@ -77,6 +77,15 @@ pub(super) struct Chat {
     current_dialog: String,
     pending_dialog: Option<String>,
 }
+impl Chat {
+    pub(super) fn deletion_busy(&self) -> bool {
+        self.loading
+            || self.history_pending.is_some()
+            || self.interrupt.is_some()
+            || !self.deliveries.is_empty()
+            || !self.state.dialogs.is_empty()
+    }
+}
 struct AgentWait {
     source: String,
     rpc_id: String,
@@ -94,6 +103,7 @@ pub(super) struct Agents {
     pub background: bool,
     mail: BTreeMap<String, (String, Option<String>)>,
     waits: Vec<AgentWait>,
+    retiring: Vec<Receiver<()>>,
 }
 impl Pui {
     pub(super) fn with_live_chat<R>(
@@ -239,6 +249,41 @@ impl Pui {
             }
         }
     }
+    pub(super) fn agents_still_retiring(&self) -> bool {
+        self.agents
+            .retiring
+            .iter()
+            .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
+    }
+    pub(super) fn forget_deleted_agents(&mut self, path: &std::path::Path) {
+        let ids: std::collections::BTreeSet<_> = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| {
+                n.path
+                    .as_ref()
+                    .is_some_and(|p| sync::identity(p) == sync::identity(path))
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        for id in &ids {
+            self.agents.nodes.remove(id);
+            self.agents.parked.remove(id);
+        }
+        for node in self.agents.nodes.values_mut() {
+            node.children.retain(|id| !ids.contains(id));
+            if node.parent.as_ref().is_some_and(|id| ids.contains(id)) {
+                node.parent = None;
+            }
+        }
+        if ids.contains(&self.agents.active) {
+            self.agents.active.clear();
+        }
+        self.agents.waits.retain(|w| !ids.contains(&w.source));
+        self.agents.mail.retain(|_, (id, _)| !ids.contains(id));
+        self.prefs.agent_tree = self.agent_records();
+    }
     pub(super) fn agent_records(&self) -> Vec<AgentRecord> {
         self.agents
             .nodes
@@ -350,6 +395,9 @@ impl Pui {
         id
     }
     pub(super) fn view_agent(&mut self, id: &str) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.tasks.open = false;
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
@@ -785,7 +833,12 @@ impl Pui {
                 if let Some(mut client) = self.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
-                    client.retire();
+                    let (tx, rx) = mpsc::channel();
+                    self.agents.retiring.push(rx);
+                    std::thread::spawn(move || {
+                        drop(client);
+                        let _ = tx.send(());
+                    });
                 }
                 self.connected = false;
                 self.state.busy = false;
@@ -798,7 +851,12 @@ impl Pui {
                 if let Some(mut client) = chat.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
-                    client.retire();
+                    let (tx, rx) = mpsc::channel();
+                    self.agents.retiring.push(rx);
+                    std::thread::spawn(move || {
+                        drop(client);
+                        let _ = tx.send(());
+                    });
                 }
                 chat.connected = false;
                 chat.state.busy = false;
@@ -856,6 +914,9 @@ impl Pui {
         self.agents.waits = pending;
     }
     pub(super) fn poll_other_agents(&mut self) {
+        self.agents
+            .retiring
+            .retain(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         if self.demo {
             return;
         }

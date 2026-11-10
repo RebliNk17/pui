@@ -16,6 +16,7 @@ enum Action {
     Move(PathBuf),
     Export(PathBuf),
     Hide(PathBuf),
+    Delete(deletion::Target),
     Open(usize),
     Agent(String),
     NewChat(PathBuf),
@@ -362,6 +363,7 @@ impl Pui {
                 Action::Agent(id) => self.view_agent(&id),
                 Action::NewChat(folder) => self.start_chat_in(folder),
                 Action::NewTask => self.new_task(),
+                Action::Delete(target) => self.request_delete(target),
                 Action::Task(task, run) => {
                     self.tasks.open = true;
                     self.tasks.selected = Some(task);
@@ -527,7 +529,7 @@ impl Pui {
                             ui,
                             &branch.title,
                             row.min + egui::vec2(19.0, title_y),
-                            row.width() - 24.0,
+                            row.width() - 48.0,
                             FontId::proportional(if compact { 11.0 } else { 11.5 }),
                             if compact && !selected && !response.hovered() {
                                 colors.muted
@@ -553,14 +555,56 @@ impl Pui {
                                 format!("{} · {}", branch.title, branch.status),
                             )
                         });
+                        let delete_target = match target {
+                            sidebar_tree::Target::Task(id, None) => {
+                                Some(deletion::Target::Task(id.clone()))
+                            }
+                            sidebar_tree::Target::Task(_, Some(_)) => None,
+                            _ => branch.path.clone().map(deletion::Target::Chat),
+                        };
+                        let menu_rect = egui::Rect::from_center_size(
+                            row.right_center() - egui::vec2(12.0, 0.0),
+                            Vec2::splat(24.0),
+                        );
+                        let menu =
+                            ui.interact(menu_rect, ui.id().with("delete-menu"), Sense::click());
+                        if delete_target.is_some()
+                            && (selected || response.hovered() || menu.hovered())
+                        {
+                            for dx in [-4.0, 0.0, 4.0] {
+                                ui.painter().circle_filled(
+                                    menu_rect.center() + egui::vec2(dx, 0.0),
+                                    1.0,
+                                    colors.muted,
+                                );
+                            }
+                        }
+                        if let Some(target) = delete_target {
+                            let mut contents = |ui: &mut egui::Ui| {
+                                let label = if matches!(target, deletion::Target::Task(_)) {
+                                    "Delete task…"
+                                } else {
+                                    "Delete chat…"
+                                };
+                                if ui.button(RichText::new(label).color(colors.red)).clicked() {
+                                    action = Some(Action::Delete(target.clone()));
+                                    ui.close();
+                                }
+                            };
+                            egui::Popup::menu(&menu).show(&mut contents);
+                            response.context_menu(&mut contents);
+                        }
                         let keyboard = response.has_focus()
                             && ui.input_mut(|i| {
                                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             });
-                        if response
+                        if (response
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text(format!("{}\n{}", branch.title, branch.status))
                             .clicked()
+                            && !menu_rect.contains(
+                                ui.input(|i| i.pointer.interact_pos()).unwrap_or_default(),
+                            ))
                             || keyboard
                         {
                             action = Some(match target {
@@ -857,6 +901,14 @@ impl Pui {
                 .clicked()
             {
                 action = Some(Action::Hide(path.clone()));
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(RichText::new("Delete chat…").color(colors.red))
+                .clicked()
+            {
+                action = Some(Action::Delete(deletion::Target::Chat(path.clone())));
                 ui.close();
             }
         };

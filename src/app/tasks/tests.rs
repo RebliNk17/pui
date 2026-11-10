@@ -399,6 +399,42 @@ fn blocked_review_does_not_spend_on_repairs() {
     assert_eq!(app.tasks.current().unwrap().attempts.len(), 1);
 }
 #[test]
+fn task_deletion_is_ordered_after_saves_and_cannot_resurrect_from_stale_saves() {
+    let mut app = app();
+    let home = std::env::temp_dir().join(format!("pui-task-delete-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let transcript = home.join("run.jsonl");
+    std::fs::write(&transcript, "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n").unwrap();
+    live(&mut app, Phase::Cancelled);
+    process(&mut app, Role::Builder);
+    app.tasks.processes.clear();
+    app.tasks.live = None;
+    let task = app.tasks.current_mut().unwrap();
+    task.runs[0].session = Some(transcript.clone());
+    let stale = task.clone();
+    let id = task.id.clone();
+    let (store, rx) = mpsc::channel();
+    let (errors, _) = mpsc::channel();
+    app.tasks.store = Some(store.clone());
+    app.tasks.save();
+    let result = app
+        .tasks
+        .delete_saved(&id, vec![transcript.clone()], vec![])
+        .unwrap();
+    store.send(StoreCommand::Save(Box::new(stale))).unwrap();
+    app.tasks.store.take();
+    drop(store);
+    run_store(&home, rx, errors, &app.ctx);
+    result.recv().unwrap().unwrap();
+    app.tasks.forget_deleted(&id);
+    assert!(!transcript.exists());
+    assert!(!home.join(format!("{id}.json")).exists());
+    assert!(domain::store::load(&home).unwrap().is_empty());
+    assert!(app.tasks.records.is_empty());
+    assert!(!app.tasks.open);
+    assert!(app.tasks.selected.is_none());
+}
+#[test]
 fn task_run_session_is_persisted_as_soon_as_pi_reports_it() {
     let mut app = app();
     live(&mut app, Phase::Building);
@@ -406,7 +442,9 @@ fn task_run_session_is_persisted_as_soon_as_pi_reports_it() {
     let (store, stored) = mpsc::channel();
     app.tasks.store = Some(store);
     app.task_event(0,rpc::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":{"sessionFile":"/fixture/task-worker.jsonl","model":{"id":"fixture-model","provider":"fixture-provider"},"thinkingLevel":"high","isStreaming":true}})));
-    let saved = stored.try_recv().unwrap();
+    let StoreCommand::Save(saved) = stored.try_recv().unwrap() else {
+        panic!("Expected task save");
+    };
     assert_eq!(
         saved.runs[0].session.as_deref(),
         Some(std::path::Path::new("/fixture/task-worker.jsonl"))

@@ -74,6 +74,7 @@ struct RemoteCommand {
 enum Work {
     Publish(PathBuf, u64, String),
     Scan,
+    Forget(PathBuf),
     Fetch(PathBuf, Endpoint, u64),
     Act(PathBuf, Endpoint, u64, Action),
     Stop,
@@ -116,7 +117,13 @@ fn key(path: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 pub(super) fn identity(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|p| p.canonicalize().ok())
+            .zip(path.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
 }
 fn private_open(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
@@ -334,6 +341,11 @@ impl WindowSync {
                             // through their registry watchers, not our renderer.
                             continue;
                         }
+                        Work::Forget(path) => {
+                            endpoint.paths.retain(|p| p.path != path);
+                            let _ = write_endpoint(&dir, &endpoint);
+                            continue;
+                        }
                         Work::Scan => {
                             let _ =
                                 results.send(ResultEvent::Registry(registry(&dir, &endpoint.id)));
@@ -408,6 +420,39 @@ impl WindowSync {
     }
     pub fn enabled(&self) -> bool {
         self.directory.is_some()
+    }
+    /// Reuse an owned lock or acquire a temporary lock. Never delete another
+    /// window's live transcript, even if its cached status says Idle.
+    pub(super) fn deletion_lock(&self, path: &Path) -> Result<Option<File>, String> {
+        let path = identity(path);
+        if self.owned.contains_key(&path) {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        if self.directory.is_none() {
+            return Ok(None);
+        }
+        let directory = self
+            .directory
+            .as_ref()
+            .ok_or("Live session coordination is unavailable; deletion was refused")?;
+        let file = private_open(&directory.join(format!("{}.lock", key(&path))))
+            .map_err(|_| "Cannot lock chat for deletion")?;
+        file.try_lock_exclusive().map_err(
+            |_| "This chat is open in another Pui window. Close it there before deleting it.",
+        )?;
+        Ok(Some(file))
+    }
+    pub(super) fn forget_deleted(&mut self, path: &Path) {
+        let path = identity(path);
+        self.owned.remove(&path);
+        self.endpoints.remove(&path);
+        self.pending.remove(&path);
+        self.revisions.remove(&path);
+        if self.mirror.as_ref() == Some(&path) {
+            self.mirror = None;
+        }
+        let _ = self.tx.send(Work::Forget(path));
     }
     pub fn detach_mirror(&mut self) {
         self.mirror = None;
@@ -909,6 +954,9 @@ impl Pui {
             return Err(
                 "This chat is not active in its owning window. Switch to it there first.".into(),
             );
+        }
+        if self.deletion.in_progress() {
+            return Err("Deletion is in progress in the owning window.".into());
         }
         if self.loading_chat {
             return Err("Owning window is connecting; try again when ready.".into());
@@ -1507,6 +1555,27 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+    #[test]
+    fn deletion_cannot_take_another_windows_session_and_releases_its_own_claim() {
+        let (directory, path) = location();
+        let mut owner = WindowSync::new_at(
+            &egui::Context::default(),
+            false,
+            Some(directory.join("registry")),
+        );
+        let other = WindowSync::new_at(
+            &egui::Context::default(),
+            false,
+            Some(directory.join("registry")),
+        );
+        assert!(owner.claim(&path).unwrap());
+        assert!(other.deletion_lock(&path).is_err());
+        assert!(owner.deletion_lock(&path).unwrap().is_none());
+        owner.forget_deleted(&path);
+        let lock = other.deletion_lock(&path).unwrap();
+        assert!(lock.is_some());
+        assert!(owner.deletion_lock(&path).is_err());
     }
     #[test]
     fn second_process_lock_probe() {

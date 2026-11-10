@@ -10,6 +10,9 @@ impl Pui {
                 ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
                     if ui.button("Back to chat").clicked(){self.tasks.open=false;}
                     if ui.button("New task").clicked(){self.new_task();}
+                    if let Some(id) = self.tasks.selected.clone() {
+                        if ui.button(RichText::new("Delete task…").color(colors.red)).clicked() { self.request_delete(deletion::Target::Task(id)); }
+                    }
                 });
             });
             if self.tasks.running() && self.tasks.live != self.tasks.selected {

@@ -6,6 +6,7 @@ mod changes;
 mod completions;
 mod composer_history;
 mod confirmations;
+mod deletion;
 mod diagnostics;
 mod files;
 mod menu;
@@ -99,6 +100,7 @@ pub struct Pui {
     demo: bool,
     agents: agents::Agents,
     tasks: tasks::Tasks,
+    deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
     effort_draft: Option<(String, usize)>,
@@ -208,6 +210,7 @@ impl Pui {
             demo: options.demo,
             agents: Default::default(),
             tasks: tasks::Tasks::new(&cc.egui_ctx, !options.demo && !cfg!(test)),
+            deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
             effort_draft: None,
@@ -433,6 +436,13 @@ impl Pui {
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
         #[cfg(not(test))]
+        if session.as_ref().is_some_and(|p| !p.is_file()) {
+            self.loading_chat = false;
+            self.state.error =
+                Some("This chat was deleted or its session file is unavailable.".into());
+            return;
+        }
+        #[cfg(not(test))]
         if !self.demo && !self.sync.enabled() {
             self.sync = sync::WindowSync::new(ctx, false);
         }
@@ -535,6 +545,9 @@ impl Pui {
     }
 
     fn open_chat(&mut self, session: Session) {
+        if self.deletion.in_progress() {
+            return;
+        }
         self.tasks.open = false;
         let path = session.path.clone();
         if !self.loading_chat
@@ -924,6 +937,9 @@ impl Pui {
     }
 
     fn submit_mode(&mut self, ctx: &egui::Context, mode: settings::DeliveryMode) {
+        if self.deletion.confirming() {
+            return;
+        }
         if self.submit_command() {
             return;
         }
@@ -1492,6 +1508,7 @@ impl eframe::App for Pui {
         let confirming = self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
+            || self.deletion.confirming()
             || self.menu.about
             || self.updates.open;
         let terminal_input = !self.settings_open && self.terminals.focused(ctx);
@@ -1541,6 +1558,7 @@ impl eframe::App for Pui {
             self.focus_composer = false;
         }
         if !self.settings_open
+            && !confirming
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
         {
@@ -1627,6 +1645,7 @@ impl eframe::App for Pui {
             self.files.hide_web();
         }
         self.process_open_links(ctx);
+        self.deletion_dialog(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
         self.refresh_menu(ctx);
