@@ -16,12 +16,17 @@ fn frame(
     width: f32,
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
+    frame_size(ctx, app, egui::vec2(width, 850.0), events)
+}
+fn frame_size(
+    ctx: &egui::Context,
+    app: &mut Pui,
+    size: Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
     ctx.run(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(width, 850.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             events,
             ..Default::default()
         },
@@ -250,6 +255,144 @@ fn board_renders_in_both_themes_at_narrow_and_wide_sizes() {
     }
 }
 
+fn crowded_app(ctx: &egui::Context) -> Pui {
+    let mut app = app(ctx);
+    app.state.session_name = "Overflow agent 00".into();
+    app.state.messages.clear();
+    for (index, (id, chat)) in app.agents.parked.iter_mut().enumerate() {
+        chat.state.session_name = format!("Overflow agent {:02}", index + 1);
+        chat.state.busy = true;
+        chat.state.dialogs.clear();
+        chat.state.error = None;
+        chat.state.messages.clear();
+        app.agents.nodes.get_mut(id).unwrap().status = "Working…".into();
+    }
+    app
+}
+fn column_scroll(ctx: &egui::Context, status: Status) -> (egui::Id, egui::Rect, Vec2) {
+    ctx.data_mut(|data| {
+        data.get_temp(egui::Id::new(("kanban-scroll", status.label())))
+            .unwrap()
+    })
+}
+#[test]
+fn overflowing_column_scrolls_down_to_last_card_without_moving_other_columns() {
+    for theme in [theme::Theme::Dark, theme::Theme::Light] {
+        for size in [egui::vec2(1440.0, 850.0), egui::vec2(860.0, 620.0)] {
+            let ctx = egui::Context::default();
+            let mut app = crowded_app(&ctx);
+            theme.apply(&ctx);
+            for _ in 0..5 {
+                frame_size(&ctx, &mut app, size, vec![]);
+            }
+            let last_title = app
+                .board_cards()
+                .into_iter()
+                .rfind(|c| c.status == Status::Working)
+                .unwrap()
+                .title;
+            let (id, viewport, content) = column_scroll(&ctx, Status::Working);
+            assert!(content.y > viewport.height(), "Fixture must overflow");
+            let before = text(frame_size(&ctx, &mut app, size, vec![]));
+            let header = before.iter().find(|(s, _)| s == "Working").unwrap().1;
+            frame_size(
+                &ctx,
+                &mut app,
+                size,
+                vec![
+                    egui::Event::PointerMoved(viewport.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -3000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            for _ in 0..20 {
+                frame_size(&ctx, &mut app, size, vec![]);
+            }
+            let state = egui::scroll_area::State::load(&ctx, id).unwrap();
+            assert!(state.offset.y > 0.0, "Wheel must scroll over agent cards");
+            let output = frame_size(&ctx, &mut app, size, vec![]);
+            let mut visible = Vec::new();
+            for shape in output.shapes {
+                let mut entries = Vec::new();
+                labels(&shape.shape, &mut entries);
+                visible.extend(
+                    entries
+                        .into_iter()
+                        .filter(|(_, r)| shape.clip_rect.contains_rect(*r)),
+                );
+            }
+            assert!(
+                visible.iter().any(|(s, _)| s == &last_title),
+                "Last card must be fully visible: size={size:?}, offset={:?}, viewport={viewport:?}, content={content:?}, visible={visible:?}",
+                state.offset
+            );
+            assert_eq!(
+                visible.iter().find(|(s, _)| s == "Working").unwrap().1,
+                header
+            );
+            let (other_id, _, _) = column_scroll(&ctx, Status::Waiting);
+            assert_eq!(
+                egui::scroll_area::State::load(&ctx, other_id)
+                    .unwrap()
+                    .offset
+                    .y,
+                0.0
+            );
+            let horizontal = ctx.data_mut(|data| {
+                data.get_temp::<egui::Id>(egui::Id::new("kanban-horizontal-scroll"))
+                    .unwrap()
+            });
+            frame_size(
+                &ctx,
+                &mut app,
+                size,
+                vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -300.0),
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            for _ in 0..12 {
+                frame_size(&ctx, &mut app, size, vec![]);
+            }
+            assert_eq!(
+                egui::scroll_area::State::load(&ctx, horizontal)
+                    .unwrap()
+                    .offset
+                    .x,
+                0.0,
+                "Scrolling down at the column bottom must not unexpectedly pan the board sideways"
+            );
+            assert!(
+                text(frame_size(&ctx, &mut app, size, vec![]))
+                    .iter()
+                    .any(|(s, rect)| s.starts_with("Click an agent") && rect.bottom() < size.y)
+            );
+        }
+    }
+}
+#[test]
+fn overflowing_column_has_a_visible_draggable_scrollbar() {
+    let ctx = egui::Context::default();
+    let mut app = crowded_app(&ctx);
+    for _ in 0..6 {
+        frame(&ctx, &mut app, 1440.0, vec![]);
+    }
+    let (id, viewport, _) = column_scroll(&ctx, Status::Working);
+    let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+    state.offset.y = 0.0;
+    state.store(&ctx, id);
+    // Solid bars reserve 4pt margin + 6pt track immediately to the right.
+    let track = egui::pos2(viewport.right() + 7.0, viewport.bottom() - 12.0);
+    click(&ctx, &mut app, 1440.0, track);
+    assert!(
+        egui::scroll_area::State::load(&ctx, id).unwrap().offset.y > 0.0,
+        "Mouse users must be able to scroll by clicking the visible track"
+    );
+}
 #[test]
 fn narrow_board_can_scroll_to_error_column() {
     let ctx = egui::Context::default();
