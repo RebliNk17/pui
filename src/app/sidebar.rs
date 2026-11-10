@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct ChatPrefs {
-    title: Option<String>,
+    pub(super) title: Option<String>,
     pub(super) project: Option<PathBuf>,
-    pinned: bool,
-    archived: bool,
-    hidden: bool,
+    pub(super) pinned: bool,
+    pub(super) archived: bool,
+    pub(super) hidden: bool,
 }
 #[derive(Clone)]
 enum Action {
@@ -20,12 +20,16 @@ enum Action {
     Agent(String),
     NewChat(PathBuf),
     NewTask,
+    Task(String, Option<String>),
+    Saved(PathBuf, PathBuf),
 }
 
 impl Pui {
     pub(super) fn sidebar(&mut self, ctx: &egui::Context) {
         let colors = crate::theme::palette(ctx);
         let mut action = None;
+        let tasks_loading = self.tasks.loading_history();
+        let branches = sidebar_tree::forest(self);
         egui::SidePanel::left("sessions-v4")
             .exact_width(254.0)
             .resizable(false)
@@ -145,66 +149,25 @@ impl Pui {
                     });
                 });
                 let query = self.search.trim().to_lowercase();
-                let roots: Vec<_> = self
-                    .agents
-                    .nodes
-                    .values()
-                    .filter(|n| n.parent.is_none() && !n.children.is_empty())
-                    .map(|n| (n.id.clone(), n.name.clone(), n.color(colors)))
-                    .collect();
-                if !roots.is_empty() {
-                    ui.label(theme::caption(ui, "AGENT WORKFLOWS"));
-                    egui::ScrollArea::vertical()
-                        .id_salt("agent-tree")
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            for (id, name, color) in roots {
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(name).size(11.0).color(color),
-                                        )
-                                        .frame(self.agents.active == id),
-                                    )
-                                    .clicked()
-                                {
-                                    action = Some(Action::Agent(id.clone()));
-                                }
-                                self.agent_rows(ui, &id);
-                            }
-                        });
-                    ui.separator();
-                }
-                let visible: Vec<_> = self
-                    .sessions
+                let visible: Vec<_> = branches
                     .iter()
                     .enumerate()
-                    .filter(|(_, s)| {
-                        let meta = self.prefs.chats.get(&s.path);
-                        !meta.is_some_and(|m| m.hidden)
-                            && meta.is_some_and(|m| m.archived) == self.show_archived
-                            && format!(
-                                "{} {} {}",
-                                meta.and_then(|m| m.title.as_deref()).unwrap_or(&s.title),
-                                s.project.display(),
-                                s.cwd.display()
-                            )
-                            .to_lowercase()
-                            .contains(&query)
+                    .filter(|(_, branch)| {
+                        !(branch.hidden
+                            || tasks_loading
+                                && matches!(branch.target, sidebar_tree::Target::Session(_)))
+                            && branch.archived == self.show_archived
+                            && branch.matches(&query)
                     })
-                    .map(|(i, _)| i)
+                    .map(|(index, _)| index)
                     .collect();
                 let mut groups: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
                 if self.projects {
                     for index in &visible {
-                        let s = &self.sessions[*index];
-                        let project = self
-                            .prefs
-                            .chats
-                            .get(&s.path)
-                            .and_then(|m| m.project.clone())
-                            .unwrap_or_else(|| s.project.clone());
-                        groups.entry(project).or_default().push(*index);
+                        groups
+                            .entry(branches[*index].project.clone())
+                            .or_default()
+                            .push(*index);
                     }
                 }
                 egui::ScrollArea::vertical()
@@ -224,6 +187,8 @@ impl Pui {
                                 ui,
                                 if self.session_rx.is_some() {
                                     "Loading sessions…"
+                                } else if tasks_loading {
+                                    "Loading workflows…"
                                 } else {
                                     "No sessions found."
                                 },
@@ -233,8 +198,7 @@ impl Pui {
                             let mut groups: Vec<_> = groups.into_iter().collect();
                             groups.sort_by_key(|(_, indices)| indices[0]);
                             for (project, mut indices) in groups {
-                                indices
-                                    .sort_by_key(|i| std::cmp::Reverse(self.sessions[*i].modified));
+                                indices.sort_by_key(|i| std::cmp::Reverse(branches[*i].modified));
                                 let open = !self.closed_projects.contains(&project);
                                 let (_, rect) =
                                     ui.allocate_space(Vec2::new(ui.available_width(), 30.0));
@@ -331,7 +295,9 @@ impl Pui {
                                     for index in
                                         indices.into_iter().take(if expanded { count } else { 5 })
                                     {
-                                        if let Some(next) = self.chat_row(ui, index) {
+                                        if let Some(next) =
+                                            self.branch_row(ui, &branches[index], 0, &query)
+                                        {
                                             action = Some(next);
                                         }
                                     }
@@ -361,15 +327,10 @@ impl Pui {
                             }
                         } else {
                             let mut indices = visible;
-                            indices.sort_by_key(|i| {
-                                !self
-                                    .prefs
-                                    .chats
-                                    .get(&self.sessions[*i].path)
-                                    .is_some_and(|m| m.pinned)
-                            });
+                            indices.sort_by_key(|i| !branches[*i].pinned);
                             for index in indices {
-                                if let Some(next) = self.chat_row(ui, index) {
+                                if let Some(next) = self.branch_row(ui, &branches[index], 0, &query)
+                                {
                                     action = Some(next);
                                 }
                             }
@@ -398,6 +359,24 @@ impl Pui {
                 Action::Agent(id) => self.view_agent(&id),
                 Action::NewChat(folder) => self.start_chat_in(folder),
                 Action::NewTask => self.new_task(),
+                Action::Task(task, run) => {
+                    self.tasks.open = true;
+                    self.tasks.selected = Some(task);
+                    self.tasks.selected_run = run;
+                    self.tasks.transcript = Default::default();
+                    self.settings_open = false;
+                    self.files.close();
+                    self.inspector_panel = false;
+                }
+                Action::Saved(path, cwd) => {
+                    self.open_chat(Session {
+                        path,
+                        cwd: cwd.clone(),
+                        project: cwd,
+                        title: "Parent chat".into(),
+                        modified: std::time::SystemTime::UNIX_EPOCH,
+                    });
+                }
                 Action::Open(index) if !self.demo => {
                     self.open_chat(self.sessions[index].clone());
                 }
@@ -465,16 +444,243 @@ impl Pui {
             });
         }
     }
+    fn branch_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        branch: &sidebar_tree::Branch,
+        depth: usize,
+        query: &str,
+    ) -> Option<Action> {
+        if branch.hidden {
+            return None;
+        }
+        let colors = theme::palette(ui.ctx());
+        let selected = branch.active(self);
+        let expanded = !self.prefs.closed_threads.contains(&branch.key) || !query.is_empty();
+        let has_children = branch.children.iter().any(|c| !c.hidden);
+        let compact = depth > 0;
+        let row_height = if compact {
+            28.0
+        } else if matches!(branch.target, sidebar_tree::Target::Session(_)) {
+            48.0
+        } else {
+            44.0
+        };
+        let indent = (depth as f32 * 14.0).min(70.0);
+        let mut action = None;
+        ui.push_id((&branch.key, "tree-row"), |ui| {
+            let origin = ui.cursor().min;
+            let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
+            let left = origin.x + indent;
+            let center_y = origin.y + if compact { row_height / 2.0 } else { 16.0 };
+            let toggle_rect =
+                egui::Rect::from_center_size(egui::pos2(left + 9.0, center_y), Vec2::splat(20.0));
+            if compact {
+                let x = left - 7.0;
+                ui.painter().line_segment(
+                    [egui::pos2(x, origin.y), egui::pos2(x, center_y)],
+                    Stroke::new(1.0, colors.border),
+                );
+                ui.painter().line_segment(
+                    [egui::pos2(x, center_y), egui::pos2(left + 1.0, center_y)],
+                    Stroke::new(1.0, colors.border),
+                );
+            }
+            let toggle = has_children
+                .then(|| ui.interact(toggle_rect, ui.id().with("disclosure"), Sense::click()));
+            let child_left = left + 20.0;
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
+                    egui::pos2(child_left, origin.y),
+                    egui::pos2(rect.right(), ui.max_rect().bottom()),
+                )),
+                |ui| match &branch.target {
+                    sidebar_tree::Target::Session(index) if !compact => {
+                        action = self.chat_row(ui, *index)
+                    }
+                    target => {
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), row_height),
+                            Sense::click(),
+                        );
+                        if selected || response.hovered() {
+                            ui.painter().rect_filled(
+                                row,
+                                7,
+                                if selected {
+                                    colors.hover
+                                } else {
+                                    colors.surface
+                                },
+                            );
+                        }
+                        let tint =
+                            if branch.status.contains("Working") || branch.status == "Connecting" {
+                                colors.accent
+                            } else if branch.status.contains("Blocked")
+                                || branch.status.contains("Failed")
+                            {
+                                colors.red
+                            } else if branch.status == "Idle" || branch.status == "Finished" {
+                                colors.green
+                            } else {
+                                colors.dim
+                            };
+                        let title_y = if compact { row.height() / 2.0 } else { 13.0 };
+                        ui.painter()
+                            .circle_filled(row.min + egui::vec2(8.0, title_y), 2.5, tint);
+                        paint_text(
+                            ui,
+                            &branch.title,
+                            row.min + egui::vec2(19.0, title_y),
+                            row.width() - 24.0,
+                            FontId::proportional(if compact { 11.0 } else { 11.5 }),
+                            if compact && !selected && !response.hovered() {
+                                colors.muted
+                            } else {
+                                colors.text
+                            },
+                        );
+                        if !compact {
+                            paint_text(
+                                ui,
+                                &branch.status,
+                                row.min + egui::vec2(19.0, 30.0),
+                                row.width() - 24.0,
+                                FontId::proportional(10.0),
+                                colors.dim,
+                            );
+                        }
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::SelectableLabel,
+                                true,
+                                selected,
+                                format!("{} · {}", branch.title, branch.status),
+                            )
+                        });
+                        let keyboard = response.has_focus()
+                            && ui.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            });
+                        if response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(format!("{}\n{}", branch.title, branch.status))
+                            .clicked()
+                            || keyboard
+                        {
+                            action = Some(match target {
+                                sidebar_tree::Target::Agent(id) => Action::Agent(id.clone()),
+                                sidebar_tree::Target::Task(task, run) => {
+                                    Action::Task(task.clone(), run.clone())
+                                }
+                                sidebar_tree::Target::Saved(path) => {
+                                    Action::Saved(path.clone(), branch.cwd.clone())
+                                }
+                                sidebar_tree::Target::Session(index) => Action::Open(*index),
+                            });
+                        }
+                    }
+                },
+            );
+            ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+                origin,
+                Vec2::new(rect.width(), row_height),
+            ));
+            if let Some(toggle) = toggle {
+                if toggle.clicked() {
+                    toggle.request_focus();
+                }
+                let highlighted = toggle.hovered() || toggle.has_focus();
+                if highlighted {
+                    ui.painter().rect_filled(toggle_rect, 5, colors.hover);
+                }
+                let center = toggle_rect.center();
+                let points = if expanded {
+                    [
+                        center + egui::vec2(-3.5, -1.5),
+                        center + egui::vec2(0.0, 2.0),
+                        center + egui::vec2(3.5, -1.5),
+                    ]
+                } else {
+                    [
+                        center + egui::vec2(-1.5, -3.5),
+                        center + egui::vec2(2.0, 0.0),
+                        center + egui::vec2(-1.5, 3.5),
+                    ]
+                };
+                ui.painter().add(egui::Shape::line(
+                    points.to_vec(),
+                    Stroke::new(
+                        1.4,
+                        if highlighted {
+                            colors.text
+                        } else {
+                            colors.muted
+                        },
+                    ),
+                ));
+                let children = branch.children.iter().filter(|child| !child.hidden).count();
+                toggle.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::CollapsingHeader,
+                        true,
+                        expanded,
+                        format!("{} children · {children}", branch.title),
+                    )
+                });
+                let keyboard = toggle.has_focus()
+                    && ui.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            || i.consume_key(egui::Modifiers::NONE, egui::Key::Space)
+                            || i.consume_key(
+                                egui::Modifiers::NONE,
+                                if expanded {
+                                    egui::Key::ArrowLeft
+                                } else {
+                                    egui::Key::ArrowRight
+                                },
+                            )
+                    });
+                if toggle
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(format!(
+                        "{} {children} children",
+                        if expanded { "Hide" } else { "Show" }
+                    ))
+                    .clicked()
+                    || keyboard
+                {
+                    if expanded {
+                        self.prefs.closed_threads.insert(branch.key.clone());
+                    } else {
+                        self.prefs.closed_threads.remove(&branch.key);
+                    }
+                }
+            }
+        });
+        if expanded {
+            for child in &branch.children {
+                if child.matches(query) {
+                    if let Some(next) = self.branch_row(ui, child, depth + 1, query) {
+                        action = Some(next);
+                    }
+                }
+            }
+        }
+        action
+    }
     fn chat_row(&mut self, ui: &mut egui::Ui, index: usize) -> Option<Action> {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
         let path = s.path.clone();
-        let selected = self
-            .state
-            .session_file
-            .as_deref()
-            .is_some_and(|p| std::path::Path::new(p) == path)
-            || self.demo && index == 0;
+        let selected = !self.tasks.open
+            && (self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| std::path::Path::new(p) == path)
+                || self.demo && index == 0);
         let node = self
             .agents
             .nodes

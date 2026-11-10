@@ -54,6 +54,8 @@ fn process(app: &mut Pui, role: Role) {
         summary: String::new(),
         cost: 0.0,
         permission_cost: 0.0,
+        selection: None,
+        routing_for: None,
     });
     app.tasks.processes.push(Process {
         run: "run".into(),
@@ -72,6 +74,8 @@ fn process(app: &mut Pui, role: Role) {
         initializing: false,
         ended: false,
         final_error: false,
+        routing_for: None,
+        route_prompt: None,
     });
 }
 fn event(app: &mut Pui, v: Value) {
@@ -344,6 +348,8 @@ fn fresh_verifier_receives_checks_not_builder_rationale() {
         summary: "BUILDER_RATIONALE_MUST_NOT_LEAK".into(),
         cost: 0.0,
         permission_cost: 0.0,
+        selection: None,
+        routing_for: None,
     });
     let prompt = app.task_prompt(Role::Verifier);
     assert!(prompt.contains("one test passed"));
@@ -391,6 +397,25 @@ fn blocked_review_does_not_spend_on_repairs() {
     app.task_finish_attempt();
     assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
     assert_eq!(app.tasks.current().unwrap().attempts.len(), 1);
+}
+#[test]
+fn task_run_session_is_persisted_as_soon_as_pi_reports_it() {
+    let mut app = app();
+    live(&mut app, Phase::Building);
+    process(&mut app, Role::Builder);
+    let (store, stored) = mpsc::channel();
+    app.tasks.store = Some(store);
+    app.task_event(0,rpc::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":{"sessionFile":"/fixture/task-worker.jsonl","model":{"id":"fixture-model","provider":"fixture-provider"},"thinkingLevel":"high","isStreaming":true}})));
+    let saved = stored.try_recv().unwrap();
+    assert_eq!(
+        saved.runs[0].session.as_deref(),
+        Some(std::path::Path::new("/fixture/task-worker.jsonl"))
+    );
+    app.task_event(0,rpc::Event::Record(json!({"type":"tool_execution_start","toolCallId":"tool","toolName":"read","args":{"path":"src/main.rs"}})));
+    assert!(
+        stored.try_recv().is_err(),
+        "No redundant task persistence for ordinary tool events"
+    );
 }
 #[test]
 fn workflow_nodes_open_agent_transcripts_and_check_evidence() {
@@ -453,6 +478,129 @@ fn workflow_nodes_open_agent_transcripts_and_check_evidence() {
         assert!(app.tasks.open);
     }
 }
+fn routing_catalog() -> Vec<crate::protocol::Model> {
+    [
+        ("claude-haiku-5-5", 0.1),
+        ("claude-opus-5-5", 4.0),
+        ("gpt-6.1-sol", 2.0),
+        ("gpt-6-astra", 10.0),
+    ]
+    .into_iter()
+    .map(|(id, price)| crate::protocol::Model {
+        id: id.into(),
+        name: id.into(),
+        provider: "fixture-provider".into(),
+        context_window: 600000,
+        input_cost: price,
+        output_cost: price * 5.0,
+    })
+    .collect()
+}
+#[test]
+fn dynamic_stage_routes_then_launches_only_validated_selection() {
+    let mut app = app();
+    live(&mut app, Phase::Proposing);
+    app.tasks.live_mut().unwrap().dynamic_routing = true;
+    app.state.models = routing_catalog();
+    app.task_launch(Role::Proposal);
+    assert_eq!(app.tasks.processes[0].routing_for, Some(Role::Proposal));
+    assert_eq!(
+        app.tasks.live_task().unwrap().runs[0]
+            .selection
+            .as_ref()
+            .unwrap()
+            .model,
+        "claude-haiku-5-5"
+    );
+    let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
+    event(
+        &mut app,
+        json!({"type":"response","id":id,"command":"get_state","success":true,"data":{"model":{"id":"claude-haiku-5-5","provider":"fixture-provider"},"thinkingLevel":"off"}}),
+    );
+    let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
+    event(&mut app, json!({"type":"agent_start"}));
+    event(
+        &mut app,
+        json!({"type":"response","id":id,"command":"prompt","success":true,"data":{"disposition":"started"}}),
+    );
+    assistant(
+        &mut app,
+        r#"{"model":"gpt-6.1-sol","thinking":"high","difficulty":"standard","reason":"Inspecting native layout and executable test contracts warrants a technical standard model.","exceptional_reason":null}"#,
+    );
+    event(&mut app, json!({"type":"agent_settled","aborted":false}));
+    assert_eq!(app.tasks.live_task().unwrap().runs.len(), 2);
+    assert!(app.tasks.processes[0].routing_for.is_none());
+    assert_eq!(
+        app.tasks.live_task().unwrap().runs[1]
+            .selection
+            .as_ref()
+            .unwrap()
+            .model,
+        "gpt-6.1-sol"
+    );
+}
+#[test]
+fn exceptional_request_pauses_before_any_expensive_launch() {
+    let mut app = app();
+    live(&mut app, Phase::Building);
+    app.tasks.live_mut().unwrap().dynamic_routing = true;
+    app.state.models = routing_catalog();
+    app.task_route_finished(Role::Builder,r#"{"model":"gpt-6-astra","thinking":"high","difficulty":"exceptional","reason":"A remaining concurrency invariant needs specialized deep reasoning after ordinary approaches failed.","exceptional_reason":"The prior Opus and Sol attempts could not satisfy the interleaving invariant; request an explicit exceptional investigation rather than another routine implementation."}"#);
+    let t = app.tasks.current().unwrap();
+    assert_eq!(t.phase, Phase::Blocked);
+    assert!(t.pending_route.is_some());
+    assert!(app.tasks.processes.is_empty());
+    assert!(app.tasks.live.is_none());
+    app.task_approve_exceptional();
+    assert!(app.tasks.current().unwrap().pending_route.is_none());
+    assert_eq!(app.tasks.processes.len(), 1);
+    assert_eq!(
+        app.tasks.live_task().unwrap().runs[0]
+            .selection
+            .as_ref()
+            .unwrap()
+            .model,
+        "gpt-6-astra"
+    );
+}
+#[test]
+fn routed_model_mismatch_and_budget_stop_do_not_fallback_or_continue() {
+    let mut app = app();
+    live(&mut app, Phase::Proposing);
+    app.tasks.live_mut().unwrap().dynamic_routing = true;
+    app.state.models = routing_catalog();
+    app.task_launch(Role::Proposal);
+    let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
+    event(
+        &mut app,
+        json!({"type":"response","id":id,"command":"get_state","success":true,"data":{"model":{"id":"gpt-6.1-sol","provider":"fixture-provider"},"thinkingLevel":"high"}}),
+    );
+    assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
+    assert!(app.tasks.processes.is_empty());
+    live(&mut app, Phase::Building);
+    app.tasks.live_mut().unwrap().spend_limit = Some(0.01);
+    process(&mut app, Role::Builder);
+    event(
+        &mut app,
+        json!({"type":"message_update","usage":{"cost":{"total":0.02}}}),
+    );
+    assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
+    assert!(app.tasks.processes.is_empty());
+    assert!(app.tasks.live.is_none());
+}
+#[test]
+fn old_tasks_remain_pinned_and_new_tasks_opt_into_dynamic_routing() {
+    let t = Task::new("/tmp".into(), "p".into(), "m".into(), "high".into());
+    let mut v = serde_json::to_value(&t).unwrap();
+    for k in ["dynamic_routing", "spend_limit", "pending_route"] {
+        v.as_object_mut().unwrap().remove(k);
+    }
+    let restored: Task = serde_json::from_value(v).unwrap();
+    assert!(!restored.dynamic_routing);
+    let mut app = app();
+    app.new_task();
+    assert!(app.tasks.current().unwrap().dynamic_routing);
+}
 fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
     match shape {
         egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
@@ -462,6 +610,61 @@ fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+#[test]
+fn workflow_long_titles_stay_inside_the_inspector_across_redraws() {
+    for task_selected in [false, true] {
+        for theme in [theme::Theme::Dark, theme::Theme::Light] {
+            let mut app = app();
+            app.demo = true;
+            if task_selected {
+                app.demo_task();
+                let task = app.tasks.current_mut().unwrap();
+                task.objective =
+                    "A long task objective with observable behavior and acceptance checks "
+                        .repeat(12);
+                task.model = "model-with-an-extremely-long-unbroken-identifier-".repeat(12);
+            }
+            app.demo_agent_tree();
+            for node in app.agents.nodes.values_mut() {
+                node.name =
+                    "this button at the top right corner, to see the files and views ".repeat(12);
+                node.status = "Waiting for input".into();
+            }
+            let ctx = app.ctx.clone();
+            theme.apply(&ctx);
+            for width in [350.0, 260.0, 350.0] {
+                for _ in 0..8 {
+                    let mut bounds = None;
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::SidePanel::right("workflow-overflow-test").exact_width(width).show(ctx, |ui| {
+                                let mut layout = CardLayout { order: vec![Card::Workflow], ..Default::default() };
+                                layout.hidden.clear();
+                                inspector::stack(ui, &mut layout, |_| String::new(), |ui, _| {
+                                    // Expand the connected-agent branch in task mode as well.
+                                    ui.style_mut().animation_time = 0.0;
+                                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(egui::Id::new("Other connected agents")), true).store(ui.ctx());
+                                    let available = ui.available_rect_before_wrap();
+                                    app.task_workflow(ui);
+                                    bounds = Some((available, ui.min_rect()));
+                                });
+                            });
+                        },
+                    );
+                    let (available, actual) = bounds.unwrap();
+                    assert!(
+                        actual.right() <= available.right() + 1.0,
+                        "Workflow overflows with task={task_selected}, width={width}: {actual:?} outside {available:?}"
+                    );
+                }
+            }
+        }
     }
 }
 #[test]

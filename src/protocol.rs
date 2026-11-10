@@ -368,6 +368,14 @@ impl State {
                             .filter_map(|v| serde_json::from_value(v.clone()).ok())
                             .collect();
                     }
+                    "set_model" => {
+                        // Pi acknowledgments are authoritative. Keep the old model
+                        // and effort options if a selection is rejected.
+                        self.model = string(data, "id").to_owned();
+                        self.model_name = string(data, "name").to_owned();
+                        self.provider = string(data, "provider").to_owned();
+                        self.levels.clear();
+                    }
                     "get_available_models" => {
                         self.models = data["models"]
                             .as_array()

@@ -86,7 +86,6 @@ impl Pui {
         self.propagate_settings(&before);
     }
     pub(super) fn permission_confirmation(&mut self, ui: &mut egui::Ui) {
-        let colors = crate::theme::palette(ui.ctx());
         let Some(scope) = self.bypass_pending.as_ref() else {
             return;
         };
@@ -94,16 +93,19 @@ impl Pui {
             self.bypass_pending = None;
             return;
         }
-        egui::Frame::new().fill(colors.sidebar).stroke(Stroke::new(1.0, colors.red)).corner_radius(10).inner_margin(12).show(ui, |ui| {
-            ui.label(RichText::new("Bypass all permissions?").color(colors.red).strong());
-            ui.add(egui::Label::new(theme::small(ui, "Writable agents in this window can run commands, change or delete files, access credentials and use the network without asking. This also changes existing workers. Read-only workers stay restricted. Only enable this for work you trust.")).wrap());
-            ui.horizontal(|ui| {
-                if ui.button("Enable bypass").clicked() {
+        confirmations::surface(ui.ctx()).shadow(egui::epaint::Shadow::NONE).show(ui, |ui| {
+            confirmations::heading(ui, "Bypass all permissions?", "Only enable this for work you trust.", true);
+            ui.add_space(14.0);
+            confirmations::note(ui, "Writable agents in this window can run commands, change or delete files, access credentials and use the network without asking. This also changes existing workers. Read-only workers stay restricted.");
+            ui.add_space(18.0);
+            match confirmations::actions(ui, "Cancel", "Enable bypass", true, true, false) {
+                Some(confirmations::Choice::Confirm) => {
                     self.prefs.settings.permission = PermissionMode::Bypass;
                     self.bypass_pending = None;
                 }
-                if ui.button("Cancel").clicked() { self.bypass_pending = None; }
-            });
+                Some(confirmations::Choice::Cancel) => self.bypass_pending = None,
+                None => {}
+            }
         });
     }
 }
