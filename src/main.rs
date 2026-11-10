@@ -12,6 +12,7 @@ mod protocol;
 mod pulls;
 mod rpc;
 mod sessions;
+mod task_output;
 mod tasks;
 mod terminal;
 mod theme;
@@ -39,6 +40,7 @@ pub struct Options {
     pub demo_question_designs: bool,
     pub demo_agents: bool,
     pub demo_task: bool,
+    pub demo_task_proposal: bool,
     pub demo_files: bool,
     pub demo_changes: bool,
     pub demo_terminal: bool,
@@ -103,6 +105,11 @@ fn main() -> eframe::Result {
             "--demo-task" => {
                 options.demo = true;
                 options.demo_task = true;
+            }
+            "--demo-task-proposal" => {
+                options.demo = true;
+                options.demo_task = true;
+                options.demo_task_proposal = true;
             }
             "--demo-agents" => {
                 options.demo = true;

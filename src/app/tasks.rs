@@ -12,6 +12,7 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 mod view;
+mod workflow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FingerprintStep {
@@ -111,6 +112,14 @@ impl Tasks {
     }
     pub(super) fn loading_history(&self) -> bool {
         self.loaded.is_some()
+    }
+    pub(super) fn demo_proposal(&mut self) {
+        if self
+            .current()
+            .is_some_and(|t| t.runs.iter().any(|r| r.id == "demo-Proposal"))
+        {
+            self.selected_run = Some("demo-Proposal".into());
+        }
     }
     pub(super) fn current(&self) -> Option<&Task> {
         let id = self.selected.as_ref()?;
@@ -249,6 +258,33 @@ impl Drop for Tasks {
     }
 }
 impl Pui {
+    /// Match known retained run paths first; names support older role sessions opened from Recent.
+    pub(super) fn task_session(&self, state: &State) -> Option<Role> {
+        if let Some(path) = state.session_file.as_deref() {
+            if let Some(role) = self
+                .tasks
+                .records
+                .iter()
+                .flat_map(|t| &t.runs)
+                .find(|r| r.session.as_deref() == Some(std::path::Path::new(path)))
+                .map(|r| r.role)
+            {
+                return Some(role);
+            }
+        }
+        let name = &state.session_name;
+        if !name.starts_with("Task ") {
+            return None;
+        }
+        if name.contains(" · Acceptance proposal · ") {
+            Some(Role::Proposal)
+        } else if name.contains(" · Fresh verifier · ") {
+            Some(Role::Verifier)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn new_task(&mut self) {
         self.tasks.open = true;
         if self.tasks.running() {

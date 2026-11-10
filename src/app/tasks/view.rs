@@ -110,6 +110,7 @@ impl Pui {
                 if let Some(state)=state {
                     let state=state.clone();
                     if !self.tasks.processes.iter().any(|p|p.run==run) { ui.label(theme::small(ui,"Saved transcript · bounded local preview; the Pi session file retains full history.")); }
+                    self.tasks.transcript.task_output = task.runs.iter().find(|r| r.id == run).is_some_and(|r| matches!(r.role, Role::Proposal | Role::Verifier));
                     let selection=task.runs.iter().find(|r|r.id==run).and_then(|r|r.selection.as_ref());
                     self.tasks.transcript.show(ui,&state.messages,selection.map(|s|s.model.as_str()).unwrap_or(&task.model),selection.map(|s|s.thinking.as_str()).unwrap_or(&task.thinking),!state.ready(),&run);
                 } else {
@@ -122,7 +123,10 @@ impl Pui {
                     }
                     egui::ScrollArea::vertical().id_salt("saved-task-run").show(ui,|ui|{
                         if let Some(r)=task.runs.iter().find(|r|r.id==run){
-                            ui.label(r.role.label());ui.add(egui::Label::new(&r.summary).selectable(true).wrap());
+                            ui.label(r.role.label());
+                            if !matches!(r.role, Role::Proposal | Role::Verifier) || !crate::task_output::show(ui, &r.summary) {
+                                ui.add(egui::Label::new(&r.summary).selectable(true).wrap());
+                            }
                             if let Some(path)=&r.session{ui.label(theme::small(ui,"Full transcript retained in Pi session:"));ui.add(egui::Label::new(path.display().to_string()).selectable(true).wrap());}
                         }
                     });
@@ -157,7 +161,7 @@ impl Pui {
             }
         });
     }
-    fn task_routing_details(&self, ui: &mut egui::Ui, task: &Task) {
+    pub(super) fn task_routing_details(&self, ui: &mut egui::Ui, task: &Task) {
         if task.dynamic_routing || task.runs.iter().any(|r| r.selection.is_some()) {
             ui.collapsing("Model choices & routing reasons",|ui| {
                 if task.runs.is_empty(){ui.label("Model selection happens before each stage, using the available catalog and task evidence.");}
@@ -271,217 +275,6 @@ impl Pui {
             self.task_answer(&run, id, answer);
         }
     }
-    pub(in crate::app) fn task_workflow(&mut self, ui: &mut egui::Ui) {
-        let colors = theme::palette(ui.ctx());
-        let Some(task) = self.tasks.current().cloned() else {
-            ui.label(theme::small(ui, "No verified task selected."));
-            let nodes: Vec<_> = self
-                .agents
-                .nodes
-                .values()
-                .map(|n| {
-                    (
-                        n.id.clone(),
-                        n.parent.clone(),
-                        n.name.clone(),
-                        n.status.clone(),
-                    )
-                })
-                .collect();
-            for (id, parent, name, status) in nodes {
-                ui.horizontal(|ui| {
-                    if parent.is_some() {
-                        ui.add_space(12.0);
-                    }
-                    if agent_row(ui, &name, &status).clicked() {
-                        self.view_agent(&id);
-                    }
-                });
-            }
-            if ui.button("New task").clicked() {
-                self.new_task();
-            }
-            return;
-        };
-        self.task_routing_details(ui, &task);
-        if self.demo {
-            ui.label(
-                RichText::new("DEMO · example workflow")
-                    .size(10.0)
-                    .color(colors.amber),
-            );
-        }
-        if !task.objective.is_empty()
-            && ui
-                .add_sized(
-                    [ui.available_width(), 0.0],
-                    egui::Button::selectable(
-                        self.tasks.open,
-                        RichText::new(&task.objective).size(12.0).strong(),
-                    )
-                    .wrap(),
-                )
-                .clicked()
-        {
-            self.tasks.open = true;
-            self.tasks.selected_run = None;
-        }
-        ui.label(theme::small(ui, task.phase.label()));
-        ui.label(theme::small(
-            ui,
-            format!("${:.3} reported · max 2 repairs", task.cost()),
-        ));
-        ui.add_space(6.0);
-        let proposal = task.runs.iter().rev().find(|r| r.role == Role::Proposal);
-        if let Some(selection) = proposal.and_then(|r| r.selection.as_ref()) {
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    format!("Proposal model: {}", selection.model),
-                ))
-                .wrap(),
-            );
-        }
-        ui.add(
-            egui::Label::new(theme::small(
-                ui,
-                if task.dynamic_routing {
-                    "Dynamic models · choices recorded per stage".into()
-                } else {
-                    format!("{} · {}", task.model, thinking_label(&task.thinking))
-                },
-            ))
-            .wrap(),
-        );
-        let mut flow = Flow::default();
-        if flow.node(
-            ui,
-            "Acceptance checks",
-            if task.approved.is_some() {
-                "Approved"
-            } else if task.phase == Phase::AwaitingApproval {
-                "Needs your approval"
-            } else {
-                proposal.map(|r| r.status.as_str()).unwrap_or("Not started")
-            },
-            colors.accent,
-        ) {
-            self.tasks.open = true;
-            self.tasks.selected_run = proposal.map(|r| r.id.clone());
-        }
-        for (index, attempt) in task.attempts.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add_space(32.0);
-                ui.label(theme::caption(
-                    ui,
-                    if index == 0 {
-                        "IMPLEMENTATION"
-                    } else {
-                        "REPAIR & RECHECK"
-                    },
-                ));
-            });
-            for role in [Role::Builder, Role::Checks, Role::Verifier] {
-                let run = task
-                    .runs
-                    .iter()
-                    .rev()
-                    .find(|r| r.attempt == attempt.number && r.role == role);
-                let status = run
-                    .map(|r| {
-                        self.tasks
-                            .processes
-                            .iter()
-                            .find(|p| p.run == r.id && !p.ended)
-                            .map(|p| {
-                                if p.state.dialogs.is_empty() {
-                                    r.status.as_str()
-                                } else {
-                                    "Waiting for input"
-                                }
-                            })
-                            .unwrap_or(&r.status)
-                    })
-                    .unwrap_or("Not started");
-                let color = if status == "Working" {
-                    colors.accent
-                } else if status == "Waiting for input" {
-                    colors.amber
-                } else {
-                    colors.muted
-                };
-                let stage_label = run
-                    .and_then(|r| {
-                        r.selection.as_ref().map(|s| {
-                            format!(
-                                "{}{} · {}",
-                                if r.routing_for.is_some() {
-                                    "Routing → "
-                                } else {
-                                    ""
-                                },
-                                role.label(),
-                                s.model
-                            )
-                        })
-                    })
-                    .unwrap_or_else(|| role.label().into());
-                if flow.node(ui, &stage_label, status, color) {
-                    self.tasks.open = true;
-                    self.tasks.selected_run = if role == Role::Checks {
-                        None
-                    } else {
-                        run.map(|r| r.id.clone())
-                    };
-                    self.tasks.transcript = Default::default();
-                }
-            }
-            if attempt.invalidated {
-                ui.label(
-                    RichText::new("Evidence stale / superseded")
-                        .size(10.0)
-                        .color(colors.amber),
-                );
-            }
-        }
-        if task.attempts.is_empty() {
-            for role in [Role::Builder, Role::Checks, Role::Verifier] {
-                flow.node(ui, role.label(), "Not started", colors.dim);
-            }
-        }
-        if flow.node(
-            ui,
-            "Result & evidence",
-            task.phase.label(),
-            if matches!(task.phase, Phase::Ready | Phase::Accepted) {
-                colors.green
-            } else {
-                colors.muted
-            },
-        ) {
-            self.tasks.open = true;
-            self.tasks.selected_run = None;
-        }
-        ui.add_space(6.0);
-        if ui.button("Open workflow").clicked() {
-            self.tasks.open = true;
-        }
-        if !self.agents.nodes.is_empty() {
-            ui.collapsing("Other connected agents", |ui| {
-                let nodes: Vec<_> = self
-                    .agents
-                    .nodes
-                    .values()
-                    .map(|n| (n.id.clone(), n.name.clone(), n.status.clone()))
-                    .collect();
-                for (id, name, status) in nodes {
-                    if agent_row(ui, &name, &status).clicked() {
-                        self.view_agent(&id);
-                    }
-                }
-            });
-        }
-    }
     pub(in crate::app) fn demo_task(&mut self) {
         let mut t = Task::new(
             self.prefs.cwd.clone(),
@@ -526,7 +319,11 @@ impl Pui {
                 }
                 .into(),
                 session: None,
-                summary: "DEMO: example agent transcript, not a provider run.".into(),
+                summary: if role == Role::Proposal {
+                    serde_json::to_string(&t.proposed).unwrap()
+                } else {
+                    "DEMO: example agent transcript, not a provider run.".into()
+                },
                 cost: if role == Role::Builder { 0.42 } else { 0.03 },
                 permission_cost: 0.0,
                 selection: None,
@@ -543,7 +340,11 @@ impl Pui {
                     thinking: t.thinking.clone(),
                     messages: vec![Message {
                         role: "assistant".into(),
-                        text: format!("DEMO ONLY · {}\n\n{}", run.role.label(), run.summary),
+                        text: if run.role == Role::Proposal {
+                            run.summary.clone()
+                        } else {
+                            format!("DEMO ONLY · {}\n\n{}", run.role.label(), run.summary)
+                        },
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -563,122 +364,5 @@ impl Pui {
         for card in [Card::Environment, Card::Context, Card::Outputs, Card::Pulls] {
             self.prefs.cards.collapsed.insert(card);
         }
-    }
-}
-fn agent_row(ui: &mut egui::Ui, name: &str, status: &str) -> egui::Response {
-    let label = format!("{name} · {status}");
-    ui.add_sized(
-        [ui.available_width(), 26.0],
-        egui::Button::selectable(false, &label).truncate(),
-    )
-    .on_hover_text(label)
-}
-
-#[derive(Default)]
-struct Flow {
-    previous: Option<egui::Pos2>,
-    step: usize,
-}
-impl Flow {
-    fn node(&mut self, ui: &mut egui::Ui, label: &str, status: &str, tint: Color32) -> bool {
-        let colors = theme::palette(ui.ctx());
-        self.step += 1;
-        let complete = matches!(
-            status,
-            "Finished" | "Approved" | "Passed" | "Ready" | "Accepted"
-        );
-        let pending = matches!(status, "Not started" | "Draft");
-        let failed = matches!(status, "Failed" | "Blocked" | "Cancelled");
-        let color = if complete {
-            colors.green
-        } else if failed {
-            colors.red
-        } else if pending {
-            colors.dim
-        } else {
-            tint
-        };
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), Sense::click());
-        let center = rect.left_center() + egui::vec2(12.0, 0.0);
-        if let Some(previous) = self.previous {
-            ui.painter().line_segment(
-                [
-                    previous + egui::vec2(0.0, 11.0),
-                    center - egui::vec2(0.0, 11.0),
-                ],
-                Stroke::new(1.0, colors.border),
-            );
-        }
-        self.previous = Some(center);
-        let body = egui::Rect::from_min_max(
-            rect.min + egui::vec2(32.0, 2.0),
-            rect.max - egui::vec2(0.0, 2.0),
-        );
-        ui.painter().rect_filled(
-            body,
-            8,
-            if response.hovered() || response.has_focus() {
-                colors.hover
-            } else if matches!(
-                status,
-                "Working" | "Waiting for input" | "Needs your approval"
-            ) {
-                colors.accent_bg
-            } else {
-                colors.surface
-            },
-        );
-        ui.painter().circle_filled(center, 10.0, colors.bg);
-        ui.painter()
-            .circle_stroke(center, 10.0, Stroke::new(1.2, color));
-        if complete {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    center + egui::vec2(-4.0, 0.0),
-                    center + egui::vec2(-1.0, 3.0),
-                    center + egui::vec2(4.0, -3.0),
-                ],
-                Stroke::new(1.4, color),
-            ));
-        } else {
-            ui.painter().text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                self.step.to_string(),
-                FontId::proportional(10.0),
-                color,
-            );
-        }
-        for (text, y, size, c) in [
-            (label, body.top() + 6.0, 11.5, colors.text),
-            (status, body.top() + 24.0, 10.0, color),
-        ] {
-            let mut job = egui::text::LayoutJob::simple_singleline(
-                text.into(),
-                FontId::proportional(size),
-                c,
-            );
-            job.wrap.max_width = (body.width() - 22.0).max(10.0);
-            job.wrap.max_rows = 1;
-            ui.painter().galley(
-                egui::pos2(body.left() + 10.0, y),
-                ui.painter().layout_job(job),
-                c,
-            );
-        }
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{label}: {status}"))
-        });
-        let keyboard = response.has_focus()
-            && ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Space)
-            });
-        response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(format!("{label}: {status}\nOpen transcript or evidence"))
-            .clicked()
-            || keyboard
     }
 }

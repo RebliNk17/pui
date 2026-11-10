@@ -299,6 +299,9 @@ impl Pui {
             }
             if options.demo_task {
                 app.demo_task();
+                if options.demo_task_proposal {
+                    app.tasks.demo_proposal();
+                }
             }
             if options.demo_working {
                 app.state.busy = true;

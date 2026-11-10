@@ -29,6 +29,7 @@ pub struct Transcript {
     pub progress: Option<Progress>,
     pub message_action: Option<(usize, MessageAction)>,
     pub message_actions_enabled: bool,
+    pub task_output: bool,
     progress_phase: Option<(Progress, f64)>,
 }
 
@@ -238,6 +239,7 @@ impl Transcript {
         let revision = self.view_revision;
         let mut layout_changed = false;
         let expand = self.expand_activity;
+        let task_output = self.task_output;
         let gallery = &mut self.gallery;
         let mut message_action = None;
         let actions_enabled = self.message_actions_enabled;
@@ -268,6 +270,7 @@ impl Transcript {
                 }
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 revision.hash(&mut hasher);
+                task_output.hash(&mut hasher);
                 for m in group {
                     m.revision.hash(&mut hasher);
                     m.text.len().hash(&mut hasher);
@@ -340,6 +343,7 @@ impl Transcript {
                                         model,
                                         thinking,
                                         (busy && index == messages.len(), expand, actions_enabled),
+                                        task_output,
                                         gallery,
                                     );
                                     layout_changed |= changed;
@@ -700,6 +704,7 @@ fn assistant(
     model: &str,
     thinking: &str,
     flags: (bool, bool, bool),
+    task_output: bool,
     gallery: &mut crate::media::Gallery,
 ) -> (bool, bool) {
     let colors = crate::theme::palette(ui.ctx());
@@ -751,7 +756,9 @@ fn assistant(
                     pending.clear();
                     group_index += 1;
                 }
-                markdown::show(ui, &message.text);
+                if !task_output || !crate::task_output::show(ui, &message.text) {
+                    markdown::show(ui, &message.text);
+                }
             }
             if !message.thinking.is_empty() {
                 pending.push(ActivityItem::Thinking(&message.thinking));
@@ -777,7 +784,9 @@ fn assistant(
                             pending.clear();
                             group_index += 1;
                         }
-                        markdown::show(ui, text);
+                        if !task_output || !crate::task_output::show(ui, text) {
+                            markdown::show(ui, text);
+                        }
                     }
                     Block::Thinking(text) => pending.push(ActivityItem::Thinking(text)),
                     Block::Tool(id) => {
@@ -1158,6 +1167,7 @@ mod tests {
                                 "model",
                                 "high",
                                 (running, false, false),
+                                false,
                                 &mut gallery,
                             );
                             heights.push(ui.cursor().top() - top);

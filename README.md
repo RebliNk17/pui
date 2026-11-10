@@ -120,6 +120,8 @@ Saved chats open a bounded, read-only 2 MiB tail preview on a worker while Pi in
 
 MCP/extension warnings are deduplicated in the top-bar **bell** notification popover, not inserted above the composer. Session updates and connection warnings have separate cards, with individual dismiss and **Clear all** actions. Escape or clicking outside closes the popover without clearing its contents or stopping a run. MCP troubleshooting and a copyable Pi CLI `/mcp` command appear only for relevant diagnostics; a remote 503/closed connection still requires service recovery. Pui does not disable your configured servers.
 
+Verified-task proposal and verifier agents intentionally return strict JSON for validation, not ordinary prose. Pui renders valid role responses as readable acceptance-check or review cards, including when their saved role session is reopened; the unchanged JSON remains under **Raw response** and Copy still copies the original response. Proposed commands are explicitly not execution results. Ordinary chat JSON is not automatically reformatted. The Workflow inspector shows the current attempt’s numbered stages, with prior attempts retained in Results & evidence. Current-session workers are separate from the collapsed **Other sessions** list; truncated names, objectives and model labels expose their full text on hover.
+
 ## Resource use
 
 - Native egui/eframe + OpenGL, no browser runtime or animation loop when idle.
@@ -227,6 +229,7 @@ cargo run -- --demo-theater --screenshot /tmp/pui-theater.png
 cargo run -- --demo-model-picker --screenshot /tmp/pui-picker.png
 cargo run -- --demo-agents --screenshot /tmp/pui-agents.png
 cargo run -- --demo-task --screenshot /tmp/pui-task.png
+cargo run -- --demo-task-proposal --screenshot /tmp/pui-task-proposal.png
 cargo run -- --demo-compacting --screenshot /tmp/pui-compacting.png
 cargo run -- --cwd /path/to/repo --session /path/to/session.jsonl
 ```

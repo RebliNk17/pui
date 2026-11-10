@@ -248,7 +248,7 @@ pub fn stack(
                         .min_scrolled_height(0.0)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            ui.set_width((ui.available_width() - 5.0).max(24.0));
+                            ui.set_width((width - 32.0).max(40.0));
                             contents(ui, card);
                         });
                 }

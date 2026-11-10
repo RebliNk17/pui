@@ -481,6 +481,10 @@ impl Pui {
                             });
                         });
                     });
+                self.transcript.task_output = matches!(
+                    self.task_session(&self.state),
+                    Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
+                );
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
                 if self.state.messages.is_empty()
