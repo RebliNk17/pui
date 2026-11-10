@@ -343,6 +343,14 @@ impl State {
                                 .unwrap_or_default(),
                         );
                     }
+                    "set_model" => {
+                        // Pi acknowledgments are authoritative. Keep the old model
+                        // and effort options if a selection is rejected.
+                        self.model = string(data, "id").to_owned();
+                        self.model_name = string(data, "name").to_owned();
+                        self.provider = string(data, "provider").to_owned();
+                        self.levels.clear();
+                    }
                     "get_available_models" => {
                         self.models = data["models"]
                             .as_array()

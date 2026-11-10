@@ -3,6 +3,7 @@ mod approval_view;
 mod attachments;
 mod changes;
 mod composer_history;
+mod confirmations;
 mod diagnostics;
 mod files;
 mod menu;
@@ -18,6 +19,7 @@ mod rewind;
 mod run_status;
 mod settings;
 mod sidebar;
+mod sidebar_tree;
 mod sync;
 mod tasks;
 mod terminal;
@@ -61,6 +63,7 @@ struct Preferences {
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,
     projects_view: bool,
+    closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
 }
 
@@ -333,6 +336,9 @@ impl Pui {
             }
             if options.demo_changes {
                 app.inspector_panel = true;
+            }
+            if options.demo_confirmation {
+                app.agents.close_prompt = true;
             }
             if options.demo_notifications {
                 app.state.notice = Some("Returned to the selected prompt. Review the draft, then send when ready. Nothing was rerun.".into());
@@ -1355,11 +1361,14 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.poll();
         self.menu_commands(ctx);
-        if self.screenshot.is_none() {
+        if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
         }
+        let confirming = self.agents.close_prompt
+            || self.terminals.confirming_stop()
+            || self.history_view.is_open();
         let terminal_input = !self.settings_open && self.terminals.focused(ctx);
-        if !self.settings_open && !self.tasks.open && !terminal_input {
+        if !confirming && !self.settings_open && !self.tasks.open && !terminal_input {
             self.image_inputs(ctx);
         }
         let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
@@ -1411,6 +1420,7 @@ impl eframe::App for Pui {
             self.new_session();
         }
         if !self.settings_open
+            && !confirming
             && !terminal_input
             && !self.diagnostics_open
             && self.state.dialogs.is_empty()

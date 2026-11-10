@@ -39,6 +39,11 @@ pub(super) struct View {
     request: Option<Request>,
     error: Option<String>,
 }
+impl View {
+    pub(super) fn is_open(&self) -> bool {
+        self.request.is_some()
+    }
+}
 fn point_for<'a>(
     message: &Message,
     points: &'a [protocol::HistoryPoint],
@@ -122,12 +127,14 @@ impl Pui {
             self.history_view = Default::default();
             return;
         }
-        let mut open = true;
-        let mut apply = false;
-        let mut cancel = false;
-        egui::Window::new(match request.operation {MessageAction::Edit=>"Edit an earlier message",MessageAction::Fork=>"Fork after this response",MessageAction::Rewind=>"Rewind to this message"})
-            .id(egui::Id::new("history-restore-confirmation")).collapsible(false).resizable(true).default_width(510.0).max_height((ctx.screen_rect().height() - 64.0).max(180.0)).vscroll(true).open(&mut open).show(ctx, |ui| {
-                ui.add(egui::Label::new(theme::small(ui,if request.operation == MessageAction::Fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Return to just before this prompt. Nothing will be resent or rerun automatically." })).wrap());
+        let fork = request.operation == MessageAction::Fork;
+        let choice = confirmations::Dialog::new(
+            "history-restore-confirmation",
+            match request.operation { MessageAction::Edit => "Edit an earlier message?", MessageAction::Fork => "Fork after this response?", MessageAction::Rewind => "Rewind to this message?" },
+            if fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Return to just before this prompt. Nothing will be resent or rerun automatically." },
+            "Cancel",
+            match request.operation { MessageAction::Edit => "Rewind and edit", MessageAction::Fork => "Create fork", MessageAction::Rewind => "Rewind" },
+        ).destructive(!fork).enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle())).show(ctx, |ui| {
                 egui::Frame::new().fill(theme::palette(ctx).sidebar).corner_radius(8).inner_margin(12).show(ui, |ui| {
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         ui.add(egui::Label::new(crate::transcript::user_display_text(&request.message)).wrap().selectable(true));
@@ -151,18 +158,12 @@ impl Pui {
                 if self.history_drafts.len() >= 8 {ui.add(egui::Label::new(theme::small(ui,"Restore or send saved drafts before another rewind; eight are already retained.")).wrap());}
                 if request.operation != MessageAction::Fork && (!self.draft.is_empty() || !self.draft_images.is_empty()) {ui.add(egui::Label::new(theme::small(ui,"Your current unsent draft will be saved for manual recovery before replacing it.")).wrap());}
                 if let Some(error)=&self.history_view.error {ui.colored_label(theme::palette(ctx).red,error);}
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle()),egui::Button::new(match request.operation {MessageAction::Edit=>"Rewind and edit",MessageAction::Fork=>"Create fork",MessageAction::Rewind=>"Rewind"})).clicked() {apply=true;}
-                    if ui.button("Cancel").clicked() {cancel=true;}
-                });
             });
         self.history_view.request = Some(request.clone());
-        if !open || cancel {
-            self.history_view = Default::default();
-        }
-        if apply {
-            self.begin_history(request);
+        match choice {
+            Some(confirmations::Choice::Cancel) => self.history_view = Default::default(),
+            Some(confirmations::Choice::Confirm) => self.begin_history(request),
+            None => {}
         }
     }
     pub(super) fn restoring_code(&self) -> bool {

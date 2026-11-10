@@ -304,12 +304,18 @@ impl Resources {
                         });
                 }
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    cancel = ui.button("Cancel").clicked();
-                    confirm = ui
-                        .add_enabled(!demo, egui::Button::new("Confirm change"))
-                        .clicked();
-                });
+                match confirmations::actions(
+                    ui,
+                    "Cancel",
+                    "Confirm change",
+                    pending.request["action"] == "remove",
+                    !demo,
+                    false,
+                ) {
+                    Some(confirmations::Choice::Cancel) => cancel = true,
+                    Some(confirmations::Choice::Confirm) => confirm = true,
+                    None => {}
+                }
             });
         });
         if cancel {

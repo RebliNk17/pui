@@ -70,6 +70,12 @@ test('task check runner still uses existing permission policy and has no model t
   assert.equal((await h.events.get('user_bash')({command:'npm test'},h.ctx)).result.exitCode,1);
   assert.equal((await h.events.get('tool_call')({toolName:'write',input:{path:'file'}},h.ctx)).block,true);
 });
+test('dynamic model router cannot invoke tools or shell even with bypass enabled', async () => {
+  const h=await host(true,'router'); Object.assign(h.ctx,{cwd:tmpdir(),hasUI:true});
+  h.commands.get('pui-settings').handler(JSON.stringify({permission:'bypassPermissions',compactPercent:85,keepRecentTokens:20000}),h.ctx);
+  for(const toolName of ['read','bash','write','codemode','pui_ask_questions']) assert.equal((await h.events.get('tool_call')({toolName,input:{}},h.ctx)).block,true);
+  assert.equal((await h.events.get('user_bash')({command:'pwd'},h.ctx)).result.exitCode,1);
+});
 test('explicit mailbox delivery is compact, visible and non-interrupting', async () => {
   const h = await host(); h.commands.get('pui-agent-message').handler(JSON.stringify({text:'Clarify the file ownership'}), h.ctx);
   assert.equal(h.messages.length,1); assert.equal(h.messages[0][1].deliverAs,'followUp'); assert.equal(h.messages[0][0].display,true);

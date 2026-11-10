@@ -60,6 +60,7 @@ export default function puiExtension(pi: any) {
   // Read-only is enforced at the tool boundary too, not only by a prompt/CLI allowlist.
   pi.on("tool_call", async (event: any, ctx: any) => {
     if (readonly && !["read", "grep", "find", "ls", "pui_agents", "pui_message_agent", "pui_ask_questions"].includes(event.toolName)) return { block: true, reason: "Read-only Pui worker: tool not allowed" };
+    if (taskRole === "router") return { block: true, reason: "Model router has no tool access." };
     if (taskRole === "checks") return { block: true, reason: "Task check runner executes only host-submitted, approved commands; model tools are disabled." };
     if (taskRole === "builder" && ["bash", "codemode", "pui_spawn_agent"].includes(event.toolName)) return { block: true, reason: "Verified-task builders use bounded file tools only. Approved tests execute in the independent check runner; no shell, codemode, delegation or Git mutations." };
     if (taskRole === "builder" && !["read", "grep", "find", "ls", "edit", "write", "pui_ask_questions"].includes(event.toolName)) return { block: true, reason: "Tool outside verified-task builder allowlist." };
