@@ -663,11 +663,8 @@ impl Pui {
                 if self.prefs.settings.permission == settings::PermissionMode::Plan {
                     return Err("Plan mode cannot create workers".into());
                 }
-                if !self.ultracode
-                    || !self.ultracode_ready
-                    || self.agents.nodes[source].access == "read-only"
-                {
-                    return Err("Enable Ultracode before spawning workers".into());
+                if !self.ultracode_ready || self.agents.nodes[source].access == "read-only" {
+                    return Err("A ready, writable Pui chat is required to create workers".into());
                 }
                 let name = protocol::string(request, "name").trim();
                 let task = protocol::string(request, "task").trim();
@@ -697,9 +694,21 @@ impl Pui {
                 if self.agents.nodes.len() >= 128 {
                     return Err("128 retained agent sessions reached; finish this workflow before creating another".into());
                 }
+                let cwd = match request.get("cwd") {
+                    None => self.prefs.cwd.clone(),
+                    Some(Value::String(path)) if !path.trim().is_empty() && path.len() <= 16384 => {
+                        let path = self.prefs.cwd.join(path);
+                        let path = std::fs::canonicalize(path)
+                            .map_err(|_| "Worker cwd must be an existing local directory")?;
+                        if !path.is_dir() {
+                            return Err("Worker cwd must be an existing local directory".into());
+                        }
+                        path
+                    }
+                    _ => return Err("Invalid worker cwd".into()),
+                };
                 self.agents.next += 1;
                 let id = format!("agent-{}", self.agents.next);
-                let cwd = self.prefs.cwd.clone();
                 let mut node = Node {
                     id: id.clone(),
                     parent: Some(source.into()),
@@ -1498,6 +1507,83 @@ mod tests {
     }
     fn spawn(app: &mut Pui, parent: &str) -> String {
         app.agent_control(parent,&json!({"action":"spawn","name":"Scoped reader","task":"Inspect just model selection and return file references","access":"read-only"})).unwrap()["agent_id"].as_str().unwrap().to_owned()
+    }
+    #[test]
+    fn ordinary_chat_spawns_clickable_children_without_ultracode() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.ultracode = false;
+        app.sessions.clear();
+        let parent = app.agents.active.clone();
+        let child = spawn(&mut app, &parent);
+        let tree = sidebar_tree::forest(&app);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(
+            tree[0].children[0].target,
+            sidebar_tree::Target::Agent(child.clone())
+        );
+        assert_eq!(tree[0].children[0].status, "Queued");
+        app.state.busy = true;
+        app.start_waiting_agents();
+        app.view_agent(&child);
+        assert_eq!(app.agents.active, child);
+        assert!(app.client.is_some());
+        assert!(app.agents.parked[&parent].state.busy);
+    }
+    #[test]
+    fn explicit_worker_workspace_preserves_parent_ownership_and_validates_paths() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.ultracode = false;
+        let parent = app.agents.active.clone();
+        let parent_cwd = app.prefs.cwd.clone();
+        let cwd = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let request = json!({"action":"spawn","name":"Other repo","task":"Inspect source","access":"read-only","cwd":cwd});
+        let child = app.agent_control(&parent, &request).unwrap()["agent_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(app.agents.nodes[&child].cwd, cwd);
+        assert_eq!(app.prefs.cwd, parent_cwd);
+        assert_eq!(
+            app.agents.nodes[&child].parent.as_deref(),
+            Some(parent.as_str())
+        );
+        let count = app.agents.nodes.len();
+        for path in [
+            json!(""),
+            json!("/nonexistent/pui-worker"),
+            json!(cwd.join("Cargo.toml")),
+            json!(42),
+        ] {
+            let mut invalid = request.clone();
+            invalid["cwd"] = path;
+            assert!(app.agent_control(&parent, &invalid).is_err());
+            assert_eq!(app.agents.nodes.len(), count);
+        }
+    }
+    #[test]
+    fn ordinary_spawn_still_requires_ready_writable_chat_and_non_plan_permissions() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.ultracode = false;
+        let parent = app.agents.active.clone();
+        let request =
+            json!({"action":"spawn","name":"reader","task":"Inspect source","access":"read-only"});
+        app.prefs.settings.permission = settings::PermissionMode::Plan;
+        assert!(
+            app.agent_control(&parent, &request)
+                .unwrap_err()
+                .contains("Plan mode")
+        );
+        app.prefs.settings.permission = settings::PermissionMode::Auto;
+        app.ultracode_ready = false;
+        assert!(app.agent_control(&parent, &request).is_err());
+        app.ultracode_ready = true;
+        app.agents.nodes.get_mut(&parent).unwrap().access = "read-only".into();
+        assert!(app.agent_control(&parent, &request).is_err());
+        assert_eq!(app.agents.nodes.len(), 1);
     }
     #[test]
     fn saved_tree_restores_links_without_restarting_agents_or_losing_readonly_policy() {

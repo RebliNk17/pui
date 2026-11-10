@@ -15,7 +15,7 @@ async function host(readonly = false, taskRole = '') {
   const source = stripTypeScriptTypes(raw.replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });'));
   const { default: extension, ULTRACODE_GUIDANCE } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   const tools = new Map(), commands = new Map(), events = new Map(), statuses = [], messages = [], requests = [];
-  let active=[];
+  let active=['read', 'bash', 'subagent', 'mcp__agents__spawn_agent'];
   const pi = {appendEntry:()=>{},getAllTools:()=>[{name:"codemode"}],getActiveTools:()=>active,setActiveTools:tools=>{active=tools;}, registerCommand: (n, v) => commands.set(n, v), registerTool: t => tools.set(t.name, t), on: (n, f) => { const prev=events.get(n); events.set(n, prev ? async (...args) => { const first=await prev(...args); return await f(...args) ?? first; } : f); }, sendMessage: (...args) => messages.push(args) };
   const ctx = { modelRegistry:{getAvailable:()=>[]}, ui: { setStatus: (...args) => statuses.push(args), input: async (...args) => { requests.push(args); return JSON.stringify({ agent_id: 'agent-2' }); } } };
   const old = process.env.PUI_AGENT_ACCESS, oldRole = process.env.PUI_TASK_ROLE;
@@ -25,23 +25,50 @@ async function host(readonly = false, taskRole = '') {
     if (oldRole === undefined) delete process.env.PUI_TASK_ROLE; else process.env.PUI_TASK_ROLE = oldRole;
   }
   await events.get('session_start')({}, ctx);
-  return { tools, commands, events, statuses, messages, requests, ctx, ULTRACODE_GUIDANCE };
+  return { tools, commands, events, statuses, messages, requests, ctx, ULTRACODE_GUIDANCE, active: () => active };
 }
 test('Ultracode does not silently change model thinking or spawn a team', async () => {
   const h = await host();
-  assert.equal(await h.events.get('before_agent_start')({systemPrompt:'base'}), undefined);
-  await assert.rejects(h.tools.get('pui_spawn_agent').execute('', {}, undefined, null, h.ctx), /Enable Ultracode/);
+  const prompt = (await h.events.get('before_agent_start')({systemPrompt:'base'})).systemPrompt;
+  assert.match(prompt, /use pui_spawn_agent/);
+  assert.match(prompt, /not registered with Pui/);
+  assert.doesNotMatch(prompt, /Pui Ultracode is enabled/);
+  assert.ok(h.active().includes('pui_spawn_agent'));
+  assert.ok(h.active().includes('pui_wait_agents'));
+  assert.ok(!h.active().includes('subagent'));
+  assert.ok(!h.active().includes('mcp__agents__spawn_agent'));
+  assert.ok(h.active().includes('bash'));
   h.commands.get('pui-ultracode').handler('on', h.ctx);
   assert.match((await h.events.get('before_agent_start')({systemPrompt:'base'})).systemPrompt, /LOWEST useful number/);
   assert.match(h.ULTRACODE_GUIDANCE, /including zero/);
   assert.equal(h.requests.length, 0);
   assert.equal(h.messages.length, 0);
 });
-test('spawn asks the host and returns an ID, not a mirrored transcript', async () => {
-  const h = await host(); h.commands.get('pui-ultracode').handler('on', h.ctx);
-  const result = await h.tools.get('pui_spawn_agent').execute('call', {name:'reader',task:'Inspect models',access:'read-only'}, undefined, null, h.ctx);
-  const request = JSON.parse(h.requests[0][1]); assert.equal(request.action,'spawn'); assert.equal(request.access,'read-only');
-  assert.equal(result.details.pui.agent_id,'agent-2'); assert.equal(h.messages.length,0);
+test('ordinary spawn uses the host, forwards another repo cwd and survives Ultracode off', async () => {
+  const h = await host();
+  for (const mode of ['off', 'on', 'off']) {
+    h.commands.get('pui-ultracode').handler(mode, h.ctx);
+    assert.ok(h.active().includes('pui_spawn_agent'));
+    const result = await h.tools.get('pui_spawn_agent').execute('call', {name:'reader',task:'Inspect models',access:'read-only',cwd:'/other/repo'}, undefined, null, h.ctx);
+    const request = JSON.parse(h.requests.at(-1)[1]);
+    assert.equal(request.action,'spawn'); assert.equal(request.access,'read-only'); assert.equal(request.cwd,'/other/repo');
+    assert.equal(result.details.pui.agent_id,'agent-2'); assert.equal(h.messages.length,0);
+  }
+});
+test('read-only and task workers cannot activate or directly execute spawning', async () => {
+  for (const [readonly, role] of [[true, ''], [false, 'builder'], [true, 'router'], [false, 'checks']]) {
+    const h = await host(readonly, role);
+    h.commands.get('pui-ultracode').handler('on', h.ctx);
+    assert.ok(!h.active().includes('pui_spawn_agent'));
+    await assert.rejects(h.tools.get('pui_spawn_agent').execute('', {}, undefined, null, h.ctx), /cannot create subagents/);
+    assert.equal(h.requests.length, 0);
+  }
+});
+test('managed spawn errors propagate without falling back to a detached process', async () => {
+  const h = await host();
+  h.ctx.ui.input = async () => JSON.stringify({error:'Plan mode cannot create workers'});
+  await assert.rejects(h.tools.get('pui_spawn_agent').execute('', {}, undefined, null, h.ctx), /Plan mode/);
+  assert.equal(h.messages.length, 0);
 });
 test('read-only workers cannot bypass restrictions through shell, codemode, or MCP', async () => {
   const h = await host(true); const gate = h.events.get('tool_call');
