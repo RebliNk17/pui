@@ -411,31 +411,146 @@ fn images_decode_off_thread_and_unknown_text_formats_still_open() {
     );
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 #[test]
-fn links_route_to_native_viewer_without_external_browser_commands() {
+fn local_preview_links_route_to_native_viewer_without_external_commands() {
+    for url in [
+        "http://localhost:3000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8080",
+    ] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.busy = true;
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+            app.process_open_links(ctx);
+            app.agent_close_guard(ctx);
+        });
+        assert!(app.files.browser_open());
+        assert_eq!(app.files.selected_url.as_deref(), Some(url));
+        assert!(!app.agents.close_prompt);
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::OpenUrl(_)))
+        );
+    }
+}
+
+#[test]
+fn remote_links_and_mailto_use_os_handler_without_changing_the_viewer() {
+    for url in [
+        "https://github.com/example/browser-service/pull/40",
+        "https://example.com",
+        "mailto:test@example.com",
+    ] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.busy = true;
+        app.files
+            .open_target(&ctx, &app.prefs.cwd, "README.md")
+            .unwrap();
+        let selected = app.files.selected.clone();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.open_url(egui::OpenUrl::new_tab(url));
+            app.process_open_links(ctx);
+            app.agent_close_guard(ctx);
+        });
+        assert!(app.files.files_open());
+        assert_eq!(app.files.selected, selected);
+        assert!(app.files.urls.is_empty());
+        assert!(!app.agents.close_prompt);
+        assert!(
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::OpenUrl(open) if open.url == url))
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn explicit_remote_open_still_uses_pui_browser() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
-    let _ = ctx.run(egui::RawInput::default(), |ctx| {
-        ctx.open_url(egui::OpenUrl::new_tab("https://example.com"));
-        app.process_open_links(ctx);
-    });
-    assert!(app.files.open);
+    let request = json!({"type":"extension_ui_request","method":"input","title":"Pui open","id":"open-remote","placeholder":json!({"version":1,"target":"https://example.com"}).to_string()});
+    assert!(app.open_request(&request));
+    assert!(app.files.browser_open());
     assert_eq!(
         app.files.selected_url.as_deref(),
         Some("https://example.com")
     );
-    // Do not build native webviews from the headless kittest Frame.
-    app.files.close();
-    let output = ctx.run(egui::RawInput::default(), |ctx| {
-        ctx.open_url(egui::OpenUrl::new_tab("mailto:test@example.com"));
-        app.process_open_links(ctx);
-    });
-    assert!(
-        output.platform_output.commands.iter().any(
-            |c| matches!(c, egui::OutputCommand::OpenUrl(url) if url.url.starts_with("mailto:"))
-        )
+}
+
+#[test]
+fn browser_escape_is_scoped_to_the_focused_pane_and_never_aborts_chat() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.focus_composer = false;
+    app.state.busy = true;
+    app.draft = "Keep this draft".into();
+    let (client, _, commands) = rpc::Client::stub_with_commands();
+    app.client = Some(client);
+    app.files.toggle_browser(&ctx, &app.prefs.cwd);
+    frame(&ctx, &mut app, vec![]);
+    frame(&ctx, &mut app, vec![]);
+    let pane = app.files.pane_rect.unwrap();
+    click(&ctx, &mut app, pane.center());
+    assert!(app.files.focused(&ctx));
+    frame(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
     );
+    // Flush the stub's FIFO so the absence of abort isn't a thread race.
+    app.send(json!({"type":"focus-test-barrier"}));
+    loop {
+        let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(command["type"], "abort", "Browser Escape must not stop Pi");
+        assert_ne!(command["type"], "clear_queue");
+        if command["type"] == "focus-test-barrier" {
+            break;
+        }
+    }
+    assert!(app.state.busy);
+    assert_eq!(app.draft, "Keep this draft");
+
+    // Clicking back into the chat restores its Escape shortcut, even with
+    // the browser still visible beside it.
+    click(
+        &ctx,
+        &mut app,
+        egui::pos2(pane.left() - 80.0, pane.center().y),
+    );
+    assert!(!app.files.focused(&ctx));
+    frame(
+        &ctx,
+        &mut app,
+        vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    loop {
+        let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
+        if command["type"] == "abort" {
+            break;
+        }
+    }
 }
 
 #[test]

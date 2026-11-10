@@ -722,6 +722,7 @@ impl Pui {
                 ("Toggle sidebar", vec![cmd, "B"]),
                 ("Toggle inspector", vec![cmd, "I"]),
                 ("New conversation", vec![cmd, "N"]),
+                ("Close browser tab / window", vec![cmd, "W"]),
             ]
             .into_iter()
             .enumerate()
@@ -751,7 +752,7 @@ impl Pui {
                 ),
                 ("Recall sent messages in this chat".into(), vec!["↑", "↓"]),
                 ("New line".into(), vec!["Shift", "Enter"]),
-                ("Stop agent".into(), vec!["Esc"]),
+                ("Stop agent (chat focus)".into(), vec!["Esc"]),
             ]
             .into_iter()
             .enumerate()

@@ -198,6 +198,9 @@ impl Pui {
                     Err(_) => self.state.error = Some("Could not open a new Pui window.".into()),
                 }
             }
+            Close if !self.settings_open && self.files.browser_open() => {
+                self.files.close_active_browser_tab();
+            }
             Close | Quit => {
                 // Feed the normal close-request path, including active-agent
                 // confirmation. Never terminate NSApplication behind eframe.
@@ -654,6 +657,49 @@ mod tests {
         assert_eq!(app.draft, "hello");
         frame(&mut app, Some(Command::Redo), vec![]);
         assert!(app.draft.is_empty());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn command_w_closes_browser_tabs_without_requesting_window_close() {
+        for native_menu in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.state.busy = true;
+            app.draft = "keep draft".into();
+            for url in ["http://localhost:3000", "https://example.com"] {
+                app.files.open_target(&ctx, &app.prefs.cwd, url).unwrap();
+            }
+            for expected_open in [true, true, false] {
+                if native_menu {
+                    app.menu.pending.push(Command::Close);
+                }
+                let output = ctx.run(
+                    egui::RawInput {
+                        events: if native_menu {
+                            vec![]
+                        } else {
+                            vec![key_event(egui::Key::W, egui::Modifiers::COMMAND)]
+                        },
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        app.menu_commands(ctx);
+                        app.agent_close_guard(ctx);
+                        assert!(!ctx.input(|i| i.viewport().close_requested()));
+                    },
+                );
+                assert_eq!(app.files.browser_open(), expected_open);
+                assert!(!app.agents.close_prompt);
+                assert!(!app.agents.exiting);
+                assert!(app.state.busy);
+                assert_eq!(app.draft, "keep draft");
+                assert!(!output.viewport_output.values().any(|v| {
+                    v.commands
+                        .iter()
+                        .any(|c| matches!(c, egui::ViewportCommand::Close))
+                }));
+            }
+        }
     }
     #[test]
     fn native_menu_commands_use_shared_actions_and_close_guard() {

@@ -67,6 +67,8 @@ pub(super) struct Browser {
     expanded: bool,
     browser_mode: bool,
     focus_address: bool,
+    input_focus: bool,
+    pane_rect: Option<egui::Rect>,
     root: PathBuf,
     directories: BTreeMap<PathBuf, Directory>,
     expanded_dirs: BTreeSet<PathBuf>,
@@ -103,8 +105,52 @@ impl Browser {
         self.open && self.browser_mode
     }
 
+    pub(super) fn focused(&self, ctx: &egui::Context) -> bool {
+        let composer_focused = ctx.memory(|m| m.has_focus(egui::Id::new("composer")));
+        self.browser_open()
+            && (self.web.focused()
+                || ctx.input(|i| {
+                    if i.pointer.any_pressed() {
+                        i.pointer.interact_pos().is_some_and(|pos| {
+                            self.pane_rect.is_some_and(|rect| rect.contains(pos))
+                        })
+                    } else {
+                        self.input_focus && !composer_focused
+                    }
+                }))
+    }
+
+    pub(super) fn close_active_browser_tab(&mut self) {
+        if let Some(index) = self
+            .urls
+            .iter()
+            .position(|url| Some(url) == self.selected_url.as_ref())
+        {
+            self.close_url_tab(index);
+        } else {
+            self.close();
+        }
+    }
+
+    fn close_url_tab(&mut self, index: usize) {
+        let url = self.urls.remove(index);
+        self.web.close(&url);
+        if self.selected_url.as_ref() == Some(&url) {
+            self.selected_url = self
+                .urls
+                .get(index.min(self.urls.len().saturating_sub(1)))
+                .cloned();
+            self.restore_address();
+        }
+        self.web_preview = None;
+        self.address_error = None;
+        self.focus_address = self.selected_url.is_none();
+    }
+
     pub(super) fn close(&mut self) {
         self.open = false;
+        self.input_focus = false;
+        self.pane_rect = None;
         self.web.hide();
     }
 
@@ -128,6 +174,10 @@ impl Browser {
         self.address_error = None;
         self.restore_address();
         self.focus_address = browser && self.selected_url.is_none();
+        self.input_focus = browser;
+        if browser {
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("composer")));
+        }
     }
 
     fn restore_address(&mut self) {
@@ -343,6 +393,10 @@ impl Browser {
         self.open = true;
         self.address = target.into();
         self.address_error = None;
+        self.input_focus = self.browser_mode;
+        if self.browser_mode {
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("composer")));
+        }
         Ok(())
     }
 
@@ -435,6 +489,17 @@ impl Browser {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        self.pane_rect = Some(rect);
+        if let Some(pos) =
+            ui.input(|i| i.pointer.interact_pos().filter(|_| i.pointer.any_pressed()))
+        {
+            self.input_focus = rect.contains(pos);
+            if self.browser_mode && self.input_focus {
+                ui.ctx()
+                    .memory_mut(|m| m.surrender_focus(egui::Id::new("composer")));
+            }
+        }
         let colors = theme::palette(ui.ctx());
         let ctx = ui.ctx().clone();
         self.chrome(ui);
@@ -830,13 +895,13 @@ impl Pui {
     }
 
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
-        // Keep egui's normal link hit-testing/selection behavior, but consume
-        // HTTP/file commands before eframe can launch an external browser.
+        // Keep remote web links with the OS/default browser. Only local
+        // development previews and files are captured by the docked viewer.
         let mut targets = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| {
                 if let egui::OutputCommand::OpenUrl(url) = command {
-                    if super::webview::web_url(&url.url) {
+                    if cfg!(target_os = "macos") && super::webview::local_preview_url(&url.url) {
                         targets.push(url.url.clone());
                         return false;
                     }

@@ -15,6 +15,21 @@ pub(super) fn web_url(value: &str) -> bool {
     })
 }
 
+/// Only development previews are captured from ordinary clicked web links.
+pub(super) fn local_preview_url(value: &str) -> bool {
+    web_url(value)
+        && url::Url::parse(value).is_ok_and(|url| match url.host() {
+            Some(url::Host::Domain(host)) => {
+                let host = host.trim_end_matches('.');
+                host.eq_ignore_ascii_case("localhost")
+                    || host.to_ascii_lowercase().ends_with(".localhost")
+            }
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        })
+}
+
 /// Local HTML gets no file origin, scripts, frames, forms, or network resources.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn safe_html(source: &str) -> String {
@@ -105,6 +120,12 @@ pub(super) struct BrowserView {
     last_location: String,
 }
 impl BrowserView {
+    pub(super) fn focused(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return self.engine.focused();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
     pub(super) fn hide(&mut self) {
         #[cfg(target_os = "macos")]
         self.engine.hide();
@@ -450,6 +471,32 @@ mod tests {
             "mailto:a@b.com",
         ] {
             assert!(!web_url(value));
+        }
+    }
+    #[test]
+    fn clicked_preview_links_are_strictly_local() {
+        for value in [
+            "http://localhost:3000",
+            "https://LOCALHOST.:3000/a",
+            "http://app.localhost:8080",
+            "http://127.0.0.1:8000",
+            "http://127.1.2.3:8000",
+            "http://[::1]:8080",
+        ] {
+            assert!(local_preview_url(value), "{value}");
+        }
+        for value in [
+            "https://github.com/a/b/pull/40",
+            "https://localhost.example.com",
+            "https://notlocalhost",
+            "https://127.0.0.1.example.com",
+            "https://localhost@example.com",
+            "https://user:pass@localhost:3000",
+            "http://192.168.1.2:3000",
+            "file:///tmp/preview.html",
+            "javascript:alert(1)",
+        ] {
+            assert!(!local_preview_url(value), "{value}");
         }
     }
     #[test]

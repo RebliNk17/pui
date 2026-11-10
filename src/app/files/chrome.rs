@@ -142,12 +142,7 @@ impl Browser {
             self.browser_mode = true;
         }
         if let Some(index) = close_url {
-            let url = self.urls.remove(index);
-            self.web.close(&url);
-            if self.selected_url.as_ref() == Some(&url) {
-                self.selected_url = self.urls.last().cloned();
-                self.restore_address();
-            }
+            self.close_url_tab(index);
         }
         if let Some(index) = close_file {
             self.close_tab(index);

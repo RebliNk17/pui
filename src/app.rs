@@ -1670,6 +1670,7 @@ impl eframe::App for Pui {
             && !self.kanban.open
             && !confirming
             && !terminal_input
+            && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
             && self.state.dialogs.is_empty()

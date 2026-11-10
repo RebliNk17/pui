@@ -58,9 +58,34 @@ wrap_load_handler! {
         }
     }
 }
+// Removing the child view releases CEF's host and completes browser teardown.
+// Defer it until DoClose returns, so destruction cannot re-enter CloseContents.
+wrap_task! {
+    struct RemoveChildView { browser: Browser }
+    impl Task {
+        fn execute(&self) {
+            if self.browser.is_valid() != 1 { return; }
+            if let Some(host) = self.browser.host() {
+                // CEF keeps the view alive until it is removed from its parent.
+                if let Some(view) = unsafe { (host.window_handle() as *const NSView).as_ref() } {
+                    view.removeFromSuperview();
+                }
+            }
+        }
+    }
+}
 wrap_life_span_handler! {
-    struct Lifetime;
+    struct Lifetime { embedded: bool }
     impl LifeSpanHandler {
+        fn do_close(&self, browser: Option<&mut Browser>) -> i32 {
+            if !self.embedded { return 0; } // DevTools owns its own top-level window.
+            if let Some(browser) = browser {
+                let mut task = RemoveChildView::new(browser.clone());
+                cef::post_task(ThreadId::UI, Some(&mut task));
+            }
+            // The default sends performClose: to Pui's NSWindow, not this tab.
+            1
+        }
         fn on_after_created(&self, _browser: Option<&mut Browser>) { crate::chromium::live_browser_created(); }
         fn on_before_close(&self, _browser: Option<&mut Browser>) { crate::chromium::live_browser_closed(); }
         fn on_before_popup(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _popup_id: i32, _target_url: Option<&CefString>, _target_frame_name: Option<&CefString>, _target_disposition: WindowOpenDisposition, _user_gesture: i32, _popup_features: Option<&PopupFeatures>, _window_info: Option<&mut WindowInfo>, _client: Option<&mut Option<Client>>, _settings: Option<&mut BrowserSettings>, _extra_info: Option<&mut Option<DictionaryValue>>, _no_javascript_access: Option<&mut i32>) -> i32 { 1 }
@@ -117,7 +142,7 @@ fn client(events: Events, initial: String, remote: bool, devtools: bool) -> Clie
     PageClient::new(
         Display::new(events.clone()),
         Loading::new(events),
-        Lifetime::new(),
+        Lifetime::new(!devtools),
         Navigation::new(initial, remote, devtools),
         Downloads::new(),
         Permissions::new(),
@@ -134,6 +159,9 @@ struct Tab {
 }
 impl Tab {
     fn host(&self) -> Option<BrowserHost> {
+        if self.browser.is_valid() != 1 {
+            return None;
+        }
         self.browser.host()
     }
     fn view(&self) -> Option<&NSView> {
@@ -202,6 +230,21 @@ pub(super) struct Engine {
     initialization_error: Option<String>,
 }
 impl Engine {
+    pub fn focused(&self) -> bool {
+        self.tabs.values().any(|tab| {
+            let Some(view) = tab.view().filter(|view| !view.isHidden()) else {
+                return false;
+            };
+            view.window()
+                .and_then(|window| window.firstResponder())
+                .and_then(|responder| {
+                    responder
+                        .downcast_ref::<NSView>()
+                        .map(|v| v.isDescendantOf(view))
+                })
+                .unwrap_or(false)
+        })
+    }
     pub fn state(&self, key: &str) -> PageState {
         self.tabs
             .get(key)
