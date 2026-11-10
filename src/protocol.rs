@@ -871,6 +871,17 @@ mod tests {
         assert_eq!(message.images[0].data.as_ref(), "aGVsbG8=");
     }
     #[test]
+    fn command_catalog_survives_an_acknowledged_model_change() {
+        let mut state = State::default();
+        state.apply(json!({"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review current changes"}]}}));
+        state.apply(json!({"type":"response","command":"set_model","success":true,"data":{"id":"gemini-4-argon","name":"Gemini 4 Argon","provider":"local"}}));
+        assert_eq!(state.commands.len(), 1);
+        assert_eq!(state.commands[0].name, "review");
+        assert_eq!(state.model, "gemini-4-argon");
+        assert_eq!(state.model_name, "Gemini 4 Argon");
+        assert_eq!(state.provider, "local");
+    }
+    #[test]
     fn model_metadata_comes_from_pi() {
         let mut state = State::default();
         state.apply(json!({"type":"response","command":"get_state","success":true,"data":{"model":{"id":"id","name":"Friendly","provider":"local"},"thinkingLevel":"high"}}));
