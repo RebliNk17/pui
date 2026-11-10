@@ -123,12 +123,270 @@ fn receiving_a_refreshed_timestamp_reorders_without_a_chat_revision() {
             .insert(pulls.links[index].url.clone(), status(Some(time)));
     }
     assert_eq!(pulls.ordered_links()[0].number, 19);
-    let (tx, rx) = mpsc::channel();
-    pulls.rx = Some(rx);
-    tx.send((pulls.links[1].url.clone(), status(Some(300))))
-        .unwrap();
-    pulls.update(&ctx, &[], 1, true);
+    let cache = Arc::new(Mutex::new(Cache::default()));
+    for (url, status) in &pulls.results {
+        cache.lock().unwrap().record(url.clone(), status.clone(), 0);
+    }
+    // A completed background lookup is picked up without a prose revision.
+    cache.lock().unwrap().entries.insert(
+        pulls.links[1].url.clone(),
+        CachedStatus {
+            status: status(Some(300)),
+            checked_at: 0,
+        },
+    );
+    pulls.cache = Some(cache);
+    pulls.update(&ctx, &[], 1, false);
     assert_eq!(pulls.ordered_links()[0].number, 60);
+}
+
+#[test]
+fn only_non_merged_statuses_expire_after_five_seconds() {
+    let url = pull("a/b", 1).url;
+    let mut cache = Cache::default();
+    assert!(cache.due(&url, 10_000));
+    for state in ["Open", "Draft", "Closed", "Unavailable", "Merged"] {
+        cache.entries.clear();
+        let mut status = status(None);
+        status.state = state.into();
+        cache.record(url.clone(), status, 10_000);
+        assert!(!cache.due(&url, 10_000));
+        assert!(!cache.due(&url, 14_999));
+        assert_eq!(cache.due(&url, 15_000), state != "Merged");
+        assert_eq!(cache.due(&url, i64::MAX), state != "Merged");
+        // A clock adjustment must not postpone refresh indefinitely.
+        assert_eq!(cache.due(&url, 9_000), state != "Merged");
+        cache.in_flight.insert(url.clone());
+        assert!(!cache.due(&url, 20_000));
+        cache.in_flight.clear();
+    }
+}
+
+#[test]
+fn polling_is_bounded_deduplicated_and_prioritizes_unseen_then_oldest() {
+    let links: Vec<_> = (1..=9).map(|number| pull("a/b", number)).collect();
+    let mut cache = Cache::default();
+    for (index, pull) in links.iter().take(7).enumerate() {
+        let mut open = status(None);
+        open.state = "Open".into();
+        cache.record(pull.url.clone(), open, 10_000 - index as i64);
+    }
+    cache.record(links[6].url.clone(), status(None), 20_000);
+    let scheduled = cache.schedule(links.iter().collect(), 30_000);
+    assert_eq!(
+        scheduled,
+        [
+            links[7].url.clone(),
+            links[8].url.clone(),
+            links[5].url.clone(),
+            links[4].url.clone()
+        ]
+    );
+    assert_eq!(cache.in_flight.len(), MAX_IN_FLIGHT);
+    assert!(cache.schedule(links.iter().collect(), 30_000).is_empty());
+    cache.in_flight.remove(&links[7].url);
+    cache.record(links[7].url.clone(), status(None), 30_000);
+    assert_eq!(
+        cache.schedule(links.iter().collect(), 30_000),
+        [links[3].url.clone()]
+    );
+    assert!(!cache.in_flight.contains(&links[6].url));
+}
+
+#[test]
+fn repaint_deadline_tracks_the_next_expiry_instead_of_delaying_each_frame() {
+    let links = vec![pull("a/b", 1), pull("a/b", 2)];
+    let mut cache = Cache::default();
+    cache.record(links[0].url.clone(), status(None), 10_000);
+    let mut open = status(None);
+    open.state = "Open".into();
+    cache.record(links[1].url.clone(), open, 10_000);
+    assert_eq!(
+        cache.next_refresh(&links, 10_000),
+        Some(Duration::from_secs(5))
+    );
+    assert_eq!(
+        cache.next_refresh(&links, 14_999),
+        Some(Duration::from_millis(1))
+    );
+    cache.in_flight.insert(links[1].url.clone());
+    assert_eq!(cache.next_refresh(&links, 15_000), None);
+}
+
+#[test]
+fn manual_refresh_preserves_visible_status_and_never_rechecks_merged_prs() {
+    let links = vec![pull("a/b", 1), pull("a/b", 2)];
+    let mut cache = Cache::default();
+    cache.record(links[0].url.clone(), status(None), 10_000);
+    let mut open = status(None);
+    open.state = "Open".into();
+    cache.record(links[1].url.clone(), open, 10_000);
+    cache.refresh(&links);
+    assert!(!cache.due(&links[0].url, 10_001));
+    assert!(cache.due(&links[1].url, 10_001));
+    assert_eq!(cache.entries[&links[0].url].status.state, "Merged");
+    assert_eq!(cache.entries[&links[1].url].status.state, "Open");
+}
+
+#[test]
+fn failed_refresh_keeps_last_known_status_and_merged_is_immutable() {
+    let url = pull("a/b", 1).url;
+    let mut cache = Cache::default();
+    let mut open = status(Some(100));
+    open.state = "Open".into();
+    cache.record(url.clone(), open, 10_000);
+    cache.record(
+        url.clone(),
+        Status {
+            state: "Unavailable".into(),
+            error: Some("Offline".into()),
+            ..Default::default()
+        },
+        20_000,
+    );
+    let cached = &cache.entries[&url];
+    assert_eq!(cached.status.state, "Open");
+    assert_eq!(cached.status.checks, "Checks passed");
+    assert_eq!(cached.status.updated_at, Some(100));
+    assert_eq!(cached.status.error.as_deref(), Some("Offline"));
+    assert_eq!(cached.checked_at, 20_000);
+    cache.record(url.clone(), status(Some(200)), 30_000);
+    cache.record(url.clone(), Status::default(), 40_000);
+    assert_eq!(cache.entries[&url].status.state, "Merged");
+    assert!(cache.entries[&url].status.error.is_none());
+    assert_eq!(cache.entries[&url].checked_at, 30_000);
+}
+
+#[test]
+fn switching_chats_reuses_statuses_and_in_flight_requests() {
+    let ctx = egui::Context::default();
+    let pull = pull("a/b", 1);
+    let messages = vec![Message {
+        role: "assistant".into(),
+        text: pull.url.clone(),
+        ..Default::default()
+    }];
+    let cache = shared_cache(&ctx);
+    {
+        let mut cache = cache.lock().unwrap();
+        cache.home = None;
+        let mut open = status(None);
+        open.state = "Open".into();
+        cache.record(pull.url.clone(), open, 0);
+        cache.in_flight.insert(pull.url.clone());
+    }
+    let mut first_chat = Pulls::default();
+    first_chat.update(&ctx, &messages, 1, false);
+    assert_eq!(first_chat.results[&pull.url].state, "Open");
+    let mut second_chat = Pulls::default();
+    second_chat.update(&ctx, &messages, 1, false);
+    assert_eq!(second_chat.results[&pull.url].state, "Open");
+    assert_eq!(cache.lock().unwrap().in_flight.len(), 1);
+    assert!(Arc::ptr_eq(
+        first_chat.cache.as_ref().unwrap(),
+        second_chat.cache.as_ref().unwrap()
+    ));
+    // The worker can finish after the original chat has gone away.
+    drop(first_chat);
+    cache
+        .lock()
+        .unwrap()
+        .record(pull.url.clone(), status(None), 10_000);
+    cache.lock().unwrap().in_flight.remove(&pull.url);
+    second_chat.update(&ctx, &messages, 1, false);
+    assert_eq!(second_chat.results[&pull.url].state, "Merged");
+    assert!(cache.lock().unwrap().in_flight.is_empty());
+    assert_eq!(
+        inline(&ctx, &pull.url).as_deref(),
+        Some(" · Merged · Checks passed")
+    );
+}
+
+#[test]
+fn disk_cache_survives_restart_and_stale_writers_cannot_undo_a_merge() {
+    let home = std::env::temp_dir().join(format!("pui-pulls-{}", uuid::Uuid::new_v4()));
+    let url = pull("a/b", 1).url;
+    let mut cache = Cache {
+        home: Some(home.clone()),
+        ..Default::default()
+    };
+    cache.record(url.clone(), status(Some(100)), 10_000);
+    let mut restarted = Cache {
+        home: Some(home.clone()),
+        ..Default::default()
+    };
+    restarted.load(&url);
+    assert_eq!(restarted.entries[&url].status.state, "Merged");
+    assert_eq!(restarted.entries[&url].status.updated_at, Some(100));
+    assert!(!restarted.due(&url, i64::MAX));
+    let mut stale_window = Cache {
+        home: Some(home.clone()),
+        ..Default::default()
+    };
+    stale_window.record(url.clone(), Status::default(), 20_000);
+    assert_eq!(stale_window.entries[&url].status.state, "Merged");
+    assert_eq!(store::load(&home, &url).unwrap().status.state, "Merged");
+
+    let open_url = pull("a/b", 2).url;
+    let mut open = status(Some(200));
+    open.state = "Open".into();
+    cache.record(open_url.clone(), open, 20_000);
+    restarted.load(&open_url);
+    assert_eq!(restarted.entries[&open_url].status.state, "Open");
+    assert!(!restarted.due(&open_url, 24_999));
+    assert!(restarted.due(&open_url, 25_000));
+    let mut stale = status(Some(50));
+    stale.state = "Closed".into();
+    stale_window.record(open_url.clone(), stale, 15_000);
+    assert_eq!(stale_window.entries[&open_url].status.state, "Open");
+    assert!(store::load(&home, &pull("other/repo", 1).url).is_none());
+    // Merged wins even when clocks differ between windows.
+    stale_window.record(open_url.clone(), status(Some(300)), 1);
+    assert_eq!(
+        store::load(&home, &open_url).unwrap().status.state,
+        "Merged"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for file in std::fs::read_dir(&home).unwrap() {
+            assert_eq!(
+                file.unwrap().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn demo_does_not_initialize_or_fetch_the_real_cache() {
+    let ctx = egui::Context::default();
+    let mut pulls = Pulls::default();
+    pulls.update(
+        &ctx,
+        &[Message {
+            role: "assistant".into(),
+            text: pull("a/b", 1).url,
+            ..Default::default()
+        }],
+        1,
+        true,
+    );
+    assert!(pulls.cache.is_none());
+    assert!(pulls.results.is_empty());
+}
+
+#[test]
+fn merged_state_is_recognized_even_without_a_merge_timestamp() {
+    assert_eq!(
+        from_json(&serde_json::json!({"state": "MERGED"})).state,
+        "Merged"
+    );
 }
 
 #[test]

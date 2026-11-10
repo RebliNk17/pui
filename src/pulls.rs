@@ -1,25 +1,33 @@
-//! Read-only, event-driven GitHub status. Only explicit PR URLs in chat prose.
+//! Cached, read-only GitHub status. Only explicit PR URLs in chat prose.
 use crate::{
     icons::{self, Icon},
     protocol::Message,
     rpc, theme,
 };
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
+    path::PathBuf,
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+mod store;
+
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_IN_FLIGHT: usize = 4;
+type SharedCache = Arc<Mutex<Cache>>;
 #[derive(Clone, Debug)]
 pub struct Pull {
     pub url: String,
     pub repo: String,
     pub number: u64,
 }
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct Status {
     pub state: String,
     pub checks: String,
@@ -31,10 +39,115 @@ pub struct Status {
 pub struct Pulls {
     pub links: Vec<Pull>,
     pub results: BTreeMap<String, Status>,
-    rx: Option<Receiver<(String, Status)>>,
-    requested: std::collections::BTreeSet<String>,
+    cache: Option<SharedCache>,
     revision: Option<u64>,
 }
+
+#[derive(Clone, Deserialize, Serialize)]
+struct CachedStatus {
+    status: Status,
+    checked_at: i64,
+}
+
+#[derive(Default)]
+struct Cache {
+    entries: BTreeMap<String, CachedStatus>,
+    in_flight: BTreeSet<String>,
+    home: Option<PathBuf>,
+}
+
+impl Cache {
+    fn load(&mut self, url: &str) {
+        if !self.entries.contains_key(url)
+            && let Some(entry) = self.home.as_deref().and_then(|home| store::load(home, url))
+        {
+            self.entries.insert(url.to_owned(), entry);
+        }
+    }
+
+    fn due(&self, url: &str, now: i64) -> bool {
+        !self.in_flight.contains(url)
+            && self.entries.get(url).is_none_or(|entry| {
+                entry.status.state != "Merged"
+                    && !(0..REFRESH_INTERVAL.as_millis() as i64)
+                        .contains(&now.saturating_sub(entry.checked_at))
+            })
+    }
+
+    fn schedule(&mut self, mut links: Vec<&Pull>, now: i64) -> Vec<String> {
+        links.retain(|pull| self.due(&pull.url, now));
+        // Unseen PRs first, then the oldest check, so long lists cannot starve.
+        links.sort_by_key(|pull| self.entries.get(&pull.url).map(|entry| entry.checked_at));
+        let urls: Vec<_> = links
+            .into_iter()
+            .take(MAX_IN_FLIGHT.saturating_sub(self.in_flight.len()))
+            .map(|pull| pull.url.clone())
+            .collect();
+        self.in_flight.extend(urls.iter().cloned());
+        urls
+    }
+
+    fn next_refresh(&self, links: &[Pull], now: i64) -> Option<Duration> {
+        links
+            .iter()
+            .filter(|pull| !self.in_flight.contains(&pull.url))
+            .filter_map(|pull| self.entries.get(&pull.url))
+            .filter(|entry| entry.status.state != "Merged")
+            .map(|entry| {
+                let elapsed = now.saturating_sub(entry.checked_at).max(0) as u64;
+                REFRESH_INTERVAL.saturating_sub(Duration::from_millis(elapsed))
+            })
+            .min()
+    }
+
+    fn record(&mut self, url: String, mut status: Status, now: i64) {
+        if let Some(previous) = self.entries.get(&url) {
+            if previous.status.state == "Merged" {
+                return;
+            }
+            // A transient auth/network failure must not erase a known state.
+            if status.error.is_some() {
+                status = Status {
+                    error: status.error,
+                    ..previous.status.clone()
+                };
+            }
+        }
+        let mut entry = CachedStatus {
+            status,
+            checked_at: now,
+        };
+        if let Some(home) = &self.home
+            && let Ok(saved) = store::save(home, &url, &entry)
+        {
+            entry = saved;
+        }
+        self.entries.insert(url, entry);
+    }
+
+    fn refresh(&mut self, links: &[Pull]) {
+        for pull in links {
+            if let Some(entry) = self.entries.get_mut(&pull.url)
+                && entry.status.state != "Merged"
+            {
+                entry.checked_at = 0;
+            }
+        }
+    }
+}
+
+fn shared_cache(ctx: &egui::Context) -> SharedCache {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_insert_with(egui::Id::new("pull-status-service"), || {
+            Arc::new(Mutex::new(Cache {
+                home: dirs::data_local_dir().map(|home| home.join("pui/pulls-v1")),
+                ..Default::default()
+            }))
+        })
+        .clone()
+    })
+}
+
 fn parse_url(url: &str) -> Option<Pull> {
     let rest = url
         .strip_prefix("https://github.com/")
@@ -82,47 +195,46 @@ pub fn referenced(messages: &[Message]) -> Vec<Pull> {
 }
 impl Pulls {
     pub fn update(&mut self, ctx: &egui::Context, messages: &[Message], revision: u64, demo: bool) {
-        if let Some(rx) = &self.rx {
-            loop {
-                match rx.try_recv() {
-                    Ok((url, status)) => {
-                        self.results.insert(url, status);
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        self.rx = None;
-                        break;
-                    }
-                }
-            }
-        }
         if self.revision != Some(revision) {
             self.revision = Some(revision);
             self.links = referenced(messages);
         }
 
-        if !demo && self.rx.is_none() {
-            let missing: Vec<_> = self
-                .ordered_links()
-                .into_iter()
-                .filter(|p| !self.requested.contains(&p.url))
-                .take(20)
-                .cloned()
+        if !demo {
+            let cache = self.cache.get_or_insert_with(|| shared_cache(ctx)).clone();
+            let mut cached = cache.lock().unwrap();
+            for pull in &self.links {
+                cached.load(&pull.url);
+            }
+            self.results = self
+                .links
+                .iter()
+                .filter_map(|pull| {
+                    cached
+                        .entries
+                        .get(&pull.url)
+                        .map(|entry| (pull.url.clone(), entry.status.clone()))
+                })
                 .collect();
-            if !missing.is_empty() {
-                for p in &missing {
-                    self.requested.insert(p.url.clone());
-                }
-                let (tx, rx) = mpsc::channel();
-                self.rx = Some(rx);
+
+            let now = chrono::Utc::now().timestamp_millis();
+            for url in cached.schedule(self.ordered_links(), now) {
+                let cache = cache.clone();
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
-                    for pull in missing {
-                        let status = fetch(&pull.url);
-                        let _ = tx.send((pull.url, status));
-                        ctx.request_repaint();
-                    }
+                    let status = fetch(&url);
+                    let mut cached = cache.lock().unwrap();
+                    cached.record(url.clone(), status, chrono::Utc::now().timestamp_millis());
+                    cached.in_flight.remove(&url);
+                    drop(cached);
+                    ctx.request_repaint();
                 });
+            }
+            // Workers repaint on completion; don't spin while every slot is busy.
+            if cached.in_flight.len() < MAX_IN_FLIGHT
+                && let Some(delay) = cached.next_refresh(&self.links, now)
+            {
+                ctx.request_repaint_after(delay);
             }
         }
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("pull-status-cache"), self.results.clone()));
@@ -194,10 +306,11 @@ impl Pulls {
                 };
                 ui.label(theme::small(ui, summary).size(10.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::labeled_button(ui, Icon::Refresh, "Refresh", true).clicked() {
-                        for p in &self.links {
-                            self.requested.remove(&p.url);
-                        }
+                    if icons::labeled_button(ui, Icon::Refresh, "Refresh", true).clicked()
+                        && let Some(cache) = &self.cache
+                    {
+                        cache.lock().unwrap().refresh(&self.links);
+                        ui.ctx().request_repaint();
                     }
                 });
             });
@@ -391,7 +504,7 @@ fn fetch(url: &str) -> Status {
     }
 }
 fn from_json(raw: &Value) -> Status {
-    let state = if raw["mergedAt"].is_string() {
+    let state = if raw["mergedAt"].is_string() || raw["state"] == "MERGED" {
         "Merged"
     } else if raw["isDraft"] == true {
         "Draft"
