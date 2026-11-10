@@ -156,38 +156,6 @@ impl Pui {
                         });
                     });
                 ui.add_space(10.0);
-                egui::Frame::new()
-                    .fill(colors.bg)
-                    .corner_radius(8)
-                    .inner_margin(3)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let width = (ui.available_width() - 3.0) / 2.0;
-                        ui.horizontal(|ui| {
-                            for (index, label) in ["Recent", "Projects"].iter().enumerate() {
-                                let selected = self.projects == (index == 1);
-                                if ui
-                                    .add_sized(
-                                        [width, theme::CONTROL_HEIGHT],
-                                        egui::Button::new(RichText::new(*label).size(11.5).color(
-                                            if selected { colors.text } else { colors.muted },
-                                        ))
-                                        .fill(if selected {
-                                            colors.hover
-                                        } else {
-                                            Color32::TRANSPARENT
-                                        })
-                                        .stroke(Stroke::NONE)
-                                        .corner_radius(6),
-                                    )
-                                    .clicked()
-                                {
-                                    self.projects = index == 1;
-                                }
-                            }
-                        });
-                    });
-                ui.add_space(10.0);
                 // Reserve exactly the footer, not a 95px estimate followed by extra layout padding.
                 egui::TopBottomPanel::bottom("account-footer-v2")
                     .exact_height(55.0)
@@ -204,20 +172,16 @@ impl Pui {
                             "ARCHIVED"
                         } else if self.projects {
                             "PROJECTS"
-                        } else if self.demo {
-                            "PREVIEW SESSIONS"
                         } else {
-                            "RECENT SESSIONS"
+                            "SESSIONS"
                         },
                     ));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Refresh, "Refresh sessions").clicked() {
-                            self.refresh_sessions();
-                        }
+                        self.session_list_controls(ui);
                     });
                 });
                 let query = self.search.trim().to_lowercase();
-                let visible: Vec<_> = branches
+                let mut visible: Vec<_> = branches
                     .iter()
                     .enumerate()
                     .filter(|(_, branch)| {
@@ -229,6 +193,8 @@ impl Pui {
                     })
                     .map(|(index, _)| index)
                     .collect();
+                let order = self.prefs.session_order;
+                visible.sort_by(|a, b| order.compare(&branches[*a], &branches[*b]));
                 let mut groups: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
                 if self.projects {
                     for index in &visible {
@@ -243,13 +209,6 @@ impl Pui {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        if self.prefs.chats.values().any(|m| m.hidden)
-                            && ui.button("Restore hidden chats").clicked()
-                        {
-                            for meta in self.prefs.chats.values_mut() {
-                                meta.hidden = false;
-                            }
-                        }
                         if visible.is_empty() {
                             ui.label(theme::small(
                                 ui,
@@ -264,9 +223,10 @@ impl Pui {
                         }
                         if self.projects {
                             let mut groups: Vec<_> = groups.into_iter().collect();
-                            groups.sort_by_key(|(_, indices)| indices[0]);
-                            for (project, mut indices) in groups {
-                                indices.sort_by_key(|i| std::cmp::Reverse(branches[*i].modified));
+                            groups.sort_by(|a, b| {
+                                order.compare_groups((&a.0, &a.1), (&b.0, &b.1), &branches)
+                            });
+                            for (project, indices) in groups {
                                 let open = !self.closed_projects.contains(&project);
                                 let (_, rect) = ui.allocate_space(Vec2::new(
                                     ui.available_width(),
@@ -397,9 +357,7 @@ impl Pui {
                                 ui.add_space(6.0);
                             }
                         } else {
-                            let mut indices = visible;
-                            indices.sort_by_key(|i| !branches[*i].pinned);
-                            for index in indices {
+                            for index in visible {
                                 if let Some(next) = self.branch_row(ui, &branches[index], 0, &query)
                                 {
                                     action = Some(next);
@@ -447,6 +405,7 @@ impl Pui {
                         cwd: cwd.clone(),
                         project: cwd,
                         title: "Parent chat".into(),
+                        created: None,
                         modified: std::time::SystemTime::UNIX_EPOCH,
                     });
                 }
@@ -482,6 +441,82 @@ impl Pui {
             }
         }
     }
+    fn session_list_controls(&mut self, ui: &mut egui::Ui) -> [egui::Response; 2] {
+        // The header lays these out right-to-left: Filter, then Group visually.
+        let group = icons::button(ui, Icon::Group, "Group sessions");
+        group.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Group sessions")
+        });
+        egui::Popup::menu(&group)
+            .id(ui.make_persistent_id("session-group-menu"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(150.0);
+                ui.label(theme::caption(ui, "GROUP BY"));
+                ui.radio_value(&mut self.projects, false, "Recent");
+                ui.radio_value(&mut self.projects, true, "Project");
+            });
+        let filter = icons::button(ui, Icon::Filter, "Filter and sort sessions");
+        filter.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Filter and sort sessions")
+        });
+        egui::Popup::menu(&filter)
+            .id(ui.make_persistent_id("session-filter-menu"))
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(190.0);
+                ui.label(theme::caption(ui, "SORT BY"));
+                for sort in [
+                    sidebar_order::Sort::Activity,
+                    sidebar_order::Sort::Created,
+                    sidebar_order::Sort::Name,
+                ] {
+                    if ui
+                        .radio_value(&mut self.prefs.session_order.sort, sort, sort.label())
+                        .changed()
+                    {
+                        self.prefs.session_order.reverse = false;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    let names = self.prefs.session_order.sort == sidebar_order::Sort::Name;
+                    ui.radio_value(
+                        &mut self.prefs.session_order.reverse,
+                        false,
+                        if names { "A–Z" } else { "Newest first" },
+                    );
+                    ui.radio_value(
+                        &mut self.prefs.session_order.reverse,
+                        true,
+                        if names { "Z–A" } else { "Oldest first" },
+                    );
+                });
+                ui.separator();
+                ui.checkbox(&mut self.prefs.session_order.pinned_first, "Pinned first");
+                ui.checkbox(&mut self.show_archived, "Show archived");
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.session_rx.is_none() && !self.demo,
+                        egui::Button::new("Refresh sessions"),
+                    )
+                    .clicked()
+                {
+                    self.refresh_sessions();
+                    ui.close();
+                }
+                if self.prefs.chats.values().any(|m| m.hidden)
+                    && ui.button("Restore hidden chats").clicked()
+                {
+                    for meta in self.prefs.chats.values_mut() {
+                        meta.hidden = false;
+                    }
+                    ui.close();
+                }
+            });
+        [filter, group]
+    }
+
     fn begin_rename(&mut self, path: PathBuf) {
         self.rename_text = self
             .prefs
@@ -1339,6 +1374,7 @@ mod tests {
             cwd: app.prefs.cwd.clone(),
             project: app.prefs.cwd.clone(),
             title: "Untitled session".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         }];
         let (client, events) = rpc::Client::stub_with_events();
@@ -1399,6 +1435,154 @@ mod tests {
         app.shutdown_agents();
     }
 
+    fn label_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+        fn find(shape: &egui::Shape, label: &str) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == label => {
+                    Some(egui::Rect::from_min_size(t.pos, t.galley.size()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, label)),
+                _ => None,
+            }
+        }
+        output.shapes.iter().find_map(|s| find(&s.shape, label))
+    }
+    fn controls_frame(
+        ctx: &egui::Context,
+        app: &mut Pui,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, [egui::Rect; 2]) {
+        let mut rects = [egui::Rect::NOTHING; 2];
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        rects = app.session_list_controls(ui).map(|r| r.rect);
+                    });
+                });
+            },
+        );
+        (output, rects)
+    }
+    fn click_control(ctx: &egui::Context, app: &mut Pui, index: usize) {
+        let (_, rects) = controls_frame(ctx, app, vec![]);
+        click_controls_at(ctx, app, rects[index].center());
+    }
+    fn click_controls_at(ctx: &egui::Context, app: &mut Pui, pos: egui::Pos2) {
+        for pressed in [true, false] {
+            controls_frame(
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+    fn click_label(ctx: &egui::Context, app: &mut Pui, label: &str) {
+        let (output, _) = controls_frame(ctx, app, vec![]);
+        let pos = label_rect(&output, label)
+            .unwrap_or_else(|| panic!("Missing {label}"))
+            .center();
+        click_controls_at(ctx, app, pos);
+    }
+    #[test]
+    fn icon_menus_separate_grouping_from_filter_sort_and_restore_actions() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.prefs
+            .chats
+            .entry(app.sessions[0].path.clone())
+            .or_default()
+            .hidden = true;
+        for _ in 0..3 {
+            controls_frame(&ctx, &mut app, vec![]);
+        }
+        click_control(&ctx, &mut app, 1);
+        assert!(egui::Popup::is_any_open(&ctx));
+        let (output, _) = controls_frame(&ctx, &mut app, vec![]);
+        assert!(label_rect(&output, "GROUP BY").is_some());
+        assert!(label_rect(&output, "SORT BY").is_none());
+        click_label(&ctx, &mut app, "Project");
+        assert!(app.projects);
+        click_label(&ctx, &mut app, "Recent");
+        assert!(!app.projects);
+        click_control(&ctx, &mut app, 0);
+        let (output, _) = controls_frame(&ctx, &mut app, vec![]);
+        assert!(label_rect(&output, "SORT BY").is_some());
+        assert!(label_rect(&output, "GROUP BY").is_none());
+        click_label(&ctx, &mut app, "Name");
+        assert!(app.prefs.session_order.sort == sidebar_order::Sort::Name);
+        click_label(&ctx, &mut app, "Z–A");
+        assert!(app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Pinned first");
+        assert!(!app.prefs.session_order.pinned_first);
+        click_label(&ctx, &mut app, "Creation time");
+        assert!(app.prefs.session_order.sort == sidebar_order::Sort::Created);
+        assert!(!app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Oldest first");
+        assert!(app.prefs.session_order.reverse);
+        click_label(&ctx, &mut app, "Show archived");
+        assert!(app.show_archived);
+        click_label(&ctx, &mut app, "Restore hidden chats");
+        assert!(app.prefs.chats.values().all(|m| !m.hidden));
+        assert!(!egui::Popup::is_any_open(&ctx));
+    }
+    #[test]
+    fn sort_applies_to_visible_rows_in_recent_and_project_views() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            let template = app.sessions[0].clone();
+            app.sessions = [("Zebra", 30, 10), ("Alpha", 10, 30), ("Beta", 20, 20)]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (title, created, modified))| Session {
+                    path: PathBuf::from(format!("/fixture/{i}.jsonl")),
+                    title: title.into(),
+                    created: Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(created)),
+                    modified: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(modified),
+                    ..template.clone()
+                })
+                .collect();
+            for (sort, expected) in [
+                (sidebar_order::Sort::Name, ["Alpha", "Beta", "Zebra"]),
+                (sidebar_order::Sort::Activity, ["Alpha", "Beta", "Zebra"]),
+                (sidebar_order::Sort::Created, ["Zebra", "Beta", "Alpha"]),
+            ] {
+                for reverse in [false, true] {
+                    app.prefs.session_order = sidebar_order::Options {
+                        sort,
+                        reverse,
+                        ..Default::default()
+                    };
+                    frame(&ctx, &mut app, vec![]);
+                    let output = frame(&ctx, &mut app, vec![]);
+                    let mut positions =
+                        expected.map(|s| label_rect(&output, s).unwrap().center().y);
+                    if reverse {
+                        positions.reverse();
+                    }
+                    assert!(positions[0] < positions[1] && positions[1] < positions[2]);
+                }
+            }
+        }
+    }
     #[test]
     fn header_has_aligned_controls_below_native_traffic_light_clearance() {
         fn text(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
@@ -1433,8 +1617,11 @@ mod tests {
                 .find(|(s, _)| s == "Search sessions")
                 .unwrap()
                 .1;
-            let recent = labels.iter().find(|(s, _)| s == "Recent").unwrap().1;
-            let projects = labels.iter().find(|(s, _)| s == "Projects").unwrap().1;
+            let heading = labels.iter().find(|(s, _)| s == "SESSIONS").unwrap().1;
+            assert!(!labels.iter().any(|(s, _)| matches!(
+                s.as_str(),
+                "View" | "Filter" | "Group" | "Recent" | "Projects"
+            )));
             assert!(
                 title.left() < 70.0,
                 "Title should align with sidebar controls, not be displaced by traffic lights"
@@ -1446,10 +1633,17 @@ mod tests {
                 );
             }
             assert!(title.bottom() < search.top());
-            assert!(search.bottom() < recent.top());
+            assert!(search.bottom() < heading.top());
+            let (controls, [filter, group]) = controls_frame(&ctx, &mut app, vec![]);
+            assert!(filter.right() <= group.left());
+            assert!((filter.center().y - group.center().y).abs() <= 1.0 / zoom);
+            assert_eq!(filter.size(), group.size());
             assert!(
-                (recent.center().y - projects.center().y).abs() <= 1.0 / zoom,
-                "Segment labels must share a baseline within pixel rounding at scale {zoom}: {recent:?} / {projects:?}"
+                controls
+                    .shapes
+                    .iter()
+                    .all(|s| !matches!(&s.shape, egui::Shape::Text(_))),
+                "Buttons must be icons only"
             );
         }
     }
@@ -1967,6 +2161,7 @@ mod tests {
             cwd: cwd.clone(),
             project: cwd,
             title: "Target chat".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         };
         app.open_chat(session.clone());

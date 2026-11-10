@@ -14,6 +14,7 @@ fn session(path: &str, title: &str) -> Session {
         cwd: "/fixture/project".into(),
         project: "/fixture/project".into(),
         title: title.into(),
+        created: None,
         modified: SystemTime::now(),
     }
 }

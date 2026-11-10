@@ -20,6 +20,7 @@ pub(super) struct Branch {
     pub status: String,
     pub cwd: PathBuf,
     pub project: PathBuf,
+    pub created: Option<SystemTime>,
     pub modified: SystemTime,
     pub children: Vec<Branch>,
     pub pinned: bool,
@@ -97,6 +98,7 @@ fn empty(
         status: String::new(),
         cwd,
         project,
+        created: None,
         modified: SystemTime::UNIX_EPOCH,
         children: Vec::new(),
         pinned: false,
@@ -134,6 +136,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
             s.cwd.clone(),
             s.project.clone(),
         );
+        row.created = s.created;
         row.modified = s.modified;
         preferences(app, &mut row);
         order.push(key.clone());

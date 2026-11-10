@@ -13,6 +13,7 @@ pub struct Session {
     pub cwd: PathBuf,
     pub project: PathBuf,
     pub title: String,
+    pub created: Option<SystemTime>,
     pub modified: SystemTime,
 }
 
@@ -77,6 +78,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     let reader = BufReader::new(file.take(96 * 1024 * 1024));
     let mut prefix_bytes = 0;
     let mut cwd = None;
+    let mut created = None;
     let mut prompt = None;
     let mut name = None;
     for line in reader.lines().map_while(Result::ok) {
@@ -86,6 +88,10 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         };
         if string(&entry, "type") == "session" {
             cwd = entry["cwd"].as_str().map(PathBuf::from);
+            created = entry["timestamp"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(SystemTime::from);
         }
         if string(&entry, "type") == "message"
             && string(&entry["message"], "role") == "user"
@@ -136,6 +142,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         cwd: cwd.clone()?,
         project: cwd?,
         title: name.or(prompt).unwrap_or_else(|| "New conversation".into()),
+        created,
         modified,
     })
 }
@@ -289,6 +296,23 @@ mod tests {
         let session = read_session(&path, SystemTime::now()).unwrap();
         fs::remove_file(path).unwrap();
         session
+    }
+    #[test]
+    fn creation_time_comes_from_session_header_not_last_activity() {
+        let session = fixture(&[serde_json::json!({
+            "type":"session", "cwd":"/fixture", "timestamp":"2024-01-02T03:04:05.000Z"
+        })]);
+        let expected = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap();
+        assert_eq!(session.created, Some(SystemTime::from(expected)));
+        assert_ne!(session.created, Some(session.modified));
+        assert_eq!(fixture(&[]).created, None);
+        assert_eq!(
+            fixture(&[
+                serde_json::json!({"type":"session", "cwd":"/fixture", "timestamp":"invalid"})
+            ])
+            .created,
+            None
+        );
     }
     #[test]
     fn title_survives_first_prompt_crossing_old_prefix_limit() {

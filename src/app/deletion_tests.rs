@@ -73,6 +73,7 @@ fn chat_overflow_has_permanent_delete_and_requires_a_second_explicit_click() {
         cwd: home.clone(),
         project: home,
         title: "Delete fixture".into(),
+        created: None,
         modified: std::time::SystemTime::now(),
     });
     let ctx = app.ctx.clone();

@@ -1626,6 +1626,7 @@ mod tests {
             cwd: app.prefs.cwd.clone(),
             project: app.prefs.cwd.clone(),
             title: "Original run".into(),
+            created: None,
             modified: std::time::SystemTime::now(),
         };
         let second = Session {

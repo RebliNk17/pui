@@ -26,6 +26,7 @@ mod rewind;
 mod run_status;
 mod settings;
 mod sidebar;
+mod sidebar_order;
 mod sidebar_tree;
 mod sync;
 mod tasks;
@@ -72,6 +73,7 @@ struct Preferences {
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,
     projects_view: bool,
+    session_order: sidebar_order::Options,
     closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
 }
@@ -1492,6 +1494,7 @@ impl Pui {
                 _ => "/demo/AlteryraMVP",
             }),
             title: (*title).into(),
+            created: Some(now - Duration::from_secs((i as u64 + 1) * 86400)),
             modified: now - Duration::from_secs(i as u64 * 3900),
         })
         .collect();
