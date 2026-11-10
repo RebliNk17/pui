@@ -172,9 +172,14 @@ impl Pui {
         if !self.demo {
             // Connecting/busy/approval/mirror chats keep their original state
             // and connection, including drafts, images and pending deliveries.
-            self.ensure_agent();
-            self.publish_live();
-            self.park_tree();
+            if !self.agents.active.is_empty()
+                || self.client.is_some()
+                || self.state.session_file.is_some()
+            {
+                self.ensure_agent();
+                self.publish_live();
+                self.park_tree();
+            }
         } else {
             self.demo = false;
             self.sessions.clear();
