@@ -3,6 +3,9 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+mod styles;
+pub use styles::{DarkStyle, LightStyle, Styles};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Theme {
     #[default]
@@ -11,10 +14,7 @@ pub enum Theme {
 }
 impl Theme {
     pub fn palette(self) -> &'static Palette {
-        match self {
-            Self::Dark => &DARK,
-            Self::Light => &LIGHT,
-        }
+        Styles::default().palette(self)
     }
     pub fn apply(self, ctx: &egui::Context) {
         ctx.set_theme(match self {
@@ -54,7 +54,7 @@ pub struct Palette {
     pub switch_off: Color32,
 }
 
-const DARK: Palette = Palette {
+const NEUTRAL_DARK: Palette = Palette {
     bg: Color32::from_rgb(25, 25, 25),
     sidebar: Color32::from_rgb(32, 32, 32),
     surface: Color32::from_rgb(32, 32, 32),
@@ -83,7 +83,7 @@ const DARK: Palette = Palette {
     switch_off: Color32::from_rgb(63, 63, 63),
 };
 
-const LIGHT: Palette = Palette {
+const NEUTRAL_LIGHT: Palette = Palette {
     bg: Color32::from_rgb(250, 250, 248),
     sidebar: Color32::from_rgb(242, 242, 239),
     surface: Color32::from_rgb(255, 255, 253),
@@ -114,10 +114,11 @@ const LIGHT: Palette = Palette {
 
 /// Resolve per context, not globally: windows and tests may use different themes.
 pub fn palette(ctx: &egui::Context) -> &'static Palette {
-    match ctx.theme() {
-        egui::Theme::Dark => &DARK,
-        egui::Theme::Light => &LIGHT,
-    }
+    let mode = match ctx.theme() {
+        egui::Theme::Dark => Theme::Dark,
+        egui::Theme::Light => Theme::Light,
+    };
+    styles(ctx).palette(mode)
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -176,17 +177,38 @@ pub fn install(ctx: &egui::Context) {
         );
     }
     ctx.set_fonts(fonts);
-    for (mode, theme) in [
-        (Theme::Dark, egui::Theme::Dark),
-        (Theme::Light, egui::Theme::Light),
-    ] {
-        install_style(ctx, mode, theme);
-    }
-    Theme::Dark.apply(ctx);
+    Styles::default().apply(ctx, Theme::Dark);
 }
 
-fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme) {
-    let colors = mode.palette();
+pub fn styles(ctx: &egui::Context) -> Styles {
+    ctx.data(|data| data.get_temp(egui::Id::new("color-styles")))
+        .unwrap_or_default()
+}
+
+impl Styles {
+    pub fn apply(self, ctx: &egui::Context, mode: Theme) {
+        let installed = ctx.data(|data| data.get_temp::<Styles>(egui::Id::new("color-styles")));
+        if installed != Some(self) {
+            install_style(
+                ctx,
+                Theme::Dark,
+                egui::Theme::Dark,
+                self.palette(Theme::Dark),
+            );
+            install_style(
+                ctx,
+                Theme::Light,
+                egui::Theme::Light,
+                self.palette(Theme::Light),
+            );
+            ctx.data_mut(|data| data.insert_temp(egui::Id::new("color-styles"), self));
+            ctx.request_repaint();
+        }
+        mode.apply(ctx);
+    }
+}
+
+fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme, colors: &Palette) {
     let mut style = (*ctx.style_of(theme)).clone();
     style.visuals = match mode {
         Theme::Dark => Visuals::dark(),
@@ -288,8 +310,75 @@ mod tests {
             assert_eq!(visuals.hyperlink_color, colors.accent);
             assert_eq!(visuals.dark_mode, mode == Theme::Dark);
             assert_eq!(light.zoom_factor(), 1.2);
-            assert_eq!(palette(&dark).bg, DARK.bg);
+            assert_eq!(palette(&dark).bg, Theme::Dark.palette().bg);
             assert!(dark.style().visuals.dark_mode);
+        }
+    }
+
+    #[test]
+    fn classic_is_the_default_and_preserves_the_original_colors() {
+        let defaults = Styles::default();
+        assert_eq!(defaults.dark, DarkStyle::Neutral);
+        assert_eq!(defaults.light, LightStyle::Neutral);
+        assert_eq!(DarkStyle::ALL[0].label(), "Classic");
+        assert_eq!(LightStyle::ALL[0].label(), "Classic");
+        let dark = defaults.palette(Theme::Dark);
+        assert_eq!(dark.bg, Color32::from_rgb(25, 25, 25));
+        assert_eq!(dark.sidebar, Color32::from_rgb(32, 32, 32));
+        assert_eq!(dark.accent, Color32::from_rgb(139, 124, 255));
+        assert_eq!(dark.dim, Color32::from_rgb(119, 119, 115));
+        let light = defaults.palette(Theme::Light);
+        assert_eq!(light.bg, Color32::from_rgb(250, 250, 248));
+        assert_eq!(light.accent, Color32::from_rgb(101, 78, 210));
+        // Existing saved Neutral selections still map to the original palette.
+        let saved: Styles =
+            serde_json::from_str(r#"{"dark":"Neutral","light":"Neutral"}"#).unwrap();
+        assert_eq!(saved, defaults);
+    }
+
+    fn all_styles() -> Vec<(Theme, Styles)> {
+        DarkStyle::ALL
+            .into_iter()
+            .map(|dark| {
+                (
+                    Theme::Dark,
+                    Styles {
+                        dark,
+                        ..Default::default()
+                    },
+                )
+            })
+            .chain(LightStyle::ALL.into_iter().map(|light| {
+                (
+                    Theme::Light,
+                    Styles {
+                        light,
+                        ..Default::default()
+                    },
+                )
+            }))
+            .collect()
+    }
+
+    #[test]
+    fn styles_update_native_widgets_without_leaking_across_contexts() {
+        let first = egui::Context::default();
+        let second = egui::Context::default();
+        install(&first);
+        install(&second);
+        first.set_zoom_factor(1.15);
+        let _ = first.run(egui::RawInput::default(), |_| {});
+        for (mode, selected) in all_styles() {
+            selected.apply(&first, mode);
+            let colors = selected.palette(mode);
+            assert_eq!(palette(&first).bg, colors.bg);
+            assert_eq!(palette(&first).accent, colors.accent);
+            assert_eq!(first.style().visuals.panel_fill, colors.bg);
+            assert_eq!(first.style().visuals.hyperlink_color, colors.accent);
+            assert_eq!(first.style().visuals.selection.bg_fill, colors.selection_bg);
+            assert_eq!(first.zoom_factor(), 1.15);
+            assert_eq!(styles(&second), Styles::default());
+            assert_eq!(palette(&second).bg, Theme::Dark.palette().bg);
         }
     }
 
@@ -317,9 +406,9 @@ mod tests {
         };
         let ctx = egui::Context::default();
         install(&ctx);
-        for theme in [Theme::Dark, Theme::Light] {
-            theme.apply(&ctx);
-            let colors = theme.palette();
+        for (theme, styles) in all_styles() {
+            styles.apply(&ctx, theme);
+            let colors = styles.palette(theme);
             assert_eq!(ctx.style().visuals.selection.bg_fill, colors.selection_bg);
             assert_eq!(colors.selection_bg.a(), 255);
             assert!(contrast(colors.text, colors.selection_bg) >= 4.5);
@@ -336,24 +425,36 @@ mod tests {
     }
 
     #[test]
-    fn light_text_and_status_colors_have_readable_contrast() {
-        let colors = Theme::Light.palette();
-        for background in [colors.bg, colors.sidebar, colors.surface] {
-            for foreground in [
-                colors.text,
-                colors.muted,
-                colors.dim,
-                colors.accent,
-                colors.green,
-                colors.red,
-                colors.blue,
-                colors.amber,
-            ] {
-                let contrast = (luminance(background) + 0.05) / (luminance(foreground) + 0.05);
-                assert!(
-                    contrast >= 4.5,
-                    "{foreground:?} on {background:?}: {contrast}"
-                );
+    fn all_styles_keep_text_and_status_colors_readable() {
+        for (mode, styles) in all_styles() {
+            let colors = styles.palette(mode);
+            for background in [colors.bg, colors.sidebar, colors.surface] {
+                for foreground in [
+                    colors.text,
+                    colors.muted,
+                    colors.dim,
+                    colors.accent,
+                    colors.green,
+                    colors.red,
+                    colors.blue,
+                    colors.amber,
+                ] {
+                    let (a, b) = (luminance(background), luminance(foreground));
+                    let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                    // Preserve the original Classic dark palette exactly, including its dim metadata.
+                    let minimum = if mode == Theme::Dark
+                        && styles.dark == DarkStyle::Neutral
+                        && foreground == colors.dim
+                    {
+                        3.0
+                    } else {
+                        4.5
+                    };
+                    assert!(
+                        contrast >= minimum,
+                        "{styles:?} {foreground:?} on {background:?}: {contrast}"
+                    );
+                }
             }
         }
     }
