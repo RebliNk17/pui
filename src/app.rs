@@ -1285,9 +1285,6 @@ impl Pui {
                     icons::draw(ui, rect, Icon::Spark, colors.accent);
                     self.model_button(ui);
                     self.permission_button(ui);
-                    if icons::button(ui, Icon::Sliders, "Settings").clicked() {
-                        self.settings_open = !self.settings_open;
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let busy = !self.state.ready();
                         let enabled = !self.loading_chat

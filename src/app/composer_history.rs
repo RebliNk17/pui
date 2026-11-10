@@ -229,6 +229,71 @@ mod tests {
     }
 
     #[test]
+    fn composer_has_no_settings_button_after_permission_picker() {
+        fn permission_rect(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Auto" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(permission_rect),
+                _ => None,
+            }
+        }
+        for theme in [theme::Theme::Dark, theme::Theme::Light] {
+            let ctx = egui::Context::default();
+            let mut app = Pui::new(
+                &eframe::CreationContext::_new_kittest(ctx.clone()),
+                Options {
+                    demo: true,
+                    ..Default::default()
+                },
+            );
+            theme.apply(&ctx);
+            app.draft = "Keep my draft".into();
+            let frame = |app: &mut Pui, events| {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(900.0, 620.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| app.composer(ui, ctx));
+                    },
+                )
+            };
+            frame(&mut app, vec![]);
+            let output = frame(&mut app, vec![]);
+            let permission = output
+                .shapes
+                .iter()
+                .find_map(|shape| permission_rect(&shape.shape))
+                .expect("Permission picker remains in the composer");
+            // The former settings button followed the label, chevron and spacing.
+            let pos = permission.right_center() + egui::vec2(39.0, 0.0);
+            for pressed in [true, false] {
+                frame(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert!(!app.settings_open, "No settings shortcut in the composer");
+            assert_eq!(app.draft, "Keep my draft");
+        }
+    }
+
+    #[test]
     fn recall_uses_only_visible_session_and_restores_local_draft() {
         let ctx = egui::Context::default();
         let mut app = Pui::new(
