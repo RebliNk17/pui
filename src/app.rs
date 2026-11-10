@@ -699,21 +699,6 @@ impl Pui {
                     }
                     let cancelled = record["data"]["cancelled"] == true;
                     self.state.apply(record);
-                    if self.state.session_name.is_empty() {
-                        if let Some(title) = self
-                            .sessions
-                            .iter()
-                            .find(|s| {
-                                self.state
-                                    .session_file
-                                    .as_deref()
-                                    .is_some_and(|p| std::path::Path::new(p) == s.path)
-                            })
-                            .map(|s| s.title.clone())
-                        {
-                            self.state.session_name = title;
-                        }
-                    }
                     if kind == "response" && command == "switch_session" {
                         if success && !cancelled {
                             self.send(protocol::command("get_state"));

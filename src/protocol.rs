@@ -218,6 +218,26 @@ impl State {
         !self.busy && !self.pending && !self.compacting
     }
 
+    pub fn chat_title(&self) -> Option<String> {
+        if !self.session_name.trim().is_empty() {
+            return Some(self.session_name.clone());
+        }
+        self.messages
+            .iter()
+            .find(|message| message.role == "user")
+            .map(|message| {
+                message
+                    .text
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(100)
+                    .collect::<String>()
+            })
+            .filter(|title| !title.is_empty())
+    }
+
     pub fn tool_mut(&mut self, id: &str) -> Option<&mut Tool> {
         for message in self.messages.iter_mut().rev() {
             for tool in &mut message.tools {
@@ -717,6 +737,32 @@ pub fn command(kind: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_title_uses_first_prompt_until_pi_names_the_session() {
+        let mut state = State::default();
+        assert_eq!(state.chat_title(), None);
+        state.apply(json!({"type":"message_start","message":{"role":"user","content":"  Fix the\n sidebar name  "}}));
+        assert_eq!(state.chat_title().as_deref(), Some("Fix the sidebar name"));
+        state.apply(
+            json!({"type":"message_start","message":{"role":"user","content":"A follow-up"}}),
+        );
+        assert_eq!(state.chat_title().as_deref(), Some("Fix the sidebar name"));
+        state.apply(json!({"type":"session_info_changed","name":"Sidebar naming fix"}));
+        assert_eq!(state.chat_title().as_deref(), Some("Sidebar naming fix"));
+    }
+
+    #[test]
+    fn chat_title_is_bounded_and_attachment_only_prompts_have_no_title() {
+        let mut state = State::default();
+        state.messages.push(Message {
+            role: "user".into(),
+            ..Default::default()
+        });
+        assert_eq!(state.chat_title(), None);
+        state.messages[0].text = "🦀".repeat(120);
+        assert_eq!(state.chat_title().unwrap().chars().count(), 100);
+    }
     #[test]
     fn mcp_notifications_are_deduplicated_diagnostics_not_composer_notices() {
         let mut state = State::default();

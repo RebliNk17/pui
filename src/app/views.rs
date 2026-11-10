@@ -39,16 +39,17 @@ impl Pui {
                                 }
                             })
                             .unwrap_or("Verified tasks")
-                    } else if self.state.session_name.is_empty() {
-                        "New conversation"
+                            .to_owned()
                     } else {
-                        &self.state.session_name
+                        self.state
+                            .chat_title()
+                            .unwrap_or_else(|| "New conversation".into())
                     };
                     let width = (ui.available_width() - 346.0).max(40.0);
                     let (rect, response) =
                         ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click_and_drag());
                     let mut job = egui::text::LayoutJob::simple_singleline(
-                        title.into(),
+                        title,
                         FontId::proportional(13.0),
                         colors.text,
                     );

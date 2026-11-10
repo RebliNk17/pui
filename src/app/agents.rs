@@ -315,11 +315,10 @@ impl Pui {
             Node {
                 id: id.clone(),
                 parent: None,
-                name: if self.state.session_name.is_empty() {
-                    "Main agent".into()
-                } else {
-                    self.state.session_name.clone()
-                },
+                name: self
+                    .state
+                    .chat_title()
+                    .unwrap_or_else(|| "New conversation".into()),
                 cwd: self.prefs.cwd.clone(),
                 path: self.state.session_file.as_ref().map(PathBuf::from),
                 access: "workspace".into(),
@@ -503,8 +502,10 @@ impl Pui {
                 .as_ref()
                 .map(PathBuf::from)
                 .or(node.path.take());
-            if node.parent.is_none() && !self.state.session_name.is_empty() {
-                node.name = self.state.session_name.clone();
+            if node.parent.is_none() {
+                if let Some(title) = self.state.chat_title() {
+                    node.name = title;
+                }
             }
         }
     }

@@ -185,7 +185,7 @@ impl Pui {
                             && meta.is_some_and(|m| m.archived) == self.show_archived
                             && format!(
                                 "{} {} {}",
-                                meta.and_then(|m| m.title.as_deref()).unwrap_or(&s.title),
+                                self.session_title(s),
                                 s.project.display(),
                                 s.cwd.display()
                             )
@@ -465,6 +465,36 @@ impl Pui {
             });
         }
     }
+    fn session_title(&self, session: &Session) -> String {
+        let live_title = || {
+            if self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path) == session.path)
+            {
+                self.state.chat_title()
+            } else {
+                self.agents
+                    .parked
+                    .values()
+                    .find(|chat| {
+                        chat.state
+                            .session_file
+                            .as_deref()
+                            .is_some_and(|path| std::path::Path::new(path) == session.path)
+                    })
+                    .and_then(|chat| chat.state.chat_title())
+            }
+        };
+        self.prefs
+            .chats
+            .get(&session.path)
+            .and_then(|meta| meta.title.clone())
+            .or_else(live_title)
+            .unwrap_or_else(|| session.title.clone())
+    }
+
     fn chat_row(&mut self, ui: &mut egui::Ui, index: usize) -> Option<Action> {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
@@ -497,8 +527,8 @@ impl Pui {
         } else {
             ("Saved · status unknown", colors.dim)
         };
+        let title = self.session_title(s);
         let meta = self.prefs.chats.entry(path.clone()).or_default();
-        let title = meta.title.as_deref().unwrap_or(&s.title);
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 48.0));
         // Session identity, not layout position: filtering, pinning, regrouping or
         // asynchronous refresh must not move a pointer press to another chat.
@@ -672,6 +702,82 @@ mod tests {
             |ctx| app.sidebar(ctx),
         )
     }
+    #[test]
+    fn running_chat_title_updates_before_discovery_and_survives_background_navigation() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.demo = false;
+        app.connected = true;
+        app.new_chat = false;
+        app.state = State {
+            session_file: Some("/fixture/running.jsonl".into()),
+            ..Default::default()
+        };
+        app.sessions = vec![Session {
+            path: PathBuf::from("/fixture/running.jsonl"),
+            cwd: app.prefs.cwd.clone(),
+            project: app.prefs.cwd.clone(),
+            title: "Untitled session".into(),
+            modified: std::time::SystemTime::now(),
+        }];
+        let (client, events) = rpc::Client::stub_with_events();
+        app.client = Some(client);
+        let id = app.ensure_agent();
+        events.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":"Fix the sidebar name"}}))).unwrap();
+        events
+            .send(rpc::Event::Record(json!({"type":"agent_start"})))
+            .unwrap();
+        events.send(rpc::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":{"sessionFile":"/fixture/running.jsonl","isStreaming":true}}))).unwrap();
+        app.poll_rpc();
+        app.poll_other_agents();
+        assert_eq!(app.session_title(&app.sessions[0]), "Fix the sidebar name");
+        assert_eq!(app.agents.nodes[&id].name, "Fix the sidebar name");
+        assert_eq!(app.agents.nodes[&id].status, "Working…");
+
+        app.new_session();
+        events
+            .send(rpc::Event::Record(
+                json!({"type":"session_info_changed","name":"Sidebar naming fix"}),
+            ))
+            .unwrap();
+        app.poll_other_agents();
+        assert_eq!(app.session_title(&app.sessions[0]), "Sidebar naming fix");
+        assert_eq!(app.agents.nodes[&id].name, "Sidebar naming fix");
+        app.projects = false;
+        app.search = "Sidebar naming fix".into();
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        let output = frame(&ctx, &mut app, vec![]);
+        fn contains(shape: &egui::Shape, label: &str) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.job.text == label,
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| contains(shape, label)),
+                _ => false,
+            }
+        }
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| contains(&shape.shape, "Sidebar naming fix"))
+        );
+        assert!(
+            !output
+                .shapes
+                .iter()
+                .any(|shape| contains(&shape.shape, "Untitled session"))
+        );
+
+        app.prefs
+            .chats
+            .entry(app.sessions[0].path.clone())
+            .or_default()
+            .title = Some("My custom name".into());
+        assert_eq!(app.session_title(&app.sessions[0]), "My custom name");
+        app.shutdown_agents();
+    }
+
     #[test]
     fn header_has_aligned_controls_below_native_traffic_light_clearance() {
         fn text(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
