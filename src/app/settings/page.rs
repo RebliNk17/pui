@@ -649,7 +649,7 @@ impl Pui {
                 row(
                     ui,
                     "Completion sound",
-                    "Play a short sound when an agent finishes successfully.",
+                    "Play a short sound when an agent finishes successfully or a chat is deleted.",
                     |ui| toggle(ui, &mut self.prefs.notifications.sound, "Completion sound"),
                 );
                 separator(ui);

@@ -444,6 +444,12 @@ impl Pui {
     }
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
+        if session
+            .as_deref()
+            .is_some_and(|p| self.deletion.deleting_chat(p))
+        {
+            return;
+        }
         #[cfg(not(test))]
         if session.as_ref().is_some_and(|p| !p.is_file()) {
             self.loading_chat = false;
@@ -554,7 +560,7 @@ impl Pui {
     }
 
     fn open_chat(&mut self, session: Session) {
-        if self.deletion.in_progress() {
+        if self.deletion.in_progress() || self.deletion.deleting_chat(&session.path) {
             return;
         }
         self.kanban.open = false;
@@ -660,6 +666,7 @@ impl Pui {
     }
 
     fn poll(&mut self) {
+        self.poll_deletions();
         self.usage.poll();
         self.notifications.poll();
         self.updates.poll();
