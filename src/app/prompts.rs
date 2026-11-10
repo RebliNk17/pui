@@ -108,6 +108,8 @@ impl Pui {
                 ui.add_space(8.0);
                 prompt_ui::heading(ui, permission.as_ref().map(|p| p.title.as_str()).unwrap_or_else(|| protocol::string(&dialog, "title")), "");
                 ui.add_space(6.0);
+                let message = protocol::string(&dialog, "message");
+                if permission.is_some() || !message.is_empty() {
                 egui::ScrollArea::vertical()
                     .id_salt(("inline-question", id))
                     .min_scrolled_height(140.0)
@@ -121,26 +123,35 @@ impl Pui {
                                 ui.add_space(8.0);
                             }
                             super::approval_view::arguments(ui, &approval.args);
-                        } else {
-                            let message = protocol::string(&dialog, "message");
-                            if !message.is_empty() {
-                                ui.add(egui::Label::new(message).wrap().selectable(true));
-                            }
+                        } else if !message.is_empty() {
+                            ui.add(egui::Label::new(message).wrap().selectable(true));
                         }
                     });
                 ui.add_space(8.0);
+                }
                 ui.add_enabled_ui(!waiting, |ui| {
                     if method == "select" && permission.is_none() {
                         if let Some(options) = dialog["options"].as_array() {
+                            let max_height = (ui.ctx().screen_rect().height() - 340.0).clamp(100.0, 320.0);
+                            let width = (ui.available_width() - 28.0).max(40.0);
+                            let height: f32 = options.iter().filter_map(Value::as_str).map(|option| {
+                                let text = ui.painter().layout(option.into(), FontId::proportional(13.0), colors.text, width);
+                                (text.size().y + 14.0).max(32.0) + 8.0
+                            }).sum();
+                            let height = (height - 8.0).clamp(0.0, max_height);
                             egui::ScrollArea::vertical()
                                 .id_salt(("inline-options", id))
-                                .max_height(130.0)
+                                // Reserve real row height so the bottom panel can grow;
+                                // max_height alone gets clipped to last frame's panel size.
+                                .min_scrolled_height(height)
+                                .max_height(max_height)
+                                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                                 .show(ui, |ui| {
                                     for option in options.iter().filter_map(Value::as_str) {
                                         if ui
-                                            .add_sized(
-                                                [ui.available_width(), 32.0],
-                                                egui::Button::new(option).fill(prompt_ui::background(ui.ctx())).stroke(Stroke::new(1.0, prompt_ui::border(ui.ctx()))).corner_radius(7),
+                                            .add(
+                                                egui::Button::new(option).fill(prompt_ui::background(ui.ctx())).stroke(Stroke::new(1.0, prompt_ui::border(ui.ctx()))).corner_radius(7)
+                                                    .min_size(egui::vec2(ui.available_width(), 32.0)).wrap(),
                                             )
                                             .clicked()
                                         {
@@ -347,6 +358,106 @@ mod tests {
             assert!(app.state.busy, "answering must not abort the run");
         }
     }
+    #[test]
+    fn restore_select_options_are_fully_visible_and_each_is_clickable() {
+        fn collect(
+            shape: &egui::Shape,
+            clip: egui::Rect,
+            out: &mut Vec<(String, egui::Rect, egui::Rect)>,
+        ) {
+            match shape {
+                egui::Shape::Text(t) => out.push((
+                    t.galley.job.text.clone(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                    clip,
+                )),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, clip, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let options = [
+            "Keep current files",
+            "Restore files to that point",
+            "↩ Undo last rewind",
+            "Cancel navigation",
+        ];
+        for (width, height) in [(1000.0, 800.0), (860.0, 620.0), (540.0, 540.0)] {
+            for selected in options {
+                let ctx = egui::Context::default();
+                let mut app = Pui::new(
+                    &eframe::CreationContext::_new_kittest(ctx.clone()),
+                    Options {
+                        demo: true,
+                        ..Default::default()
+                    },
+                );
+                app.state.dialogs.push_back(json!({"id":"restore","method":"select","title":"Restore Options","options":options}));
+                app.draft = "Keep my draft".into();
+                let render = |app: &mut Pui, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, height),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| app.conversation(ctx),
+                    )
+                };
+                for _ in 0..4 {
+                    render(&mut app, vec![]);
+                }
+                let mut labels = vec![];
+                for shape in render(&mut app, vec![]).shapes {
+                    collect(&shape.shape, shape.clip_rect, &mut labels);
+                }
+                let composer = labels
+                    .iter()
+                    .find(|(text, _, _)| text == "Keep my draft")
+                    .unwrap()
+                    .1;
+                for option in options {
+                    let (_, rect, clip) =
+                        labels.iter().find(|(text, _, _)| text == option).unwrap();
+                    assert!(
+                        clip.contains_rect(*rect),
+                        "Clipped {option} at {width}x{height}: {rect:?} in {clip:?}"
+                    );
+                    assert!(rect.bottom() < composer.top());
+                }
+                let pos = labels
+                    .iter()
+                    .find(|(text, _, _)| text == selected)
+                    .unwrap()
+                    .1
+                    .center();
+                for pressed in [true, false] {
+                    render(
+                        &mut app,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+                assert!(app.state.dialogs.is_empty(), "{selected} must be clickable");
+                assert_eq!(app.draft, "Keep my draft");
+                assert!(app.deliveries.is_empty());
+            }
+        }
+    }
+
     fn select_dialog() -> Value {
         let args = json!({"code":"const file = await tools.read({\n  path: \"Cargo.toml\"\n});\ntext(file);"});
         json!({"method":"select","id":"new-approval","title":format!("Allow codemode?\n\nAuto flagged this action for review.\n\n{}\n\nApprove this exact action.",args),"options":["Allow once",ALWAYS_ALLOW,"Deny"]})

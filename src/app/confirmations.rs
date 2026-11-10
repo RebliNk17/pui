@@ -15,6 +15,7 @@ pub(super) struct Dialog<'a> {
     confirm: &'a str,
     destructive: bool,
     enabled: bool,
+    width: f32,
 }
 impl<'a> Dialog<'a> {
     pub fn new(
@@ -32,6 +33,7 @@ impl<'a> Dialog<'a> {
             confirm,
             destructive: true,
             enabled: true,
+            width: 360.0,
         }
     }
     pub fn destructive(mut self, destructive: bool) -> Self {
@@ -42,6 +44,10 @@ impl<'a> Dialog<'a> {
         self.enabled = enabled;
         self
     }
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
     pub fn show(self, ctx: &egui::Context, body: impl FnOnce(&mut egui::Ui)) -> Option<Choice> {
         let frame_number = ctx.cumulative_frame_nr();
         let first = ctx.data_mut(|data| {
@@ -49,7 +55,7 @@ impl<'a> Dialog<'a> {
             data.insert_temp(self.id.with("last-frame"), frame_number);
             previous.is_none_or(|previous| previous.saturating_add(1) < frame_number)
         });
-        let response = prompt_ui::modal(ctx, self.id, 360.0, |ui| {
+        let response = prompt_ui::modal(ctx, self.id, self.width, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             heading(ui, self.title, self.description, self.destructive);
             ui.add_space(16.0);

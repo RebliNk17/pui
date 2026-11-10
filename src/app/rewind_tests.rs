@@ -78,9 +78,8 @@ fn rewind_waits_for_ack_restores_prompt_and_images_and_preserves_unsent_draft() 
     app.draft = "Unsent draft".into();
     app.transcript.message_action = Some((0, MessageAction::Edit));
     app.history_action();
-    let request = app.history_view.request.clone().unwrap();
-    assert!(request.mode == Mode::Messages);
-    app.begin_history(request);
+    assert!(!app.history_view.is_open());
+    assert!(app.history_pending.as_ref().unwrap().request.mode == Mode::Messages);
     let id = app.history_pending.as_ref().unwrap().id.clone();
     app.submit(&ctx);
     assert_eq!(app.draft, "Unsent draft");
@@ -95,6 +94,59 @@ fn rewind_waits_for_ack_restores_prompt_and_images_and_preserves_unsent_draft() 
     assert!(!app.state.pending);
     assert!(app.history_pending.is_none());
 }
+#[test]
+fn edit_and_rewind_skip_confirmation_only_when_there_is_no_file_choice() {
+    for operation in [MessageAction::Edit, MessageAction::Rewind] {
+        for (changes, reason, immediate) in [
+            (Some(0), None, true),
+            (Some(2), None, false),
+            (None, None, false),
+            (
+                None,
+                Some("Untracked shell effects; cannot restore files"),
+                true,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.state.history_points[0].file_changes = changes;
+            app.state.history_points[0].code_reason = reason.map(str::to_owned);
+            app.draft = "Unsent draft".into();
+            app.transcript.message_action = Some((0, operation));
+            app.history_action();
+            assert_eq!(app.history_pending.is_some(), immediate);
+            assert_eq!(app.history_view.is_open(), !immediate);
+            assert_eq!(app.draft, "Unsent draft", "wait for Pi acknowledgment");
+            assert!(app.deliveries.is_empty());
+            if let Some(pending) = &app.history_pending {
+                assert!(
+                    pending.request.mode == Mode::Messages,
+                    "never auto-restore files"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn busy_other_agent_does_not_require_a_useless_restore_confirmation() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state.history_points[0].code_reason = None;
+    app.state.history_points[0].file_changes = Some(1);
+    app.ensure_agent();
+    let mut other = app.agents.nodes.remove(&app.agents.active).unwrap();
+    other.id = "other-agent".into();
+    other.path = None;
+    other.stopped = false;
+    app.agents.nodes.insert(other.id.clone(), other);
+    assert!(!app.workspace_restore_idle());
+    app.transcript.message_action = Some((0, MessageAction::Edit));
+    app.history_action();
+    assert!(!app.history_view.is_open());
+    assert!(app.history_pending.as_ref().unwrap().request.mode == Mode::Messages);
+}
+
 #[test]
 fn fork_targets_assistant_and_new_chat_contains_no_replayed_response_draft() {
     let ctx = egui::Context::default();
@@ -137,10 +189,12 @@ fn duplicate_prompts_code_unavailable_and_stale_navigation_are_rejected() {
     app.history_action();
     assert!(app.history_view.request.is_none());
     app.state.history_points.pop();
+    app.state.history_points[0].code_reason = None;
     app.transcript.message_action = Some((0, MessageAction::Rewind));
     app.history_action();
     let mut request = app.history_view.request.clone().unwrap();
     request.mode = Mode::Both;
+    app.state.history_points[0].code_reason = Some("Checkpoint is no longer available".into());
     app.begin_history(request.clone());
     assert!(app.history_pending.is_none());
     request.mode = Mode::Messages;
@@ -206,6 +260,8 @@ fn restore_confirmation_has_three_choices_and_cancel_is_non_mutating() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     app.draft = "keep me".into();
+    app.state.history_points[0].code_reason = None;
+    app.state.history_points[0].file_changes = Some(2);
     app.transcript.message_action = Some((0, MessageAction::Edit));
     app.history_action();
     let render = |app: &mut Pui, events| {
@@ -226,17 +282,40 @@ fn restore_confirmation_has_three_choices_and_cancel_is_non_mutating() {
     }
     let mut labels = Vec::new();
     for shape in render(&mut app, vec![]).shapes {
-        text(&shape.shape, &mut labels);
+        let mut rendered = vec![];
+        text(&shape.shape, &mut rendered);
+        for (label, rect) in &rendered {
+            if [
+                "Keep current files",
+                "Restore files and conversation",
+                "Restore files only",
+                "Cancel",
+                "Edit message",
+            ]
+            .contains(&label.as_str())
+            {
+                assert!(
+                    shape.clip_rect.contains_rect(*rect),
+                    "Clipped {label}: {rect:?} in {:?}",
+                    shape.clip_rect
+                );
+            }
+        }
+        labels.extend(rendered);
     }
     for title in [
-        "Messages only",
-        "Code + messages",
-        "Code only",
-        "Rewind and edit",
+        "Keep current files",
+        "Restore files and conversation",
+        "Restore files only",
+        "Edit message",
     ] {
         assert!(labels.iter().any(|(s, _)| s == title));
     }
-    assert!(labels.iter().any(|(s, _)| s.contains("No checkpoint")));
+    assert!(
+        labels
+            .iter()
+            .any(|(s, _)| s.contains("2 captured file change"))
+    );
     let pos = labels
         .iter()
         .find(|(s, _)| s == "Cancel")

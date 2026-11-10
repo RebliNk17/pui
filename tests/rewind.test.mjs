@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {stripTypeScriptTypes} from 'node:module';
 const source=stripTypeScriptTypes(await readFile(new URL('../scripts/rewind.ts',import.meta.url),'utf8'));
-const {installRewind,restoreCheckpoints,workspacePath}=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const {installRewind,restoreCheckpoints,workspacePath,navigateKeepingFiles}=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const state=(s)=>({data:Buffer.from(s).toString('base64'),mode:0o644});
 async function host(){
  const cwd=await mkdtemp(join(tmpdir(),'pui-rewind-')), directory=join(cwd,'checkpoints');
@@ -64,4 +64,42 @@ test('native Pi SessionManager fork includes selected assistant response and pre
  try{const r=await h.command('fork','messages',response);assert.equal(r.success,true);assert.notEqual(r.path,source);assert.equal(await readFile(source,'utf8'),before);const fork=SessionManager.open(r.path);assert.ok(fork.getBranch().some(e=>e.id===first));assert.ok(fork.getBranch().some(e=>e.id===response),'Fork includes the selected response');assert.ok(!fork.getBranch().some(e=>e.id===second));
  const invalid=await h.command('fork','messages',first);assert.equal(invalid.success,false);assert.match(invalid.error,/completed assistant response/);}
  finally{if(previous===undefined)delete process.env.PUI_PI_SDK;else process.env.PUI_PI_SDK=previous;}
+});
+
+test('history points distinguish known unchanged ranges, edits and unknown effects',async()=>{
+ const h=await host();await h.user('u1',1,'inspect');await h.emit('tool_call',{toolName:'read',toolCallId:'r',input:{path:'source'}});await h.emit('agent_settled');
+ assert.equal(h.points()[0].fileChanges,0);
+ await h.user('u2',2,'update');await h.emit('tool_call',{toolName:'write',toolCallId:'w',input:{path:'source'}});await writeFile(join(h.cwd,'source'),'after');await h.emit('tool_result',{toolCallId:'w'});await h.emit('agent_settled');
+ assert.deepEqual(h.points().map(p=>p.fileChanges),[1,1]);
+ await h.user('u3',3,'nothing');await h.emit('agent_settled');assert.deepEqual(h.points().map(p=>p.fileChanges),[1,1,0]);
+ await h.user('u4',4,'shell');await h.emit('tool_call',{toolName:'bash',toolCallId:'b',input:{command:'unknown'}});await h.emit('agent_settled');
+ assert.ok(h.points().every(p=>p.fileChanges===null));
+});
+test('no-op writes do not count as changes and legacy checkpoints remain unknown',async()=>{
+ const h=await host();await writeFile(join(h.cwd,'same'),'unchanged');await h.user('u1',1,'no-op');await h.emit('tool_call',{toolName:'edit',toolCallId:'e',input:{path:'same'}});await h.emit('tool_result',{toolCallId:'e'});await h.emit('agent_settled');
+ assert.equal(h.points()[0].fileChanges,0);
+ delete h.entries.find(e=>e.customType==='pui-checkpoint').data.fileChanges;
+ await h.emit('agent_settled');assert.equal(h.points()[0].fileChanges,null);
+});
+test('Pui navigation answers only redundant keep-files selection, never a restoring choice',async()=>{
+ const h=await host();await h.user('u1',1,'original');await h.emit('agent_settled');
+ const shown=[],select=async(title,options)=>{shown.push([title,options]);return options[0];};h.ctx.ui.select=select;
+ const navigate=h.ctx.navigateTree;let duplicateAnswer;
+ h.ctx.navigateTree=async(...args)=>{
+  duplicateAnswer=await h.ctx.ui.select('Restore Options',['Keep current files','Restore files to that point','↩ Undo last rewind','Cancel navigation']);
+  assert.equal(await h.ctx.ui.select('Other question',['A','B']),'A');
+  assert.equal(await h.ctx.ui.select('Restore Options',['Custom restore action']),'Custom restore action');
+  return navigate(...args);
+ };
+ assert.equal((await h.command('edit','messages','u1')).success,true);
+ assert.equal(duplicateAnswer,'Keep current files');assert.equal(shown.length,2);assert.equal(h.ctx.ui.select,select);
+ await h.ctx.ui.select('Restore Options',['Keep current files','Cancel navigation']);assert.equal(shown.length,3,'ordinary navigation remains interactive');
+ h.ctx.navigateTree=async()=>{throw Error('navigation failed');};
+ await assert.rejects(navigateKeepingFiles(h.ctx,'u1'),/navigation failed/);assert.equal(h.ctx.ui.select,select);
+});
+test('confirmed bounded file restore cannot trigger a second extension file restore',async()=>{
+ const h=await host();await writeFile(join(h.cwd,'file'),'before');await h.user('u1',1,'edit');await h.emit('tool_call',{toolName:'edit',toolCallId:'e',input:{path:'file'}});await writeFile(join(h.cwd,'file'),'after');await h.emit('tool_result',{toolCallId:'e'});await h.emit('agent_settled');
+ h.ctx.ui.select=async()=>{throw Error('duplicate dialog escaped');};const navigate=h.ctx.navigateTree;
+ h.ctx.navigateTree=async(...args)=>{assert.equal(await readFile(join(h.cwd,'file'),'utf8'),'before');assert.equal(await h.ctx.ui.select('Restore Options',['Keep current files','Restore files to that point','Cancel navigation']),'Keep current files');return navigate(...args);};
+ assert.equal((await h.command('edit','both','u1')).success,true);assert.equal(await readFile(join(h.cwd,'file'),'utf8'),'before');
 });

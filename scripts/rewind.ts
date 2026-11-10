@@ -95,6 +95,25 @@ export async function restoreCheckpoints(cwd: string, checkpoints: Checkpoint[],
   return { files: plans.length, recovery };
 }
 
+// Pui already chose whether to restore its bounded checkpoints. Some installed
+// extensions (pi-rewind) ask the same question from session_before_tree. Keep
+// their files untouched, only for this exact navigation, and leave all other
+// dialogs/extension hooks intact. Never auto-select a restoring option.
+export async function navigateKeepingFiles(ctx: any, targetId: string) {
+  const ui = ctx.ui, select = ui.select;
+  const choices = new Set(["Keep current files", "Restore files to that point", "↩ Undo last rewind", "Cancel navigation"]);
+  ui.select = (title: string, options: string[], ...args: any[]) => {
+    if (title === "Restore Options" && Array.isArray(options)
+      && options[0] === "Keep current files" && options.includes("Cancel navigation")
+      && options.every(option => choices.has(option))) {
+      return Promise.resolve("Keep current files");
+    }
+    return select.call(ui, title, options, ...args);
+  };
+  try { return await ctx.navigateTree(targetId, { summarize: false }); }
+  finally { ui.select = select; }
+}
+
 export function installRewind(pi: any, options: any = {}) {
   let current: { timestamp: number; cp: Checkpoint } | undefined;
   let outstanding = new Map<string, string>();
@@ -116,14 +135,18 @@ export function installRewind(pi: any, options: any = {}) {
   }
   function points(ctx: any) {
     const entries = branch(ctx).filter((e: any) => e.type === "message" && (e.message.role === "user" || (e.message.role === "assistant" && e.message.stopReason === "stop" && !e.message.errorMessage && !e.message.content?.some?.((b: any) => b.type === "toolCall")))), references = refs(ctx);
-    let reason = branch(ctx).some((e: any) => e.type === "custom" && ["pui-code-restored", "pui-untracked-effect"].includes(e.customType)) ? "Files were independently restored or changed outside captured edits on this branch." : options.readonly ? "Read-only workers cannot restore files." : "", textBudget = 256000;
+    let reason = branch(ctx).some((e: any) => e.type === "custom" && ["pui-code-restored", "pui-untracked-effect"].includes(e.customType)) ? "Files were independently restored or changed outside captured edits on this branch." : options.readonly ? "Read-only workers cannot restore files." : "", textBudget = 256000, fileChanges: number | null = 0;
     return entries.slice(-200).reverse().map((entry: any) => {
       const ref: any = references.get(entry.id);
-      if (entry.message.role === "user") reason ||= !ref ? "No file checkpoint was captured for this message." : ref.reason ?? "";
+      if (entry.message.role === "user") {
+        reason ||= !ref ? "No file checkpoint was captured for this message." : ref.reason ?? "";
+        fileChanges = fileChanges === null || !Number.isSafeInteger(ref?.fileChanges) || ref.fileChanges < 0
+          ? null : fileChanges + ref.fileChanges;
+      }
       const content = entry.message.content;
       const text = typeof content === "string" ? content : (content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n\n");
       textBudget -= text.length;
-      return { entryId: entry.id, role: entry.message.role, text: text.length <= 48000 && textBudget >= 0 ? text : "", timestamp: entry.message.timestamp ?? 0, imageCount: Array.isArray(content) ? content.filter((b: any) => b.type === "image").length : 0, codeReason: reason || null };
+      return { entryId: entry.id, role: entry.message.role, text: text.length <= 48000 && textBudget >= 0 ? text : "", timestamp: entry.message.timestamp ?? 0, imageCount: Array.isArray(content) ? content.filter((b: any) => b.type === "image").length : 0, codeReason: reason || null, fileChanges: reason ? null : fileChanges };
     }).reverse();
   }
   const status = (ctx: any) => ctx.ui.setStatus("pui-history", JSON.stringify({ sessionFile: ctx.sessionManager?.getSessionFile?.(), points: points(ctx) }));
@@ -141,7 +164,8 @@ export function installRewind(pi: any, options: any = {}) {
       const raw = JSON.stringify(pending.cp), key = digest(raw);
       try { await writeFile(join(directory, `${key}.json`), raw, { flag: "wx", mode: 0o600 }); }
       catch (e: any) { if (e.code !== "EEXIST") throw e; }
-      pi.appendEntry("pui-checkpoint", { userId: pending.cp.userId, key, reason: pending.cp.reason ?? null });
+      pi.appendEntry("pui-checkpoint", { userId: pending.cp.userId, key, reason: pending.cp.reason ?? null,
+        fileChanges: pending.cp.reason ? null : pending.cp.changes.filter(c => !same(c.before, c.after)).length });
     } catch { /* Missing/unwritable checkpoint is explicitly unavailable. */ }
     status(ctx);
   }
@@ -226,7 +250,7 @@ export function installRewind(pi: any, options: any = {}) {
           result({ success: true, path }); return;
         }
         if (request.mode !== "code") {
-          const moved = await ctx.navigateTree(target.id, { summarize: false });
+          const moved = await navigateKeepingFiles(ctx, target.id);
           if (moved.cancelled) throw Error("Navigation cancelled.");
           if (branch(ctx).some((e: any) => e.id === target.id)) throw Error("Pi did not move the active branch; check runtime compatibility.");
           // Persist the leaf selection without deleting the abandoned branch.

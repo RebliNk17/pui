@@ -141,6 +141,9 @@ pub struct HistoryPoint {
     pub image_count: usize,
     #[serde(rename = "codeReason")]
     pub code_reason: Option<String>,
+    /// None means unknown (including older adapters), never "no changes".
+    #[serde(default, rename = "fileChanges")]
+    pub file_changes: Option<usize>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SlashCommand {

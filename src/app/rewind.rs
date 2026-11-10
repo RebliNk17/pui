@@ -110,16 +110,27 @@ impl Pui {
             self.state.error = Some("No unambiguous Pi entry for this message yet. Wait for the chat to finish loading or reconnect with the current adapter.".into());
             return;
         };
-        self.history_view = View {
-            request: Some(Request {
-                path: self.state.session_file.clone().unwrap(),
-                point: point.clone(),
-                message: message.clone(),
-                operation,
-                mode: Mode::Messages,
-            }),
-            error: None,
+        let request = Request {
+            path: self.state.session_file.clone().unwrap(),
+            point: point.clone(),
+            message: message.clone(),
+            operation,
+            mode: Mode::Messages,
         };
+        // Returning a prompt to the composer is reversible and never sends it.
+        // Ask only when there is a real file-restore choice (or a new fork).
+        if operation != MessageAction::Fork
+            && (request.point.file_changes == Some(0)
+                || request.point.code_reason.is_some()
+                || !self.workspace_restore_idle())
+        {
+            self.begin_history(request);
+        } else {
+            self.history_view = View {
+                request: Some(request),
+                error: None,
+            };
+        }
     }
     pub(super) fn history_confirmation(&mut self, ctx: &egui::Context) {
         let Some(mut request) = self.history_view.request.clone() else {
@@ -132,13 +143,13 @@ impl Pui {
         let fork = request.operation == MessageAction::Fork;
         let choice = confirmations::Dialog::new(
             "history-restore-confirmation",
-            match request.operation { MessageAction::Edit => "Edit an earlier message?", MessageAction::Fork => "Fork after this response?", MessageAction::Rewind => "Rewind to this message?" },
-            if fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Return to just before this prompt. Nothing will be resent or rerun automatically." },
+            match request.operation { MessageAction::Edit => "Edit message", MessageAction::Fork => "Fork after this response?", MessageAction::Rewind => "Rewind conversation" },
+            if fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Bring this prompt back to the composer. Choose what happens to files; nothing is sent until you send it." },
             "Cancel",
-            match request.operation { MessageAction::Edit => "Rewind and edit", MessageAction::Fork => "Create fork", MessageAction::Rewind => "Rewind" },
-        ).destructive(!fork).enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle())).show(ctx, |ui| {
+            match (request.operation, request.mode) { (MessageAction::Fork, _) => "Create fork", (_, Mode::Code) => "Restore files", (MessageAction::Edit, Mode::Messages) => "Edit message", (MessageAction::Edit, Mode::Both) => "Restore files and edit", (_, Mode::Messages) => "Rewind messages", (_, Mode::Both) => "Restore files and rewind" },
+        ).width(440.0).destructive(!fork && request.mode != Mode::Messages).enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle())).show(ctx, |ui| {
                 egui::Frame::new().fill(theme::palette(ctx).sidebar).corner_radius(8).inner_margin(12).show(ui, |ui| {
-                    egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(48.0).show(ui, |ui| {
                         ui.add(egui::Label::new(crate::transcript::user_display_text(&request.message)).wrap().selectable(true));
                         if request.operation != MessageAction::Fork && !request.message.images.is_empty() {ui.label(theme::small(ui,format!("{} attached file(s) will return to the draft",request.message.images.len())));}
                     });
@@ -147,7 +158,11 @@ impl Pui {
                 if request.operation == MessageAction::Fork {
                     ui.add(egui::Label::new("Creates a separate chat. The original chat and all files remain unchanged; both chats still use the same workspace.").wrap());
                 } else {
-                    for (mode,title,description) in [(Mode::Messages,"Messages only","Return the conversation to this point. Leave files as they are."),(Mode::Both,"Code + messages","Restore captured files and rewind the conversation."),(Mode::Code,"Code only","Restore captured files. Keep the current conversation.")] {
+                    ui.add(egui::Label::new(theme::small(ui, match request.point.file_changes {
+                        Some(count) => format!("{count} captured file change(s) since this message"),
+                        None => "File changes may exist since this message".into(),
+                    })).wrap());
+                    for (mode,title,description) in [(Mode::Messages,"Keep current files","Edit the conversation only. Your files stay exactly as they are."),(Mode::Both,"Restore files and conversation","Undo captured file changes and return this prompt to the composer."),(Mode::Code,"Restore files only","Undo captured file changes. Keep the conversation and draft unchanged.")] {
                         let available = mode == Mode::Messages || (request.point.code_reason.is_none() && self.workspace_restore_idle());
                         ui.add_enabled_ui(available, |ui| {
                             if prompt_ui::option(ui, title, description, request.mode == mode).clicked() { request.mode = mode; }
@@ -156,7 +171,7 @@ impl Pui {
                     if let Some(reason)=&request.point.code_reason {ui.add(egui::Label::new(theme::small(ui,reason)).wrap());}
                     if !self.workspace_restore_idle() {ui.add(egui::Label::new(theme::small(ui,"File restore requires other agents in this window to finish or stop. Other windows and external writers cannot be locked by Pui; conflicts are checked before restoring.")).wrap());}
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(theme::small(ui,"Later conversation entries are preserved on the abandoned branch. External actions, shell commands, commits and deployments cannot be undone.")).wrap());
+                    ui.add(egui::Label::new(theme::small(ui,"Later messages remain in history. File restore cannot undo commits, deployments or other external actions.")).wrap());
                 }
                 if self.history_drafts.len() >= 8 {ui.add(egui::Label::new(theme::small(ui,"Restore or send saved drafts before another rewind; eight are already retained.")).wrap());}
                 if request.operation != MessageAction::Fork && (!self.draft.is_empty() || !self.draft_images.is_empty()) {ui.add(egui::Label::new(theme::small(ui,"Your current unsent draft will be saved for manual recovery before replacing it.")).wrap());}
@@ -192,8 +207,15 @@ impl Pui {
         if !self.history_ready() || self.state.session_file.as_deref() != Some(&request.path) {
             return;
         }
+        // Resolve the entry again: a dialog must never apply stale restore metadata.
+        let Some(point) = point_for(&request.message, &self.state.history_points) else {
+            return;
+        };
+        if point.entry_id != request.point.entry_id {
+            return;
+        }
         if request.mode != Mode::Messages
-            && (request.point.code_reason.is_some() || !self.workspace_restore_idle())
+            && (point.code_reason.is_some() || !self.workspace_restore_idle())
         {
             return;
         }
@@ -212,7 +234,10 @@ impl Pui {
                     });
                     self.history_view = Default::default();
                 }
-                Err(error) => self.history_view.error = Some(error),
+                Err(error) => {
+                    self.state.error = Some(error.clone());
+                    self.history_view.error = Some(error);
+                }
             }
         }
     }
@@ -309,7 +334,12 @@ impl Pui {
             self.focus_composer = true;
         }
         self.state.error = None;
-        self.state.notice=Some(if request.operation == MessageAction::Fork { "Fork created including the selected response. The original chat is unchanged. Send a new message when ready." } else if request.mode==Mode::Code {"Captured files restored. Conversation kept; nothing was rerun."}else{"Returned to the selected prompt. Review the draft, then send when ready. Nothing was rerun."}.into());
+        self.state.notice = Some(match (request.operation, request.mode) {
+            (MessageAction::Fork, _) => "Fork created including the selected response. The original chat is unchanged. Send a new message when ready.",
+            (_, Mode::Code) => "Captured files restored. Conversation and draft kept; nothing was rerun.",
+            (_, Mode::Both) => "Captured files restored and prompt ready to edit. Review the draft, then send when ready.",
+            (_, Mode::Messages) => "Prompt ready to edit. Files kept unchanged; nothing was rerun. Review the draft, then send when ready.",
+        }.into());
         self.refresh_sessions();
         true
     }
@@ -334,7 +364,7 @@ impl Pui {
             ui.horizontal(|ui| {
                 ui.label(theme::small(
                     ui,
-                    "History navigation in progress · sending is paused",
+                    "Returning to your message… · nothing will be sent",
                 ));
                 if self.history_pending.as_ref().is_some_and(|p| p.timed_out)
                     && ui.small_button("Reconnect to inspect").clicked()

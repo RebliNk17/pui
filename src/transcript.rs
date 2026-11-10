@@ -793,8 +793,8 @@ fn user_footer(
         // Reverse construction keeps the visible order timestamp, Copy, Edit,
         // Rewind while anchoring the whole footer to the user's right edge.
         for (label, icon, kind, hint) in [
-            ("Rewind", Icon::Rewind, MessageAction::Rewind, "Rewind to before this message. Review what to restore before applying."),
-            ("Edit", Icon::Edit, MessageAction::Edit, "Edit this message. Review the rewind before applying; nothing is resent automatically."),
+            ("Rewind", Icon::Rewind, MessageAction::Rewind, "Return to before this message. Choose file restore only when available; nothing is resent."),
+            ("Edit", Icon::Edit, MessageAction::Edit, "Bring this message back to the composer. Your current draft is saved; nothing is sent automatically."),
         ] {
             if icons::labeled_button(ui, icon, label, enabled)
                 .on_hover_text(hint)
