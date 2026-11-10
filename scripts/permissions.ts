@@ -13,6 +13,28 @@ export const PERMISSION_MODES = ["manual", "acceptEdits", "plan", "auto", "dontA
 const reads = new Set(["read", "grep", "find", "ls"]);
 const inspect = new Set(["pui_agents", "pui_message_agent", "pui_wait_agents", "pui_stop_agent", "tool_search"]);
 const block = (reason: string) => ({ block: true, reason });
+const MANAGED_AGENTS_ONLY = "Unmanaged agent launches are disabled in Pui. Use pui_spawn_agent so the worker appears beneath its parent chat with a live transcript. If managed spawning is unavailable or denied, report the blocker; do not launch a detached CLI or SDK agent.";
+// A tool-boundary guard, not a shell sandbox. Inspect executable commands/code,
+// never ordinary read/write contents. Nested codemode tool calls are gated too.
+export function unmanagedAgentLaunch(name: string, args: any) {
+  if (/^(?:.*__)?(?:subagent|spawn_agent|spawn_subagent|delegate_task|launch_agent)$/.test(name)) return true;
+  // Codemode is sandboxed: its nested tools emit their own tool_call events.
+  // Do not scan the wrapper text: tools.write/edit may contain launch examples.
+  if (!["bash", "powershell"].includes(name)) return false;
+  const code = args.command;
+  if (typeof code !== "string") return false;
+  // Direct shell commands (including absolute paths, wrappers and pipelines).
+  const shell = /(?:^\s*|[;&|()\n]\s*|\b(?:env|nohup|exec|command|sudo)\s+|\bcommand\s*:\s*["'`]|\b(?:exec|execSync)\s*\(\s*["'`])(?:[A-Za-z_]\w*=[^\s]+\s+)*["']?(?:[^\s"'`;&|()\[\],]*[/\\])?(pi|claude|codex|opencode|aider)["']?(?=\s|$)([^;&|\n]*)/g;
+  for (const match of code.matchAll(shell)) {
+    // Discovery does not start a model session. No trailing prompt/options.
+    if (!/^\s*(?:--help|-h|--version|-v|auth\s+check|--list-models)\s*$/.test(match[2])) return true;
+  }
+  // Python/Node subprocess arrays, including a variable later passed to Popen.
+  const processCall = /\b(?:Popen|run|call|check_call|check_output|spawn|spawnSync|exec|execFile|execFileSync|execSync|Start-Process)\s*\(?/;
+  if (processCall.test(code) && /[\[(,]\s*["'](?:[^"'\n]*[/\\])?(?:pi|claude|codex|opencode|aider)["'](?=\s*[,\])])/.test(code)) return true;
+  // The Pi SDK is another unmanaged launch route, even without a CLI process.
+  return /\bcreateAgentSession\s*\(/.test(code);
+}
 export function cheapestModel(ctx: any) {
   const scope = ctx.scopedModels?.length ? ctx.scopedModels.map((m: any) => m.model) : ctx.modelRegistry.getAvailable();
   return scope.filter((m: any) => m.provider === ctx.model?.provider && m.input?.includes("text") && m.contextWindow >= 8192 && m.maxTokens >= 256 && [m.cost?.input, m.cost?.output].every((n: any) => typeof n === "number" && Number.isFinite(n) && n >= 0))
@@ -73,6 +95,9 @@ export function installPermissions(pi: any, initial: any = {}) {
   async function gate(e: any, ctx: any) {
     const version = revision;
     const name = e.toolName, args = e.input ?? {};
+    // This is an application invariant, not an approval preference. Bypass,
+    // classifier decisions and remembered grants cannot create invisible agents.
+    if (unmanagedAgentLaunch(name, args)) return block(MANAGED_AGENTS_ONLY);
     if (name === "pui_ask_questions") return; // User decisions, never a permission grant.
     // Native previews enforce their own path/format limits; pages can execute
     // network requests, so URL opens still pass the normal permission gate.

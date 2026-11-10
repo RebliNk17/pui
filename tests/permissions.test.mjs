@@ -30,6 +30,51 @@ function host(mode, {decision='ask',fail=false,approve=false,readonly=false}={})
   events.get('before_agent_start')({messageType:'user',prompt:'Update src/file to fix the requested bug',systemPrompt:'base'});
   return {events,prompts,calls,entries,statuses,ctx,control,gate:(toolName,input={})=>events.get('tool_call')({toolName,input},ctx)};
 }
+test('unmanaged agent launches are rejected before approvals, classification or bypass', async () => {
+  const commands = [
+    'pi --print --mode json "fix bugs"',
+    'pi -p "fix bugs"',
+    'cd /other/repo && /Users/me/.pi/agent/bin/pi --mode rpc',
+    'nohup pi --print "task" > events.jsonl &',
+    'env MODEL=example pi --print task',
+    'claude -p task',
+    'codex exec task',
+    'opencode run task',
+    'python3 - <<\'PY\'\nargs=["/Users/me/.pi/agent/bin/pi","--print","--mode","json"]\nsubprocess.Popen(args,start_new_session=True)\nPY',
+    'node -e \'spawn("pi", ["--print", "task"])\'',
+    'node -e \'const s = await createAgentSession({}); await s.session.prompt("task")\'',
+  ];
+  for (const mode of ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
+    const h = host(mode, {decision:'allow',approve:true});
+    for (const command of commands) {
+      const result = await h.gate('bash', {command});
+      assert.equal(result?.block, true, `${mode}: ${command}`);
+      assert.match(result.reason, /Use pui_spawn_agent/);
+    }
+    // Codemode's sandboxed wrapper follows ordinary permissions. The actual
+    // nested Bash call is independently rejected, even with a parent tool ID.
+    const nested = await h.events.get('tool_call')({toolName:'bash',parentToolCallId:'codemode-1',input:{command:'pi --print task'}}, h.ctx);
+    assert.equal(nested.block, true);
+    assert.equal((await h.gate('subagent', {task:'hidden worker'})).block, true);
+    assert.equal((await h.gate('mcp__agents__spawn_agent', {task:'hidden worker'})).block, true);
+    const shell = await h.events.get('user_bash')({command:'pi -p task'}, h.ctx);
+    assert.equal(shell.result.exitCode, 1);
+    assert.match(shell.result.output, /Use pui_spawn_agent/);
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.calls.length, 0);
+  }
+});
+test('agent guard leaves managed tools, ordinary development and CLI discovery alone', async () => {
+  const h = host('bypassPermissions');
+  for (const command of ['pi --help', 'pi --version', 'pi auth check', 'pi --list-models', 'command -v pi', 'npm test', 'cargo test', 'python3 -c "import math; print(math.pi)"', 'rg "pi --print" README.md']) {
+    assert.equal(await h.gate('bash', {command}), undefined, command);
+  }
+  assert.equal(await h.gate('pui_spawn_agent', {name:'reader',task:'Inspect',access:'read-only'}), undefined);
+  assert.equal(await h.gate('codemode', {code:'await tools.pui_spawn_agent({name:"reader", task:"Inspect", access:"read-only"})'}), undefined);
+  assert.equal(await h.gate('write', {path:'src/test',content:'subprocess.Popen(["pi", "--print"])'}), undefined);
+  assert.equal(await h.gate('edit', {path:'src/test',newText:'const s = await createAgentSession({});'}), undefined);
+  assert.equal(await h.gate('codemode', {code:'await tools.write({path:"src/test",content:\'subprocess.Popen(["pi", "--print"])\'})'}), undefined);
+});
 test('questions are available in all permission modes, including read-only, without approval or classification', async () => {
   for (const mode of ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
     for (const readonly of [false, true]) {

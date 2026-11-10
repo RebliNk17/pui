@@ -1,11 +1,15 @@
 // Bundled Pui/Pi adapter. Transport uses Pi's supported extension UI RPC,
 // never arbitrary stdout writes or another agent loop.
 import { Type } from "typebox";
-import { installPermissions, localPath } from "./permissions.ts";
+import { installPermissions, localPath, unmanagedAgentLaunch } from "./permissions.ts";
 import { installCompaction } from "./compaction.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
+
+export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
+Do not launch delegated agents through Bash, Python subprocesses, detached pi --print/--mode json, or another CLI: those processes are not registered with Pui and cannot be opened as live child chats. If managed spawning is unavailable or denied, report the blocker instead of silently falling back to an invisible process. Never claim a worker launched until pui_spawn_agent succeeds.
+Use the fewest useful workers, including zero. Give each a bounded task, relevant context/paths, acceptance criteria and constraints; review its results. Worktree workers start from committed HEAD, not uncommitted edits. No automatic commits, pushes, merges, deployments or destructive cleanup. Use event-driven waits instead of status polling; do not mirror worker transcripts into the parent.`;
 
 export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan a compact workflow using your tools and codemode.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
@@ -36,10 +40,14 @@ export default function puiExtension(pi: any) {
   const pending = new Map<string, AbortController>();
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
-  const worker=process.env.PUI_AGENT_CHILD === "1";
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
   const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent"];
-  const setMode=(on:boolean)=>{enabled=on && !readonly;const tools=pi.getActiveTools().filter((name:string)=>!orchestrationTools.includes(name));pi.setActiveTools([...new Set([...tools,...(enabled?orchestrationTools:(readonly||worker)?["pui_agents","pui_message_agent"]:[]),...(enabled&&pi.getAllTools().some((tool:any)=>tool.name==="codemode")?["codemode"]:[])])]);};
+  const setMode = (on: boolean) => {
+    enabled = on && !readonly && !taskRole;
+    const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
+    const controls = taskRole ? [] : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
+    pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
+  };
   pi.on("session_start", (_event: any, ctx: any) => {setMode(false);announce(ctx);});
   pi.on("session_shutdown", () => { for (const controller of pending.values()) controller.abort(); pending.clear(); });
   pi.on("turn_end", async (_event: any, ctx: any) => {
@@ -58,7 +66,10 @@ export default function puiExtension(pi: any) {
       announce(ctx);
     },
   });
-  pi.on("before_agent_start", (event: any) => enabled ? { systemPrompt: `${event.systemPrompt}\n\n${ULTRACODE_GUIDANCE}` } : undefined);
+  pi.on("before_agent_start", (event: any) => {
+    if (readonly || taskRole) return;
+    return { systemPrompt: `${event.systemPrompt}\n\n${AGENT_GUIDANCE}${enabled ? `\n\n${ULTRACODE_GUIDANCE}` : ""}` };
+  });
   // Read-only is enforced at the tool boundary too, not only by a prompt/CLI allowlist.
   pi.on("tool_call", async (event: any, ctx: any) => {
     if (readonly && !["read", "grep", "find", "ls", "pui_agents", "pui_message_agent", "pui_ask_questions"].includes(event.toolName)) return { block: true, reason: "Read-only Pui worker: tool not allowed" };
@@ -83,10 +94,12 @@ export default function puiExtension(pi: any) {
     } finally { clearTimeout(timeout);pending.delete(id); signal?.removeEventListener("abort", cancel); }
   }
   pi.registerTool({
-    name: "pui_spawn_agent", label: "Delegate task", description: "Spawn an independent Pui worker with a fresh context. Use the fewest useful workers. Returns its ID immediately, not its transcript. The worker sends one bounded completion report. Worktree workers start from committed HEAD.",
-    parameters: Type.Object({ name: Type.String({ maxLength: 80 }), task: Type.String({ maxLength: 24000 }), access: Type.Union([Type.Literal("read-only"), Type.Literal("worktree")]), depends_on: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),
+    name: "pui_spawn_agent", label: "Delegate task", description: "Spawn an independent Pui worker as a live, clickable child chat. Available without Ultracode. Use the fewest useful workers. Optional cwd selects another local repository; defaults to the parent workspace. Returns its ID immediately, not its transcript. Worktree workers start from committed HEAD. Normal permissions apply.",
+    promptSnippet: "Launch a visible, independently addressable child agent",
+    promptGuidelines: ["Use pui_spawn_agent for delegation, never detached agents through Bash/Python/CLI. If pui_spawn_agent fails or is unavailable, report the blocker rather than bypassing Pui's child-chat tracking."],
+    parameters: Type.Object({ name: Type.String({ maxLength: 80 }), task: Type.String({ maxLength: 24000 }), access: Type.Union([Type.Literal("read-only"), Type.Literal("worktree")]), cwd: Type.Optional(Type.String({ maxLength: 4096 })), depends_on: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),
     async execute(_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) {
-      if (!enabled || readonly) throw new Error("Enable Ultracode on a writable parent before creating workers");
+      if (readonly || taskRole) throw new Error("This worker cannot create subagents");
       return request("spawn", args, signal, ctx);
     },
   });
