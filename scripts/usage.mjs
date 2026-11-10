@@ -30,20 +30,30 @@ async function main() {
   };
   const info = await get("/user/info");
   const user = info.user_info || {};
-  const now = new Date();const start = `${now.toISOString().slice(0, 7)}-01`;
-  const models = new Map();let spend = 0, requests = 0;
+  const now = new Date();const end = now.toISOString().slice(0, 10);const start = `${end.slice(0, 7)}-01`;
+  const models = new Map(), days = new Map();let spend = 0, requests = 0;
   for (let page = 1; page <= 5; page++) {
-    const daily = await get(`/user/daily/activity?${new URLSearchParams({ start_date: start, end_date: now.toISOString().slice(0, 10), page: String(page), page_size: "1000" })}`);
+    const daily = await get(`/user/daily/activity?${new URLSearchParams({ start_date: start, end_date: end, page: String(page), page_size: "1000" })}`);
     spend += safeNumber(daily.metadata?.total_spend);requests += safeNumber(daily.metadata?.total_api_requests);
-    for (const day of daily.results || []) for (const [name, item] of Object.entries(day.breakdown?.model_groups || {})) {
-      const n = label(name);models.set(n, (models.get(n) || 0) + safeNumber(item.metrics?.spend));
+    for (const day of daily.results || []) {
+      const date = day.date;
+      if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && date >= start && date <= end) {
+        const entry = days.get(date) || { date, spend: 0, requests: 0 };
+        entry.spend += safeNumber(day.metrics?.spend);
+        entry.requests += safeNumber(day.metrics?.api_requests);
+        days.set(date, entry);
+      }
+      for (const [name, item] of Object.entries(day.breakdown?.model_groups || {})) {
+        const n = label(name);models.set(n, (models.get(n) || 0) + safeNumber(item.metrics?.spend));
+      }
     }
     if (!daily.metadata?.has_more) break;
   }
   return { provider: "LiteLLM", spend: safeNumber(user.spend), max: typeof user.max_budget === "number" && user.max_budget > 0 ? user.max_budget : null,
     reset: typeof user.budget_reset_at === "string" ? user.budget_reset_at : null, duration: label(user.budget_duration || ""), month: start,
     month_spend: spend, requests, total: (info.keys || []).reduce((sum, k) => sum + safeNumber(k.spend), 0),
-    models: [...models].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, spend]) => ({ name, spend })), fetched: Date.now() };
+    models: [...models].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, spend]) => ({ name, spend })),
+    days: [...days.values()].sort((a, b) => b.date.localeCompare(a.date)), fetched: Date.now() };
 }
 
 // Do not leak exception messages from auth helpers, URLs, response bodies or keys.
