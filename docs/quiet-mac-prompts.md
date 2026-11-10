@@ -20,6 +20,14 @@ Implemented in the isolated `quiet-mac-prompts` worktree from `master` at `22c00
 - No widened approval scope, protocol changes, automatic provider calls, auto-update behavior, file restoration changes, commits, merges, deployments or installations.
 - Keyboard approval shortcuts do not reach prompts beneath information modals. Escape cancels bypass without granting permission. Application stop/image-input/webview gates also recognize About and Updates as modal surfaces.
 
+## Preventing design regressions
+
+The Scheduled tasks delete confirmation was added after the redesign and bypassed the shared components with a raw egui modal. It now uses `confirmations::Dialog`, including bounded layout, destructive styling, safe initial focus, and Escape/backdrop cancellation. Resource add/remove/review dialogs now use shared headings and decision actions rather than only the shared outer frame. Task extension choices and secondary consent actions also use shared controls.
+
+`tests/prompt_design.rs` recursively scans all first-party Rust sources and rejects legacy modal/message-dialog types outside `prompt_ui.rs`, including aliased or multiline imports. It also rejects stock headings/decision buttons in custom modal renderers and the task prompt renderer. The guard runs with `cargo test`; source instructions in `AGENTS.md` require the shared design for new features. Native file pickers, the themed diff utility window, image theater and compact question navigation are intentional exceptions, not alternate confirmation designs.
+
+Call-site regressions cover Scheduled tasks deletion in both themes at narrow/wide sizes and multiple zoom levels, explicit enabled confirmation, Escape/backdrop/Cancel, safe Enter behavior, and disabled demo/read-only actions. Resource dialog tests check both themes, zoom, shared action styling/order, and Escape without staging/applying changes.
+
 ## Validation
 
 - `cargo fmt --check`: passed.

@@ -161,17 +161,33 @@ impl Pui {
             }
         }
         if let Some(id) = self.automation.delete.clone() {
-            egui::Modal::new(egui::Id::new("delete-automation")).show(ctx, |ui| {
-                ui.heading("Delete this job?");
-                ui.label("Stops future checks/prompts and removes this job. The creator chat and any already delivered messages are kept.");
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() { self.automation.delete = None; }
-                    if ui.add_enabled(writable, egui::Button::new("Delete job")).clicked() {
-                        if let Err(error) = self.change_job(&id, "delete") { self.automation.error = Some(error); }
-                        self.automation.delete = None;
-                    }
-                });
+            let choice = confirmations::Dialog::new(
+                "delete-automation",
+                "Delete this job?",
+                "Stop future checks/prompts and remove this scheduled job.",
+                "Cancel",
+                "Delete job",
+            )
+            .enabled(writable)
+            .show(ctx, |ui| {
+                if let Some(job) = self.automation.jobs.iter().find(|job| job.id == id) {
+                    ui.add(egui::Label::new(RichText::new(&job.name).strong()).wrap());
+                }
+                confirmations::note(
+                    ui,
+                    "The creator chat and any already delivered messages are kept.",
+                );
             });
+            match choice {
+                Some(confirmations::Choice::Cancel) => self.automation.delete = None,
+                Some(confirmations::Choice::Confirm) => {
+                    if let Err(error) = self.change_job(&id, "delete") {
+                        self.automation.error = Some(error);
+                    }
+                    self.automation.delete = None;
+                }
+                None => {}
+            }
         }
     }
 }

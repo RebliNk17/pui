@@ -201,7 +201,7 @@ impl Pui {
                         ui.add(egui::Label::new(&p.explanation).wrap());
                         approval_view::arguments(ui, &p.args);
                     } else {
-                        ui.add(egui::Label::new(protocol::string(&dialog, "title")).wrap());
+                        prompt_ui::heading(ui, protocol::string(&dialog, "title"), "");
                         ui.add(egui::Label::new(protocol::string(&dialog, "message")).wrap());
                     }
                 });
@@ -235,7 +235,7 @@ impl Pui {
                         "select" => {
                             if let Some(options) = dialog["options"].as_array() {
                                 for o in options.iter().filter_map(Value::as_str) {
-                                    if ui.button(o).clicked() {
+                                    if prompt_ui::option(ui, o, "", false).clicked() {
                                         answer = Some(json!({"value":o}));
                                     }
                                 }

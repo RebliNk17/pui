@@ -30,15 +30,15 @@ impl Resources {
         let mut cancel = false;
         let trusted = self.catalog.as_ref().is_some_and(|c| c.trusted);
         let response = prompt_ui::modal(ctx, egui::Id::new("resource-add"), 570.0, |ui| {
-            ui.heading(if self.form.edit_id.is_some() {
-                "Edit MCP server"
-            } else {
-                "Add to Pi"
-            });
-            ui.label(theme::small(
+            prompt_ui::heading(
                 ui,
+                if self.form.edit_id.is_some() {
+                    "Edit MCP server"
+                } else {
+                    "Add to Pi"
+                },
                 "Stage a change, then review its configuration impact.",
-            ));
+            );
             ui.add_space(14.0);
             egui::ScrollArea::vertical().id_salt("resource-form-body").max_height((ctx.screen_rect().height()-260.0).max(180.0)).show(ui,|ui|{
                 ui.add_enabled_ui(self.form.edit_id.is_none(),|ui|{
@@ -76,15 +76,18 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
                 if let Some(error)=&self.form.error{ui.add(egui::Label::new(RichText::new(error).color(theme::palette(ctx).red).size(12.0)).wrap());}
             });
             ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                cancel = ui.button("Cancel").clicked();
-                stage = ui
-                    .add_enabled(
-                        self.job.is_none(),
-                        egui::Button::new("Stage & review →").fill(theme::palette(ctx).accent_bg),
-                    )
-                    .clicked();
-            });
+            match confirmations::actions(
+                ui,
+                "Cancel",
+                "Stage & review →",
+                false,
+                self.job.is_none(),
+                false,
+            ) {
+                Some(confirmations::Choice::Cancel) => cancel = true,
+                Some(confirmations::Choice::Confirm) => stage = true,
+                None => {}
+            }
         });
         if cancel || response.should_close() {
             self.form.open = false;
@@ -169,16 +172,21 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
     }
     fn remove_dialog(&mut self, ctx: &egui::Context) {
         let item = self.remove.as_ref().unwrap().clone();
-        let mut stage = false;
-        let mut cancel = false;
-        let response = prompt_ui::modal(ctx, egui::Id::new("resource-remove"), 540.0, |ui| {
-            ui.heading(if item.kind == "packages" {
+        let choice = confirmations::Dialog::new(
+            "resource-remove",
+            if item.kind == "packages" {
                 "Uninstall package?"
             } else if item.kind == "mcp" {
                 "Remove server entry?"
             } else {
                 "Exclude resource?"
-            });
+            },
+            "Stage a removal for review before applying it.",
+            "Cancel",
+            "Stage removal",
+        )
+        .width(440.0)
+        .show(ctx, |ui| {
             ui.label(RichText::new(&item.name).strong());
             ui.add_space(12.0);
             ui.add(egui::Label::new(theme::small(ui,match item.kind.as_str(){"packages"=>"Removes the managed installation and declaration. Local package source files stay intact. These resolved resources belong to this package:","mcp"=>"Removes this entry. OAuth credentials stay intact. Removing a project entry can reveal a personal server with the same name.",_=>"Adds a Pi exclusion filter; it does not delete source files. Uninstall the owning package separately to remove its managed copy."})).wrap());
@@ -206,17 +214,11 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
                 ui,
                 "This stages a change. Nothing happens until the review is confirmed.",
             ));
-            ui.horizontal(|ui| {
-                cancel = ui.button("Cancel").clicked();
-                stage = ui
-                    .button(RichText::new("Stage removal").color(theme::palette(ctx).red))
-                    .clicked();
-            });
         });
-        if cancel || response.should_close() {
+        if choice == Some(confirmations::Choice::Cancel) {
             self.remove = None;
         }
-        if stage {
+        if choice == Some(confirmations::Choice::Confirm) {
             self.stage(
                 format!("remove:{}", item.id),
                 format!("Remove {}", item.name),
@@ -231,14 +233,14 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
         let mut close = false;
         let mut remove = None;
         let response = prompt_ui::modal(ctx, egui::Id::new("resource-review"), 690.0, |ui| {
-            ui.heading("Review changes");
-            ui.label(theme::small(
+            prompt_ui::heading(
                 ui,
-                format!(
+                "Review changes",
+                &format!(
                     "{} operations · revalidated before applying",
                     self.drafts.len()
                 ),
-            ));
+            );
             ui.add_space(12.0);
             egui::ScrollArea::vertical().id_salt("resource-review-body").max_height((ctx.screen_rect().height()-280.0).max(180.0)).show(ui,|ui|{
                 if let Some(review)=&review {for step in &review.steps{
@@ -259,20 +261,22 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
                 ui.add(egui::Label::new(theme::small(ui,"Operations run sequentially, not as an atomic transaction. On failure, earlier operations may remain applied; remaining changes are kept for explicit review. Package scripts cannot be rolled back. Existing agents are not reloaded.")).wrap());
             });
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                close = ui.button("Back").clicked();
-                apply = ui
-                    .add_enabled(
-                        review.is_some() && self.job.is_none(),
-                        egui::Button::new(if demo {
-                            "Simulate apply"
-                        } else {
-                            "Apply reviewed changes"
-                        })
-                        .fill(theme::palette(ctx).accent_bg),
-                    )
-                    .clicked();
-            });
+            match confirmations::actions(
+                ui,
+                "Back",
+                if demo {
+                    "Simulate apply"
+                } else {
+                    "Apply reviewed changes"
+                },
+                false,
+                review.is_some() && self.job.is_none(),
+                false,
+            ) {
+                Some(confirmations::Choice::Cancel) => close = true,
+                Some(confirmations::Choice::Confirm) => apply = true,
+                None => {}
+            }
         });
         if close || response.should_close() {
             self.review_open = false;

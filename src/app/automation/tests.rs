@@ -279,3 +279,184 @@ fn view_exposes_jobs_and_creator() {
     create(&mut a, "monitor");
     let _ = ctx.run(egui::RawInput::default(), |ctx| a.automation_panel(ctx));
 }
+
+fn labels(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+    match shape {
+        egui::Shape::Text(text) => out.push((
+            text.galley.job.text.clone(),
+            egui::Rect::from_min_size(text.pos, text.galley.size()),
+        )),
+        egui::Shape::Vec(shapes) => {
+            for shape in shapes {
+                labels(shape, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn delete_frame(
+    a: &mut Pui,
+    ctx: &egui::Context,
+    size: Vec2,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        },
+        |ctx| a.automation_panel(ctx),
+    )
+}
+
+#[test]
+fn delete_job_uses_the_shared_bounded_destructive_confirmation() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for size in [Vec2::new(420.0, 620.0), Vec2::new(1480.0, 960.0)] {
+            for zoom in [0.8, 1.0, 1.4] {
+                let ctx = egui::Context::default();
+                let mut a = app(&ctx);
+                mode.apply(&ctx);
+                ctx.style_mut(|style| style.animation_time = 0.0);
+                ctx.set_zoom_factor(zoom);
+                let id = create(&mut a, "cron");
+                a.automation.delete = Some(id.clone());
+                for _ in 0..4 {
+                    delete_frame(&mut a, &ctx, size, vec![]);
+                }
+                let output = delete_frame(&mut a, &ctx, size, vec![]);
+                let rect = ctx
+                    .read_response(egui::Id::new("delete-automation"))
+                    .unwrap()
+                    .rect;
+                assert!(
+                    ctx.screen_rect().contains_rect(rect),
+                    "{rect:?} at {size:?}/{zoom}"
+                );
+                assert!(
+                    rect.width() <= 410.0,
+                    "No full-width legacy prompts: {rect:?}"
+                );
+                let mut text = Vec::new();
+                for shape in &output.shapes {
+                    labels(&shape.shape, &mut text);
+                }
+                let cancel = text.iter().find(|(label, _)| label == "Cancel").unwrap().1;
+                let confirm = text
+                    .iter()
+                    .find(|(label, _)| label == "Delete job")
+                    .unwrap()
+                    .1;
+                assert!(cancel.right() < confirm.left());
+                assert!((cancel.center().y - confirm.center().y).abs() < 1.0);
+                assert!(rect.contains_rect(confirm));
+                assert!(
+                    text.iter()
+                        .any(|(label, bounds)| label == "CI ready" && rect.contains_rect(*bounds))
+                );
+                assert!(text.iter().any(|(label, _)| label
+                    == "The creator chat and any already delivered messages are kept."));
+                let danger = theme::palette(&ctx).red;
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(button) if button.fill == danger && button.rect.contains_rect(confirm)
+                )), "Destructive action must use the shared danger button");
+                assert_eq!(a.automation.delete.as_deref(), Some(id.as_str()));
+                assert_eq!(a.automation.jobs.len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn delete_job_only_deletes_on_explicit_enabled_confirmation() {
+    for action in [
+        "escape",
+        "backdrop",
+        "cancel",
+        "enter",
+        "confirm",
+        "read-only",
+        "demo",
+    ] {
+        let ctx = egui::Context::default();
+        let mut a = app(&ctx);
+        let id = create(&mut a, "cron");
+        let creator = a.automation.jobs[0].creator.id.clone();
+        a.automation.delete = Some(id);
+        a.draft = "Keep my draft".into();
+        if action == "read-only" {
+            a.automation.failed = true;
+        }
+        if action == "demo" {
+            a.demo = true;
+        }
+        let size = Vec2::new(860.0, 620.0);
+        for _ in 0..4 {
+            delete_frame(&mut a, &ctx, size, vec![]);
+        }
+        let output = delete_frame(&mut a, &ctx, size, vec![]);
+        let mut text = Vec::new();
+        for shape in &output.shapes {
+            labels(&shape.shape, &mut text);
+        }
+        let events = if matches!(action, "escape" | "enter") {
+            vec![egui::Event::Key {
+                key: if action == "escape" {
+                    egui::Key::Escape
+                } else {
+                    egui::Key::Enter
+                },
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        } else {
+            let pos = if action == "backdrop" {
+                egui::pos2(5.0, 5.0)
+            } else {
+                let label = if action == "cancel" {
+                    "Cancel"
+                } else {
+                    "Delete job"
+                };
+                text.iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap()
+                    .1
+                    .center()
+            };
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        delete_frame(&mut a, &ctx, size, events);
+        assert_eq!(
+            a.automation.jobs.is_empty(),
+            action == "confirm",
+            "{action}"
+        );
+        if matches!(action, "escape" | "backdrop" | "cancel" | "confirm") {
+            assert!(
+                a.automation.delete.is_none(),
+                "{action} must dismiss the dialog"
+            );
+        }
+        assert!(a.agents.nodes.contains_key(&creator));
+        assert_eq!(a.draft, "Keep my draft");
+    }
+}

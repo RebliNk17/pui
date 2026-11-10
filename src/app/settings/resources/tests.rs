@@ -359,6 +359,93 @@ fn forms_validate_arguments_and_preserve_omitted_server_fields() {
     assert!(manager.form_request().is_err());
 }
 #[test]
+fn resource_dialog_decisions_use_shared_actions_and_escape_never_applies() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [1.0, 1.4] {
+            for kind in ["form", "remove", "review"] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.style_mut(|style| style.animation_time = 0.0);
+                ctx.set_zoom_factor(zoom);
+                let mut manager = Resources {
+                    catalog: Some(demo_catalog()),
+                    ..Default::default()
+                };
+                let (id, cancel, confirm) = match kind {
+                    "form" => {
+                        manager.form.open = true;
+                        ("resource-add", "Cancel", "Stage & review →")
+                    }
+                    "remove" => {
+                        manager.remove = Some(demo_catalog().items.remove(0));
+                        ("resource-remove", "Cancel", "Stage removal")
+                    }
+                    _ => {
+                        manager.review_open = true;
+                        manager.review = Some(Review::default());
+                        ("resource-review", "Back", "Simulate apply")
+                    }
+                };
+                let frame = |manager: &mut Resources, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(1100.0, 1000.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| manager.dialogs(ctx, true),
+                    )
+                };
+                for _ in 0..4 {
+                    frame(&mut manager, vec![]);
+                }
+                let output = frame(&mut manager, vec![]);
+                let rect = ctx.read_response(egui::Id::new(id)).unwrap().rect;
+                assert!(
+                    ctx.screen_rect().contains_rect(rect),
+                    "{kind}/{zoom}: {rect:?}"
+                );
+                let mut labels = Vec::new();
+                for shape in &output.shapes {
+                    painted(&shape.shape, &mut labels);
+                }
+                let cancel = labels.iter().find(|(label, _)| label == cancel).unwrap().1;
+                let confirm = labels.iter().find(|(label, _)| label == confirm).unwrap().1;
+                assert!(cancel.right() < confirm.left(), "{kind}");
+                assert!((cancel.center().y - confirm.center().y).abs() < 1.0);
+                let colors = theme::palette(&ctx);
+                let fill = if kind == "remove" {
+                    colors.red
+                } else {
+                    colors.accent
+                };
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(button) if button.fill == fill && button.rect.contains_rect(confirm)
+                )), "{kind}: action must use shared palette styling");
+                frame(
+                    &mut manager,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                assert!(!manager.form.open && manager.remove.is_none() && !manager.review_open);
+                assert!(manager.drafts.is_empty());
+                assert!(manager.job.is_none());
+                assert!(manager.notice.is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn escape_closes_resource_dialog_before_settings() {
     let mut manager = Resources::default();
     manager.form.open = true;

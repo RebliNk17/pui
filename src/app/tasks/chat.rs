@@ -298,7 +298,7 @@ impl Pui {
                 prompt_ui::heading(ui, "Exceptional model requested", &format!("{} / {}\n{}", pending.selection.provider, pending.selection.model, pending.selection.reason));
                 ui.horizontal_wrapped(|ui| {
                     if prompt_ui::button(ui, "Approve exceptional model · uses provider", prompt_ui::Button::Primary, !self.demo).clicked() { self.task_approve_exceptional(); }
-                    if ui.button("Decline").clicked() {
+                    if prompt_ui::button(ui, "Decline", prompt_ui::Button::Secondary, true).clicked() {
                         if let Some(t) = self.tasks.current_mut() { t.pending_route = None; t.note = "Exceptional routing declined. No model call was made; start a new task to revise scope or policy.".into(); }
                         self.tasks.save();
                     }
@@ -477,7 +477,7 @@ impl Pui {
             {
                 self.task_start();
             }
-            if ui.button("Cancel task").clicked() {
+            if prompt_ui::button(ui, "Cancel task", prompt_ui::Button::Secondary, true).clicked() {
                 if let Some(t) = self.tasks.current_mut() {
                     t.phase = Phase::Cancelled;
                     t.note = "Cancelled before implementation.".into();
