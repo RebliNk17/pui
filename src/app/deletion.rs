@@ -351,6 +351,23 @@ impl Pui {
                 self.new_chat = true;
                 self.output_revision = u64::MAX;
                 self.focus_composer = true;
+                // Select saved history, not a newly registered blank chat.
+                // Keep the deleting chat parked until its worker completes.
+                if let Some(next) = self
+                    .sessions
+                    .iter()
+                    .find(|s| {
+                        !self.deletion.deleting_chat(&s.path)
+                            && self
+                                .prefs
+                                .chats
+                                .get(&s.path)
+                                .is_none_or(|meta| !meta.hidden && !meta.archived)
+                    })
+                    .cloned()
+                {
+                    self.open_chat(next);
+                }
             }
         }
         Ok(())

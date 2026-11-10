@@ -158,10 +158,8 @@ impl Pui {
         .frame(prompt_ui::popup(ctx))
         .gap(12.0)
         .show(|ui| {
-            theme::compact_controls(ui);
-            // Preserve the compact chat picker's original density, including popup options.
-            ui.spacing_mut().interact_size.y = 18.0;
-            ui.set_width(width - 32.0);
+            theme::menu_controls(ui);
+            ui.set_width(width - 20.0);
             ui.label(RichText::new("Model").size(12.0).color(colors.muted));
             let search=egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0,colors.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(9,7)).show(ui,|ui|{
                 ui.horizontal(|ui|{ui.spacing_mut().item_spacing.x=7.0;icons::inline(ui,Icon::Search,colors.dim);ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search").font(FontId::proportional(12.0)).frame(false).hint_text("Search models…").desired_width(ui.available_width()))}).inner
@@ -222,13 +220,13 @@ impl Pui {
                 .id_salt("model-results")
                 .max_height((anchor.top() - 210.0).clamp(90.0, 260.0))
                 .auto_shrink([false, true])
-                .show_rows(ui, 44.0, count, |ui, range| {
+                .show_rows(ui, 38.0, count, |ui, range| {
                     for index in range {
                         let model = filtered[index];
                         let selected =
                             self.state.model == model.id && self.state.provider == model.provider;
                         let (rect, response) = ui.add_enabled_ui(blocked.is_none(), |ui| ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 44.0), Sense::click(),
+                            Vec2::new(ui.available_width(), 38.0), Sense::click(),
                         )).inner;
                         response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, blocked.is_none(), selected, &model.name));
                         let response = response.on_hover_cursor(if blocked.is_none() { egui::CursorIcon::PointingHand } else { egui::CursorIcon::NotAllowed });
@@ -240,14 +238,14 @@ impl Pui {
                             );
                         }
                         ui.painter().text(
-                            rect.min + egui::vec2(12.0, 12.0),
+                            rect.min + egui::vec2(10.0, 11.0),
                             egui::Align2::LEFT_CENTER,
                             &model.name,
                             FontId::proportional(13.0),
                             if blocked.is_none() { colors.text } else { colors.dim },
                         );
                         ui.painter().text(
-                            rect.min + egui::vec2(12.0, 31.0),
+                            rect.min + egui::vec2(10.0, 27.0),
                             egui::Align2::LEFT_CENTER,
                             format!(
                                 "{} · {} context · ${} in · ${} out",
@@ -613,7 +611,8 @@ mod tests {
             events,
             ..Default::default()
         };
-        for _ in 0..3 {
+        // Popup/ScrollArea geometry needs several passes to settle after sizing.
+        for _ in 0..8 {
             let _ = ctx.run(input(vec![]), |ctx| app.model_picker(ctx));
         }
         let popup = ctx

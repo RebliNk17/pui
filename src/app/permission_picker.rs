@@ -72,8 +72,8 @@ impl Pui {
             .width(275.0)
             .frame(prompt_ui::popup(ui.ctx()))
             .show(|ui| {
-                prompt_ui::style(ui);
-                ui.set_width(243.0);
+                theme::menu_controls(ui);
+                ui.set_width(255.0);
                 ui.label(theme::small(ui, "Agent mode"));
                 for mode in PermissionMode::ALL {
                     if ui
@@ -222,6 +222,12 @@ mod tests {
             .1;
         assert!(plan.bottom() < button.top(), "Menu must open upward");
         assert!(text.iter().any(|(t, _)| t == "Bypass all permissions"));
+        let manual = text.iter().find(|(t, _)| t == "Manual").unwrap().1;
+        let accept = text.iter().find(|(t, _)| t == "Accept edits").unwrap().1;
+        assert!(
+            accept.center().y - manual.center().y <= 27.0,
+            "Mode rows should be compact"
+        );
         click(&mut app, plan.center());
         assert!(app.prefs.settings.permission == PermissionMode::Plan);
         assert!(app.state.busy);

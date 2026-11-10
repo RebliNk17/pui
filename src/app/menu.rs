@@ -35,6 +35,7 @@ fn menu_items(
     state: MenuState,
     selected: &mut Option<Command>,
 ) {
+    theme::menu_controls(ui);
     let mut separated = true;
     let mut separator_pending = false;
     for entry in entries.iter().filter(|e| e.supported()) {

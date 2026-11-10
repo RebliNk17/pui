@@ -154,6 +154,7 @@ pub struct Pui {
     usage: crate::usage::Usage,
     sessions: Vec<Session>,
     session_rx: Option<Receiver<Vec<Session>>>,
+    session_watch: Option<sessions::Watch>,
     workspace: Workspace,
     workspace_rx: Option<Receiver<Workspace>>,
     ctx: egui::Context,
@@ -272,6 +273,11 @@ impl Pui {
             },
             sessions: Vec::new(),
             session_rx: None,
+            session_watch: if options.demo {
+                None
+            } else {
+                sessions::session_root().map(|root| sessions::Watch::new(&root, &cc.egui_ctx))
+            },
             workspace: Workspace::default(),
             workspace_rx: None,
             ctx: cc.egui_ctx.clone(),
@@ -433,6 +439,9 @@ impl Pui {
     fn refresh_sessions(&mut self) {
         if self.session_rx.is_some() || self.demo {
             return;
+        }
+        if let Some(watch) = &mut self.session_watch {
+            watch.scanned();
         }
         let (tx, rx) = mpsc::channel();
         self.session_rx = Some(rx);
@@ -959,6 +968,14 @@ impl Pui {
             self.sessions = result;
             self.session_rx = None;
             self.update_session_title();
+        }
+        if !self.demo
+            && self
+                .session_watch
+                .as_mut()
+                .is_some_and(|watch| watch.ready(&self.ctx, self.session_rx.is_some()))
+        {
+            self.refresh_sessions();
         }
         if let Some(result) = self.workspace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.workspace = result;

@@ -43,16 +43,17 @@ fn deleting_active_chat_closes_dialog_and_allows_navigation_and_sending() {
     assert!(app.deletion.pending.is_none());
     assert!(!app.deletion.confirming());
     assert!(!app.deletion.in_progress());
-    assert!(app.new_chat);
-    assert!(app.state.session_file.is_none());
+    assert!(!app.new_chat);
+    assert_eq!(app.state.session_file.as_deref(), other.path.to_str());
     let ctx = app.ctx.clone();
     let output = ctx.run(Default::default(), |ctx| app.deletion_dialog(ctx));
     assert!(output.shapes.is_empty(), "No waiting modal");
 
     app.view_agent(&id);
     app.open_chat(deleting);
-    assert!(
-        app.state.session_file.is_none(),
+    assert_eq!(
+        app.state.session_file.as_deref(),
+        other.path.to_str(),
         "Cannot reopen deleting chat"
     );
     app.open_chat(other.clone());
@@ -73,6 +74,109 @@ fn deleting_active_chat_closes_dialog_and_allows_navigation_and_sending() {
     assert_eq!(app.draft, "preserve this draft");
     assert!(!app.agents.nodes.contains_key(&id));
     app.shutdown_agents();
+}
+
+#[test]
+fn deleting_chats_repeatedly_never_registers_phantom_conversations() {
+    let mut app = app();
+    let home = home();
+    let first = saved(&mut app, &home, "first");
+    let second = saved(&mut app, &home, "second");
+    app.prefs.cwd = home;
+    app.state = State {
+        session_file: Some(first.path.display().to_string()),
+        ..Default::default()
+    };
+    app.ensure_agent();
+    for chat in [first, second] {
+        app.loading_chat = false;
+        app.pending_session = None;
+        app.preview_rx = None;
+        app.begin_delete(Target::Chat(chat.path)).unwrap();
+        let done = hold_completion(&mut app);
+        // Exercise the frame polling which used to register the placeholder.
+        app.poll_other_agents();
+        done.send(Ok(())).unwrap();
+        app.poll_deletions();
+        app.poll_other_agents();
+        assert!(app.agents.nodes.values().all(|n| n.path.is_some()));
+    }
+    assert!(app.new_chat);
+    assert!(app.client.is_none());
+    assert!(app.agents.active.is_empty());
+    assert!(app.agents.nodes.is_empty());
+    assert!(app.agents.parked.is_empty());
+    assert!(super::super::sidebar_tree::forest(&app).is_empty());
+    app.new_session();
+    assert_eq!(app.agents.nodes.len(), 1, "Only the explicit new chat");
+    assert!(app.client.is_some());
+    app.shutdown_agents();
+}
+
+#[test]
+fn leaving_empty_workspace_for_parked_chat_does_not_save_a_placeholder() {
+    let mut app = app();
+    let home = home();
+    let chat = saved(&mut app, &home, "parked");
+    app.state = State {
+        session_file: Some(chat.path.display().to_string()),
+        ..Default::default()
+    };
+    let id = app.ensure_agent();
+    app.park_tree();
+    app.new_chat = true;
+    app.poll_other_agents();
+    app.open_chat(chat);
+    assert_eq!(app.agents.active, id);
+    assert_eq!(app.agents.nodes.len(), 1);
+    assert!(app.agents.parked.is_empty());
+    app.shutdown_agents();
+}
+
+#[test]
+fn deleting_last_visible_chat_does_not_reopen_hidden_or_archived_history() {
+    let mut app = app();
+    let home = home();
+    let current = saved(&mut app, &home, "current");
+    let hidden = saved(&mut app, &home, "hidden");
+    let archived = saved(&mut app, &home, "archived");
+    app.prefs.chats.entry(hidden.path).or_default().hidden = true;
+    app.prefs.chats.entry(archived.path).or_default().archived = true;
+    app.state = State {
+        session_file: Some(current.path.display().to_string()),
+        ..Default::default()
+    };
+    app.begin_delete(Target::Chat(current.path)).unwrap();
+    let done = hold_completion(&mut app);
+    app.poll_other_agents();
+    done.send(Ok(())).unwrap();
+    app.poll_deletions();
+    assert!(app.state.session_file.is_none());
+    assert!(app.client.is_none());
+    assert!(app.agents.nodes.is_empty());
+}
+
+#[test]
+fn deleting_background_chat_keeps_current_chat_and_draft() {
+    let mut app = app();
+    let home = home();
+    let current = saved(&mut app, &home, "current");
+    let other = saved(&mut app, &home, "other");
+    app.state = State {
+        session_file: Some(current.path.display().to_string()),
+        ..Default::default()
+    };
+    let id = app.ensure_agent();
+    app.draft = "keep my draft".into();
+    app.begin_delete(Target::Chat(other.path)).unwrap();
+    let done = hold_completion(&mut app);
+    app.poll_other_agents();
+    done.send(Ok(())).unwrap();
+    app.poll_deletions();
+    assert_eq!(app.state.session_file.as_deref(), current.path.to_str());
+    assert_eq!(app.agents.active, id);
+    assert_eq!(app.agents.nodes.len(), 1);
+    assert_eq!(app.draft, "keep my draft");
 }
 
 #[test]
