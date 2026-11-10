@@ -2,6 +2,7 @@ mod agents;
 mod approval_view;
 mod attachments;
 mod changes;
+mod completions;
 mod composer_history;
 mod diagnostics;
 mod files;
@@ -112,6 +113,7 @@ pub struct Pui {
     draft: String,
     recall: composer_history::Recall,
     recall_width: f32,
+    completions: completions::View,
     draft_images: attachments::DraftImages,
     image_picker_rx: Option<Receiver<Vec<PathBuf>>>,
     new_chat: bool,
@@ -219,6 +221,7 @@ impl Pui {
             draft: String::new(),
             recall: Default::default(),
             recall_width: 700.0,
+            completions: Default::default(),
             draft_images: Default::default(),
             image_picker_rx: None,
             new_chat: session.is_none() && !options.demo,
@@ -403,6 +406,7 @@ impl Pui {
         self.current_dialog.clear();
         self.pending_dialog = None;
         self.connected = false;
+        self.completions = Default::default();
         self.ultracode = false;
         self.ultracode_ready = false;
         self.loading_chat = true;
@@ -458,6 +462,7 @@ impl Pui {
         self.send(protocol::command("get_state"));
         self.send(protocol::command("get_messages"));
         self.send(protocol::command("get_available_models"));
+        self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_available_thinking_levels"));
         self.send(protocol::command("get_session_stats"));
         self.refresh_workspace();
@@ -734,6 +739,9 @@ impl Pui {
                             self.send(protocol::command("get_messages"));
                         }
                     }
+                    if kind == "response" && success && command == "prompt" {
+                        self.send(protocol::command("get_commands"));
+                    }
                     if kind == "agent_settled" {
                         if !self.demo {
                             self.usage.refresh(&self.ctx, false);
@@ -813,6 +821,9 @@ impl Pui {
     }
 
     fn submit_mode(&mut self, ctx: &egui::Context, mode: settings::DeliveryMode) {
+        if self.submit_command() {
+            return;
+        }
         if self.is_mirror() {
             self.queue_draft_mode(mode);
             return;
@@ -992,6 +1003,7 @@ impl Pui {
         self.propagate_settings(&settings_before);
         let mut submit = false;
         let mut alternate = false;
+        let mut completion_anchor = None;
         egui::Frame::new()
             .fill(colors.sidebar)
             .stroke(Stroke::new(1.0, colors.border))
@@ -1006,6 +1018,8 @@ impl Pui {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 self.draft_images.show(ui);
                 self.recall_width = ui.available_width();
+                let completing = self.completion_active(ctx);
+                self.completion_keys(ctx);
                 self.recall_before_edit(ctx);
                 let response = ui.add(
                     egui::TextEdit::multiline(&mut self.draft)
@@ -1014,12 +1028,13 @@ impl Pui {
                             RichText::new(if self.demo {
                                 "Start a real session to talk to Pi…"
                             } else {
-                                "Message Pi… (paste or drop images)"
+                                "Message Pi… (/ commands, @ files, or drop files)"
                             })
                             .color(colors.dim),
                         )
                         .font(FontId::proportional(14.0))
                         .frame(false)
+                        .lock_focus(completing)
                         .desired_width(f32::INFINITY)
                         .desired_rows(1)
                         .return_key(egui::KeyboardShortcut::new(
@@ -1027,6 +1042,7 @@ impl Pui {
                             egui::Key::Enter,
                         )),
                 );
+                completion_anchor = Some((response.rect, ui.layer_id()));
                 if self.focus_composer {
                     response.request_focus();
                     self.focus_composer = false;
@@ -1042,8 +1058,11 @@ impl Pui {
                     ui.set_height(28.0);
                     ui.spacing_mut().button_padding = egui::vec2(6.0, 5.0);
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let attach =
-                        icons::button(ui, Icon::Plus, "Attach images · right-click for clipboard");
+                    let attach = icons::button(
+                        ui,
+                        Icon::Plus,
+                        "Attach files · right-click to paste an image",
+                    );
                     if attach.clicked() {
                         self.pick_images();
                     }
@@ -1155,6 +1174,9 @@ impl Pui {
                 .color(colors.dim),
             );
         });
+        if let Some((anchor, layer)) = completion_anchor {
+            self.completion_popup(ctx, anchor, layer);
+        }
         if submit {
             if alternate {
                 self.submit_mode(ctx, self.prefs.settings.delivery.opposite());
@@ -1414,6 +1436,7 @@ impl eframe::App for Pui {
             && !terminal_input
             && !self.diagnostics_open
             && self.state.dialogs.is_empty()
+            && !self.completion_active(ctx)
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
             && !self.transcript.gallery.is_open()
             && !self.draft_images.gallery.is_open()

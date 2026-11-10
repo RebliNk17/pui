@@ -131,7 +131,7 @@ impl Pui {
                 egui::Frame::new().fill(theme::palette(ctx).sidebar).corner_radius(8).inner_margin(12).show(ui, |ui| {
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
                         ui.add(egui::Label::new(crate::transcript::user_display_text(&request.message)).wrap().selectable(true));
-                        if request.operation != MessageAction::Fork && !request.message.images.is_empty() {ui.label(theme::small(ui,format!("{} attached image(s) will return to the draft",request.message.images.len())));}
+                        if request.operation != MessageAction::Fork && !request.message.images.is_empty() {ui.label(theme::small(ui,format!("{} attached file(s) will return to the draft",request.message.images.len())));}
                     });
                 });
                 ui.add_space(8.0);

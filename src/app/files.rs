@@ -723,6 +723,20 @@ fn read_preview(root: &Path, path: &Path) -> Result<String, String> {
         .map_err(|_| "Binary or non-UTF-8 file — no text preview available.".into())
 }
 
+/// Filename-only discovery for composer mentions; never opens file contents.
+pub(super) fn mention_paths(
+    root: &Path,
+    query: &str,
+    cancel: &AtomicBool,
+) -> Result<(Vec<PathBuf>, bool), String> {
+    search_paths(root, query, cancel).map(|search| {
+        (
+            search.entries.into_iter().map(|e| e.path).collect(),
+            search.limited,
+        )
+    })
+}
+
 fn search_paths(root: &Path, query: &str, cancel: &AtomicBool) -> Result<Search, String> {
     let mut directories = vec![(root.to_path_buf(), 0)];
     let mut search = Search {

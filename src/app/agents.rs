@@ -64,7 +64,9 @@ pub(super) struct Chat {
     partial: bool,
     draft: String,
     recall: composer_history::Recall,
+    completions: completions::View,
     images: attachments::DraftImages,
+    image_picker: Option<Receiver<Vec<PathBuf>>>,
     deliveries: Vec<run_status::Delivery>,
     transcript: Transcript,
     ultra: bool,
@@ -268,7 +270,9 @@ impl Pui {
             partial: std::mem::take(&mut self.preview_partial),
             draft: std::mem::take(&mut self.draft),
             recall: std::mem::take(&mut self.recall),
+            completions: std::mem::take(&mut self.completions),
             images: std::mem::take(&mut self.draft_images),
+            image_picker: self.image_picker_rx.take(),
             deliveries: std::mem::take(&mut self.deliveries),
             transcript: std::mem::take(&mut self.transcript),
             ultra: std::mem::take(&mut self.ultracode),
@@ -294,6 +298,8 @@ impl Pui {
         self.draft = chat.draft;
         self.recall = chat.recall;
         self.draft_images = chat.images;
+        self.image_picker_rx = chat.image_picker;
+        self.completions = chat.completions;
         self.deliveries = chat.deliveries;
         self.transcript = chat.transcript;
         self.ultracode = chat.ultra;
@@ -416,6 +422,7 @@ impl Pui {
         for kind in [
             "get_state",
             "get_messages",
+            "get_commands",
             "get_available_models",
             "get_available_thinking_levels",
         ] {
@@ -1060,6 +1067,7 @@ impl Pui {
             };
             for kind in [
                 "get_state",
+                "get_commands",
                 "get_available_models",
                 "get_available_thinking_levels",
             ] {

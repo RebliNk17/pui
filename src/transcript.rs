@@ -545,12 +545,23 @@ pub(crate) fn user_display_text(message: &Message) -> &str {
             break;
         }
         notes += 1;
-        if notes > message.images.len() {
+        if notes > message.images.iter().filter(|a| a.file.is_none()).count() {
             return original;
         }
         text = prefix.trim_end();
     }
-    if notes == 0 { original } else { text }
+    let text = if notes == 0 { original } else { text };
+    crate::media::file_manifest(text)
+        .filter(|(_, files)| {
+            files.iter().all(|f| {
+                message
+                    .images
+                    .iter()
+                    .any(|a| a.file.as_ref().is_some_and(|a| a.path == f.path))
+            })
+        })
+        .map(|(body, _)| body)
+        .unwrap_or(text)
 }
 fn image_dimension_note(line: &str) -> bool {
     fn dimensions(value: &str) -> bool {
@@ -1407,6 +1418,7 @@ mod tests {
                         key: i,
                         data: "invalid".into(),
                         mime: "image/png".into(),
+                        file: None,
                     }]
                 } else {
                     Vec::new()

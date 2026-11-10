@@ -633,6 +633,10 @@ impl Pui {
         self.prefs.notifications.sound.hash(&mut hash);
         self.prefs.notifications.desktop.hash(&mut hash);
         self.state.session_name.hash(&mut hash);
+        for command in &self.state.commands {
+            command.name.hash(&mut hash);
+            command.description.hash(&mut hash);
+        }
         self.state.permission_classifier.hash(&mut hash);
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);

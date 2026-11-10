@@ -11,6 +11,29 @@ pub(super) struct Delivery {
     pub message: WaitingMessage,
     pub window: Option<String>,
 }
+impl WaitingMessage {
+    pub(super) fn rpc_record(&self, kind: &str) -> Value {
+        let images: Vec<_> = self
+            .images
+            .iter()
+            .filter(|a| a.file.is_none())
+            .map(crate::media::Attachment::to_json)
+            .collect();
+        let files: Vec<_> = self.images.iter().filter_map(|a| a.file.as_ref()).collect();
+        let mut text = self.text.clone();
+        if !files.is_empty() {
+            text.push_str(crate::media::FILE_MARKER);
+            text.push_str(&serde_json::to_string(&files).expect("file manifest"));
+        }
+        // steer() rejects extension commands. prompt() dispatches them before
+        // queuing, while still steering expanded templates/skills during a run.
+        if kind == "steer" && self.text.starts_with('/') {
+            json!({"type":"prompt","streamingBehavior":"steer","message":text,"images":images})
+        } else {
+            json!({"type":kind,"message":text,"images":images})
+        }
+    }
+}
 impl Pui {
     pub(super) fn deliver_message(&mut self, message: WaitingMessage, kind: &str) -> bool {
         if self.history_pending.is_some() || self.restoring_code() {
@@ -22,16 +45,12 @@ impl Pui {
             self.state.error = Some("Pui permission adapter is not ready. Message kept; reconnect or check diagnostics.".into());
             return false;
         }
-        let images: Vec<_> = message
-            .images
-            .iter()
-            .map(crate::media::Attachment::to_json)
-            .collect();
+        let record = message.rpc_record(kind);
         let Some(client) = self.client.as_mut() else {
             self.state.error = Some("Pi is not connected. Your draft was kept.".into());
             return false;
         };
-        match client.enqueue(json!({"type":kind,"message":message.text,"images":images})) {
+        match client.enqueue(record) {
             Ok(id) => {
                 self.new_chat = false;
                 self.agent_user_turn();
@@ -215,7 +234,7 @@ impl Pui {
                     ui.push_id(index, |ui| {
                         ui.horizontal(|ui| {
                             let text = if message.text.is_empty() {
-                                "Image message"
+                                "File message"
                             } else {
                                 &message.text
                             };
@@ -308,6 +327,89 @@ mod tests {
         app.state.session_file = Some("/fixture/chat.jsonl".into());
         app.client = Some(rpc::Client::stub());
         app
+    }
+    fn csv() -> crate::media::Attachment {
+        crate::media::Attachment::from_file(crate::media::FileAttachment {
+            path: PathBuf::from("/fixture/retained/report file.csv"),
+            name: "report file.csv".into(),
+            size: 18,
+        })
+    }
+    #[test]
+    fn mixed_files_use_native_images_and_roundtrip_manifest_in_history() {
+        let image =
+            crate::media::Attachment::from_bytes(include_bytes!("../../assets/icon.png")).unwrap();
+        let message = WaitingMessage {
+            text: "Analyze this".into(),
+            images: vec![csv(), image.clone()],
+            ..Default::default()
+        };
+        let record = message.rpc_record("prompt");
+        assert_eq!(record["images"].as_array().unwrap().len(), 1);
+        assert_eq!(record["images"][0], image.to_json());
+        assert!(
+            record["message"]
+                .as_str()
+                .unwrap()
+                .contains("report file.csv")
+        );
+        let mut blocks = vec![
+            json!({"type":"text","text":record["message"]}),
+            image.to_json(),
+        ];
+        blocks.push(json!({"type":"text","text":"[Image: original 1000x500, displayed at 500x250. Multiply coordinates by 2.00 to map to original image.]"}));
+        let history = Message::from_json(&json!({"role":"user","content":blocks}));
+        assert_eq!(history.images.len(), 2);
+        assert_eq!(
+            crate::transcript::user_display_text(&history),
+            "Analyze this"
+        );
+        let recalled = WaitingMessage {
+            text: crate::transcript::user_display_text(&history).into(),
+            images: history.images,
+            ..Default::default()
+        };
+        assert_eq!(recalled.rpc_record("prompt"), record);
+        let file_only = WaitingMessage {
+            images: vec![csv()],
+            ..Default::default()
+        }
+        .rpc_record("prompt");
+        assert!(file_only["images"].as_array().unwrap().is_empty());
+        assert!(crate::media::file_manifest(file_only["message"].as_str().unwrap()).is_some());
+    }
+    #[test]
+    fn files_survive_queue_edit_chat_parking_and_rejected_send() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.busy = true;
+        app.draft_images.set_images(vec![csv()]);
+        app.queue_draft_mode(settings::DeliveryMode::Steer);
+        let path = PathBuf::from("/fixture/chat.jsonl");
+        assert!(app.waiting[&path][0].images[0].file.is_some());
+        let queued = app.waiting.get_mut(&path).unwrap().remove(0);
+        app.draft_images.set_images(queued.images);
+        let original = app.ensure_agent();
+        app.start_chat_in(app.prefs.cwd.clone());
+        assert!(app.draft_images.is_empty());
+        app.view_agent(&original);
+        app.state.busy = false;
+        app.submit(&ctx);
+        assert_eq!(app.deliveries.len(), 1);
+        let id = app.deliveries[0].id.clone();
+        app.delivery_response(&json!({"id":id,"success":false}));
+        assert_eq!(app.waiting[&path].len(), 1);
+        assert!(app.waiting[&path][0].images[0].file.is_some());
+    }
+    #[test]
+    fn slash_commands_use_prompt_dispatch_at_a_steering_boundary() {
+        let record = WaitingMessage {
+            text: "/review this".into(),
+            ..Default::default()
+        }
+        .rpc_record("steer");
+        assert_eq!(record["type"], "prompt");
+        assert_eq!(record["streamingBehavior"], "steer");
     }
     #[test]
     fn running_compacting_and_input_status_are_explicit() {

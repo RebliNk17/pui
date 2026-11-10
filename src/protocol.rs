@@ -86,12 +86,20 @@ pub struct HistoryPoint {
     #[serde(rename = "codeReason")]
     pub code_reason: Option<String>,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
     pub messages: Vec<Message>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
+    pub commands: Vec<SlashCommand>,
     pub model: String,
     pub model_name: String,
     pub provider: String,
@@ -159,6 +167,15 @@ impl Message {
             effort: string(value, "thinkingLevel").to_owned(),
             ..Default::default()
         };
+        if message.role == "user" {
+            if let Some((_, files)) =
+                crate::media::file_manifest(crate::transcript::user_display_text(&message))
+            {
+                message
+                    .images
+                    .extend(files.into_iter().map(crate::media::Attachment::from_file));
+            }
+        }
         if let Some(blocks) = value["content"].as_array() {
             for block in blocks {
                 match string(block, "type") {
@@ -342,6 +359,14 @@ impl State {
                                 .map(Vec::as_slice)
                                 .unwrap_or_default(),
                         );
+                    }
+                    "get_commands" => {
+                        self.commands = data["commands"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
                     }
                     "get_available_models" => {
                         self.models = data["models"]
