@@ -33,8 +33,9 @@ impl Pui {
         let tasks_loading = self.tasks.loading_history();
         let (mut pinned, branches) = sidebar_tree::listing(self);
         egui::SidePanel::left("sessions-v4")
-            .exact_width(254.0)
-            .resizable(false)
+            .default_width(254.0)
+            .width_range(220.0..=480.0)
+            .resizable(true)
             .frame(egui::Frame::new().fill(colors.sidebar).inner_margin(12))
             .show(ctx, |ui| {
                 // Native traffic lights occupy the top-left strip on macOS.
@@ -1130,6 +1131,91 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         }
     }
+    #[test]
+    fn sidebar_edge_resizes_in_both_views_and_clamps_width() {
+        for projects in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.projects = projects;
+            let panel = egui::Id::new("sessions-v4");
+            let width = || {
+                egui::containers::panel::PanelState::load(&ctx, panel)
+                    .unwrap()
+                    .rect
+                    .width()
+            };
+            for _ in 0..2 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            assert_eq!(width(), 254.0);
+
+            for (requested, expected) in [(340.0, 340.0), (100.0, 220.0), (800.0, 480.0)] {
+                let start = egui::pos2(width(), 400.0);
+                let output = frame(&ctx, &mut app, vec![egui::Event::PointerMoved(start)]);
+                assert!(matches!(
+                    output.platform_output.cursor_icon,
+                    egui::CursorIcon::ResizeHorizontal
+                        | egui::CursorIcon::ResizeEast
+                        | egui::CursorIcon::ResizeWest
+                ));
+                frame(
+                    &ctx,
+                    &mut app,
+                    vec![egui::Event::PointerButton {
+                        pos: start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                let end = egui::pos2(requested, start.y);
+                frame(&ctx, &mut app, vec![egui::Event::PointerMoved(end)]);
+                frame(&ctx, &mut app, vec![]);
+                frame(
+                    &ctx,
+                    &mut app,
+                    vec![egui::Event::PointerButton {
+                        pos: end,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                assert_eq!(width(), expected);
+                frame(&ctx, &mut app, vec![]);
+                assert_eq!(width(), expected, "Width survives subsequent frames");
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_width_survives_restoring_egui_memory_and_switching_views() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let panel = egui::Id::new("sessions-v4");
+        ctx.data_mut(|data| {
+            data.insert_persisted(
+                panel,
+                egui::containers::panel::PanelState {
+                    rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 800.0)),
+                },
+            );
+        });
+        frame(&ctx, &mut app, vec![]);
+        let memory = ctx.data(|data| serde_json::to_string(data).unwrap());
+        let restored = egui::Context::default();
+        restored.data_mut(|data| *data = serde_json::from_str(&memory).unwrap());
+        app.projects = !app.projects;
+        frame(&restored, &mut app, vec![]);
+        assert_eq!(
+            egui::containers::panel::PanelState::load(&restored, panel)
+                .unwrap()
+                .rect
+                .width(),
+            360.0
+        );
+    }
+
     #[test]
     fn inline_rename_selects_title_and_enter_saves_trimmed_text_in_both_views() {
         for projects in [false, true] {
