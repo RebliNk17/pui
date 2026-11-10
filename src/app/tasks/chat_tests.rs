@@ -67,6 +67,25 @@ fn click(app: &mut Pui, pos: egui::Pos2, picker: bool) {
         );
     }
 }
+fn add_workflow(app: &mut Pui) {
+    let mut task = Task::new(
+        app.prefs.cwd.clone(),
+        app.state.provider.clone(),
+        app.state.model.clone(),
+        app.state.thinking.clone(),
+    );
+    task.parent_session = app.state.session_file.as_ref().map(PathBuf::from);
+    let parent = app.ensure_agent();
+    app.tasks.parents.insert(task.id.clone(), parent);
+    app.tasks.selected = Some(task.id.clone());
+    app.tasks.records.insert(0, task);
+    app.tasks.open = true;
+    app.tasks.selected_run = None;
+    app.prefs.hide_inspector = false;
+    app.prefs.cards.hidden.remove(&Card::Workflow);
+    app.prefs.cards.collapsed.remove(&Card::Workflow);
+}
+
 fn proposal(app: &mut Pui) {
     app.state.session_file = Some("/fixture/task-parent.jsonl".into());
     app.state.messages = vec![Message {
@@ -74,7 +93,7 @@ fn proposal(app: &mut Pui) {
         text: "Conversation context stays here".into(),
         ..Default::default()
     }];
-    app.new_task();
+    add_workflow(app);
     let t = app.tasks.current_mut().unwrap();
     t.objective = "Keep drafts while switching chats".into();
     t.phase = Phase::AwaitingApproval;
@@ -108,12 +127,13 @@ fn inspector_and_collapsed_summary_follow_session_and_click_the_displayed_task()
     proposal(&mut app);
     let first = app.tasks.selected.clone().unwrap();
     app.tasks.current_mut().unwrap().objective = "First session workflow".into();
+    app.tasks.current_mut().unwrap().phase = Phase::Building;
     app.tasks.current_mut().unwrap().updated = 10;
     app.state.session_file = Some("/fixture/second-parent.jsonl".into());
-    app.new_task();
+    add_workflow(&mut app);
     let second = app.tasks.selected.clone().unwrap();
     app.tasks.current_mut().unwrap().objective = "Second session workflow".into();
-    app.tasks.current_mut().unwrap().phase = Phase::Accepted;
+    app.tasks.current_mut().unwrap().phase = Phase::Verifying;
     app.tasks.open = false;
     // Retained global selection must not decide which session's task is shown.
     app.state.session_file = Some("/fixture/task-parent.jsonl".into());
@@ -127,14 +147,12 @@ fn inspector_and_collapsed_summary_follow_session_and_click_the_displayed_task()
     assert!(!text.iter().any(|(s, _)| s == "Second session workflow"));
     app.prefs.cards.collapsed.insert(Card::Workflow);
     let text = labels(&inspector(&mut app, vec![]));
-    assert!(
-        text.iter()
-            .any(|(s, _)| s == Phase::AwaitingApproval.label())
-    );
-    assert!(!text.iter().any(|(s, _)| s == Phase::Accepted.label()));
+    assert!(text.iter().any(|(s, _)| s == Phase::Building.label()));
+    assert!(!text.iter().any(|(s, _)| s == Phase::Verifying.label()));
     app.state.session_file = Some("/fixture/no-tasks.jsonl".into());
     let text = labels(&inspector(&mut app, vec![]));
-    assert!(text.iter().any(|(s, _)| s == "No task"));
+    assert!(!text.iter().any(|(s, _)| s == "First session workflow"));
+    assert!(!text.iter().any(|(s, _)| s == Card::Workflow.label()));
     assert!(app.workflow_task().is_none());
     app.prefs.cards.collapsed.remove(&Card::Workflow);
     app.state.session_file = Some("/fixture/second-parent.jsonl".into());
@@ -171,6 +189,7 @@ fn workflow_header_action_stays_next_to_title_when_collapsed_and_does_not_toggle
     for collapsed in [false, true] {
         let mut app = app();
         proposal(&mut app);
+        app.tasks.current_mut().unwrap().phase = Phase::Building;
         let id = app.tasks.selected.clone();
         app.tasks.open = false;
         app.tasks.selected_run = Some("old-transcript".into());
@@ -182,7 +201,11 @@ fn workflow_header_action_stays_next_to_title_when_collapsed_and_does_not_toggle
             inspector(&mut app, vec![]);
         }
         let text = labels(&inspector(&mut app, vec![]));
-        let title = text.iter().find(|(s, _)| s == "Workflow").unwrap().1;
+        let title = text
+            .iter()
+            .find(|(s, _)| s == Card::Workflow.label())
+            .unwrap()
+            .1;
         let buttons: Vec<_> = text.iter().filter(|(s, _)| s == "Open").collect();
         assert_eq!(buttons.len(), 1, "one action, not a second footer button");
         assert!((buttons[0].1.center().y - title.center().y).abs() < 1.0);
@@ -227,13 +250,56 @@ fn workflow_header_action_stays_next_to_title_when_collapsed_and_does_not_toggle
 }
 
 #[test]
+fn inspector_hides_inactive_workflows_but_history_stays_accessible() {
+    for phase in [
+        Phase::Draft,
+        Phase::AwaitingApproval,
+        Phase::Ready,
+        Phase::Accepted,
+        Phase::Failed,
+        Phase::Blocked,
+        Phase::Interrupted,
+        Phase::Cancelled,
+        Phase::Stale,
+    ] {
+        let mut app = app();
+        proposal(&mut app);
+        app.tasks.current_mut().unwrap().phase = phase;
+        let id = app.tasks.selected.clone().unwrap();
+        app.tasks.open = false;
+        for _ in 0..3 {
+            inspector(&mut app, vec![]);
+        }
+        let text = labels(&inspector(&mut app, vec![]));
+        assert!(
+            !text.iter().any(|(s, _)| s == Card::Workflow.label()),
+            "inactive {phase:?} must not render a workflow inspector box"
+        );
+        assert!(
+            !text
+                .iter()
+                .any(|(s, _)| s == "Keep drafts while switching chats")
+        );
+        app.open_task_from_board(id.clone(), None);
+        assert!(app.tasks.open);
+        assert_eq!(app.tasks.selected.as_deref(), Some(id.as_str()));
+        let text = labels(&render(&mut app, vec![], false));
+        assert!(
+            text.iter()
+                .any(|(s, _)| s == "Keep drafts while switching chats")
+        );
+        assert!(app.tasks.processes.is_empty());
+    }
+}
+
+#[test]
 fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selection() {
     let mut app = app();
     proposal(&mut app);
     app.tasks.current_mut().unwrap().objective = "First session only".into();
     let first = app.tasks.selected.clone().unwrap();
     app.state.session_file = Some("/fixture/second-parent.jsonl".into());
-    app.new_task();
+    add_workflow(&mut app);
     app.tasks.current_mut().unwrap().objective = "Second session only".into();
     let second = app.tasks.selected.clone().unwrap();
     app.tasks.open = false;
@@ -251,7 +317,7 @@ fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selecti
     let text = labels(&render(&mut app, vec![], true));
     assert!(
         text.iter()
-            .any(|(s, _)| s == "Approve acceptance checks · First session only")
+            .any(|(s, _)| s == &format!("{} · First session only", Phase::AwaitingApproval.label()))
     );
     assert!(!text.iter().any(|(s, _)| s.contains("Second session only")));
     app.tasks.open = false;
@@ -261,9 +327,10 @@ fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selecti
     app.tasks.open = false;
     app.state.session_file = Some("/fixture/no-tasks.jsonl".into());
     app.toggle_chat_tasks();
-    assert_eq!(app.tasks.records.len(), 3);
-    assert_eq!(app.tasks.current().unwrap().phase, Phase::Draft);
-    assert!(app.task_in_chat(app.tasks.current().unwrap()));
+    assert_eq!(app.tasks.records.len(), 2);
+    assert_eq!(app.tasks.selected.as_deref(), Some(second.as_str()));
+    assert!(!app.tasks.open);
+    assert!(app.workflow_task().is_none());
     assert!(app.tasks.processes.is_empty());
 }
 
@@ -294,11 +361,11 @@ fn saved_ownership_survives_reload_and_unlinked_tasks_are_not_assigned_by_worksp
 }
 
 #[test]
-fn unsaved_chats_have_distinct_workflows_and_a_foreign_live_task_does_not_hijack_new_task() {
+fn unsaved_chats_have_distinct_workflows_and_foreign_live_work_does_not_hijack_navigation() {
     let mut app = app();
     app.state.session_file = None;
     app.demo_agent_tree();
-    app.new_task();
+    add_workflow(&mut app);
     let first = app.tasks.selected.clone().unwrap();
     let parent = app.agents.active.clone();
     let child = app.agents.nodes[&parent].children[0].clone();
@@ -306,15 +373,13 @@ fn unsaved_chats_have_distinct_workflows_and_a_foreign_live_task_does_not_hijack
     assert!(app.workflow_task().is_none());
     app.tasks.live = Some(first.clone());
     app.tasks.live_mut().unwrap().phase = Phase::Building;
-    app.new_task();
-    assert!(
-        !app.tasks.open,
-        "New task must not open another chat's running task"
-    );
+    app.toggle_chat_tasks();
+    assert!(!app.tasks.open);
     assert!(app.workflow_task().is_none());
+    assert_eq!(app.tasks.records.len(), 1);
     assert_eq!(app.tasks.live.as_deref(), Some(first.as_str()));
     app.tasks.live = None;
-    app.new_task();
+    add_workflow(&mut app);
     let second = app.tasks.selected.clone().unwrap();
     assert_ne!(first, second);
     app.view_agent(&parent);
@@ -384,45 +449,52 @@ fn picker_popup_bounds_long_spaced_and_unbroken_titles_and_keeps_navigation() {
 }
 
 #[test]
-fn linked_task_shows_chat_composer_and_readable_checks_without_changing_messages_or_approval() {
-    let mut app = app();
-    proposal(&mut app);
-    app.draft = "Unsent chat draft".into();
-    let messages = serde_json::to_value(&app.state.messages).unwrap();
-    for _ in 0..4 {
-        render(&mut app, vec![], false);
+fn legacy_workflow_shows_composer_and_read_only_checks_without_changing_state() {
+    for phase in [Phase::Draft, Phase::AwaitingApproval] {
+        let mut app = app();
+        proposal(&mut app);
+        app.tasks.current_mut().unwrap().phase = phase;
+        app.draft = "Unsent chat draft".into();
+        let messages = serde_json::to_value(&app.state.messages).unwrap();
+        let task = serde_json::to_value(app.tasks.current()).unwrap();
+        for _ in 0..4 {
+            render(&mut app, vec![], false);
+        }
+        let text = labels(&render(&mut app, vec![], false));
+        for expected in [
+            "Conversation context stays here",
+            "This legacy workflow is read-only. Ask the agent in chat to start a new workflow.",
+            "The exact draft survives switching away and back",
+            "cargo test draft_switch",
+        ] {
+            assert!(
+                text.iter().any(|(s, _)| s.contains(expected)),
+                "missing {expected}: {text:?}"
+            );
+        }
+        assert!(text.iter().any(|(s, _)| s.starts_with("Chat with Pi")));
+        for removed in [
+            "Edit check",
+            "Requirement",
+            "New task",
+            "Generate acceptance checks",
+            "Approve checks & start",
+            "Cancel task",
+            "Use current chat workspace and model",
+            "Accept this result",
+            "Revalidate source",
+        ] {
+            assert!(
+                !text.iter().any(|(s, _)| s == removed),
+                "unexpected {removed}"
+            );
+        }
+        assert_eq!(app.draft, "Unsent chat draft");
+        assert_eq!(serde_json::to_value(&app.state.messages).unwrap(), messages);
+        assert_eq!(serde_json::to_value(app.tasks.current()).unwrap(), task);
+        assert!(app.tasks.processes.is_empty());
+        assert!(app.tasks.job.is_none());
     }
-    let text = labels(&render(&mut app, vec![], false));
-    for expected in [
-        "Conversation context stays here",
-        "Here's the finish line",
-        "The exact draft survives switching away and back",
-        "cargo test draft_switch",
-        "Edit check",
-    ] {
-        assert!(
-            text.iter().any(|(s, _)| s == expected),
-            "missing {expected}: {text:?}"
-        );
-    }
-    assert!(text.iter().any(|(s, _)| s.starts_with("Chat with Pi")));
-    assert!(
-        !text.iter().any(|(s, _)| s == "Requirement"),
-        "editor starts collapsed"
-    );
-    let edit = text.iter().find(|(s, _)| s == "Edit check").unwrap().1;
-    click(&mut app, edit.center(), false);
-    assert!(
-        labels(&render(&mut app, vec![], false))
-            .iter()
-            .any(|(s, _)| s == "Requirement")
-    );
-    assert_eq!(app.draft, "Unsent chat draft");
-    assert_eq!(serde_json::to_value(&app.state.messages).unwrap(), messages);
-    assert!(app.tasks.current().unwrap().approved.is_none());
-    assert!(app.tasks.processes.is_empty());
-    assert!(app.tasks.job.is_none());
-    assert!(app.tasks.current().unwrap().attempts.is_empty());
 }
 
 #[test]
@@ -438,7 +510,7 @@ fn chat_card_reopens_its_task_and_does_not_appear_in_other_conversations() {
     let text = labels(&output);
     let review = text
         .iter()
-        .find(|(s, _)| s == "Review checks")
+        .find(|(s, _)| s == "Open workflow")
         .expect("task card in creator chat")
         .1;
     click(&mut app, review.center(), false);
@@ -447,7 +519,7 @@ fn chat_card_reopens_its_task_and_does_not_appear_in_other_conversations() {
     app.tasks.open = false;
     app.state.session_file = Some("/fixture/unrelated.jsonl".into());
     let text = labels(&render(&mut app, vec![], false));
-    assert!(!text.iter().any(|(s, _)| s == "Review checks"));
+    assert!(!text.iter().any(|(s, _)| s == "Open workflow"));
     app.tasks.open = true;
     let text = labels(&render(&mut app, vec![], false));
     assert!(
@@ -457,6 +529,138 @@ fn chat_card_reopens_its_task_and_does_not_appear_in_other_conversations() {
         "do not mix unrelated chat into task context"
     );
     assert!(!text.iter().any(|(s, _)| s.starts_with("Chat with Pi")));
+}
+
+#[test]
+fn workflow_results_and_exceptional_routing_are_read_only() {
+    for phase in [Phase::Ready, Phase::Accepted, Phase::Stale, Phase::Blocked] {
+        let mut app = app();
+        proposal(&mut app);
+        let task = app.tasks.current_mut().unwrap();
+        task.phase = phase;
+        task.approved = Some(task.proposed.clone());
+        task.pending_route = Some(domain::routing::PendingRoute {
+            role: Role::Builder,
+            selection: domain::routing::Selection {
+                provider: "fixture-provider".into(),
+                model: "fixture-exceptional-model".into(),
+                exceptional: true,
+                ..Default::default()
+            },
+        });
+        let before = serde_json::to_value(app.tasks.current()).unwrap();
+        for _ in 0..4 {
+            render(&mut app, vec![], false);
+        }
+        let text = labels(&render(&mut app, vec![], false));
+        assert!(
+            text.iter()
+                .any(|(s, _)| s.contains("Exceptional routing is blocked"))
+        );
+        assert!(text.iter().any(|(s, _)| s == "Acceptance checks"));
+        for removed in [
+            "Accept this result",
+            "Revalidate source",
+            "Approve exceptional model · uses provider",
+            "Decline",
+        ] {
+            assert!(
+                !text.iter().any(|(s, _)| s == removed),
+                "unexpected {removed}"
+            );
+        }
+        assert_eq!(serde_json::to_value(app.tasks.current()).unwrap(), before);
+        assert!(app.tasks.processes.is_empty());
+        assert!(app.tasks.job.is_none());
+    }
+}
+
+#[test]
+fn active_workflow_is_not_hidden_by_an_older_selected_history_record() {
+    let mut app = app();
+    proposal(&mut app);
+    let old = app.tasks.selected.clone().unwrap();
+    app.tasks.current_mut().unwrap().phase = Phase::Ready;
+    add_workflow(&mut app);
+    let active = app.tasks.selected.clone().unwrap();
+    app.tasks.current_mut().unwrap().phase = Phase::Building;
+    app.tasks.open = false;
+    app.tasks.selected = Some(old.clone());
+    assert_eq!(app.active_workflow().unwrap().id, active);
+    app.open_task_from_board(old, None);
+    assert!(app.active_workflow().is_none());
+}
+
+#[test]
+fn workflow_pages_never_expose_manual_lifecycle_controls() {
+    for phase in [
+        Phase::Draft,
+        Phase::Proposing,
+        Phase::AwaitingApproval,
+        Phase::Preparing,
+        Phase::Building,
+        Phase::Capturing,
+        Phase::Checking,
+        Phase::Verifying,
+        Phase::Ready,
+        Phase::Accepted,
+        Phase::Failed,
+        Phase::Blocked,
+        Phase::Interrupted,
+        Phase::Cancelled,
+        Phase::Stale,
+    ] {
+        let mut app = app();
+        proposal(&mut app);
+        app.tasks.current_mut().unwrap().phase = phase;
+        for _ in 0..3 {
+            render(&mut app, vec![], false);
+        }
+        let text = labels(&render(&mut app, vec![], false));
+        for removed in [
+            "New task",
+            "New workflow",
+            "What should change?",
+            "Workspace & model settings",
+            "Use current chat workspace and model",
+            "Choose a model for each stage",
+            "Stop at a reported spend threshold",
+            "Generate acceptance checks",
+            "Here's the finish line",
+            "Edit check",
+            "Requirement",
+            "Exact command · blank means review only",
+            "Use committed HEAD only; leave uncommitted changes out of this task",
+            "Approve checks & start",
+            "Cancel task",
+            "Cancel workflow",
+            "Approve exceptional model · uses provider",
+            "Accept this result",
+            "Revalidate source",
+        ] {
+            assert!(
+                !text.iter().any(|(s, _)| s == removed),
+                "{phase:?} exposed manual control: {removed}"
+            );
+        }
+        assert!(app.tasks.processes.is_empty());
+        assert!(app.tasks.job.is_none());
+    }
+}
+
+#[test]
+fn stop_stays_available_in_workflow_and_transcript_headers() {
+    let mut app = app();
+    app.demo_task();
+    for run in [None, Some("demo-Builder".to_owned())] {
+        app.tasks.selected_run = run;
+        for _ in 0..3 {
+            render(&mut app, vec![], false);
+        }
+        let text = labels(&render(&mut app, vec![], false));
+        assert!(text.iter().any(|(s, _)| s == "Stop workflow"));
+        assert!(!text.iter().any(|(s, _)| s == "New task"));
+    }
 }
 
 #[test]

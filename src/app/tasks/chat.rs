@@ -1,4 +1,4 @@
-//! Task controls live in the conversation, not a second workspace.
+//! Read-only workflow progress lives in the conversation, not a second workspace.
 use super::*;
 
 #[cfg(test)]
@@ -39,6 +39,18 @@ impl Pui {
         }
     }
 
+    pub(in crate::app) fn active_workflow(&self) -> Option<&Task> {
+        if self.tasks.open {
+            self.tasks.current().filter(|t| t.phase.active())
+        } else {
+            self.tasks
+                .records
+                .iter()
+                .filter(|t| t.phase.active() && self.task_in_chat(t))
+                .max_by_key(|t| t.updated)
+        }
+    }
+
     fn task_same_session(&self, left: &Task, right: &Task) -> bool {
         if left.id == right.id {
             return true;
@@ -55,14 +67,15 @@ impl Pui {
     }
 
     pub(in crate::app) fn toggle_chat_tasks(&mut self) {
+        if !self.tasks.open && self.task_for_chat().is_none() {
+            return;
+        }
         self.kanban.open = false;
         self.automation.open = false;
         if self.tasks.open {
             self.task_parent_chat();
         } else if let Some(id) = self.task_for_chat().map(|t| t.id.clone()) {
             self.open_task_from_board(id, None);
-        } else {
-            self.new_task();
         }
     }
 
@@ -82,11 +95,11 @@ impl Pui {
                 .inner_margin(14)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.label(theme::caption(ui, "TASK"));
+                    ui.label(theme::caption(ui, "WORKFLOW"));
                     ui.add(
                         egui::Label::new(
                             RichText::new(if task.objective.is_empty() {
-                                "New task"
+                                "Untitled workflow"
                             } else {
                                 &task.objective
                             })
@@ -96,14 +109,7 @@ impl Pui {
                     );
                     ui.horizontal_wrapped(|ui| {
                         ui.label(theme::small(ui, task.phase.label()));
-                        if ui
-                            .button(if task.phase == Phase::AwaitingApproval {
-                                "Review checks"
-                            } else {
-                                "Open task"
-                            })
-                            .clicked()
-                        {
+                        if ui.button("Open workflow").clicked() {
                             self.open_task_from_board(task.id.clone(), None);
                         }
                     });
@@ -119,14 +125,21 @@ impl Pui {
                 self.task_parent_chat();
             }
             self.task_picker(ui);
-            if ui.small_button("New task").clicked() {
-                self.new_task();
+            if self.tasks.current().is_some_and(|task| task.phase.active())
+                && ui
+                    .add_enabled(
+                        !self.demo && self.tasks.live == self.tasks.selected,
+                        egui::Button::new("Stop workflow"),
+                    )
+                    .clicked()
+            {
+                self.tasks.stop();
             }
             ui.menu_button("More", |ui| {
                 theme::menu_controls(ui);
                 if let Some(id) = self.tasks.selected.clone() {
                     if ui
-                        .button(RichText::new("Delete task…").color(colors.red))
+                        .button(RichText::new("Delete workflow history…").color(colors.red))
                         .clicked()
                     {
                         self.request_delete(deletion::Target::Task(id));
@@ -135,16 +148,6 @@ impl Pui {
                 }
             });
         });
-        if self.tasks.running() && self.tasks.live != self.tasks.selected {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(theme::small(ui, "Another task is active."));
-                if ui.button("Open active task").clicked() {
-                    if let Some(id) = self.tasks.live.clone() {
-                        self.open_task_from_board(id, None);
-                    }
-                }
-            });
-        }
     }
 
     fn task_picker(&mut self, ui: &mut egui::Ui) {
@@ -154,12 +157,12 @@ impl Pui {
         let title = context
             .map(|t| {
                 if t.objective.is_empty() {
-                    "New task"
+                    "Untitled workflow"
                 } else {
                     &t.objective
                 }
             })
-            .unwrap_or("Choose task");
+            .unwrap_or("Choose workflow");
         let response = ui
             .allocate_ui_with_layout(
                 Vec2::new(width, ui.spacing().interact_size.y),
@@ -245,7 +248,7 @@ impl Pui {
                 path,
                 cwd: task.source.clone(),
                 project: task.source,
-                title: "Task conversation".into(),
+                title: "Workflow conversation".into(),
                 created: None,
                 modified: std::time::SystemTime::UNIX_EPOCH,
             });
@@ -255,7 +258,7 @@ impl Pui {
     pub(in crate::app) fn task_content(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
         let Some(task) = self.tasks.current().cloned() else {
-            ui.label("Start a new task to agree on a finish line.");
+            ui.label("Ask the agent in chat to start a workflow.");
             return;
         };
         if let Some(error) = &self.tasks.error {
@@ -268,228 +271,41 @@ impl Pui {
                     .color(colors.amber),
             );
         }
-        if task.phase == Phase::Draft {
-            self.task_draft(ui, &task);
-            return;
-        }
-        ui.label(theme::caption(ui, "TASK"));
+        ui.label(theme::caption(ui, "WORKFLOW"));
         ui.add(egui::Label::new(RichText::new(&task.objective).size(18.0).strong()).wrap());
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(task.phase.label()).color(colors.accent));
             ui.label(theme::small(ui, format!("${:.3} reported", task.cost())));
-            if task.phase.active()
-                && ui
-                    .add_enabled(!self.demo, egui::Button::new("Stop task"))
-                    .clicked()
-            {
-                self.tasks.stop();
-            }
         });
         if !task.note.is_empty() {
             ui.add(egui::Label::new(theme::small(ui, &task.note)).wrap());
         }
-        if task.phase.active() && self.tasks.live.as_ref() != Some(&task.id) && !self.demo {
-            return;
+        if matches!(task.phase, Phase::Draft | Phase::AwaitingApproval) {
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    "This legacy workflow is read-only. Ask the agent in chat to start a new workflow.",
+                ))
+                .wrap(),
+            );
         }
         self.task_dialog(ui);
         if let Some(pending) = &task.pending_route {
-            prompt_ui::inline(ui.ctx()).show(ui, |ui| {
-                prompt_ui::style(ui);
-                prompt_ui::heading(ui, "Exceptional model requested", &format!("{} / {}\n{}", pending.selection.provider, pending.selection.model, pending.selection.reason));
-                ui.horizontal_wrapped(|ui| {
-                    if prompt_ui::button(ui, "Approve exceptional model · uses provider", prompt_ui::Button::Primary, !self.demo).clicked() { self.task_approve_exceptional(); }
-                    if prompt_ui::button(ui, "Decline", prompt_ui::Button::Secondary, true).clicked() {
-                        if let Some(t) = self.tasks.current_mut() { t.pending_route = None; t.note = "Exceptional routing declined. No model call was made; start a new task to revise scope or policy.".into(); }
-                        self.tasks.save();
-                    }
-                });
-            });
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    format!(
+                        "Exceptional routing is blocked: {} / {}. Ask the agent for a new workflow using a supported model.\n{}",
+                        pending.selection.provider, pending.selection.model, pending.selection.reason
+                    ),
+                ))
+                .wrap(),
+            );
         }
         ui.add_space(16.0);
-        if task.phase == Phase::AwaitingApproval {
-            self.task_contract(ui, &task);
-        } else {
-            self.task_results(ui, &task);
-        }
+        self.task_results(ui, &task);
         ui.add_space(12.0);
         self.task_routing_details(ui, &task);
-    }
-
-    fn task_draft(&mut self, ui: &mut egui::Ui, task: &Task) {
-        ui.label(theme::caption(ui, "NEW TASK"));
-        ui.label(RichText::new("What should change?").size(22.0).strong());
-        ui.add(
-            egui::Label::new(theme::small(
-                ui,
-                "Define the outcome. Review the checks before any implementation starts.",
-            ))
-            .wrap(),
-        );
-        ui.add_space(12.0);
-        let t = self.tasks.current_mut().unwrap();
-        ui.add(
-            egui::TextEdit::multiline(&mut t.objective)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY)
-                .char_limit(16000)
-                .hint_text("Describe the behavior you want…"),
-        );
-        ui.add_space(8.0);
-        crate::section::Section::new("Constraints & out of scope")
-            .summary("Compatibility, boundaries and protected behavior")
-            .icon(Icon::Shield)
-            .id_salt((&task.id, "constraints"))
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut t.constraints)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .char_limit(12000)
-                        .hint_text("Compatibility, protected behavior, design constraints…"),
-                );
-            });
-        crate::section::Section::new("Workspace & model settings").summary("Execution location, routing and spending").icon(Icon::Sliders).id_salt((&task.id, "settings")).show(ui, |ui| {
-            ui.add(egui::Label::new(task.source.display().to_string()).selectable(true).wrap());
-            ui.add(egui::Label::new(theme::small(ui, "Git: isolated worktree. Non-Git: work in place. Uncommitted changes are never silently copied or omitted.")).wrap());
-            if ui.button("Use current chat workspace and model").clicked() {
-                let source = self.prefs.cwd.clone(); let provider = self.state.provider.clone(); let model = self.state.model.clone(); let thinking = self.state.thinking.clone();
-                if let Some(t) = self.tasks.current_mut() { t.source = source; t.provider = provider; t.model = model; t.thinking = thinking; }
-                self.tasks.save();
-            }
-            let t = self.tasks.current_mut().unwrap();
-            ui.checkbox(&mut t.dynamic_routing, "Choose a model for each stage");
-            let mut limited = t.spend_limit.is_some();
-            if ui.checkbox(&mut limited, "Stop at a reported spend threshold").changed() { t.spend_limit = limited.then_some(10.0); }
-            if let Some(limit) = &mut t.spend_limit { ui.add(egui::DragValue::new(limit).range(0.1..=1000.0).prefix("$ ").speed(0.5)); }
-            ui.add(egui::Label::new(theme::small(ui, if t.dynamic_routing { "Haiku assesses each stage. Easy work uses Haiku; harder work uses Opus 5.5 or GPT-6.1 Sol. Fable/Astra always needs separate approval." } else { "Pinned to the chat model. No automatic substitution." })).wrap());
-            ui.add(egui::Label::new(theme::small(ui, format!("{} / {} · {}", t.provider, t.model, thinking_label(&t.thinking)))).wrap());
-        });
-        ui.add_space(12.0);
-        if prompt_ui::button(
-            ui,
-            "Generate acceptance checks",
-            prompt_ui::Button::Primary,
-            !self.demo && self.tasks.loaded.is_none() && self.tasks.live.is_none(),
-        )
-        .clicked()
-        {
-            self.task_propose();
-        }
-        ui.add(egui::Label::new(theme::small(ui, "Uses provider credits for routing and proposal only. Implementation waits for your approval. Reported spending thresholds are not a hard cap.")).wrap());
-        if self.tasks.current().is_some_and(|t| {
-            t.objective != task.objective
-                || t.constraints != task.constraints
-                || t.dynamic_routing != task.dynamic_routing
-                || t.spend_limit != task.spend_limit
-                || t.source != task.source
-        }) {
-            self.tasks.save();
-        }
-    }
-
-    fn task_contract(&mut self, ui: &mut egui::Ui, task: &Task) {
-        let colors = theme::palette(ui.ctx());
-        ui.label(RichText::new("Here's the finish line").size(16.0).strong());
-        ui.add(
-            egui::Label::new(theme::small(
-                ui,
-                "Review the requirements and exact commands. Edit any check before approving.",
-            ))
-            .wrap(),
-        );
-        let t = self.tasks.current_mut().unwrap();
-        for criterion in &mut t.proposed.criteria {
-            ui.add_space(10.0);
-            egui::Frame::new()
-                .fill(colors.surface)
-                .stroke(Stroke::new(1.0, colors.border))
-                .corner_radius(10)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(theme::caption(ui, &criterion.id));
-                    ui.add(
-                        egui::Label::new(&criterion.description)
-                            .selectable(true)
-                            .wrap(),
-                    );
-                    if criterion.command.trim().is_empty() {
-                        ui.label(
-                            RichText::new("Review only · no executable check")
-                                .size(11.0)
-                                .color(colors.amber),
-                        );
-                    } else {
-                        ui.add_space(6.0);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&criterion.command)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(colors.muted),
-                            )
-                            .selectable(true)
-                            .wrap(),
-                        );
-                    }
-                    crate::section::Section::new("Edit check")
-                        .icon(Icon::Edit)
-                        .id_salt((&task.id, &criterion.id, "edit"))
-                        .show(ui, |ui| {
-                            ui.label(theme::small(ui, "Requirement"));
-                            ui.add(
-                                egui::TextEdit::multiline(&mut criterion.description)
-                                    .desired_rows(2)
-                                    .desired_width(f32::INFINITY)
-                                    .char_limit(4000),
-                            );
-                            ui.label(theme::small(ui, "Exact command · blank means review only"));
-                            ui.add(
-                                egui::TextEdit::multiline(&mut criterion.command)
-                                    .font(egui::TextStyle::Monospace)
-                                    .desired_rows(2)
-                                    .desired_width(f32::INFINITY)
-                                    .char_limit(4000),
-                            );
-                        });
-                });
-        }
-        if task.dirty_source {
-            ui.add_space(12.0);
-            ui.label(RichText::new("Source has uncommitted changes").color(colors.amber));
-            ui.checkbox(
-                &mut self.tasks.dirty_confirmed,
-                "Use committed HEAD only; leave uncommitted changes out of this task",
-            );
-            ui.add(egui::Label::new(theme::small(ui, "Otherwise cancel and prepare the source yourself. Pui will not commit or copy it for you.")).wrap());
-        }
-        ui.add_space(16.0);
-        ui.add(egui::Label::new(theme::small(ui, "Approval starts paid implementation, checks and fresh verification, with up to two repair rounds. Commands still use Pi's permission gate and can execute project code; this is not an OS sandbox. Fable/Astra need separate approval. Each process has a 30-minute deadline. No automatic commits, merges or deployments.")).wrap());
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            if prompt_ui::button(
-                ui,
-                "Approve checks & start",
-                prompt_ui::Button::Primary,
-                !self.demo,
-            )
-            .clicked()
-            {
-                self.task_start();
-            }
-            if prompt_ui::button(ui, "Cancel task", prompt_ui::Button::Secondary, true).clicked() {
-                if let Some(t) = self.tasks.current_mut() {
-                    t.phase = Phase::Cancelled;
-                    t.note = "Cancelled before implementation.".into();
-                }
-                self.tasks.save();
-            }
-        });
-        if self.tasks.current().is_some_and(|t| {
-            serde_json::to_value(&t.proposed).ok() != serde_json::to_value(&task.proposed).ok()
-        }) {
-            self.tasks.save();
-        }
     }
 
     fn task_results(&mut self, ui: &mut egui::Ui, task: &Task) {
@@ -517,38 +333,21 @@ impl Pui {
                     }
                 });
         }
-        if matches!(task.phase, Phase::Ready | Phase::Accepted) {
-            ui.horizontal_wrapped(|ui| {
-                if task.phase == Phase::Ready
-                    && ui
-                        .add_enabled(
-                            self.tasks.live.is_none() && !self.demo,
-                            egui::Button::new("Accept this result"),
-                        )
-                        .clicked()
-                {
-                    self.task_fingerprint(FingerprintStep::Accept);
-                }
-                if matches!(task.phase, Phase::Ready | Phase::Accepted)
-                    && ui
-                        .add_enabled(
-                            self.tasks.live.is_none() && !self.demo,
-                            egui::Button::new("Revalidate source"),
-                        )
-                        .clicked()
-                {
-                    self.task_fingerprint(FingerprintStep::Revalidate);
-                }
-            });
+        if !task.constraints.is_empty() {
+            crate::section::Section::new("Constraints & out of scope")
+                .id_salt((&task.id, "constraints"))
+                .icon(Icon::Shield)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(&task.constraints).selectable(true).wrap());
+                });
         }
-        if let Some(contract) = &task.approved {
-            crate::section::Section::new("Approved acceptance checks")
+        let contract = task.approved.as_ref().unwrap_or(&task.proposed);
+        if !contract.criteria.is_empty() {
+            crate::section::Section::new("Acceptance checks")
                 .id_salt((&task.id, "approved-checks"))
-                .summary(format!(
-                    "{} checks · agreed before implementation",
-                    contract.criteria.len()
-                ))
+                .summary(format!("{} checks · read-only", contract.criteria.len()))
                 .icon(Icon::Board)
+                .default_open(matches!(task.phase, Phase::Draft | Phase::AwaitingApproval))
                 .show(ui, |ui| {
                     for criterion in &contract.criteria {
                         ui.add(

@@ -242,7 +242,7 @@ impl Pui {
             self.remote_action(sync::Action::Rpc(response));
             return;
         }
-        let sent = if self.demo {
+        let sent = if self.workflow_answer(&response) || self.demo {
             true
         } else if let Some(client) = self.client.as_mut() {
             match client.send(response) {

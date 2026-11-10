@@ -27,13 +27,13 @@ impl Pui {
                                 ui.add_space(padding);
                                 ui.vertical(|ui| {
                                     ui.set_width(width);
-                                    ui.label(theme::small(ui, "Chat with Pi · task scope changes still require check approval"));
+                                    ui.label(theme::small(ui, "Chat with Pi · ask the agent to start a new workflow for a different scope"));
                                     self.composer(ui, ctx);
                                 });
                             });
                         });
                 }
-                // Keep Pi messages untouched. Task controls are a live footer in
+                // Keep Pi messages untouched. Workflow progress is a live footer in
                 // the same conversation scroll, never synthetic provider messages.
                 let messages = if linked { self.state.messages.clone() } else { vec![] };
                 let model = self.state.model.clone();
@@ -55,7 +55,7 @@ impl Pui {
             return;
         };
         ui.horizontal_wrapped(|ui| {
-            if ui.button("← Task & results").clicked() {
+            if ui.button("← Workflow & results").clicked() {
                 self.tasks.selected_run = None;
             }
             if let Some(record) = task.runs.iter().find(|r| r.id == run) {
@@ -138,7 +138,7 @@ impl Pui {
     pub(super) fn task_routing_details(&self, ui: &mut egui::Ui, task: &Task) {
         if task.dynamic_routing || task.runs.iter().any(|r| r.selection.is_some()) {
             crate::section::Section::new("Model choices & routing reasons").id_salt((&task.id, "routing-details")).summary("Per-stage models, reported cost and selection rationale").icon(Icon::Sliders).show(ui,|ui| {
-                if task.runs.is_empty(){ui.label("Model selection happens before each stage, using the available catalog and task evidence.");}
+                if task.runs.is_empty(){ui.label("Model selection happens before each stage, using the available catalog and workflow evidence.");}
                 for run in &task.runs {
                     if let Some(selection)=&run.selection {
                         let label=run.routing_for.map(|r|format!("Router → {}",r.label())).unwrap_or_else(||run.role.label().into());

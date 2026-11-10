@@ -191,9 +191,9 @@ impl Pui {
                     .unwrap_or_else(|| "Untitled session".into()),
             ),
             Target::Task(id) => (
-                "Delete task?",
-                "Permanently delete this task, its checks/results and its saved run transcripts. This cannot be undone.",
-                "Delete task",
+                "Delete workflow history?",
+                "Permanently delete this workflow history, its checks/results and its saved run transcripts. This cannot be undone.",
+                "Delete workflow history",
                 self.tasks
                     .records
                     .iter()

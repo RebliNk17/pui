@@ -96,6 +96,18 @@ test('local viewer opens are bounded host actions but web pages retain permissio
     assert.equal((await readonly.gate('pui_open', { target: '/tmp/review.md' })).block, true);
   }
 });
+test('workflow offer avoids a duplicate generic approval but never bypasses Plan, DontAsk or read-only', async () => {
+  for (const mode of ['manual','auto','acceptEdits','bypassPermissions']) {
+    const h = host(mode);
+    assert.equal(await h.gate('pui_workflow', {objective:'Fix focus',reason:'Independent review catches regressions.'}), undefined);
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.calls.length, 0);
+  }
+  for (const mode of ['plan','dontAsk']) {
+    assert.equal((await host(mode).gate('pui_workflow')).block, true);
+  }
+  assert.equal((await host('bypassPermissions', {readonly:true}).gate('pui_workflow')).block, true);
+});
 test('classifier is cheapest priced text model in selected provider and scope',()=>{
   const h=host('auto');assert.equal(cheapestModel(h.ctx).id,'cheap');
   h.ctx.scopedModels=[{model:model('scoped','current',2,3)},{model:model('other','elsewhere',0,0)}];

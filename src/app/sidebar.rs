@@ -21,7 +21,6 @@ enum Action {
     Open(usize),
     Agent(String),
     NewChat(PathBuf),
-    NewTask,
     Task(String, Option<String>),
     Saved(PathBuf, PathBuf),
 }
@@ -51,9 +50,6 @@ impl Pui {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icons::button(ui, Icon::Plus, "New chat · ⌘N").clicked() {
                             action = Some(Action::NewChat(self.prefs.cwd.clone()));
-                        }
-                        if ui.button("New task").clicked() {
-                            action = Some(Action::NewTask);
                         }
                     });
                 });
@@ -343,7 +339,6 @@ impl Pui {
             match action {
                 Action::Agent(id) => self.view_agent(&id),
                 Action::NewChat(folder) => self.start_chat_in(folder),
-                Action::NewTask => self.new_task(),
                 Action::Delete(target) => self.request_delete(target),
                 Action::Task(task, run) => {
                     self.kanban.open = false;
@@ -671,7 +666,7 @@ impl Pui {
                                 }
                                 if let Some(target) = &delete_target {
                                     let label = if matches!(target, deletion::Target::Task(_)) {
-                                        "Delete task…"
+                                        "Delete workflow history…"
                                     } else {
                                         "Delete chat…"
                                     };
@@ -1846,7 +1841,8 @@ mod tests {
                 text(&shape.shape, &mut labels);
             }
             assert!(!labels.iter().any(|(s, _)| s == "Pui"));
-            let title = labels.iter().find(|(s, _)| s == "New task").unwrap().1;
+            assert!(!labels.iter().any(|(s, _)| s == "New task"));
+            let title = labels.iter().find(|(s, _)| s == "Agents board").unwrap().1;
             let navigation = ["Agents board", "Scheduled tasks", "Settings"]
                 .map(|label| labels.iter().find(|(s, _)| s == label).unwrap().1);
             let search = labels
@@ -1866,7 +1862,7 @@ mod tests {
                     "Native traffic-light overlap at scale {zoom}"
                 );
             }
-            assert!(title.bottom() < navigation[0].top());
+            assert_eq!(title, navigation[0]);
             assert!(navigation[0].bottom() < navigation[1].top());
             assert!(navigation[1].bottom() < navigation[2].top());
             assert!(navigation[2].bottom() < search.top());

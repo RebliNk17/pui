@@ -197,8 +197,8 @@ fn sidebar_places_navigation_between_header_and_search_without_pui_menu() {
         .filter(|(_, rect)| rect.left() < 254.0)
         .collect();
     assert!(!sidebar.iter().any(|(s, _)| s == "Pui"));
+    assert!(!sidebar.iter().any(|(s, _)| s == "New task"));
     let rows = [
-        "New task",
         "Agents board",
         "Scheduled tasks",
         "Settings",

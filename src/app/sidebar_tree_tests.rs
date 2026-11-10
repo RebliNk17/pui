@@ -447,7 +447,7 @@ fn task_runs_open_under_their_creator_and_old_unlinked_runs_get_a_task_group() {
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].children.len(), 1);
     let task = &roots[0].children[0];
-    assert_eq!(task.title, "Task · Fix navigation");
+    assert_eq!(task.title, "Workflow · Fix navigation");
     assert_eq!(task.children.len(), 1);
     assert_eq!(
         task.children[0].target,

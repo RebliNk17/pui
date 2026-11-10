@@ -708,6 +708,9 @@ impl Pui {
         if self.remote_action(sync::Action::Rpc(record.clone())) {
             return;
         }
+        if self.workflow_answer(&record) {
+            return;
+        }
         if let Some(client) = &mut self.client {
             if let Err(error) = client.send(record) {
                 self.state.error = Some(error);
@@ -927,6 +930,7 @@ impl Pui {
                     self.state.error = Some(error);
                 }
                 rpc::Event::Exited => {
+                    self.cancel_workflows_for(&self.agents.active.clone());
                     self.uncertain_deliveries();
                     self.completion_run = Default::default();
                     if let Some(client) = self.client.take() {

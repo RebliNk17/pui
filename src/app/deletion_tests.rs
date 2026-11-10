@@ -205,7 +205,7 @@ fn task_sidebar_overflow_opens_confirmation_for_the_exact_task_without_deleting(
     let row = output
         .shapes
         .iter()
-        .find_map(|s| text(&s.shape, &format!("Task {}", &id[..8])))
+        .find_map(|s| text(&s.shape, &format!("Workflow {}", &id[..8])))
         .expect("Sidebar task");
     let click = |app: &mut Pui, pos| {
         for pressed in [true, false] {
@@ -231,7 +231,7 @@ fn task_sidebar_overflow_opens_confirmation_for_the_exact_task_without_deleting(
     let delete = output
         .shapes
         .iter()
-        .find_map(|s| text(&s.shape, "Delete task…"))
+        .find_map(|s| text(&s.shape, "Delete workflow history…"))
         .expect("Delete task menu");
     click(&mut app, delete.center());
     assert_eq!(app.deletion.pending, Some(Target::Task(id.clone())));

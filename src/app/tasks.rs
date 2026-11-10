@@ -6,8 +6,7 @@ use crate::tasks::{
 use std::collections::BTreeMap;
 
 mod chat;
-#[cfg(not(test))]
-mod proposal;
+mod consent;
 mod routing;
 mod runtime;
 #[cfg(test)]
@@ -20,7 +19,6 @@ pub(super) enum FingerprintStep {
     Candidate,
     AfterChecks,
     AfterReview,
-    Accept,
     Revalidate,
 }
 enum JobResult {
@@ -89,7 +87,7 @@ pub(super) struct Tasks {
     pub dialog_text: String,
     pub current_dialog: String,
     questions: questions::View,
-    dirty_confirmed: bool,
+    requests: BTreeMap<String, consent::Request>,
     pub revalidate_at: Option<std::time::Instant>,
     preview: Option<(String, Receiver<Result<crate::history::Preview, String>>)>,
     watched: Option<String>,
@@ -487,10 +485,10 @@ impl Pui {
                     title: task.objective.clone(),
                     project: task.source.clone(),
                     status: Status::Waiting,
-                    activity: "Acceptance checks need your approval".into(),
+                    activity: "Legacy workflow · not started".into(),
                     model: task.model.clone(),
                     parent: None,
-                    action: "Review acceptance checks",
+                    action: "View workflow",
                     path: None,
                 });
             }
@@ -518,7 +516,7 @@ impl Pui {
             }
         }
         let name = &state.session_name;
-        if !name.starts_with("Task ") {
+        if !name.starts_with("Task ") && !name.starts_with("Workflow ") {
             return None;
         }
         if name.contains(" · Acceptance proposal · ") {
@@ -530,7 +528,11 @@ impl Pui {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn new_task(&mut self) {
+        self.create_workflow();
+    }
+    fn create_workflow(&mut self) {
         if self.deletion.in_progress() {
             return;
         }
@@ -614,7 +616,7 @@ impl Pui {
                 self.tasks.revalidate_at = Some(std::time::Instant::now());
             }
             Err(_) => {
-                self.tasks.error = Some("Source watching unavailable. Use Revalidate source; acceptance always recomputes the fingerprint.".into());
+                self.tasks.error = Some("Source watching unavailable. Reopening this workflow recomputes its evidence fingerprint.".into());
             }
         }
     }
@@ -696,6 +698,7 @@ impl Pui {
             }
         }
         self.task_poll_processes();
+        self.finish_workflow_requests();
         if let Some(deadline) = self.tasks.revalidate_at {
             if std::time::Instant::now() >= deadline {
                 self.tasks.revalidate_at = None;

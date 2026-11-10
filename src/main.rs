@@ -60,7 +60,6 @@ pub struct Options {
     pub demo_send_now: bool,
     pub cwd: Option<PathBuf>,
     pub session: Option<PathBuf>,
-    pub task_proposal: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub theme: Option<theme::Theme>,
 }
@@ -197,13 +196,6 @@ fn main() -> eframe::Result {
             "--browser-console" => options.browser_console = true,
             "--cwd" => options.cwd = args.next().map(PathBuf::from),
             "--session" => options.session = args.next().map(PathBuf::from),
-            "--task-proposal" => {
-                let Some(path) = args.next() else {
-                    eprintln!("--task-proposal requires a request JSON path");
-                    return Ok(());
-                };
-                options.task_proposal = Some(path.into());
-            }
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
@@ -216,18 +208,6 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
         }
-    }
-    #[cfg(not(test))]
-    if let Some(path) = options.task_proposal.take() {
-        if options.demo || options.screenshot.is_some() {
-            eprintln!("Proposal execution cannot be combined with demo/screenshot flags.");
-            return Ok(());
-        }
-        if let Err(e) = app::Pui::run_task_proposal(&path) {
-            eprintln!("Proposal stopped: {e}");
-            std::process::exit(1);
-        }
-        return Ok(());
     }
     chromium::prepare_application();
     let native = eframe::NativeOptions {

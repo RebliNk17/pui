@@ -210,9 +210,9 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
     for task in &app.tasks.records {
         let key = format!("task:{}", task.id);
         let title = if task.objective.trim().is_empty() {
-            format!("Task {}", &task.id[..task.id.len().min(8)])
+            format!("Workflow {}", &task.id[..task.id.len().min(8)])
         } else {
-            format!("Task · {}", task.objective)
+            format!("Workflow · {}", task.objective)
         };
         let mut row = empty(
             key.clone(),

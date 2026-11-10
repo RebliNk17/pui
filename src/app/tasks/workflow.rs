@@ -1,4 +1,4 @@
-//! Bounded inspector workflow. Other sessions are secondary, never a flat chat dump.
+//! Bounded workflow progress only; conversation navigation belongs in the sidebar.
 use super::*;
 
 #[cfg(test)]
@@ -8,39 +8,19 @@ mod tests;
 impl Pui {
     pub(in crate::app) fn task_workflow(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        let Some(task) = self.workflow_task().cloned() else {
-            ui.label(theme::caption(ui, "VERIFIED TASKS"));
-            ui.add(
-                egui::Label::new(
-                    RichText::new("Build with a clear finish line")
-                        .size(14.0)
-                        .strong(),
-                )
-                .wrap(),
-            );
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    "Agree on checks, implement, then independently verify the result.",
-                ))
-                .wrap(),
-            );
-            if ui.button("New task").clicked() {
-                self.new_task();
-            }
-            self.workflow_agents(ui);
+        let Some(task) = self.active_workflow().cloned() else {
             return;
         };
         ui.label(theme::caption(
             ui,
             if self.demo {
-                "DEMO · VERIFIED TASK"
+                "DEMO · WORKFLOW"
             } else {
-                "VERIFIED TASK"
+                "WORKFLOW"
             },
         ));
         let objective = if task.objective.is_empty() {
-            "Untitled task"
+            "Untitled workflow"
         } else {
             &task.objective
         };
@@ -65,7 +45,7 @@ impl Pui {
         if let Some(route) = &task.pending_route {
             line(
                 ui,
-                &format!("Approval needed: {}", route.selection.model),
+                &format!("Exceptional routing blocked: {}", route.selection.model),
                 10.0,
                 colors.amber,
                 false,
@@ -81,9 +61,9 @@ impl Pui {
         ui.add_space(8.0);
         let proposal = task.runs.iter().rev().find(|r| r.role == Role::Proposal);
         let status = if task.approved.is_some() {
-            "Approved"
-        } else if task.phase == Phase::AwaitingApproval {
-            "Needs your approval"
+            "Established"
+        } else if matches!(task.phase, Phase::Draft | Phase::AwaitingApproval) {
+            "Legacy · new agent request required"
         } else {
             proposal.map(|r| r.status.as_str()).unwrap_or("Not started")
         };
@@ -175,76 +155,6 @@ impl Pui {
             self.open_task_from_board(task.id.clone(), None);
         }
         self.task_routing_details(ui, &task);
-        self.workflow_agents(ui);
-    }
-
-    fn workflow_agents(&mut self, ui: &mut egui::Ui) {
-        let colors = theme::palette(ui.ctx());
-        let active = self.agents.active.clone();
-        let root = self
-            .agents
-            .nodes
-            .get(&active)
-            .and_then(|n| n.parent.clone())
-            .unwrap_or_else(|| active.clone());
-        let mut nodes: Vec<_> = self
-            .agents
-            .nodes
-            .values()
-            .map(|n| {
-                (
-                    n.id.clone(),
-                    n.parent.clone(),
-                    n.name.clone(),
-                    n.status.clone(),
-                    n.color(colors),
-                )
-            })
-            .collect();
-        // Current root first, direct workers next, unrelated sessions only on request.
-        nodes.sort_by_key(|(id, parent, ..)| {
-            (
-                if id == &root {
-                    0
-                } else if parent.as_ref() == Some(&root) {
-                    1
-                } else {
-                    2
-                },
-                id.clone(),
-            )
-        });
-        let (current, other): (Vec<_>, Vec<_>) = nodes
-            .into_iter()
-            .partition(|(id, parent, ..)| id == &root || parent.as_ref() == Some(&root));
-        if !current.is_empty() {
-            ui.add_space(12.0);
-            ui.separator();
-            ui.label(theme::caption(ui, "CURRENT SESSION"));
-            for (id, parent, name, status, color) in current {
-                if agent_row(ui, &name, &status, color, id == active, parent.is_some()).clicked() {
-                    self.view_agent(&id);
-                }
-            }
-        }
-        if !other.is_empty() {
-            ui.add_space(8.0);
-            let label = format!("Other sessions · {}", other.len());
-            crate::section::Section::new(label)
-                .summary("Open another session without interrupting work")
-                .icon(Icon::Spark)
-                .id_salt("workflow-other-sessions")
-                .default_open(false)
-                .show(ui, |ui| {
-                    for (id, parent, name, status, color) in other {
-                        if agent_row(ui, &name, &status, color, id == active, parent.is_some())
-                            .clicked()
-                        {
-                            self.view_agent(&id);
-                        }
-                    }
-                });
-        }
     }
 }
 
@@ -359,61 +269,4 @@ fn step(
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!("{label}\n{status}"))
-}
-fn agent_row(
-    ui: &mut egui::Ui,
-    name: &str,
-    status: &str,
-    color: Color32,
-    selected: bool,
-    indented: bool,
-) -> egui::Response {
-    let colors = theme::palette(ui.ctx());
-    let width = ui.available_width();
-    let indent = if indented { 12.0 } else { 0.0 };
-    let (slot, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
-    let rect = egui::Rect::from_min_max(slot.min + egui::vec2(indent, 0.0), slot.max);
-    if selected || response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            7,
-            if selected {
-                colors.accent_bg
-            } else {
-                colors.hover
-            },
-        );
-    }
-    ui.painter()
-        .circle_filled(rect.left_center() + egui::vec2(8.0, 0.0), 2.5, color);
-    let text_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(19.0, 4.0),
-        rect.max - egui::vec2(6.0, 4.0),
-    );
-    paint_line(
-        ui,
-        egui::Rect::from_min_max(
-            text_rect.min,
-            egui::pos2(text_rect.right(), text_rect.center().y),
-        ),
-        name,
-        11.5,
-        colors.text,
-    );
-    paint_line(
-        ui,
-        egui::Rect::from_min_max(
-            egui::pos2(text_rect.left(), text_rect.center().y),
-            text_rect.max,
-        ),
-        status,
-        10.0,
-        colors.muted,
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name}: {status}"))
-    });
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("{name}\n{status}"))
 }

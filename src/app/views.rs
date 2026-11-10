@@ -35,8 +35,13 @@ impl Pui {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button("Tasks")
-                            .on_hover_text("Task checks, progress and results in your conversation")
+                            .add_enabled(
+                                self.workflow_task().is_some(),
+                                egui::Button::new("Workflows"),
+                            )
+                            .on_hover_text(
+                                "Workflow progress and evidence · the agent asks before starting",
+                            )
                             .clicked()
                         {
                             self.toggle_chat_tasks();
@@ -203,9 +208,9 @@ impl Pui {
                             .map(|a| a.changes.clone())
                             .unwrap_or_default();
                         let workflow_summary = self
-                            .workflow_task()
+                            .active_workflow()
                             .map(|t| t.phase.label())
-                            .unwrap_or("No task")
+                            .unwrap_or("")
                             .to_owned();
                         let summaries = [
                             status.to_owned(),
@@ -230,7 +235,10 @@ impl Pui {
                                 .hidden
                                 .extend([Card::Context, Card::Pulls, Card::Changes]);
                         }
-                        let workflow_id = self.workflow_task().map(|t| t.id.clone());
+                        let workflow_id = self.active_workflow().map(|t| t.id.clone());
+                        if workflow_id.is_none() {
+                            layout.hidden.insert(Card::Workflow);
+                        }
                         let header_action = workflow_id.as_ref().map(|_| (Card::Workflow, "Open"));
                         let action = inspector::stack(
                             ui,
@@ -256,9 +264,9 @@ impl Pui {
                                     if let Some(task) = &task {
                                         ui.label(
                                             RichText::new(if task.isolated {
-                                                "Isolated task workspace"
+                                                "Isolated workflow workspace"
                                             } else {
-                                                "Task workspace"
+                                                "Workflow workspace"
                                             })
                                             .size(12.0),
                                         );
@@ -279,7 +287,7 @@ impl Pui {
                                         );
                                         ui.label(theme::small(
                                             ui,
-                                            "Linked to your conversation. Task workers use their own permission-controlled sessions.",
+                                            "Linked to your conversation. Workflow agents use their own permission-controlled sessions.",
                                         ));
                                         return;
                                     }
@@ -408,6 +416,9 @@ impl Pui {
                                     layout.hidden.remove(&card);
                                 }
                             }
+                        }
+                        if workflow_id.is_none() && !original_hidden.contains(&Card::Workflow) {
+                            layout.hidden.remove(&Card::Workflow);
                         }
                         self.prefs.cards = layout;
                         if action == Some(Card::Workflow) {

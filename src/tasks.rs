@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(test)]
 pub mod proposal;
 pub mod routing;
 pub mod store;
@@ -41,14 +42,14 @@ impl Phase {
         match self {
             Self::Draft => "Draft",
             Self::Proposing => "Proposing checks",
-            Self::AwaitingApproval => "Approve acceptance checks",
+            Self::AwaitingApproval => "Legacy workflow · not started",
             Self::Preparing => "Preparing workspace",
             Self::Building => "Implementing",
             Self::Capturing => "Fingerprinting candidate",
             Self::Checking => "Running checks",
             Self::Verifying => "Independent review",
-            Self::Ready => "Checks passed · review ready",
-            Self::Accepted => "Accepted by you",
+            Self::Ready => "Completed · checks and review passed",
+            Self::Accepted => "Previously accepted",
             Self::Failed => "Checks failed · repair limit reached",
             Self::Blocked => "Blocked",
             Self::Interrupted => "Interrupted · not resumed",
@@ -232,6 +233,9 @@ pub struct Task {
     pub source: PathBuf,
     #[serde(default)]
     pub parent_session: Option<PathBuf>,
+    /// Initial user consent for this objective; absent on legacy manual tasks.
+    #[serde(default)]
+    pub initial_approved: bool,
     pub workspace: Option<PathBuf>,
     pub isolated: bool,
     pub provider: String,
@@ -240,7 +244,7 @@ pub struct Task {
     pub objective: String,
     pub constraints: String,
     pub proposed: Contract,
-    /// Frozen at execution approval; agent output cannot replace this.
+    /// Agent-established checks frozen before implementation; later output cannot replace them.
     pub approved: Option<Contract>,
     pub phase: Phase,
     pub note: String,
@@ -264,6 +268,7 @@ impl Task {
             id: uuid::Uuid::new_v4().to_string(),
             source,
             parent_session: None,
+            initial_approved: false,
             workspace: None,
             isolated: false,
             provider,
@@ -293,9 +298,7 @@ impl Task {
             return Err("Supply a bounded objective (up to 16,000 bytes) and constraints (up to 12,000 bytes).".into());
         }
         if self.provider.is_empty() || self.model.is_empty() {
-            return Err(
-                "Select a confirmed model in ordinary chat before creating the task.".into(),
-            );
+            return Err("A confirmed chat model is required before offering a workflow.".into());
         }
         Ok(())
     }
@@ -321,7 +324,7 @@ impl Task {
                 }
             }
             self.phase = Phase::Interrupted;
-            self.note = "Pui stopped during execution. No prompts or commands were replayed. Inspect the retained workspace and start a new task if needed.".into();
+            self.note = "Pui stopped during execution. No prompts or commands were replayed. Inspect the retained workspace; ask the agent for a new workflow if needed.".into();
         }
     }
 }

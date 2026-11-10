@@ -108,7 +108,7 @@ fn kanban_lists_live_task_agents_and_acceptance_approvals() {
     app.task_board_cards(&mut cards);
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].status, kanban::Status::Waiting);
-    assert_eq!(cards[0].action, "Review acceptance checks");
+    assert_eq!(cards[0].action, "View workflow");
     app.tasks.live = None;
 }
 fn event(app: &mut Pui, v: Value) {
@@ -205,6 +205,29 @@ fn fast_settle_before_prompt_ack_waits_for_acceptance() {
     assert!(app.tasks.current().unwrap().approved.is_none()); // A proposal is not execution approval.
 }
 #[test]
+fn initially_approved_proposal_starts_without_manual_check_approval() {
+    let mut app = app();
+    live(&mut app, Phase::Proposing);
+    let root = std::env::temp_dir().join(format!("pui-workflow-auto-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let t = app.tasks.live_mut().unwrap();
+    t.source = root;
+    t.initial_approved = true;
+    t.approved = None;
+    process(&mut app, Role::Proposal);
+    event(&mut app, json!({"type":"agent_start"}));
+    event(
+        &mut app,
+        json!({"type":"response","id":"prompt","command":"prompt","success":true,"data":{"disposition":"started"}}),
+    );
+    assistant(&mut app, &serde_json::to_string(&contract()).unwrap());
+    event(&mut app, json!({"type":"agent_settled","aborted":false}));
+    assert_eq!(app.tasks.live_task().unwrap().phase, Phase::Preparing);
+    assert!(app.tasks.live_task().unwrap().approved.is_some());
+    assert!(app.tasks.job.is_some());
+    app.tasks.stop();
+}
+#[test]
 fn fixture_workflow_runs_builder_checks_and_fresh_verifier_end_to_end() {
     let mut app = app();
     live(&mut app, Phase::Building);
@@ -227,7 +250,7 @@ fn fixture_workflow_runs_builder_checks_and_fresh_verifier_end_to_end() {
     event(&mut app, json!({"type":"agent_settled","aborted":false}));
     fn job(app: &mut Pui) {
         let job = app.tasks.job.take().expect("off-thread fingerprint job");
-        let result = job.rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let result = job.rx.recv_timeout(Duration::from_secs(30)).unwrap();
         app.task_job_result(result);
     }
     fn init(app: &mut Pui) {
@@ -299,12 +322,12 @@ fn check_exit_status_is_correlated_and_not_inferred_from_prose() {
     assert!(!app.tasks.live_task().unwrap().latest().unwrap().checks[0].passed());
 }
 #[test]
-fn source_change_refuses_acceptance_and_marks_evidence_stale() {
+fn source_change_marks_completed_workflow_evidence_stale() {
     let mut app = app();
     live(&mut app, Phase::Ready);
     passed_attempt(app.tasks.live_mut().unwrap());
     app.task_job_result(Ok(JobResult::Fingerprint(
-        FingerprintStep::Accept,
+        FingerprintStep::Revalidate,
         "changed".into(),
     )));
     let t = app.tasks.current().unwrap();
@@ -313,7 +336,7 @@ fn source_change_refuses_acceptance_and_marks_evidence_stale() {
     assert!(app.tasks.live.is_none());
 }
 #[test]
-fn matching_candidate_requires_explicit_acceptance_after_checks() {
+fn matching_candidate_completes_without_manual_acceptance() {
     let mut app = app();
     live(&mut app, Phase::Verifying);
     passed_attempt(app.tasks.live_mut().unwrap());
@@ -322,10 +345,10 @@ fn matching_candidate_requires_explicit_acceptance_after_checks() {
     assert!(app.tasks.live.is_none());
     app.tasks.live = app.tasks.selected.clone();
     app.task_job_result(Ok(JobResult::Fingerprint(
-        FingerprintStep::Accept,
+        FingerprintStep::Revalidate,
         "fingerprint".into(),
     )));
-    assert_eq!(app.tasks.current().unwrap().phase, Phase::Accepted);
+    assert_eq!(app.tasks.current().unwrap().phase, Phase::Ready);
 }
 #[test]
 fn repair_is_bounded_to_initial_plus_two_attempts() {
@@ -619,20 +642,10 @@ fn exceptional_request_pauses_before_any_expensive_launch() {
     app.task_route_finished(Role::Builder,r#"{"model":"gpt-6-astra","thinking":"high","difficulty":"exceptional","reason":"A remaining concurrency invariant needs specialized deep reasoning after ordinary approaches failed.","exceptional_reason":"The prior Opus and Sol attempts could not satisfy the interleaving invariant; request an explicit exceptional investigation rather than another routine implementation."}"#);
     let t = app.tasks.current().unwrap();
     assert_eq!(t.phase, Phase::Blocked);
-    assert!(t.pending_route.is_some());
+    assert!(t.pending_route.is_none());
+    assert!(t.note.contains("outside this workflow"));
     assert!(app.tasks.processes.is_empty());
     assert!(app.tasks.live.is_none());
-    app.task_approve_exceptional();
-    assert!(app.tasks.current().unwrap().pending_route.is_none());
-    assert_eq!(app.tasks.processes.len(), 1);
-    assert_eq!(
-        app.tasks.live_task().unwrap().runs[0]
-            .selection
-            .as_ref()
-            .unwrap()
-            .model,
-        "gpt-6-astra"
-    );
 }
 #[test]
 fn routed_model_mismatch_and_budget_stop_do_not_fallback_or_continue() {

@@ -45,7 +45,7 @@ pub fn show(ui: &mut egui::Ui, text: &str) -> bool {
         ui.label(RichText::new(title).size(15.0).strong());
         match output {
             Output::Proposal(contract) => {
-                ui.add(egui::Label::new(theme::small(ui, "Proposed checks, not execution results. Review and approve them in Tasks before implementation starts.")).wrap());
+                ui.add(egui::Label::new(theme::small(ui, "Agent-established acceptance checks, not execution results. Workflow checks are frozen before implementation.")).wrap());
                 for criterion in contract.criteria {
                     ui.separator();
                     ui.label(RichText::new(&criterion.id).size(11.0).strong().color(colors.accent));

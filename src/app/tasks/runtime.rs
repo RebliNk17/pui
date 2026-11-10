@@ -10,6 +10,10 @@ impl Pui {
         let Some(t) = self.tasks.current() else {
             return;
         };
+        if !t.initial_approved && !cfg!(test) {
+            self.tasks.error = Some("Initial workflow approval is required.".into());
+            return;
+        }
         if let Err(e) = t.validate_draft() {
             self.tasks.error = Some(e);
             return;
@@ -19,7 +23,6 @@ impl Pui {
             return;
         }
         self.tasks.live = Some(t.id.clone());
-        self.tasks.dirty_confirmed = false;
         let t = self.tasks.live_mut().unwrap();
         t.phase = Phase::Proposing;
         t.note.clear();
@@ -51,7 +54,7 @@ impl Pui {
         let Some(t) = self.tasks.current() else {
             return;
         };
-        if t.phase != Phase::AwaitingApproval {
+        if t.phase != Phase::AwaitingApproval || (!t.initial_approved && !cfg!(test)) {
             return;
         }
         if self.tasks.storage_failed {
@@ -62,16 +65,14 @@ impl Pui {
             self.tasks.error = Some(e);
             return;
         }
-        if t.dirty_source && !self.tasks.dirty_confirmed {
+        if t.dirty_source {
             self.tasks.error = Some(
-                "Choose committed HEAD explicitly or cancel and prepare the source yourself."
-                    .into(),
+                "Source has uncommitted changes. Prepare a clean source or continue regular development.".into(),
             );
             return;
         }
         let id = t.id.clone();
         let source = t.source.clone();
-        let allow = self.tasks.dirty_confirmed;
         let head = t.base_head.clone();
         self.tasks.live = Some(id.clone());
         let t = self.tasks.live_mut().unwrap();
@@ -84,7 +85,7 @@ impl Pui {
             return;
         };
         self.task_job(id.clone(), move || {
-            domain::workspace::prepare(&source, &id, &home, allow, &head)
+            domain::workspace::prepare(&source, &id, &home, false, &head)
                 .map(|(p, i)| JobResult::Prepared(p, i))
         });
     }
@@ -102,6 +103,10 @@ impl Pui {
                     return;
                 };
                 if t.phase != Phase::Proposing {
+                    return;
+                }
+                if i.dirty && t.initial_approved {
+                    self.tasks.block("Source has uncommitted changes. Workflow stopped before provider calls; no changes were copied or silently omitted. Continue regular development in this workspace, or prepare a clean source and ask again.");
                     return;
                 }
                 let t = self.tasks.live_mut().unwrap();
@@ -175,19 +180,6 @@ impl Pui {
                 self.task_launch(Role::Verifier);
             }
             FingerprintStep::AfterReview => self.task_finish_attempt(),
-            FingerprintStep::Accept => {
-                let t = self.tasks.live_mut().unwrap();
-                if t.phase == Phase::Ready
-                    && t.approved
-                        .as_ref()
-                        .is_some_and(|c| t.latest().is_some_and(|a| a.passed(c)))
-                {
-                    t.phase = Phase::Accepted;
-                    t.note = "Accepted by you for this fingerprint and these checks only. Files were not committed, merged or deployed.".into();
-                }
-                self.tasks.save();
-                self.tasks.live = None;
-            }
             FingerprintStep::Revalidate => {
                 self.tasks.live = None;
             }
@@ -254,7 +246,7 @@ impl Pui {
         };
         let mut args = vec![
             "--name".into(),
-            format!("Task {} · {} · {}", &t.id[..8], role.label(), attempt + 1),
+            format!("Workflow {} · {} · {}", &t.id[..8], role.label(), attempt + 1),
             "--no-extensions".into(),
             "--no-mcp".into(),
             "--tools".into(),
@@ -702,13 +694,30 @@ impl Pui {
                 .and_then(|c| c.validate().map(|_| c))
             {
                 Ok(c) => {
+                    let auto = self.tasks.live_task().unwrap().initial_approved;
+                    let id = self.tasks.live.clone().unwrap();
                     let t = self.tasks.live_mut().unwrap();
                     t.proposed = c;
                     t.phase = Phase::AwaitingApproval;
-                    t.note="Review and edit the criteria and exact commands. Execution approval authorizes the configured routing policy (or pinned model) and at most two repair rounds, not arbitrary tool permissions. Exceptional models require separate approval.".into();
+                    t.note = if auto {
+                        "Acceptance checks established by the agent; implementation follows under the initial workflow approval. Tool permissions remain separate.".into()
+                    } else {
+                        "Legacy proposal · not started. Ask the agent for a new workflow.".into()
+                    };
                     self.tasks.save();
                     self.tasks.retire();
                     self.tasks.live = None;
+                    if auto {
+                        let selected = self.tasks.selected.clone();
+                        self.tasks.selected = Some(id.clone());
+                        self.task_start();
+                        self.tasks.selected = selected;
+                        if let Some(error) = self.tasks.error.clone() {
+                            // Fail closed rather than leave an inaccessible manual approval.
+                            self.tasks.live = Some(id);
+                            self.tasks.block(error);
+                        }
+                    }
                 }
                 Err(e) => self.tasks.block(e),
             },
@@ -753,7 +762,7 @@ impl Pui {
         let a = t.latest().unwrap();
         if a.passed(c) {
             t.phase = Phase::Ready;
-            t.note="Executed checks and independent review passed for the displayed source fingerprint. This is bounded evidence, not proof of all behavior. Inspect the retained workspace before accepting.".into();
+            t.note="Executed checks and independent review passed for the displayed source fingerprint. This is bounded evidence, not proof of all behavior. Workflow complete; files were not committed, merged or deployed.".into();
             self.tasks.save();
             self.tasks.retire();
             self.tasks.live = None;

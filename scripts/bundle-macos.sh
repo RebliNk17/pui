@@ -31,7 +31,7 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" assets/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$resources/Pui.icns"
-cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts "$resources/"
+cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts scripts/workflows.ts "$resources/"
 python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
 cp packaging/Info.plist "$app/Contents/Info.plist"
 # Cargo is the release-version source of truth, including future GitHub checks.

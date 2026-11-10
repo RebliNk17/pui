@@ -662,6 +662,9 @@ impl Pui {
         }
     }
     pub(super) fn control_request(&mut self, record: &Value) -> bool {
+        if self.workflow_control(record) {
+            return true;
+        }
         if record["type"] != "extension_ui_request"
             || record["method"] != "input"
             || record["title"] != "Pui agent control"
@@ -920,6 +923,7 @@ impl Pui {
             .cloned()
             .collect();
         for id in ids {
+            self.cancel_workflows_for(&id);
             self.pause_agent_jobs(&id);
             if let Some(node) = self.agents.nodes.get_mut(&id) {
                 node.stopped = true;

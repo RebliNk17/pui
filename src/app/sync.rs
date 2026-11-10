@@ -1078,6 +1078,10 @@ impl Pui {
                     self.waiting.remove(&queue_path);
                 }
                 if kind == "extension_ui_response" {
+                    if self.workflow_answer(&record) {
+                        self.state.dialogs.retain(|d| d["id"] != record["id"]);
+                        return Ok(edited);
+                    }
                     self.state.dialogs.retain(|d| d["id"] != record["id"]);
                 }
                 self.send(record);

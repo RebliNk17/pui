@@ -19,6 +19,30 @@ fn labels(output: &egui::FullOutput) -> Vec<(String, egui::Rect)> {
 }
 
 #[test]
+fn no_workflow_renders_nothing_even_with_saved_sessions() {
+    let ctx = egui::Context::default();
+    let mut app = Pui::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo_agent_tree();
+    let output = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| app.task_workflow(ui));
+    });
+    assert!(
+        labels(&output).is_empty(),
+        "no marketing or session-list empty state"
+    );
+    app.toggle_chat_tasks();
+    assert!(!app.tasks.open);
+    assert!(app.tasks.records.is_empty());
+    assert!(app.tasks.processes.is_empty());
+}
+
+#[test]
 fn workflow_is_bounded_and_stable_with_long_names_in_both_states_and_themes() {
     for mode in [theme::Theme::Dark, theme::Theme::Light] {
         for width in [240.0, 350.0] {
@@ -101,46 +125,7 @@ fn workflow_is_bounded_and_stable_with_long_names_in_both_states_and_themes() {
 }
 
 #[test]
-fn long_names_keep_full_hover_text_and_rows_keep_their_navigation() {
-    let ctx = egui::Context::default();
-    theme::install(&ctx);
-    let name = format!("{} DISTINCTIVE END", "VeryLongAgentName".repeat(20));
-    let render = |events| {
-        ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    Vec2::new(350.0, 300.0),
-                )),
-                events,
-                time: Some(10.0),
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let response =
-                        agent_row(ui, &name, "Stopped", theme::palette(ctx).dim, false, true);
-                    assert!(response.rect.width() <= 334.0);
-                });
-            },
-        )
-    };
-    render(vec![]);
-    let pos = egui::pos2(100.0, 25.0);
-    render(vec![egui::Event::PointerMoved(pos)]);
-    // Disable delay for a deterministic tooltip assertion.
-    ctx.style_mut(|style| style.interaction.tooltip_delay = 0.0);
-    let output = render(vec![]);
-    assert!(
-        labels(&output)
-            .iter()
-            .any(|(s, _)| s.contains("DISTINCTIVE END")),
-        "Full name must be available on hover"
-    );
-}
-
-#[test]
-fn secondary_sessions_are_collapsed_until_requested_and_still_navigate() {
+fn workflow_never_lists_current_or_other_sessions_but_keeps_progress_navigation() {
     let ctx = egui::Context::default();
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
@@ -150,21 +135,17 @@ fn secondary_sessions_are_collapsed_until_requested_and_still_navigate() {
         },
     );
     app.demo_agent_tree();
-    let other = app
-        .agents
-        .nodes
-        .keys()
-        .find(|id| **id != app.agents.active)
-        .unwrap()
-        .clone();
-    app.agents.nodes.get_mut(&other).unwrap().parent = None;
-    app.agents.nodes.get_mut(&other).unwrap().name = "Other saved conversation".into();
+    app.demo_task();
+    for node in app.agents.nodes.values_mut() {
+        node.name = format!("Session list fixture {}", node.id);
+    }
+    let active = app.agents.active.clone();
     let render = |app: &mut Pui, events| {
         ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    Vec2::new(350.0, 700.0),
+                    Vec2::new(350.0, 900.0),
                 )),
                 events,
                 ..Default::default()
@@ -178,10 +159,16 @@ fn secondary_sessions_are_collapsed_until_requested_and_still_navigate() {
         render(&mut app, vec![]);
     }
     let text = labels(&render(&mut app, vec![]));
-    assert!(!text.iter().any(|(s, _)| s == "Other saved conversation"));
+    assert!(text.iter().any(|(s, _)| s == "Acceptance checks"));
+    assert!(text.iter().any(|(s, _)| s == "Result & evidence"));
+    for (label, _) in &text {
+        assert!(!label.contains("CURRENT SESSION"));
+        assert!(!label.contains("Other sessions"));
+        assert!(!label.contains("Session list fixture"));
+    }
     let pos = text
         .iter()
-        .find(|(s, _)| s.starts_with("Other sessions"))
+        .find(|(s, _)| s == "Result & evidence")
         .unwrap()
         .1
         .center();
@@ -199,32 +186,10 @@ fn secondary_sessions_are_collapsed_until_requested_and_still_navigate() {
             ],
         );
     }
-    for _ in 0..3 {
-        render(&mut app, vec![]);
-    }
-    let text = labels(&render(&mut app, vec![]));
-    let pos = text
-        .iter()
-        .find(|(s, _)| s == "Other saved conversation")
-        .expect("Expanded secondary row")
-        .1
-        .center();
-    for pressed in [true, false] {
-        render(
-            &mut app,
-            vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-    }
-    assert_eq!(app.agents.active, other);
-    assert!(!app.tasks.open);
+    assert!(app.tasks.open);
+    assert!(app.tasks.selected_run.is_none());
+    assert_eq!(app.agents.active, active);
+    assert!(app.tasks.processes.is_empty());
 }
 
 #[test]
