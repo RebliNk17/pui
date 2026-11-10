@@ -368,6 +368,14 @@ impl State {
                             .filter_map(|v| serde_json::from_value(v.clone()).ok())
                             .collect();
                     }
+                    "set_model" => {
+                        // Pi acknowledgments are authoritative. Keep the old model
+                        // and effort options if a selection is rejected.
+                        self.model = string(data, "id").to_owned();
+                        self.model_name = string(data, "name").to_owned();
+                        self.provider = string(data, "provider").to_owned();
+                        self.levels.clear();
+                    }
                     "get_available_models" => {
                         self.models = data["models"]
                             .as_array()
@@ -809,6 +817,17 @@ mod tests {
         assert_eq!(message.text, "See this");
         assert_eq!(message.images.len(), 1);
         assert_eq!(message.images[0].data.as_ref(), "aGVsbG8=");
+    }
+    #[test]
+    fn command_catalog_survives_an_acknowledged_model_change() {
+        let mut state = State::default();
+        state.apply(json!({"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review current changes"}]}}));
+        state.apply(json!({"type":"response","command":"set_model","success":true,"data":{"id":"gemini-4-argon","name":"Gemini 4 Argon","provider":"local"}}));
+        assert_eq!(state.commands.len(), 1);
+        assert_eq!(state.commands[0].name, "review");
+        assert_eq!(state.model, "gemini-4-argon");
+        assert_eq!(state.model_name, "Gemini 4 Argon");
+        assert_eq!(state.provider, "local");
     }
     #[test]
     fn model_metadata_comes_from_pi() {
