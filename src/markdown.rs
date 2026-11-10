@@ -50,6 +50,7 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
         return;
     }
     job.wrap.max_width = ui.available_width();
+    job.align_baseline = true;
     let galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
     show_galley(ui, galley, links);
     links.clear();
@@ -481,6 +482,81 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn bold_links_italics_and_code_share_exact_baselines() {
+        let source = "**Status:** [#69](https://example.com/pr/69) is merged, but this linked scan still contains the finding. It does **not prove an exploitable bypass**, nor does \"Passed\" prove resolution. The post-merge release is queued; *successful deployment* is not yet `verified`.";
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            ctx.set_pixels_per_point(scale);
+            for markdown in [
+                source.to_owned(),
+                format!("- {source}"),
+                format!("## {source}"),
+                format!("| Result |\n| --- |\n| {source} |"),
+                "שלום **מודגש** [קישור](https://example.com) *נטוי* `code` English".into(),
+            ] {
+                for width in [260.0, 760.0] {
+                    let (texts, _) = render(&ctx, &markdown, width);
+                    assert!(!texts.is_empty());
+                    for text in texts {
+                        for row in &text.galley.rows {
+                            let Some(first) = row.glyphs.first() else {
+                                continue;
+                            };
+                            for glyph in &row.glyphs {
+                                assert_eq!(
+                                    glyph.logical_rect().y_range(),
+                                    first.logical_rect().y_range(),
+                                    "Mixed style backgrounds and selection must share a row"
+                                );
+                                assert!(
+                                    (glyph.pos.y - first.pos.y).abs() < 0.01,
+                                    "Mixed-format glyph {:?} baseline {} != {} at scale {scale}, width {width}: {markdown}",
+                                    glyph.chr,
+                                    glyph.pos.y,
+                                    first.pos.y
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn baseline_flag_is_cached_and_retained_when_paragraphs_are_split() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let mut job = LayoutJob::default();
+            for _ in 0..3 {
+                job.append(
+                    "Status ",
+                    0.0,
+                    format(ctx, false, false, false, false, false),
+                );
+                job.append("bold ", 0.0, format(ctx, true, false, false, false, false));
+                job.append("code\n", 0.0, format(ctx, false, false, false, true, false));
+            }
+            let original = ctx.fonts(|f| f.layout_job(job.clone()));
+            job.align_baseline = true;
+            let aligned = ctx.fonts(|f| f.layout_job(job.clone()));
+            let cached = ctx.fonts(|f| f.layout_job(job));
+            assert!(
+                !Arc::ptr_eq(&original, &aligned),
+                "Baseline mode must affect the layout cache key"
+            );
+            assert!(Arc::ptr_eq(&aligned, &cached));
+            for row in &aligned.rows {
+                for glyph in &row.glyphs {
+                    assert_eq!(glyph.pos.y, row.glyphs[0].pos.y);
+                    assert_eq!(glyph.logical_rect().top(), 0.0);
+                    assert_eq!(glyph.logical_rect().bottom(), row.height());
+                }
+            }
+        });
     }
     #[test]
     fn list_markers_inline_code_and_body_share_rows_without_double_spacing() {

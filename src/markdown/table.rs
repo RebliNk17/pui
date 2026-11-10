@@ -25,7 +25,8 @@ impl Table {
         self.rows.push(Vec::new());
     }
 
-    pub(super) fn push_cell(&mut self, job: LayoutJob, links: Vec<Link>) {
+    pub(super) fn push_cell(&mut self, mut job: LayoutJob, links: Vec<Link>) {
+        job.align_baseline = true;
         self.rows.last_mut().unwrap().push(Cell { job, links });
     }
 

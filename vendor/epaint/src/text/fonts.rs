@@ -903,6 +903,7 @@ impl GalleyCache {
                 break_on_newline: job.break_on_newline,
                 halign: job.halign,
                 justify: job.justify,
+                align_baseline: job.align_baseline,
                 first_row_min_height: if is_first_paragraph {
                     job.first_row_min_height
                 } else {

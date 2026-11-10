@@ -78,6 +78,12 @@ pub struct LayoutJob {
     /// Justify text so that word-wrapped rows fill the whole [`TextWrapping::max_width`].
     pub justify: bool,
 
+    /// Align all fonts and fallback glyphs on one typographic baseline per row.
+    /// Useful for mixed-style prose. When false, retain each format's vertical
+    /// alignment and center fallback fonts as in upstream egui.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub align_baseline: bool,
+
     /// Round output sizes using [`emath::GuiRounding`], to avoid rounding errors in layout code.
     pub round_output_to_gui: bool,
 }
@@ -93,6 +99,7 @@ impl Default for LayoutJob {
             break_on_newline: true,
             halign: Align::LEFT,
             justify: false,
+            align_baseline: false,
             round_output_to_gui: true,
         }
     }
@@ -216,6 +223,7 @@ impl std::hash::Hash for LayoutJob {
             break_on_newline,
             halign,
             justify,
+            align_baseline,
             round_output_to_gui,
         } = self;
 
@@ -226,6 +234,7 @@ impl std::hash::Hash for LayoutJob {
         break_on_newline.hash(state);
         halign.hash(state);
         justify.hash(state);
+        align_baseline.hash(state);
         round_output_to_gui.hash(state);
     }
 }

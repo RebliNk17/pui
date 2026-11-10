@@ -673,20 +673,42 @@ fn galley_from_rows(
         }
         max_row_height = point_scale.round_to_pixel(max_row_height);
 
-        // Now position each glyph vertically:
+        // Markdown opts into a typographic baseline instead of aligning each
+        // font's box independently. Equal font sizes/line heights alone do not
+        // align SF, Arial Bold, monospace and language fallback ascenders.
+        let baseline = if job.align_baseline {
+            let ascent = row
+                .glyphs
+                .iter()
+                .map(|g| g.font_impl_ascent)
+                .fold(0.0_f32, f32::max);
+            let descent = row
+                .glyphs
+                .iter()
+                .map(|g| g.font_impl_height - g.font_impl_ascent)
+                .fold(0.0_f32, f32::max);
+            max_row_height = point_scale.round_to_pixel(max_row_height.max(ascent + descent));
+            Some(point_scale.round_to_pixel(ascent + 0.5 * (max_row_height - ascent - descent)))
+        } else {
+            None
+        };
+
+        // Now position each glyph vertically, before backgrounds and glyph
+        // meshes are tessellated so painting, hit testing and selection agree.
         for glyph in &mut row.glyphs {
-            let format = &job.sections[glyph.section_index as usize].format;
-
-            glyph.pos.y = glyph.font_impl_ascent
-
-                // Apply valign to the different in height of the entire row, and the height of this `Font`:
-                + format.valign.to_factor() * (max_row_height - glyph.line_height)
-
-                // When mixing different `FontImpl` (e.g. latin and emojis),
-                // we always center the difference:
-                + 0.5 * (glyph.font_height - glyph.font_impl_height);
-
-            glyph.pos.y = point_scale.round_to_pixel(glyph.pos.y);
+            if let Some(baseline) = baseline {
+                glyph.pos.y = baseline;
+                // Logical glyph boxes cover the row, not each font's original
+                // ascent. Keep code backgrounds, selection and hit areas level.
+                glyph.font_ascent = baseline;
+                glyph.line_height = max_row_height;
+            } else {
+                let format = &job.sections[glyph.section_index as usize].format;
+                glyph.pos.y = glyph.font_impl_ascent
+                    + format.valign.to_factor() * (max_row_height - glyph.line_height)
+                    + 0.5 * (glyph.font_height - glyph.font_impl_height);
+                glyph.pos.y = point_scale.round_to_pixel(glyph.pos.y);
+            }
         }
 
         placed_row.pos.y = cursor_y;

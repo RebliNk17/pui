@@ -29,6 +29,7 @@ use std::path::PathBuf;
 pub struct Options {
     pub demo: bool,
     pub demo_languages: bool,
+    pub demo_markdown: bool,
     pub demo_expanded: bool,
     pub demo_collapsed: bool,
     pub demo_theater: bool,
@@ -176,6 +177,10 @@ fn main() -> eframe::Result {
             "--demo-approval" => {
                 options.demo = true;
                 options.demo_approval = true;
+            }
+            "--demo-markdown" => {
+                options.demo = true;
+                options.demo_markdown = true;
             }
             "--demo-working" => {
                 options.demo = true;
