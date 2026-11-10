@@ -1070,6 +1070,9 @@ impl Pui {
                 {
                     return Err("This approval dialog is no longer active".into());
                 }
+                if kind == "abort" {
+                    self.pause_agent_jobs(&self.agents.active.clone());
+                }
                 if kind == "clear_queue" {
                     self.cancel_send_now();
                     self.waiting.remove(&queue_path);

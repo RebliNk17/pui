@@ -28,7 +28,9 @@ impl Pui {
                     if self.prefs.hide_sidebar {
                         self.app_menu(ui);
                     }
-                    let title = if self.kanban.open {
+                    let title = if self.automation.open {
+                        "Cron jobs & monitors".to_owned()
+                    } else if self.kanban.open {
                         "Agents board".to_owned()
                     } else if self.tasks.open {
                         self.tasks
@@ -110,6 +112,7 @@ impl Pui {
                         }
                         if response.clicked() {
                             self.kanban.open = false;
+                            self.automation.open = false;
                             self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                             self.focus_composer = !self.terminals.is_open();
                         }
@@ -128,6 +131,7 @@ impl Pui {
                         }
                         if response.clicked() {
                             self.kanban.open = false;
+                            self.automation.open = false;
                             self.files.toggle_browser(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                             self.terminals.close(ctx);
@@ -143,6 +147,7 @@ impl Pui {
                         }
                         if response.clicked() {
                             self.kanban.open = false;
+                            self.automation.open = false;
                             self.files.toggle(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                         }
@@ -157,6 +162,7 @@ impl Pui {
                         }
                         if response.clicked() {
                             self.kanban.open = false;
+                            self.automation.open = false;
                             self.files.close();
                             self.inspector_panel = !self.inspector_panel;
                             self.prefs.hide_inspector = false;
@@ -179,6 +185,7 @@ impl Pui {
                         }
                         if response.clicked() {
                             self.kanban.open = false;
+                            self.automation.open = false;
                             if self.files.is_open() {
                                 self.files.close();
                                 self.prefs.hide_inspector = false;

@@ -184,7 +184,7 @@ fn opening_board_preserves_busy_chat_draft_and_approvals() {
 }
 
 #[test]
-fn sidebar_button_is_above_search_and_opens_board() {
+fn sidebar_keeps_overviews_in_menu_instead_of_above_search() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     app.kanban.open = false;
@@ -192,15 +192,17 @@ fn sidebar_button_is_above_search_and_opens_board() {
         frame(&ctx, &mut app, 1440.0, vec![]);
     }
     let output = text(frame(&ctx, &mut app, 1440.0, vec![]));
-    let button = output.iter().find(|(s, _)| s == "Agents board").unwrap().1;
-    let search = output
+    let sidebar: Vec<_> = output
         .iter()
-        .find(|(s, _)| s == "Search sessions")
-        .unwrap()
-        .1;
-    assert!(button.bottom() < search.top());
-    click(&ctx, &mut app, 1440.0, button.center());
-    assert!(app.kanban.open);
+        .filter(|(_, rect)| rect.left() < 254.0)
+        .collect();
+    assert!(sidebar.iter().any(|(s, _)| s == "Search sessions"));
+    assert!(sidebar.iter().any(|(s, _)| s == "Pui"));
+    assert!(
+        !sidebar
+            .iter()
+            .any(|(s, _)| s == "Agents board" || s.contains("Cron jobs & monitors"))
+    );
 }
 
 #[test]

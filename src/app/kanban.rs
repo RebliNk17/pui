@@ -158,6 +158,7 @@ impl Pui {
         if self.deletion.in_progress() {
             return;
         }
+        self.automation.open = false;
         self.kanban.open = true;
         self.model_picker_open = false;
         self.files.close();

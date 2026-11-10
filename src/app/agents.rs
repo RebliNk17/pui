@@ -41,13 +41,13 @@ impl Node {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct AgentRecord {
-    id: String,
-    parent: Option<String>,
-    name: String,
-    cwd: PathBuf,
-    path: PathBuf,
-    access: String,
-    worktree: Option<PathBuf>,
+    pub(super) id: String,
+    pub(super) parent: Option<String>,
+    pub(super) name: String,
+    pub(super) cwd: PathBuf,
+    pub(super) path: PathBuf,
+    pub(super) access: String,
+    pub(super) worktree: Option<PathBuf>,
 }
 #[derive(Default)]
 pub(super) struct Chat {
@@ -186,10 +186,8 @@ impl Pui {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0),
             );
-            let launch = record
-                .parent
-                .as_ref()
-                .map(|_| worker_launch(record.access == "read-only", &record.name, None, None));
+            let launch = (record.access != "workspace")
+                .then(|| worker_launch(record.access == "read-only", &record.name, None, None));
             let state = State {
                 session_file: Some(record.path.display().to_string()),
                 // Root names may have come from a compacted context. Rediscover
@@ -244,12 +242,10 @@ impl Pui {
                 && self.agents.nodes.contains_key(&parent)
                 && !self.descendants(&child, &parent)
             {
-                self.agents
-                    .nodes
-                    .get_mut(&parent)
-                    .unwrap()
-                    .children
-                    .push(child);
+                let children = &mut self.agents.nodes.get_mut(&parent).unwrap().children;
+                if !children.contains(&child) {
+                    children.push(child);
+                }
             } else if let Some(node) = self.agents.nodes.get_mut(&child) {
                 node.parent = None;
             }
@@ -307,7 +303,7 @@ impl Pui {
             })
             .collect()
     }
-    fn take_chat(&mut self) -> Chat {
+    pub(super) fn take_chat(&mut self) -> Chat {
         Chat {
             state: std::mem::take(&mut self.state),
             new_chat: std::mem::take(&mut self.new_chat),
@@ -336,7 +332,7 @@ impl Pui {
             pending_dialog: self.pending_dialog.take(),
         }
     }
-    fn put_chat(&mut self, chat: Chat) {
+    pub(super) fn put_chat(&mut self, chat: Chat) {
         self.state = chat.state;
         self.new_chat = chat.new_chat;
         self.history_pending = chat.history_pending;
@@ -411,6 +407,7 @@ impl Pui {
             return;
         }
         self.kanban.open = false;
+        self.automation.open = false;
         self.tasks.open = false;
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
@@ -442,11 +439,71 @@ impl Pui {
         self.output_revision = u64::MAX;
         self.focus_composer = true;
     }
+    /// Reconnect a persisted automation owner without navigating or sending a prompt.
+    pub(super) fn reconnect_job_owner(&mut self, id: &str) -> Result<(), String> {
+        let node = self
+            .agents
+            .nodes
+            .get(id)
+            .ok_or("Creator agent is unavailable")?;
+        let path = node.path.clone().ok_or("Creator has no saved session")?;
+        if !path.is_file() && !cfg!(test) {
+            return Err("Creator session file is unavailable".into());
+        }
+        let cwd = node.cwd.clone();
+        let mut launch = node.launch.clone().unwrap_or_default();
+        launch.settings = self.prefs.settings.payload();
+        let ready = if id == self.agents.active {
+            self.client.is_some()
+        } else {
+            self.agents
+                .parked
+                .get(id)
+                .is_some_and(|c| c.client.is_some())
+        };
+        if ready {
+            if !self.sync.enabled() || self.sync.owns(&path) {
+                return Ok(());
+            }
+            return Err("Creator ownership is unavailable; checks are suspended.".into());
+        }
+        if !self.sync.claim(&path)? {
+            return Err(
+                "Creator is open in another Pui window; jobs wait for that window to release it."
+                    .into(),
+            );
+        }
+        #[cfg(not(test))]
+        let client = rpc::Client::start_with(&cwd, Some(&path), self.ctx.clone(), launch);
+        #[cfg(test)]
+        let client = {
+            let _ = (cwd, launch);
+            rpc::Client::stub()
+        };
+        self.with_live_chat(&path, |app| {
+            app.client = Some(client);
+            app.loading_chat = true;
+            app.connected = false;
+            app.ultracode_ready = false;
+            for kind in [
+                "get_state",
+                "get_entries",
+                "get_commands",
+                "get_available_models",
+                "get_available_thinking_levels",
+            ] {
+                app.send(protocol::command(kind));
+            }
+        })
+        .ok_or("Creator chat is unavailable")?;
+        self.agents.nodes.get_mut(id).unwrap().stopped = false;
+        Ok(())
+    }
     pub(super) fn resume_agent(&mut self) -> bool {
         let Some(node) = self.agents.nodes.get_mut(&self.agents.active) else {
             return false;
         };
-        if node.parent.is_none() {
+        if node.launch.is_none() {
             return false;
         }
         if node.setup.is_some() || (!node.stopped && node.path.is_none()) {
@@ -659,6 +716,9 @@ impl Pui {
     }
     fn agent_control(&mut self, source: &str, request: &Value) -> Result<Value, String> {
         match protocol::string(request, "action") {
+            "automation_create" | "automation_list" | "automation_update" => {
+                self.automation_control(source, request)
+            }
             "spawn" => {
                 if self.prefs.settings.permission == settings::PermissionMode::Plan {
                     return Err("Plan mode cannot create workers".into());
@@ -826,7 +886,7 @@ impl Pui {
             }
         }
     }
-    fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
+    pub(super) fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
         let record = json!({"type":"prompt","message":format!("/pui-agent-message {}",json!({"text":text}))});
         if self.agents.nodes.get(id).is_some_and(|n| n.stopped) {
             return Err("Target agent is stopped".into());
@@ -859,6 +919,7 @@ impl Pui {
             .cloned()
             .collect();
         for id in ids {
+            self.pause_agent_jobs(&id);
             if let Some(node) = self.agents.nodes.get_mut(&id) {
                 node.stopped = true;
                 node.needs_report = false;
@@ -1386,11 +1447,12 @@ impl Pui {
                 "Keep working",
                 "Stop all and quit",
             ).show(ctx, |ui| {
-                confirmations::note(ui, "Sessions and worktrees will be kept. Running terminal commands will stop, and queued messages will be lost.");
+                confirmations::note(ui, "Sessions and worktrees will be kept. Running terminal commands will stop, and queued messages will be lost. Active cron jobs and monitors resume when Pui reopens.");
             });
             match choice {
                 Some(confirmations::Choice::Cancel) => self.agents.close_prompt = false,
                 Some(confirmations::Choice::Confirm) => {
+                    self.agents.exiting = true;
                     self.tasks.stop();
                     let roots: Vec<_> = self
                         .agents

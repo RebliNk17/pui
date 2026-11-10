@@ -112,6 +112,8 @@ impl Pui {
             alerts: self.prefs.notifications,
             delivery: self.prefs.settings.delivery,
             sidebar: !self.prefs.hide_sidebar,
+            agents_board: !self.settings_open && self.kanban.open,
+            automation: !self.settings_open && self.automation.open,
             inspector: !self.prefs.hide_inspector && !self.files.is_open() && !self.inspector_panel,
             inspector_available: ctx.screen_rect().width() > 1110.0,
             files: self.files.files_open(),
@@ -145,6 +147,14 @@ impl Pui {
         }
         use Command::*;
         match command {
+            AgentsBoard => {
+                self.settings_open = false;
+                self.open_agents_board();
+            }
+            Automation => {
+                self.settings_open = false;
+                self.open_automation();
+            }
             About => self.menu.about = true,
             Updates => self.updates.start(ctx),
             Settings => {
@@ -267,6 +277,7 @@ impl Pui {
             Sidebar => self.prefs.hide_sidebar = !self.prefs.hide_sidebar,
             Inspector => {
                 self.kanban.open = false;
+                self.automation.open = false;
                 let shown = self.menu_state(ctx).inspector;
                 self.files.close();
                 self.inspector_panel = false;
@@ -274,18 +285,21 @@ impl Pui {
             }
             Terminal => {
                 self.kanban.open = false;
+                self.automation.open = false;
                 self.settings_open = false;
                 self.terminals.toggle(ctx, &self.prefs.cwd, self.demo);
                 self.focus_composer = !self.terminals.is_open();
             }
             Files => {
                 self.kanban.open = false;
+                self.automation.open = false;
                 self.settings_open = false;
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }
             Browser => {
                 self.kanban.open = false;
+                self.automation.open = false;
                 self.settings_open = false;
                 self.files.toggle_browser(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
@@ -293,6 +307,7 @@ impl Pui {
             }
             Changes => {
                 self.kanban.open = false;
+                self.automation.open = false;
                 self.settings_open = false;
                 self.files.close();
                 self.inspector_panel = !self.inspector_panel;
@@ -388,6 +403,8 @@ mod tests {
             Command::Steer,
             Command::Queue,
             Command::Terminal,
+            Command::AgentsBoard,
+            Command::Automation,
         ] {
             assert!(exposed.contains(&command));
         }
@@ -405,6 +422,36 @@ mod tests {
             let mut app = app(&ctx);
             app.menu_command(&ctx, Command::Updates);
             assert!(!app.updates.open);
+        }
+    }
+    #[test]
+    fn overview_menu_actions_open_views_without_interrupting_chat() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.busy = true;
+        app.draft = "Keep this draft".into();
+        app.settings_open = true;
+        app.state.dialogs.push_back(questions::demo_dialog());
+        for command in [
+            Command::AgentsBoard,
+            Command::Automation,
+            Command::AgentsBoard,
+        ] {
+            app.menu.pending.push(command);
+            app.menu_commands(&ctx);
+            assert!(!app.settings_open);
+            assert_eq!(app.kanban.open, command == Command::AgentsBoard);
+            assert_eq!(app.automation.open, command == Command::Automation);
+            assert_eq!(app.menu_state(&ctx).checked(command), Some(true));
+            assert!(app.state.busy);
+            assert_eq!(app.draft, "Keep this draft");
+            assert_eq!(app.state.dialogs.len(), 1);
+            assert!(app.deliveries.is_empty());
+            assert!(
+                entries::APP
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Action(_, action) if *action == command))
+            );
         }
     }
     #[test]

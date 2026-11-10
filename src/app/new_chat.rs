@@ -161,6 +161,7 @@ impl Pui {
             return;
         }
         self.kanban.open = false;
+        self.automation.open = false;
         self.tasks.open = false;
         if !folder.is_dir() {
             self.state.error =

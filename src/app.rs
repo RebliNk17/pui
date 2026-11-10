@@ -2,6 +2,7 @@ mod about;
 mod agents;
 mod approval_view;
 mod attachments;
+mod automation;
 mod changes;
 mod completions;
 mod composer_history;
@@ -105,6 +106,7 @@ pub struct Pui {
     agents: agents::Agents,
     tasks: tasks::Tasks,
     kanban: kanban::Board,
+    automation: automation::Automation,
     deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
@@ -220,6 +222,7 @@ impl Pui {
             agents: Default::default(),
             tasks: tasks::Tasks::new(&cc.egui_ctx, !options.demo && !cfg!(test)),
             kanban: Default::default(),
+            automation: automation::Automation::new(!options.demo && !cfg!(test)),
             deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
@@ -333,7 +336,10 @@ impl Pui {
                 app.model_picker_open = true;
                 app.ultracode_ready = true;
             }
-            if options.demo_kanban {
+            if options.demo_automation {
+                app.demo_automation();
+                app.open_automation();
+            } else if options.demo_kanban {
                 app.demo_kanban_agents();
                 app.open_agents_board();
             } else if options.demo_agents {
@@ -594,6 +600,7 @@ impl Pui {
             return;
         }
         self.kanban.open = false;
+        self.automation.open = false;
         self.tasks.open = false;
         let path = session.path.clone();
         if !self.loading_chat
@@ -706,6 +713,7 @@ impl Pui {
         self.poll_rpc();
         self.poll_history();
         self.poll_other_agents();
+        self.poll_automation();
         self.poll_views();
         self.publish_live();
         self.poll_window_sync();
@@ -812,6 +820,10 @@ impl Pui {
                         mail_record["id"] =
                             format!("{}:{}", self.agents.active, protocol::string(&record, "id"))
                                 .into();
+                        self.automation_response(
+                            protocol::string(&mail_record, "id"),
+                            &mail_record,
+                        );
                         self.agent_mail_response(&mail_record);
                         self.delivery_response(&record);
                     }
@@ -1056,6 +1068,7 @@ impl Pui {
             return;
         }
         self.cancel_send_now();
+        self.pause_agent_jobs(&self.agents.active.clone());
         if self.is_mirror() {
             self.remote_action(sync::Action::Rpc(protocol::command("clear_queue")));
             self.remote_action(sync::Action::Rpc(protocol::command("abort")));
@@ -1576,12 +1589,15 @@ impl eframe::App for Pui {
             || self.deletion.confirming()
             || self.menu.about
             || self.updates.open;
-        let terminal_input =
-            !self.settings_open && !self.kanban.open && self.terminals.focused(ctx);
+        let terminal_input = !self.settings_open
+            && !self.kanban.open
+            && !self.automation.open
+            && self.terminals.focused(ctx);
         if !confirming
             && !self.settings_open
             && !self.kanban.open
             && !self.tasks.open
+            && !self.automation.open
             && !terminal_input
         {
             self.image_inputs(ctx);
@@ -1617,6 +1633,7 @@ impl eframe::App for Pui {
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I))
         {
             self.kanban.open = false;
+            self.automation.open = false;
             self.files.close();
             self.inspector_panel = false;
             self.prefs.hide_inspector = !self.prefs.hide_inspector;
@@ -1638,14 +1655,16 @@ impl eframe::App for Pui {
         }
         let leaving_board = !confirming
             && !self.settings_open
-            && self.kanban.open
+            && (self.kanban.open || self.automation.open)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         if leaving_board {
             self.kanban.open = false;
+            self.automation.open = false;
             self.focus_composer = true;
         }
         if !leaving_board
             && !self.settings_open
+            && !self.automation.open
             && !self.kanban.open
             && !confirming
             && !terminal_input
@@ -1673,12 +1692,16 @@ impl eframe::App for Pui {
             }
             self.top_bar(ctx);
             let terminal_expanded = !self.kanban.open
+                && !self.automation.open
                 && self.terminals.is_open()
                 && self.terminals.show(ctx, &self.prefs.cwd, self.demo);
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if self.kanban.open {
+            let central = if self.automation.open {
+                self.automation_panel(ctx);
+                true
+            } else if self.kanban.open {
                 self.agents_board(ctx);
                 true
             } else if terminal_expanded {
@@ -1720,6 +1743,7 @@ impl eframe::App for Pui {
         }
         if !self.settings_open
             && !self.kanban.open
+            && !self.automation.open
             && !theater
             && !confirming
             && !self.model_picker_open
@@ -1776,6 +1800,7 @@ impl eframe::App for Pui {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.terminals.shutdown();
         self.tasks.shutdown();
+        self.automation.running_stop();
         self.shutdown_agents();
         self.agents = Default::default();
     }

@@ -535,6 +535,7 @@ impl Pui {
             return;
         }
         self.kanban.open = false;
+        self.automation.open = false;
         if self.tasks.running() {
             if let Some(id) = self
                 .tasks

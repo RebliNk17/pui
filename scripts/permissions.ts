@@ -11,7 +11,7 @@ import { resolve, dirname, relative, isAbsolute } from "node:path";
 
 export const PERMISSION_MODES = ["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 const reads = new Set(["read", "grep", "find", "ls"]);
-const inspect = new Set(["pui_agents", "pui_message_agent", "pui_wait_agents", "pui_stop_agent", "tool_search"]);
+const inspect = new Set(["pui_jobs", "pui_agents", "pui_message_agent", "pui_wait_agents", "pui_stop_agent", "tool_search"]);
 const block = (reason: string) => ({ block: true, reason });
 const MANAGED_AGENTS_ONLY = "Unmanaged agent launches are disabled in Pui. Use pui_spawn_agent so the worker appears beneath its parent chat with a live transcript. If managed spawning is unavailable or denied, report the blocker; do not launch a detached CLI or SDK agent.";
 // A tool-boundary guard, not a shell sandbox. Inspect executable commands/code,
@@ -97,7 +97,7 @@ export function installPermissions(pi: any, initial: any = {}) {
     const name = e.toolName, args = e.input ?? {};
     // This is an application invariant, not an approval preference. Bypass,
     // classifier decisions and remembered grants cannot create invisible agents.
-    if (unmanagedAgentLaunch(name, args)) return block(MANAGED_AGENTS_ONLY);
+    if (unmanagedAgentLaunch(name, args) || (name === "pui_create_monitor" && unmanagedAgentLaunch("bash", args))) return block(MANAGED_AGENTS_ONLY);
     if (name === "pui_ask_questions") return; // User decisions, never a permission grant.
     // Native previews enforce their own path/format limits; pages can execute
     // network requests, so URL opens still pass the normal permission gate.
@@ -105,7 +105,7 @@ export function installPermissions(pi: any, initial: any = {}) {
     if (initial.readonly && ![...reads, "pui_agents", "pui_message_agent"].includes(name)) return block("Read-only Pui worker: tool not allowed");
     if (mode === "bypassPermissions") return;
     const sensitiveRead = mode === "auto" && reads.has(name) && /(?:^|[\/])(?:\.env(?:\.[^\/]*)?|\.ssh|\.aws|\.gnupg|auth\.json|credentials(?:\.[^\/]*)?|id_(?:rsa|ed25519))(?:[\/]|$)/i.test(String(args.path ?? args.file ?? ""));
-    if ((reads.has(name) && !sensitiveRead) || (inspect.has(name) && (mode !== "plan" || ["pui_agents", "tool_search"].includes(name)))) return;
+    if ((reads.has(name) && !sensitiveRead) || (inspect.has(name) && (mode !== "plan" || ["pui_jobs", "pui_agents", "tool_search"].includes(name)))) return;
     const shell = name === "bash" && typeof args.command === "string";
     if (mode !== "manual" && shell && safeShell(args.command)) return;
     if (mode === "plan") return block("Plan mode is read-only. Approve the written plan and change mode in Pui before implementation.");
@@ -117,8 +117,11 @@ export function installPermissions(pi: any, initial: any = {}) {
     if (mode === "dontAsk") return block("Don't ask: this action requires approval and was automatically denied.");
     const grant = actionKey(ctx.cwd, name, args);
     if (grants.has(grant)) return;
-    let explanation = "";
-    if (mode === "auto") {
+    let explanation = "Background automation persists across Pui restarts. Approve this exact schedule/command and its future agent prompts.";
+    // Scheduling authorizes future execution: never spend classifier tokens or
+    // silently approve repeated arbitrary commands from their innocuous tool name.
+    const automation = ["pui_create_monitor", "pui_create_cron"].includes(name) || (name === "pui_update_job" && args.operation === "resume");
+    if (mode === "auto" && !automation) {
       const model = cheapestModel(ctx);
       const payload = JSON.stringify(args);
       // Look at executable action names/commands, not incidental words in

@@ -56,6 +56,7 @@ impl Pui {
 
     pub(in crate::app) fn toggle_chat_tasks(&mut self) {
         self.kanban.open = false;
+        self.automation.open = false;
         if self.tasks.open {
             self.task_parent_chat();
         } else if let Some(id) = self.task_for_chat().map(|t| t.id.clone()) {

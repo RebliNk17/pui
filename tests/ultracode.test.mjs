@@ -64,6 +64,27 @@ test('read-only and task workers cannot activate or directly execute spawning', 
     assert.equal(h.requests.length, 0);
   }
 });
+test('automation tools are active without Ultracode and route bounded definitions to the host', async () => {
+  const h = await host();
+  for (const name of ['pui_create_monitor','pui_create_cron','pui_jobs','pui_update_job']) assert.ok(h.active().includes(name));
+  await h.tools.get('pui_create_monitor').execute('', {name:'CI',command:'exit 0',interval_seconds:20,message:'Review CI'},undefined,null,h.ctx);
+  assert.deepEqual(JSON.parse(h.requests.at(-1)[1]).kind,'monitor');
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).action,'automation_create');
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).command,'exit 0');
+  await h.tools.get('pui_create_cron').execute('', {name:'Daily',schedule:'0 9 * * *',message:'Summarize'},undefined,null,h.ctx);
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).kind,'cron');
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).schedule,'0 9 * * *');
+  await h.tools.get('pui_update_job').execute('', {job_id:'job',operation:'pause'},undefined,null,h.ctx);
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).action,'automation_update');
+  assert.equal(h.messages.length,0);
+  for (const [readonly,role] of [[true,''],[false,'builder'],[true,'router'],[false,'checks']]) {
+    const worker=await host(readonly,role);
+    for (const name of ['pui_create_monitor','pui_create_cron','pui_update_job']) {
+      assert.ok(!worker.active().includes(name));
+      await assert.rejects(worker.tools.get(name).execute('',{},undefined,null,worker.ctx),/cannot .*automation/);
+    }
+  }
+});
 test('managed spawn errors propagate without falling back to a detached process', async () => {
   const h = await host();
   h.ctx.ui.input = async () => JSON.stringify({error:'Plan mode cannot create workers'});

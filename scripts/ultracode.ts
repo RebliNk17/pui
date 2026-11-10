@@ -9,7 +9,8 @@ import { installOpen } from "./open.ts";
 
 export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
 Do not launch delegated agents through Bash, Python subprocesses, detached pi --print/--mode json, or another CLI: those processes are not registered with Pui and cannot be opened as live child chats. If managed spawning is unavailable or denied, report the blocker instead of silently falling back to an invisible process. Never claim a worker launched until pui_spawn_agent succeeds.
-Use the fewest useful workers, including zero. Give each a bounded task, relevant context/paths, acceptance criteria and constraints; review its results. Worktree workers start from committed HEAD, not uncommitted edits. No automatic commits, pushes, merges, deployments or destructive cleanup. Use event-driven waits instead of status polling; do not mirror worker transcripts into the parent.`;
+Use the fewest useful workers, including zero. Give each a bounded task, relevant context/paths, acceptance criteria and constraints; review its results. Worktree workers start from committed HEAD, not uncommitted edits. No automatic commits, pushes, merges, deployments or destructive cleanup. Use event-driven waits instead of status polling; do not mirror worker transcripts into the parent.
+Use pui_create_monitor for a non-AI background shell condition (exit 0 fires once, exit 1 keeps waiting), pui_create_cron for scheduled prompts, and pui_jobs/pui_update_job to inspect/manage your own jobs. Checks and scheduling do not consume context or call models. Only delivered events/prompts wake you. Jobs run while Pui is open; active jobs reconnect their creator on relaunch. Cron uses five numeric fields in UTC and skips missed occurrences. Use bounded side-effect-free checks; never use monitors to launch unmanaged agents. Tell the user that event handling consumes tokens.`;
 
 export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan a compact workflow using your tools and codemode.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
@@ -41,7 +42,7 @@ export default function puiExtension(pi: any) {
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
-  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent"];
+  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job"];
   const setMode = (on: boolean) => {
     enabled = on && !readonly && !taskRole;
     const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
@@ -103,6 +104,21 @@ export default function puiExtension(pi: any) {
       return request("spawn", args, signal, ctx);
     },
   });
+  for (const [name, kind, fields, description] of [
+    ["pui_create_monitor", "monitor", { command: Type.String({minLength:1,maxLength:16000}), interval_seconds: Type.Optional(Type.Integer({minimum:10,maximum:86400})), timeout_seconds: Type.Optional(Type.Integer({minimum:1,maximum:300})) }, "Run a bounded shell condition in the background without AI/context: exit 0 sends one event to this creating chat and completes; exit 1 waits, other failures appear in the jobs view. Defaults: 60s interval, 30s timeout. Checks run in this chat's saved workspace while Pui is open, including after restart. Requires approval for the repeated command. Use side-effect-free commands, never unmanaged agents. Event response uses tokens."],
+    ["pui_create_cron", "cron", { schedule: Type.String({maxLength:256}) }, "Schedule a recurring prompt back to this creating chat. Five numeric cron fields (minute hour day month weekday), UTC, supporting *, ranges, lists and steps; Sunday=0/7 and restricted day/weekday use OR. Runs while Pui is open, reconnecting this chat after restart; missed occurrences are skipped. Scheduling uses no AI; prompt handling uses tokens."],
+  ] as const) {
+    pi.registerTool({ name, label: kind === "monitor" ? "Create monitor" : "Create cron job", description,
+      promptSnippet: kind === "monitor" ? "Wait for a shell condition without AI polling" : "Schedule prompts to this agent",
+      parameters: Type.Object({name:Type.String({minLength:1,maxLength:80}),message:Type.String({minLength:1,maxLength:6000}),...fields}),
+      execute: async (_id:string,args:any,signal:AbortSignal,_update:any,ctx:any) => {
+        if (readonly || taskRole) throw new Error("This worker cannot create automation");
+        return request("automation_create", {...args,kind}, signal, ctx);
+      },
+    });
+  }
+  pi.registerTool({name:"pui_jobs",label:"My cron jobs & monitors",description:"List jobs owned by this agent, including status, schedule, creator and delivery errors. No model polling or messages.",parameters:Type.Object({}),execute:(_id:string,args:any,signal:AbortSignal,_update:any,ctx:any)=>request("automation_list",args,signal,ctx)});
+  pi.registerTool({name:"pui_update_job",label:"Manage my job",description:"Pause, resume/rearm, or delete one of this agent's own cron jobs or monitors. Resume retries a retained pending event; review the creator chat first after uncertain delivery. Does not delete chats or undo delivered prompts.",parameters:Type.Object({job_id:Type.String(),operation:Type.Union([Type.Literal("pause"),Type.Literal("resume"),Type.Literal("delete")])}),execute:async(_id:string,args:any,signal:AbortSignal,_update:any,ctx:any)=>{if(readonly||taskRole)throw new Error("This worker cannot manage automation");return request("automation_update",args,signal,ctx);}});
   pi.registerTool({name:"pui_wait_agents",label:"Wait for workers",description:"Event-driven wait for descendant results, not polling. Use in codemode to keep intermediate results in script variables. Timeout returns pending IDs; it does not stop workers. No progress chatter.",parameters:Type.Object({agent_ids:Type.Array(Type.String(),{minItems:1,maxItems:32}),timeout_ms:Type.Optional(Type.Number({minimum:1000,maximum:1800000}))}),execute:(_id:string,args:any,signal:AbortSignal,_update:any,ctx:any)=>request("wait",args,signal,ctx)});
   pi.registerTool({ name: "pui_agents", label: "Agent status", description: "List this agent's descendants and lifecycle status; no transcript polling or messages are generated.", parameters: Type.Object({}), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("list", args, signal, ctx) });
   pi.registerTool({ name: "pui_message_agent", label: "Message agent", description: "Send only a necessary assignment, clarification, blocker or result to a direct parent/descendant. No automatic peer chatter. Does not interrupt active tools. Use kind=task only for a new assignment requiring a completion report, not for acknowledgements.", parameters: Type.Object({ agent_id: Type.String(), message: Type.String({ maxLength: 12000 }), kind:Type.Optional(Type.Union([Type.Literal("task"),Type.Literal("clarification"),Type.Literal("blocker"),Type.Literal("result")])) }), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("message", args, signal, ctx) });

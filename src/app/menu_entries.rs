@@ -38,6 +38,8 @@ pub(super) enum Command {
     Queue,
     Terminal,
     Browser,
+    AgentsBoard,
+    Automation,
 }
 impl Command {
     #[cfg(any(target_os = "macos", test))]
@@ -76,6 +78,8 @@ impl Command {
         Self::Queue,
         Self::Terminal,
         Self::Browser,
+        Self::AgentsBoard,
+        Self::Automation,
     ];
     #[cfg(any(target_os = "macos", test))]
     pub fn from_tag(tag: isize) -> Option<Self> {
@@ -137,6 +141,9 @@ impl Entry {
 }
 use Entry::{Action as A, Separator as S, Submenu as M};
 pub(super) const APP: &[Entry] = &[
+    A("Agents board", Command::AgentsBoard),
+    A("Cron jobs & monitors", Command::Automation),
+    S,
     A("About Pui", Command::About),
     A("Check for Updates…", Command::Updates),
     S,
@@ -219,6 +226,8 @@ pub(super) struct MenuState {
     pub alerts: notifications::NotificationSettings,
     pub delivery: settings::DeliveryMode,
     pub sidebar: bool,
+    pub agents_board: bool,
+    pub automation: bool,
     pub inspector: bool,
     pub inspector_available: bool,
     pub files: bool,
@@ -241,6 +250,8 @@ impl MenuState {
             Command::Steer => self.delivery == settings::DeliveryMode::Steer,
             Command::Queue => self.delivery == settings::DeliveryMode::Queue,
             Command::Sidebar => self.sidebar,
+            Command::AgentsBoard => self.agents_board,
+            Command::Automation => self.automation,
             Command::Inspector => self.inspector && self.inspector_available,
             Command::Files => self.files,
             Command::Browser => self.browser,
