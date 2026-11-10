@@ -70,7 +70,7 @@ impl Pui {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .small_button("Tasks")
+                            .button("Tasks")
                             .on_hover_text("Verified tasks and workflow evidence")
                             .clicked()
                         {
@@ -340,7 +340,7 @@ impl Pui {
                                     );
                                     if !self.demo
                                         && self.client.is_none()
-                                        && ui.small_button("Connect to Pi").clicked()
+                                        && ui.button("Connect to Pi").clicked()
                                         && !self.resume_agent()
                                     {
                                         self.connect(
@@ -481,10 +481,15 @@ impl Pui {
                             });
                         });
                     });
+                self.transcript.task_output = matches!(
+                    self.task_session(&self.state),
+                    Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
+                );
+                self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
                 if self.state.messages.is_empty()
-                    && !self.new_chat
+                    && (!self.new_chat || !self.state.pending_messages.is_empty())
                     && self.transcript.progress.is_some()
                 {
                     self.transcript.show(
@@ -495,7 +500,7 @@ impl Pui {
                         !self.state.ready(),
                         self.state.session_file.as_deref().unwrap_or("new"),
                     );
-                } else if self.state.messages.is_empty() {
+                } else if self.state.messages.is_empty() && self.state.pending_messages.is_empty() {
                     let width = ui.available_width();
                     let pad = ((width - 720.0) / 2.0).max(30.0);
                     egui::ScrollArea::vertical()

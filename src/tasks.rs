@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod proposal;
+pub mod routing;
 pub mod store;
 pub mod workspace;
 
@@ -218,12 +220,18 @@ pub struct Run {
     pub summary: String,
     pub cost: f64,
     pub permission_cost: f64,
+    #[serde(default)]
+    pub selection: Option<routing::Selection>,
+    #[serde(default)]
+    pub routing_for: Option<Role>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Task {
     pub version: u32,
     pub id: String,
     pub source: PathBuf,
+    #[serde(default)]
+    pub parent_session: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
     pub isolated: bool,
     pub provider: String,
@@ -242,6 +250,12 @@ pub struct Task {
     pub attempts: Vec<Attempt>,
     pub runs: Vec<Run>,
     pub updated: u64,
+    #[serde(default)]
+    pub dynamic_routing: bool,
+    #[serde(default)]
+    pub spend_limit: Option<f64>,
+    #[serde(default)]
+    pub pending_route: Option<routing::PendingRoute>,
 }
 impl Task {
     pub fn new(source: PathBuf, provider: String, model: String, thinking: String) -> Self {
@@ -249,6 +263,7 @@ impl Task {
             version: 1,
             id: uuid::Uuid::new_v4().to_string(),
             source,
+            parent_session: None,
             workspace: None,
             isolated: false,
             provider,
@@ -265,6 +280,9 @@ impl Task {
             attempts: vec![],
             runs: vec![],
             updated: now(),
+            dynamic_routing: false,
+            spend_limit: None,
+            pending_route: None,
         }
     }
     pub fn validate_draft(&self) -> Result<(), String> {

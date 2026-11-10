@@ -5,10 +5,14 @@ use crate::tasks::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(not(test))]
+mod proposal;
+mod routing;
 mod runtime;
 #[cfg(test)]
 mod tests;
 mod view;
+mod workflow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FingerprintStep {
@@ -46,17 +50,20 @@ struct Process {
     initializing: bool,
     ended: bool,
     final_error: bool,
+    routing_for: Option<Role>,
+    route_prompt: Option<String>,
 }
 #[derive(Default)]
 pub(super) struct Tasks {
     pub open: bool,
     pub selected: Option<String>,
-    records: Vec<Task>,
+    pub(super) records: Vec<Task>,
+    pub(super) parents: BTreeMap<String, String>,
     live: Option<String>,
     processes: Vec<Process>,
     histories: BTreeMap<String, State>,
     pub(super) selected_run: Option<String>,
-    transcript: Transcript,
+    pub(super) transcript: Transcript,
     job: Option<Job>,
     store: Option<mpsc::Sender<Task>>,
     store_worker: Option<std::thread::JoinHandle<()>>,
@@ -102,6 +109,17 @@ impl Tasks {
         result.loaded = Some(loaded);
         result.errors = Some(error_rx);
         result
+    }
+    pub(super) fn loading_history(&self) -> bool {
+        self.loaded.is_some()
+    }
+    pub(super) fn demo_proposal(&mut self) {
+        if self
+            .current()
+            .is_some_and(|t| t.runs.iter().any(|r| r.id == "demo-Proposal"))
+        {
+            self.selected_run = Some("demo-Proposal".into());
+        }
     }
     pub(super) fn current(&self) -> Option<&Task> {
         let id = self.selected.as_ref()?;
@@ -240,18 +258,49 @@ impl Drop for Tasks {
     }
 }
 impl Pui {
+    /// Match known retained run paths first; names support older role sessions opened from Recent.
+    pub(super) fn task_session(&self, state: &State) -> Option<Role> {
+        if let Some(path) = state.session_file.as_deref() {
+            if let Some(role) = self
+                .tasks
+                .records
+                .iter()
+                .flat_map(|t| &t.runs)
+                .find(|r| r.session.as_deref() == Some(std::path::Path::new(path)))
+                .map(|r| r.role)
+            {
+                return Some(role);
+            }
+        }
+        let name = &state.session_name;
+        if !name.starts_with("Task ") {
+            return None;
+        }
+        if name.contains(" · Acceptance proposal · ") {
+            Some(Role::Proposal)
+        } else if name.contains(" · Fresh verifier · ") {
+            Some(Role::Verifier)
+        } else {
+            None
+        }
+    }
+
     pub(super) fn new_task(&mut self) {
         self.tasks.open = true;
         if self.tasks.running() {
             self.tasks.selected = self.tasks.live.clone();
             return;
         }
-        let task = Task::new(
+        let mut task = Task::new(
             self.prefs.cwd.clone(),
             self.state.provider.clone(),
             self.state.model.clone(),
             self.state.thinking.clone(),
         );
+        task.dynamic_routing = true;
+        task.parent_session = self.state.session_file.as_ref().map(PathBuf::from);
+        let parent = self.ensure_agent();
+        self.tasks.parents.insert(task.id.clone(), parent);
         self.tasks.selected = Some(task.id.clone());
         self.tasks.records.insert(0, task);
         self.tasks.selected_run = None;
@@ -312,6 +361,29 @@ impl Pui {
     }
     pub(super) fn poll_tasks(&mut self) {
         self.tasks.persist_loaded();
+        let mut linked = Vec::new();
+        for task in &mut self.tasks.records {
+            if task.parent_session.is_none() {
+                if let Some(path) = self
+                    .tasks
+                    .parents
+                    .get(&task.id)
+                    .and_then(|id| self.agents.nodes.get(id))
+                    .and_then(|n| n.path.clone())
+                {
+                    task.parent_session = Some(path);
+                    linked.push(task.clone());
+                }
+            }
+        }
+        if let Some(store) = &self.tasks.store {
+            for task in linked {
+                if store.send(task).is_err() {
+                    self.tasks.storage_failed = true;
+                    self.tasks.error = Some("Cannot save task parent relationship.".into());
+                }
+            }
+        }
         if let Some((run, rx)) = &self.tasks.preview {
             match rx.try_recv() {
                 Ok(Ok(preview)) => {

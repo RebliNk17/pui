@@ -52,13 +52,27 @@ impl Client {
     }
     #[cfg(test)]
     pub(crate) fn stub_with_events() -> (Self, Sender<Event>) {
+        let (client, events, _) = Self::stub_with_commands();
+        (client, events)
+    }
+    #[cfg(test)]
+    pub(crate) fn stub_with_records() -> (Self, Sender<Event>, Receiver<Value>) {
+        Self::stub_with_commands()
+    }
+    #[cfg(test)]
+    pub(crate) fn stub_with_commands() -> (Self, Sender<Event>, Receiver<Value>) {
         let (tx, rx) = mpsc::channel();
+        let (commands_tx, commands) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
         let inject = events_tx.clone();
         let worker = thread::spawn(move || {
             while let Ok(request) = rx.recv() {
-                if matches!(request, Request::Shutdown) {
-                    break;
+                match request {
+                    Request::Shutdown => break,
+                    Request::Record(record) => {
+                        let _ = commands_tx.send(record);
+                    }
+                    Request::Eof => {}
                 }
             }
             let _ = events_tx.send(Event::Exited);
@@ -71,6 +85,7 @@ impl Client {
                 worker: Some(worker),
             },
             inject,
+            commands,
         )
     }
     #[cfg(not(test))]

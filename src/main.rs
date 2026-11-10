@@ -13,6 +13,7 @@ mod protocol;
 mod pulls;
 mod rpc;
 mod sessions;
+mod task_output;
 mod tasks;
 mod terminal;
 mod theme;
@@ -40,6 +41,7 @@ pub struct Options {
     pub demo_question_designs: bool,
     pub demo_agents: bool,
     pub demo_task: bool,
+    pub demo_task_proposal: bool,
     pub demo_files: bool,
     pub demo_changes: bool,
     pub demo_terminal: bool,
@@ -47,8 +49,11 @@ pub struct Options {
     pub open: Option<String>,
     pub browser_device: Option<String>,
     pub browser_console: bool,
+    pub demo_confirmation: bool,
+    pub demo_send_now: bool,
     pub cwd: Option<PathBuf>,
     pub session: Option<PathBuf>,
+    pub task_proposal: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
     pub theme: Option<theme::Theme>,
 }
@@ -82,9 +87,17 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_files = true;
             }
+            "--demo-confirmation" => {
+                options.demo = true;
+                options.demo_confirmation = true;
+            }
             "--demo-notifications" => {
                 options.demo = true;
                 options.demo_notifications = true;
+            }
+            "--demo-send-now" => {
+                options.demo = true;
+                options.demo_send_now = true;
             }
             "--demo-terminal" => {
                 options.demo = true;
@@ -101,6 +114,11 @@ fn main() -> eframe::Result {
             "--demo-task" => {
                 options.demo = true;
                 options.demo_task = true;
+            }
+            "--demo-task-proposal" => {
+                options.demo = true;
+                options.demo_task = true;
+                options.demo_task_proposal = true;
             }
             "--demo-agents" => {
                 options.demo = true;
@@ -148,6 +166,13 @@ fn main() -> eframe::Result {
             "--browser-console" => options.browser_console = true,
             "--cwd" => options.cwd = args.next().map(PathBuf::from),
             "--session" => options.session = args.next().map(PathBuf::from),
+            "--task-proposal" => {
+                let Some(path) = args.next() else {
+                    eprintln!("--task-proposal requires a request JSON path");
+                    return Ok(());
+                };
+                options.task_proposal = Some(path.into());
+            }
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
@@ -160,6 +185,18 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
         }
+    }
+    #[cfg(not(test))]
+    if let Some(path) = options.task_proposal.take() {
+        if options.demo || options.screenshot.is_some() {
+            eprintln!("Proposal execution cannot be combined with demo/screenshot flags.");
+            return Ok(());
+        }
+        if let Err(e) = app::Pui::run_task_proposal(&path) {
+            eprintln!("Proposal stopped: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     chromium::prepare_application();
     let native = eframe::NativeOptions {

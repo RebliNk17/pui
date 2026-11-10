@@ -155,7 +155,7 @@ impl Pulls {
             }
             ui.add_space(5.0);
         }
-        if ui.small_button("Refresh PR status").clicked() {
+        if ui.button("Refresh PR status").clicked() {
             for p in &self.links {
                 self.requested.remove(&p.url);
             }

@@ -177,6 +177,23 @@ fn call(
     )?;
     read_frame(&mut stream)
 }
+fn write_endpoint(directory: &Path, endpoint: &Endpoint) -> std::io::Result<()> {
+    // Streaming serde_json directly into File issues a syscall for every JSON
+    // token. Encode first so each publication needs just one bounded write.
+    let bytes = serde_json::to_vec(endpoint).map_err(std::io::Error::other)?;
+    let temp = directory.join(format!("{}.tmp", endpoint.id));
+    let mut file = private_open(&temp)?;
+    file.set_len(0)?;
+    file.write_all(&bytes)?;
+    std::fs::rename(temp, directory.join(format!("{}.json", endpoint.id)))
+}
+fn registry_changed(event: &notify::Event, own: &Path) -> bool {
+    (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
+        && event
+            .paths
+            .iter()
+            .any(|p| p != own && p.extension().is_some_and(|e| e == "json"))
+}
 fn registry(directory: &Path, own: &str) -> Vec<Endpoint> {
     std::fs::read_dir(directory)
         .into_iter()
@@ -312,13 +329,10 @@ impl WindowSync {
                                 revision,
                                 label,
                             });
-                            let temp = dir.join(format!("{}.tmp", endpoint.id));
-                            if let Ok(mut file) = private_open(&temp) {
-                                let _ = file.set_len(0);
-                                if serde_json::to_writer(&mut file, &endpoint).is_ok() {
-                                    let _ = std::fs::rename(&temp, &metadata);
-                                }
-                            }
+                            let _ = write_endpoint(&dir, &endpoint);
+                            // Publication has no UI result. Other windows wake
+                            // through their registry watchers, not our renderer.
+                            continue;
                         }
                         Work::Scan => {
                             let _ =
@@ -367,20 +381,14 @@ impl WindowSync {
                 }
                 let _ = std::fs::remove_file(metadata);
             }));
-            let repaint = ctx.clone();
+            let own_metadata = directory.join(format!("{}.json", this.id));
             let mut watcher =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
-                        if (event.kind.is_create()
-                            || event.kind.is_modify()
-                            || event.kind.is_remove())
-                            && event
-                                .paths
-                                .iter()
-                                .any(|p| p.extension().is_some_and(|e| e == "json"))
-                        {
+                        if registry_changed(&event, &own_metadata) {
+                            // The scan worker wakes the UI once its result is
+                            // ready. Never scan/repaint for our own publications.
                             let _ = tx.send(Work::Scan);
-                            repaint.request_repaint();
                         }
                     }
                 })
@@ -625,6 +633,15 @@ impl Pui {
             self.ultracode_ready,
         )
             .hash(&mut hash);
+        for receipt in &self.state.pending_messages {
+            receipt.id.hash(&mut hash);
+            receipt.text.hash(&mut hash);
+            receipt.status.label().hash(&mut hash);
+            receipt.observed.hash(&mut hash);
+            for image in &receipt.images {
+                image.key.hash(&mut hash);
+            }
+        }
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
@@ -633,6 +650,10 @@ impl Pui {
         self.prefs.notifications.sound.hash(&mut hash);
         self.prefs.notifications.desktop.hash(&mut hash);
         self.state.session_name.hash(&mut hash);
+        for command in &self.state.commands {
+            command.name.hash(&mut hash);
+            command.description.hash(&mut hash);
+        }
         self.state.permission_classifier.hash(&mut hash);
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);
@@ -929,18 +950,8 @@ impl Pui {
                         {
                             return Err("Wait for compaction/approval before sending now.".into());
                         }
-                        let message = queue.remove(index);
-                        let kind = if self.state.ready() {
-                            "prompt"
-                        } else {
-                            "steer"
-                        };
-                        if !self.deliver_message(message.clone(), kind) {
-                            self.waiting
-                                .entry(queue_path.clone())
-                                .or_default()
-                                .insert(index, message);
-                            return Err("Owner could not send; message retained".into());
+                        if !self.send_now(index) {
+                            return Err("Owner could not interrupt/send; message retained".into());
                         }
                     }
                     _ => unreachable!(),
@@ -990,6 +1001,7 @@ impl Pui {
                     return Err("This approval dialog is no longer active".into());
                 }
                 if kind == "clear_queue" {
+                    self.cancel_send_now();
                     self.waiting.remove(&queue_path);
                 }
                 if kind == "extension_ui_response" {
@@ -1047,6 +1059,92 @@ mod tests {
             "cross-window operation timed out: {:?} / {:?}",
             a.state.error,
             b.state.error
+        );
+    }
+    #[test]
+    fn registry_watcher_ignores_own_publications_and_temporary_files() {
+        use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+        let root = Path::new("registry");
+        let own = root.join("own.json");
+        let peer = root.join("peer.json");
+        for kind in [
+            notify::EventKind::Create(CreateKind::File),
+            notify::EventKind::Modify(ModifyKind::Any),
+            notify::EventKind::Remove(RemoveKind::File),
+        ] {
+            let event = notify::Event::new(kind);
+            assert!(!registry_changed(
+                &event.clone().add_path(own.clone()),
+                &own
+            ));
+            assert!(!registry_changed(
+                &event.clone().add_path(root.join("own.tmp")),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.clone().add_path(peer.clone()),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.add_path(own.clone()).add_path(peer.clone()),
+                &own
+            ));
+        }
+        assert!(!registry_changed(
+            &notify::Event::new(notify::EventKind::Access(AccessKind::Any)).add_path(peer),
+            &own
+        ));
+    }
+    #[test]
+    fn publication_updates_registry_without_waking_its_own_ui() {
+        let (directory, path) = location();
+        let ctx = egui::Context::default();
+        let (wake, wakes) = mpsc::channel();
+        ctx.set_request_repaint_callback(move |_| {
+            let _ = wake.send(());
+        });
+        // Clear egui's initial repaint before starting the registry worker.
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        }
+        wakes.try_iter().for_each(drop);
+        let mut sync = WindowSync::new_at(&ctx, false, Some(directory.join("registry")));
+        assert!(sync.error.is_none(), "{:?}", sync.error);
+        wakes.recv_timeout(Duration::from_secs(5)).unwrap();
+        for _ in 0..3 {
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+        }
+        assert!(!ctx.has_requested_repaint());
+        sync.tx
+            .send(Work::Publish(path.clone(), 1, "Working…".into()))
+            .unwrap();
+        // Stop is a barrier: the publication must finish before we inspect the
+        // repaint state. The watcher remains active throughout publication.
+        sync.tx.send(Work::Stop).unwrap();
+        sync.worker.take().unwrap().join().unwrap();
+        assert!(!ctx.has_requested_repaint());
+        let endpoint = Endpoint {
+            id: sync.id.clone(),
+            port: sync.port,
+            token: "test-token".into(),
+            paths: vec![LivePath {
+                path,
+                revision: 1,
+                label: "Working…".into(),
+            }],
+        };
+        let registry = sync.directory.as_ref().unwrap();
+        write_endpoint(registry, &endpoint).unwrap();
+        let metadata = registry.join(format!("{}.json", sync.id));
+        let saved: Endpoint = serde_json::from_reader(File::open(&metadata).unwrap()).unwrap();
+        assert_eq!(saved.paths[0].revision, 1);
+        let mut endpoint = endpoint;
+        endpoint.paths.clear();
+        write_endpoint(registry, &endpoint).unwrap();
+        let saved: Endpoint = serde_json::from_reader(File::open(metadata).unwrap()).unwrap();
+        assert!(
+            saved.paths.is_empty(),
+            "shorter updates must truncate old JSON"
         );
     }
     #[test]
@@ -1151,6 +1249,70 @@ mod tests {
         assert!(owner.state.busy);
         assert!(owner.client.is_some());
     }
+    #[test]
+    fn shared_send_now_interrupts_owner_and_publishes_immediate_receipt() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        let (client, tx, commands) = rpc::Client::stub_with_commands();
+        owner.client = Some(client);
+        owner.state.busy = true;
+        owner.state.run_observed = true;
+        assert!(owner.attach_or_claim(&path));
+        owner.waiting.insert(
+            path.clone(),
+            vec![run_status::WaitingMessage {
+                text: "interrupt from attached window".into(),
+                ..Default::default()
+            }],
+        );
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.waiting.get(&path).is_some_and(|q| q.len() == 1)
+        });
+        mirror.remote_action(Action::SendNow(0));
+        spin(&mut owner, &mut mirror, |a, b| {
+            a.interrupt.is_some() && b.state.pending_messages.len() == 1
+        });
+        assert_eq!(
+            mirror.state.pending_messages[0].status,
+            protocol::DeliveryStatus::Interrupting
+        );
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(1)).unwrap()["type"],
+            "abort_bash"
+        );
+        let abort = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(abort["type"], "abort");
+        assert!(owner.deliveries.is_empty());
+        tx.send(rpc::Event::Record(
+            json!({"type":"agent_settled","aborted":true}),
+        ))
+        .unwrap();
+        tx.send(rpc::Event::Record(
+            json!({"type":"response","command":"abort","id":abort["id"],"success":true}),
+        ))
+        .unwrap();
+        owner.poll_rpc();
+        assert_eq!(owner.deliveries.len(), 1);
+        let id = owner.deliveries[0].id.clone();
+        tx.send(rpc::Event::Record(json!({"type":"response","command":"prompt","id":id,"success":true,"data":{"disposition":"started"}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state
+                .pending_messages
+                .first()
+                .is_some_and(|p| p.status == protocol::DeliveryStatus::AwaitingAgent)
+        });
+        assert!(mirror.state.messages.is_empty());
+        tx.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":"interrupt from attached window","timestamp":42}}))).unwrap();
+        owner.poll_rpc();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.messages.len() == 1 && b.state.pending_messages.is_empty()
+        });
+    }
+
     #[test]
     fn shared_queue_edit_remove_and_stale_revision_are_authoritative() {
         let (directory, path) = location();

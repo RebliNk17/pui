@@ -1,5 +1,5 @@
 //! Settings resource browser. Helpers never share the chat RPC or interrupt agents.
-use super::page::{card, row, section, toggle};
+use super::page::{card, note, row, section, separator, toggle};
 use super::*;
 use std::{
     io::{Read, Write},
@@ -65,6 +65,7 @@ pub(in crate::app) struct Resources {
     name: String,
     definition: String,
     edit_id: Option<String>,
+    expanded: std::collections::BTreeSet<String>,
 }
 impl Resources {
     pub(in crate::app) fn poll(&mut self) {
@@ -146,6 +147,7 @@ impl Resources {
             self.source.clear();
             self.name.clear();
             self.scope = "user".into();
+            self.expanded.clear();
         }
         if demo && self.catalog.is_none() {
             self.catalog = Some(demo_catalog());
@@ -154,52 +156,74 @@ impl Resources {
             self.start(ui, json!({"action":"list"}));
         }
         let colors = theme::palette(ui.ctx());
-        ui.add_space(22.0);
-        ui.horizontal(|ui| {
-            ui.label(theme::small(
+        section(
+            ui,
+            "Configuration",
+            "Changes apply to new chats. Running agents are left unchanged.",
+        );
+        card(ui, |ui| {
+            row(
                 ui,
+                "Pi configuration",
                 if demo {
                     "Demo fixtures · no configuration changes"
                 } else {
-                    "Pi configuration · not live connection status"
+                    "Configured resources, not live connection status."
                 },
-            ));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        self.job.is_none() && self.pending.is_none(),
-                        egui::Button::new("Refresh"),
-                    )
-                    .clicked()
-                {
-                    self.catalog = if demo { Some(demo_catalog()) } else { None };
-                    self.error = None;
-                }
-            });
-        });
-        ui.label(theme::small(ui, format!("Workspace: {}", cwd.display())));
-        if let Some(catalog) = &self.catalog {
-            for warning in &catalog.warnings {
-                ui.label(RichText::new(warning).size(11.5).color(colors.muted));
-            }
-            ui.horizontal_wrapped(|ui| {
-                for (label, file) in [
-                    ("Personal config", &catalog.user_config),
-                    ("Project config", &catalog.project_config),
-                ] {
+                |ui| {
                     if ui
                         .add_enabled(
-                            !demo && Path::new(file).is_file(),
-                            egui::Button::new(label).small(),
+                            self.job.is_none() && self.pending.is_none(),
+                            egui::Button::new("Refresh"),
                         )
-                        .on_hover_text(file)
                         .clicked()
                     {
-                        open_config(PathBuf::from(file));
+                        self.catalog = if demo { Some(demo_catalog()) } else { None };
+                        self.error = None;
                     }
-                }
-            });
-        }
+                },
+            );
+            separator(ui);
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    ui.label(theme::caption(ui, "WORKSPACE"));
+                    ui.add(
+                        egui::Label::new(theme::small(ui, cwd.display().to_string()))
+                            .truncate()
+                            .selectable(true),
+                    )
+                    .on_hover_text(cwd.display().to_string());
+                    if let Some(catalog) = &self.catalog {
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, file) in [
+                                ("Personal config", &catalog.user_config),
+                                ("Project config", &catalog.project_config),
+                            ] {
+                                if ui
+                                    .add_enabled(
+                                        !demo && Path::new(file).is_file(),
+                                        egui::Button::new(label),
+                                    )
+                                    .on_hover_text(file)
+                                    .clicked()
+                                {
+                                    open_config(PathBuf::from(file));
+                                }
+                            }
+                        });
+                        for warning in &catalog.warnings {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(warning).size(11.5).color(colors.amber),
+                                )
+                                .wrap(),
+                            );
+                        }
+                    }
+                });
+        });
         if let Some(notice) = &self.notice {
             ui.label(RichText::new(notice).size(12.0).color(colors.accent));
         }
@@ -223,12 +247,17 @@ impl Resources {
             self.confirmation(ui, demo);
         }
         let locked = self.job.is_some() || self.pending.is_some();
-        ui.add_space(18.0);
+        section(
+            ui,
+            "Resource library",
+            "Browse by type, then search by name, source or scope.",
+        );
         ui.add_enabled_ui(!locked, |ui| {
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 6.0);
                 for (index, (kind, title)) in KINDS.iter().enumerate() {
                     let count = self.catalog.as_ref().map(|c| c.items.iter().filter(|r| r.kind == *kind).count()).unwrap_or(0);
-                    if ui.selectable_label(self.kind == index, format!("{title}  {count}")).clicked() {
+                    if theme::choice(ui, self.kind == index, format!("{title}  {count}")).clicked() {
                         self.kind = index;
                         self.adding = false;
                         self.edit_id = None;
@@ -237,13 +266,13 @@ impl Resources {
                 }
             });
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("Search resources").desired_width((ui.available_width() - 130.0).max(80.0)));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add_enabled(self.catalog.is_some(), egui::Button::new(if KINDS[self.kind].0 == "packages" { "+ Install package" } else { "+ Add resource" })).clicked() {
                     self.adding = !self.adding;
                     self.edit_id = None;
                     self.definition = "{\n  \"url\": \"https://example.com/mcp\"\n}".into();
                 }
+                ui.add(theme::text_field(&mut self.query, "Search resources").desired_width(ui.available_width()));
             });
             if self.adding { self.form(ui, demo); }
             let query = self.query.trim().to_lowercase();
@@ -252,17 +281,22 @@ impl Resources {
             if items.is_empty() && self.catalog.is_some() {
                 card(ui, |ui| row(ui, if query.is_empty() { "No configured resources" } else { "No matching resources" }, "Add a local resource, install a Pi package, or refresh after editing configuration.", |_| {}));
             }
-            for item in items { self.resource(ui, item, demo); ui.add_space(8.0); }
+            if !items.is_empty() {
+                ui.label(theme::caption(ui, format!("{} · {}", KINDS[self.kind].1.to_uppercase(), items.len())));
+                card(ui, |ui| {
+                    for (index, item) in items.into_iter().enumerate() {
+                        if index > 0 { separator(ui); }
+                        self.resource(ui, item, demo);
+                    }
+                });
+            }
         });
         section(ui, "How changes apply", "");
-        card(ui, |ui| {
-            row(
-                ui,
-                "Configuration, not a sandbox",
-                "Browse without loading extensions or connecting to MCP servers. Installs may run dependency code. Local source files are never deleted; Remove excludes a local resource. Package removal uninstalls its managed copy. MCP removal keeps OAuth credentials. New chats / restarted Pui processes load changes; existing agents are not reloaded. Use Pi /mcp for connection diagnostics and OAuth sign-in. Pi themes affect the CLI, not Pui's appearance.",
-                |_| {},
-            )
-        });
+        note(
+            ui,
+            "Configuration, not a sandbox",
+            "Browse without loading extensions or connecting to MCP servers. Installs may run dependency code. Local source files are never deleted; Remove excludes a local resource. Package removal uninstalls its managed copy. MCP removal keeps OAuth credentials. New chats / restarted Pui processes load changes; existing agents are not reloaded. Use Pi /mcp for connection diagnostics and OAuth sign-in. Pi themes affect the CLI, not Pui's appearance.",
+        );
     }
     fn confirmation(&mut self, ui: &mut egui::Ui, demo: bool) {
         let pending = self.pending.as_ref().unwrap();
@@ -304,12 +338,18 @@ impl Resources {
                         });
                 }
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    cancel = ui.button("Cancel").clicked();
-                    confirm = ui
-                        .add_enabled(!demo, egui::Button::new("Confirm change"))
-                        .clicked();
-                });
+                match confirmations::actions(
+                    ui,
+                    "Cancel",
+                    "Confirm change",
+                    pending.request["action"] == "remove",
+                    !demo,
+                    false,
+                ) {
+                    Some(confirmations::Choice::Cancel) => cancel = true,
+                    Some(confirmations::Choice::Confirm) => confirm = true,
+                    None => {}
+                }
             });
         });
         if cancel {
@@ -337,17 +377,19 @@ impl Resources {
                 ui.horizontal(|ui| {
                     ui.label(theme::small(ui, "Save to"));
                     ui.add_enabled_ui(self.edit_id.is_none(), |ui| {
-                        ui.selectable_value(&mut self.scope, "user".into(), "Personal");
-                        ui.add_enabled_ui(self.catalog.as_ref().is_some_and(|c| c.trusted), |ui| { ui.selectable_value(&mut self.scope, "project".into(), "Project"); });
+                        if theme::choice(ui, self.scope == "user", "Personal").clicked() { self.scope = "user".into(); }
+                        ui.add_enabled_ui(self.catalog.as_ref().is_some_and(|c| c.trusted), |ui| {
+                            if theme::choice(ui, self.scope == "project", "Project").clicked() { self.scope = "project".into(); }
+                        });
                     });
                 });
                 if kind == "mcp" {
-                    ui.add_enabled(self.edit_id.is_none(), egui::TextEdit::singleline(&mut self.name).hint_text("Server name"));
+                    ui.add_enabled(self.edit_id.is_none(), theme::text_field(&mut self.name, "Server name").desired_width(ui.available_width()));
                     ui.label(theme::small(ui, if self.edit_id.is_some() { "JSON patch: supplied fields replace existing fields; omitted fields (including credentials) are preserved. Use environment references, not literal secrets. Open mcp.json to inspect or remove fields." } else { "Server definition JSON (command + args, or url). Prefer ${ENV_VAR} references for credentials." }));
                     ui.add(egui::TextEdit::multiline(&mut self.definition).code_editor().desired_rows(6).desired_width(f32::INFINITY));
                 } else {
                     ui.label(theme::small(ui, if kind == "packages" { "npm:@scope/package@version, git:github.com/owner/repo@ref, or a local package path" } else { "Absolute or workspace-relative path. Source files stay in place; Pi registers their path." }));
-                    ui.add(egui::TextEdit::singleline(&mut self.source).desired_width(f32::INFINITY).hint_text(if kind == "packages" { "Package source" } else { "Local resource path" }));
+                    ui.add(theme::text_field(&mut self.source, if kind == "packages" { "Package source" } else { "Local resource path" }).desired_width(ui.available_width()));
                 }
                 let valid = if kind == "mcp" { !self.name.trim().is_empty() && serde_json::from_str::<Value>(&self.definition).is_ok_and(|v| v.is_object()) } else { !self.source.trim().is_empty() };
                 ui.horizontal(|ui| {
@@ -364,7 +406,7 @@ impl Resources {
     }
     fn resource(&mut self, ui: &mut egui::Ui, item: Resource, demo: bool) {
         let colors = theme::palette(ui.ctx());
-        ui.push_id(&item.id, |ui| card(ui, |ui| {
+        ui.push_id(&item.id, |ui| {
             row(ui, &item.name, &format!("{} · {}", if item.scope == "project" { "Project" } else { "Personal" }, if item.kind == "packages" { &item.description } else if item.enabled { "Enabled in config" } else { "Disabled in config" }), |ui| {
                 if item.kind != "packages" {
                     let mut enabled = item.enabled;
@@ -373,31 +415,35 @@ impl Resources {
                         self.stage(json!({"action":"toggle","id":item.id,"scope":item.scope,"enabled":enabled}), format!("{} {}?", if enabled { "Enable" } else { "Disable" }, item.name), format!("Updates {}. This affects future Pi processes only, not running agents.", item.config));
                     }
                 } else { ui.label(theme::small(ui, "Pi package")); }
+                if icons::button(ui, if self.expanded.contains(&item.id) { Icon::Collapse } else { Icon::Details }, "Details & actions").clicked() && !self.expanded.remove(&item.id) {
+                    self.expanded.insert(item.id.clone());
+                }
             });
-            egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 18, top: 0, bottom: 12 }).show(ui, |ui| {
-                egui::CollapsingHeader::new("Details & actions").id_salt("details").show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 6.0;
+            if self.expanded.contains(&item.id) {
+                egui::Frame::new().fill(colors.code_bg).inner_margin(18).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 10.0;
                     if !item.description.is_empty() { ui.label(theme::small(ui, &item.description)); }
                     for (label, value) in [("Source", &item.source), ("Path", &item.path), ("Configuration", &item.config)] {
                         if !value.is_empty() { ui.add(egui::Label::new(RichText::new(format!("{label}: {value}")).size(11.0).color(colors.muted)).wrap().selectable(true)); }
                     }
                     ui.horizontal_wrapped(|ui| {
-                        if ui.add_enabled(!demo && Path::new(&item.config).is_file(), egui::Button::new("Open config").small()).clicked() { open_config(item.config.clone().into()); }
-                        if ui.small_button("Copy path").clicked() { ui.ctx().copy_text(item.path.clone()); }
-                        if item.kind == "mcp" && ui.add_enabled(!demo, egui::Button::new("Edit definition…").small()).clicked() {
+                        if ui.add_enabled(!demo && Path::new(&item.config).is_file(), egui::Button::new("Open config")).clicked() { open_config(item.config.clone().into()); }
+                        if ui.button("Copy path").clicked() { ui.ctx().copy_text(item.path.clone()); }
+                        if item.kind == "mcp" && ui.add_enabled(!demo, egui::Button::new("Edit definition…")).clicked() {
                             self.adding = true;
                             self.edit_id = Some(item.id.clone());
                             self.name = item.name.clone();
                             self.scope = item.scope.clone();
                             self.definition = "{}".into();
                         }
-                        if item.removable && ui.add_enabled(!demo, egui::Button::new(if item.kind == "packages" { "Uninstall…" } else { "Remove…" }).small()).clicked() {
+                        if item.removable && ui.add_enabled(!demo, egui::Button::new(if item.kind == "packages" { "Uninstall…" } else { "Remove…" })).clicked() {
                             self.stage(json!({"action":"remove","id":item.id,"scope":item.scope}), format!("Remove {}?", item.name), format!("{} Configuration: {}. Running agents remain unchanged.", match item.kind.as_str() { "packages" => "Uninstalls the managed package copy and removes its declaration. Local package source files are kept.", "mcp" => "Removes this server entry; OAuth credentials are kept. Removing a project override may reveal the personal server again.", _ => "Disables this resource through Pi's exclusion filters. Source files are kept. For package resources, uninstall the package separately to remove its managed copy." }, item.config));
                         }
                     });
                 });
-            });
-        }));
+            }
+        });
     }
 }
 fn run_helper(cwd: &Path, request: &Value) -> Result<Value, String> {
@@ -557,6 +603,89 @@ fn demo_catalog() -> Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouped_resource_details_toggle_without_changing_configuration() {
+        fn labels(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| labels(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut resources = Resources {
+            catalog: Some(demo_catalog()),
+            ..Default::default()
+        };
+        let mut details = None;
+        let render = |resources: &mut Resources, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(860.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let item = demo_catalog().items.remove(0);
+                        card(ui, |ui| resources.resource(ui, item, true));
+                    });
+                },
+            )
+        };
+        let mut output = render(&mut resources, vec![]);
+        for _ in 0..2 {
+            output = render(&mut resources, vec![]);
+        }
+        // Locate the first resource row from its painted title; controls are pinned to its right edge.
+        fn title(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == "code-review" => {
+                    Some(t.galley.rect.translate(t.pos.to_vec2()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(title),
+                _ => None,
+            }
+        }
+        for shape in &output.shapes {
+            if let Some(rect) = title(&shape.shape) {
+                details = Some(egui::pos2(771.0, rect.center().y + 10.0));
+            }
+        }
+        let pos = details.expect("First resource row");
+        for pressed in [true, false] {
+            render(
+                &mut resources,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(resources.expanded.contains("demo-0"));
+        let output = render(&mut resources, vec![]);
+        let mut text = Vec::new();
+        for shape in &output.shapes {
+            labels(&shape.shape, &mut text);
+        }
+        assert!(text.iter().any(|s| s == "Copy path"));
+        assert!(
+            text.iter()
+                .any(|s| s.contains("Review changes for correctness"))
+        );
+        assert!(resources.pending.is_none());
+        assert!(resources.job.is_none());
+    }
+
     #[test]
     fn confirmation_is_staged_not_executed() {
         let mut resources = Resources {

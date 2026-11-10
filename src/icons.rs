@@ -345,7 +345,8 @@ pub fn chevron(ui: &Ui, rect: Rect, open: bool, color: Color32) {
 
 pub fn button(ui: &mut Ui, icon: Icon, tip: &str) -> Response {
     let colors = crate::theme::palette(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(ui.spacing().interact_size.y), Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(rect, 6, colors.hover);
     }
@@ -375,7 +376,7 @@ pub fn labeled_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> Re
         let gap = 4.0;
         // Match egui's horizontal-row height so preceding metadata labels do not
         // stay centered on a shorter row while this action extends below them.
-        let height = ui.spacing().interact_size.y.max(galley.size().y);
+        let height = 18.0_f32.max(galley.size().y);
         let (rect, response) = ui.allocate_exact_size(
             Vec2::new(galley.size().x + icon_size + gap, height),
             Sense::click(),

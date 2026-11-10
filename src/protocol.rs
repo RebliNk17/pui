@@ -23,6 +23,49 @@ pub struct Message {
     pub revision: u64,
 }
 
+/// UI-only delivery receipt, never part of Pi's canonical messages or model context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingMessage {
+    pub id: String,
+    pub text: String,
+    pub images: Vec<crate::media::Attachment>,
+    pub status: DeliveryStatus,
+    pub observed: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeliveryStatus {
+    Interrupting,
+    Cancelled,
+    Handled,
+    Sending,
+    AwaitingAgent,
+    Uncertain,
+}
+impl DeliveryStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Interrupting => "Interrupting current run…",
+            Self::Cancelled => "Not sent · interruption cancelled",
+            Self::Handled => "Handled by Pi extension",
+            Self::Sending => "Sending to Pi…",
+            Self::AwaitingAgent => "Sent to Pi · waiting for agent",
+            Self::Uncertain => "Delivery uncertain · not automatically retried",
+        }
+    }
+}
+impl PendingMessage {
+    pub fn matches(&self, message: &Message) -> bool {
+        message.role == "user"
+            && self.text == crate::transcript::user_display_text(message)
+            && self.images.len() == message.images.len()
+            && self
+                .images
+                .iter()
+                .zip(&message.images)
+                .all(|(a, b)| a.key == b.key)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Block {
     Text(String),
@@ -86,12 +129,21 @@ pub struct HistoryPoint {
     #[serde(rename = "codeReason")]
     pub code_reason: Option<String>,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
     pub messages: Vec<Message>,
+    pub pending_messages: Vec<PendingMessage>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
+    pub commands: Vec<SlashCommand>,
     pub model: String,
     pub model_name: String,
     pub provider: String,
@@ -159,6 +211,15 @@ impl Message {
             effort: string(value, "thinkingLevel").to_owned(),
             ..Default::default()
         };
+        if message.role == "user" {
+            if let Some((_, files)) =
+                crate::media::file_manifest(crate::transcript::user_display_text(&message))
+            {
+                message
+                    .images
+                    .extend(files.into_iter().map(crate::media::Attachment::from_file));
+            }
+        }
         if let Some(blocks) = value["content"].as_array() {
             for block in blocks {
                 match string(block, "type") {
@@ -213,6 +274,14 @@ impl State {
             }
             self.diagnostics.push(text);
         }
+    }
+    pub fn reconcile_pending_messages(&mut self) {
+        self.pending_messages.retain(|pending| {
+            matches!(
+                pending.status,
+                DeliveryStatus::Interrupting | DeliveryStatus::Cancelled | DeliveryStatus::Handled
+            ) || self.messages.iter().filter(|m| pending.matches(m)).count() <= pending.observed
+        });
     }
     pub fn ready(&self) -> bool {
         !self.busy && !self.pending && !self.compacting
@@ -342,6 +411,22 @@ impl State {
                                 .map(Vec::as_slice)
                                 .unwrap_or_default(),
                         );
+                    }
+                    "get_commands" => {
+                        self.commands = data["commands"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+                    }
+                    "set_model" => {
+                        // Pi acknowledgments are authoritative. Keep the old model
+                        // and effort options if a selection is rejected.
+                        self.model = string(data, "id").to_owned();
+                        self.model_name = string(data, "name").to_owned();
+                        self.provider = string(data, "provider").to_owned();
+                        self.levels.clear();
                     }
                     "get_available_models" => {
                         self.models = data["models"]
@@ -784,6 +869,17 @@ mod tests {
         assert_eq!(message.text, "See this");
         assert_eq!(message.images.len(), 1);
         assert_eq!(message.images[0].data.as_ref(), "aGVsbG8=");
+    }
+    #[test]
+    fn command_catalog_survives_an_acknowledged_model_change() {
+        let mut state = State::default();
+        state.apply(json!({"type":"response","command":"get_commands","success":true,"data":{"commands":[{"name":"review","description":"Review current changes"}]}}));
+        state.apply(json!({"type":"response","command":"set_model","success":true,"data":{"id":"gemini-4-argon","name":"Gemini 4 Argon","provider":"local"}}));
+        assert_eq!(state.commands.len(), 1);
+        assert_eq!(state.commands[0].name, "review");
+        assert_eq!(state.model, "gemini-4-argon");
+        assert_eq!(state.model_name, "Gemini 4 Argon");
+        assert_eq!(state.provider, "local");
     }
     #[test]
     fn model_metadata_comes_from_pi() {
