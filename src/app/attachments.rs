@@ -185,12 +185,7 @@ impl DraftImages {
                         response.on_hover_text(item.error.as_deref().unwrap_or(&item.name));
                         rect
                     };
-                    let close = egui::Rect::from_center_size(rect.right_top(), Vec2::splat(18.0));
-                    if ui
-                        .put(close, egui::Button::new("×").fill(colors.bg))
-                        .on_hover_text(format!("Remove {}", item.name))
-                        .clicked()
-                    {
+                    if remove_button(ui, rect, &item.name).clicked() {
                         remove = Some(item.id);
                     }
                 });
@@ -203,6 +198,40 @@ impl DraftImages {
         ui.add_space(6.0);
     }
 }
+
+fn remove_button(ui: &mut egui::Ui, thumbnail: egui::Rect, name: &str) -> egui::Response {
+    let colors = crate::theme::palette(ui.ctx());
+    // Keep a generous hit target inside the preview without inheriting the
+    // application's full-size button padding or expanding the attachment row.
+    let rect = egui::Rect::from_min_size(
+        thumbnail.right_top() + egui::vec2(-24.0, 2.0),
+        Vec2::splat(22.0),
+    );
+    let response = ui.interact(rect, ui.id().with("remove-attachment"), Sense::click());
+    let active = response.hovered() || response.has_focus();
+    ui.painter().circle_filled(
+        rect.center(),
+        9.0,
+        if active { colors.hover } else { colors.bg },
+    );
+    ui.painter().circle_stroke(
+        rect.center(),
+        9.0,
+        egui::Stroke::new(1.0, if active { colors.muted } else { colors.border }),
+    );
+    icons::draw(
+        ui,
+        rect,
+        Icon::Close,
+        if active { colors.text } else { colors.muted },
+    );
+    let label = format!("Remove {name}");
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
 fn load_file(path: &Path) -> Result<Attachment, String> {
     let metadata = std::fs::metadata(path).map_err(|_| "Cannot inspect file")?;
     if !metadata.is_file() {
@@ -390,6 +419,118 @@ impl Drop for PasteMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attachment_frame(
+        ctx: &egui::Context,
+        draft: &mut DraftImages,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::Pos2> {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| draft.show(ui));
+            },
+        );
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Circle(circle)
+                    if circle.radius == 9.0 && circle.fill != egui::Color32::TRANSPARENT =>
+                {
+                    Some(circle.center)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn attachment_remove_is_compact_and_stays_inside_the_preview() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            for compact in [false, true] {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        if compact {
+                            theme::compact_controls(ui);
+                        }
+                        let (preview, _) =
+                            ui.allocate_exact_size(egui::vec2(65.0, 55.0), Sense::hover());
+                        let cursor = ui.cursor();
+                        let response = remove_button(ui, preview, "image.png");
+                        assert_eq!(response.rect.size(), Vec2::splat(22.0));
+                        assert!(preview.contains_rect(response.rect));
+                        assert_eq!(ui.cursor(), cursor, "Overlay must not expand the row");
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_remove_only_removes_its_item_without_opening_the_gallery() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let image = Attachment::from_bytes(include_bytes!("../../assets/icon.png")).unwrap();
+        let file = Attachment::from_file(crate::media::FileAttachment {
+            path: PathBuf::from("/fixture/report.csv"),
+            name: "report.csv".into(),
+            size: 12,
+        });
+        let mut draft = DraftImages::default();
+        draft.set_images(vec![image, file]);
+        draft.items.push(Item {
+            id: 3,
+            name: "Loading image".into(),
+            image: None,
+            error: None,
+        });
+        draft.items.push(Item {
+            id: 4,
+            name: "Failed image".into(),
+            image: None,
+            error: Some("Unavailable".into()),
+        });
+        for id in [2, 1, 3, 4] {
+            attachment_frame(&ctx, &mut draft, vec![]);
+            let buttons = attachment_frame(&ctx, &mut draft, vec![]);
+            assert_eq!(buttons.len(), draft.items.len());
+            let index = draft.items.iter().position(|item| item.id == id).unwrap();
+            let pos = buttons[index];
+            for pressed in [true, false] {
+                attachment_frame(
+                    &ctx,
+                    &mut draft,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert!(!draft.items.iter().any(|item| item.id == id));
+            assert!(
+                !draft.gallery.is_open(),
+                "Remove must not activate the thumbnail"
+            );
+        }
+        assert!(draft.is_empty());
+    }
+
     #[test]
     fn files_use_detected_mime_not_filename() {
         let image = load_file(Path::new(concat!(
