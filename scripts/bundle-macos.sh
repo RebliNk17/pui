@@ -7,10 +7,13 @@ if [[ "$(uname -s)" != Darwin ]]; then
 fi
 profile=release
 cargo_flags=(--release --locked)
-if [[ "${1:-}" == --debug ]]; then
-  profile=debug
-  cargo_flags=(--locked)
-fi
+case "${1:-}" in
+  '') ;;
+  --debug) profile=debug; cargo_flags=(--locked) ;;
+  *) echo "Usage: $0 [--debug]" >&2; exit 1 ;;
+esac
+[[ $# -le 1 ]] || { echo "Usage: $0 [--debug]" >&2; exit 1; }
+[[ -z "${CARGO_BUILD_TARGET:-}" ]] || { echo "Use a native build without CARGO_BUILD_TARGET." >&2; exit 1; }
 # CEF's build requires CMake/Ninja. Download only the pinned, hash-checked
 # runtime before Cargo so custom TLS roots can use the system curl stack.
 command -v cmake >/dev/null || { echo "CMake is required to build Chromium." >&2; exit 1; }
@@ -20,9 +23,14 @@ if [[ -z "${CEF_PATH:-}" ]]; then
   export CEF_PATH
 fi
 cargo build --bins "${cargo_flags[@]}"
-app="$PWD/dist/Pui.app"
+# Build into a fresh bundle: overlaying an older signed CEF framework leaves
+# stale resources/signatures behind. Never delete an existing local bundle.
+mkdir -p dist
+staging=$(mktemp -d "$PWD/dist/.pui-bundle.XXXXXXXX")
+trap 'python3 -c '\''import shutil,sys; shutil.rmtree(sys.argv[1])'\'' "$staging"' EXIT
+app="$staging/Pui.app"
 resources="$app/Contents/Resources"
-iconset="$PWD/target/pui.iconset"
+iconset="$staging/pui.iconset"
 mkdir -p "$app/Contents/MacOS" "$resources" "$iconset"
 cp "${CARGO_TARGET_DIR:-target}/$profile/pui" "$app/Contents/MacOS/pui"
 for size in 16 32 128 256 512; do
@@ -34,13 +42,22 @@ iconutil -c icns "$iconset" -o "$resources/Pui.icns"
 cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts scripts/workflows.ts "$resources/"
 python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
 cp packaging/Info.plist "$app/Contents/Info.plist"
-# Cargo is the release-version source of truth, including future GitHub checks.
+# Cargo is the release-version source of truth.
 version=$(cargo pkgid --offline | awk -F# '{print $NF}' | awk -F@ '{print $NF}')
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${CI_PIPELINE_IID:-1}" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
-# Seal the local bundle (no developer identity); Apple Silicon requires a valid signature.
-codesign --force --deep --sign - "$app"
-codesign --verify --deep --strict "$app"
-echo "Built $app ($profile, $(uname -m))."
+python3 scripts/sign-macos.py "$app"
+if [[ -e dist/Pui.app ]]; then
+  previous=$(mktemp -d "$PWD/dist/Pui.previous.XXXXXXXX")
+  mv dist/Pui.app "$previous/Pui.app"
+  echo "Previous bundle retained at $previous/Pui.app"
+fi
+mv "$app" dist/Pui.app
+echo "Built $PWD/dist/Pui.app ($profile, $(uname -m))."
 echo "Open with: open dist/Pui.app"
-echo "Local ad-hoc signed build; Developer ID signing/notarization is not configured."
+if [[ "${PUI_SIGN_IDENTITY:--}" == - ]]; then
+  echo "Local ad-hoc signed build; not Developer ID signed or notarized."
+else
+  echo "Developer ID signed; notarization is performed separately by CI."
+fi

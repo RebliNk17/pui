@@ -1,3 +1,5 @@
 /target/
 /dist/
+/.cargo-ci/
+__pycache__/
 .DS_Store

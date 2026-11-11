@@ -1,0 +1,79 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages: [validate, build, release]
+
+variables:
+  # GitLab-hosted macOS images/tags: docs.gitlab.com/ci/runners/hosted_runners/macos/
+  MACOS_IMAGE: "macos-26-xcode-26"
+  RUST_VERSION: "1.88.0"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo-ci"
+  CARGO_TARGET_DIR: "$CI_PROJECT_DIR/target"
+  CARGO_TERM_COLOR: "always"
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  # Set to true in project CI variables to forbid ad-hoc tagged releases.
+  PUI_REQUIRE_SIGNING: "false"
+
+.macos:
+  image: $MACOS_IMAGE
+  tags: [saas-macos-medium-m1]
+  interruptible: true
+  # Jobs without rules otherwise default to excluding merge-request pipelines.
+  rules:
+    - when: on_success
+  timeout: 2h
+  before_script:
+    - source scripts/ci/setup-macos.sh
+  cache:
+    # Never cache target/ or credentials; protected/non-protected caches stay separate.
+    key:
+      prefix: "macos-arm64-rust-${RUST_VERSION}"
+      files: [Cargo.lock, scripts/fetch-chromium-macos.py]
+    paths:
+      - .cargo-ci/registry/
+      - .cargo-ci/git/
+    policy: pull-push
+
+validate:macos:
+  extends: .macos
+  stage: validate
+  script:
+    - python3 scripts/release.py check
+    - for script in scripts/bundle-macos.sh scripts/package-macos.sh scripts/notarize-macos.sh scripts/ci/*.sh; do bash -n "$script" || exit; done
+    - python3 -m unittest discover -s tests -p 'test_release.py' -v
+    - cargo fmt --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - cargo test --locked
+    - node --test tests/*.test.mjs
+
+build:macos:
+  extends: .macos
+  stage: build
+  script:
+    # The signing script only imports credentials for protected version tags.
+    - bash scripts/ci/build-macos.sh
+  artifacts:
+    name: "Pui-macos-arm64-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 14 days
+    paths:
+      - dist/releases/
+
+release:gitlab:
+  stage: release
+  image: python:3.13-slim
+  tags: [saas-linux-small-amd64]
+  interruptible: false
+  resource_group: pui-releases
+  needs:
+    - job: build:macos
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && $CI_COMMIT_REF_PROTECTED == "true"'
+  script:
+    - python3 scripts/release.py publish
