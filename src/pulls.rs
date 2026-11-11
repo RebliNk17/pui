@@ -242,10 +242,16 @@ impl Pulls {
     fn ordered_links(&self) -> Vec<&Pull> {
         let mut links: Vec<_> = self.links.iter().collect();
         let updated_at = |p: &Pull| self.results.get(&p.url).and_then(|s| s.updated_at);
+        let is_open = |p: &Pull| {
+            self.results
+                .get(&p.url)
+                .is_some_and(|s| matches!(s.state.as_str(), "Open" | "Draft"))
+        };
         links.sort_by(|a, b| {
-            updated_at(b)
-                .cmp(&updated_at(a))
-                .then_with(|| a.repo.cmp(&b.repo))
+            a.repo
+                .cmp(&b.repo)
+                .then_with(|| is_open(b).cmp(&is_open(a)))
+                .then_with(|| updated_at(b).cmp(&updated_at(a)))
                 .then_with(|| b.number.cmp(&a.number))
         });
         links
@@ -260,10 +266,9 @@ impl Pulls {
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             ui.spacing_mut().interact_size.y = 20.0;
-            ui.label(theme::small(ui, "Last updated · newest first").size(10.0));
+            ui.label(theme::small(ui, "By repository · open first · newest updated").size(10.0));
             let mut previous_repo = None;
             for pull in self.ordered_links() {
-                // Keep the global update order, even when repositories interleave.
                 if previous_repo != Some(&pull.repo) {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {

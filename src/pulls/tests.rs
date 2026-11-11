@@ -56,23 +56,76 @@ fn github_update_times_are_parsed_and_missing_or_invalid_times_stay_unknown() {
 }
 
 #[test]
-fn newest_updated_prs_come_first_regardless_of_number_state_or_repository() {
-    let mut pulls = Pulls {
-        links: vec![pull("a/b", 90), pull("c/d", 20), pull("a/b", 10)],
-        ..Default::default()
-    };
-    for (index, time) in [100, 300, 200].into_iter().enumerate() {
-        pulls
-            .results
-            .insert(pulls.links[index].url.clone(), status(Some(time)));
+fn repositories_stay_grouped_with_open_prs_first_then_newest_updated() {
+    let mut pulls = Pulls::default();
+    for (repo, number, state, time) in [
+        ("a/b", 90, "Merged", 500),
+        ("c/b", 20, "Open", 700),
+        ("a/b", 10, "Open", 200),
+        ("a/b", 30, "Closed", 600),
+        ("c/b", 50, "Merged", 800),
+        ("a/b", 40, "Open", 100),
+        ("a/b", 60, "Draft", 300),
+    ] {
+        let pull = pull(repo, number);
+        pulls.results.insert(
+            pull.url.clone(),
+            Status {
+                state: state.into(),
+                ..status(Some(time))
+            },
+        );
+        pulls.links.push(pull);
     }
-    pulls.results.get_mut(&pulls.links[1].url).unwrap().state = "Open".into();
     let ordered: Vec<_> = pulls
         .ordered_links()
         .iter()
         .map(|p| (p.repo.as_str(), p.number))
         .collect();
-    assert_eq!(ordered, [("c/d", 20), ("a/b", 10), ("a/b", 90)]);
+    assert_eq!(
+        ordered,
+        [
+            ("a/b", 60),
+            ("a/b", 10),
+            ("a/b", 40),
+            ("a/b", 30),
+            ("a/b", 90),
+            ("c/b", 20),
+            ("c/b", 50),
+        ]
+    );
+}
+
+#[test]
+fn open_prs_with_unknown_times_still_precede_finished_or_unknown_states() {
+    let mut pulls = Pulls::default();
+    for (number, state, time) in [
+        (1, "Merged", Some(500)),
+        (2, "Open", None),
+        (3, "Draft", None),
+        (4, "Unavailable", Some(600)),
+        (5, "Closed", Some(700)),
+        (6, "Open", Some(100)),
+    ] {
+        let pull = pull("a/b", number);
+        pulls.results.insert(
+            pull.url.clone(),
+            Status {
+                state: state.into(),
+                ..status(time)
+            },
+        );
+        pulls.links.push(pull);
+    }
+    pulls.links.push(pull("a/b", 7));
+    assert_eq!(
+        pulls
+            .ordered_links()
+            .iter()
+            .map(|p| p.number)
+            .collect::<Vec<_>>(),
+        [6, 3, 2, 5, 4, 1, 7]
+    );
 }
 
 #[test]

@@ -272,6 +272,73 @@ fn rejected_or_unacknowledged_delivery_does_not_retry() {
     assert!(a.automation.mail.is_empty());
 }
 #[test]
+fn sidebar_shows_active_schedules_and_updates_when_paused_or_completed() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for width in [220.0, 300.0] {
+            for zoom in [0.8, 1.4] {
+                let ctx = egui::Context::default();
+                let mut a = app(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let cron = create(&mut a, "cron");
+                create(&mut a, "monitor");
+                a.state.busy = true;
+                a.draft = "Keep my draft".into();
+                for expected in [2, 1, 0] {
+                    assert_eq!(a.automation.active_count(), expected);
+                    let mut text = Vec::new();
+                    for _ in 0..2 {
+                        let output = ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(width, 200.0),
+                                )),
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                egui::CentralPanel::default()
+                                    .show(ctx, |ui| a.sidebar_navigation(ui));
+                            },
+                        );
+                        text.clear();
+                        for shape in &output.shapes {
+                            labels(&shape.shape, &mut text);
+                        }
+                    }
+                    let badges: Vec<_> = text
+                        .iter()
+                        .filter(|(label, _)| label.ends_with(" active"))
+                        .collect();
+                    if expected > 0 {
+                        assert_eq!(badges.len(), 1);
+                        assert_eq!(badges[0].0, format!("{expected} active"));
+                        let scheduled = text
+                            .iter()
+                            .find(|(label, _)| label == "Scheduled tasks")
+                            .unwrap()
+                            .1;
+                        assert!(scheduled.right() < badges[0].1.left());
+                        assert!(badges[0].1.right() <= width);
+                    } else {
+                        assert!(badges.is_empty());
+                    }
+                    assert!(a.state.busy);
+                    assert_eq!(a.draft, "Keep my draft");
+                    if expected == 2 {
+                        a.change_job(&cron, "pause").unwrap();
+                    } else if expected == 1 {
+                        // Completed jobs are never counted, even if an old snapshot
+                        // still has their enabled flag set.
+                        a.automation.jobs[1].completed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn view_exposes_jobs_and_creator() {
     let ctx = egui::Context::default();
     let mut a = app(&ctx);

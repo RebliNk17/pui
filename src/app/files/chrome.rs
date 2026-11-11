@@ -94,17 +94,15 @@ impl Browser {
                                             close_url = Some(index);
                                         }
                                     }
-                                    new_tab = chrome::icon_button(
-                                        ui,
-                                        Icon::Plus,
-                                        if self.browser_mode {
-                                            "Open another page"
-                                        } else {
-                                            "Open another file"
-                                        },
-                                        false,
-                                    )
-                                    .clicked();
+                                    if self.browser_mode {
+                                        new_tab = chrome::icon_button(
+                                            ui,
+                                            Icon::Plus,
+                                            "Open another page",
+                                            false,
+                                        )
+                                        .clicked();
+                                    }
                                 });
                             });
                     }
@@ -130,6 +128,17 @@ impl Browser {
                         {
                             self.expanded = !self.expanded;
                         }
+                        if !self.browser_mode
+                            && chrome::icon_button(
+                                ui,
+                                Icon::Refresh,
+                                "Refresh files and selected preview",
+                                false,
+                            )
+                            .clicked()
+                        {
+                            self.refresh(&ctx);
+                        }
                     });
                 });
             });
@@ -148,6 +157,9 @@ impl Browser {
         }
         if let Some(index) = close_file {
             self.close_tab(index);
+        }
+        if !self.browser_mode {
+            return;
         }
         if new_tab {
             self.address.clear();

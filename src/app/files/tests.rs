@@ -146,6 +146,76 @@ fn docked_tree_is_right_of_preview_and_reads_only_clicked_files_while_busy() {
 }
 
 #[test]
+fn file_explorer_omits_address_and_error_rows_but_keeps_tabs_and_refresh() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for width in [360.0, 760.0] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            let root = fixture();
+            let mut browser = Browser::default();
+            browser.toggle(&ctx, &root);
+            browser.select(&ctx, root.join("README.md"));
+            settle(&mut browser);
+            browser.address_error = Some("Invalid file path or URL.".into());
+            for _ in 0..2 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| browser.contents(ui));
+                    },
+                );
+                text(&output, "Hello, 世界");
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.job.text.contains("Invalid file path or URL.")
+                        || text.galley.job.text.contains(&root.display().to_string())
+                )));
+                assert!(
+                    ctx.read_response(egui::Id::new("viewer-navigation"))
+                        .is_none()
+                );
+                assert!(
+                    ctx.read_response(egui::Id::new("viewer-address-error"))
+                        .is_none()
+                );
+                for tip in [
+                    "Refresh files and selected preview",
+                    "Expand viewer",
+                    "Close viewer",
+                ] {
+                    let rect = ctx
+                        .data(|data| {
+                            data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", tip)))
+                        })
+                        .unwrap();
+                    assert!(rect.left() >= 0.0 && rect.right() <= width);
+                }
+                assert!(
+                    ctx.data(|data| {
+                        data.get_temp::<egui::Rect>(egui::Id::new((
+                            "browser-control",
+                            "Open another file",
+                        )))
+                    })
+                    .is_none()
+                );
+            }
+            assert_eq!(
+                browser.selected.as_deref(),
+                Some(root.join("README.md").as_path())
+            );
+            assert_eq!(browser.tabs.len(), 1);
+        }
+    }
+}
+
+#[test]
 fn globe_and_folder_buttons_open_separate_panes_without_navigation() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

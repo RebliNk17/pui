@@ -331,6 +331,7 @@ impl Pui {
     pub(super) fn sidebar_navigation(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
         let state = self.menu_state(ui.ctx());
+        let active_tasks = self.automation.active_count();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for (label, icon, command, selected) in [
@@ -375,14 +376,44 @@ impl Pui {
                     icon,
                     color,
                 );
-                ui.painter().text(
-                    rect.left_center() + egui::vec2(34.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    label,
+                let badge = (command == Command::Automation && active_tasks > 0).then(|| {
+                    ui.painter().layout_no_wrap(
+                        format!("{active_tasks} active"),
+                        FontId::proportional(11.0),
+                        colors.green,
+                    )
+                });
+                let label_right = if let Some(badge) = badge {
+                    let pos = egui::pos2(
+                        rect.right() - badge.size().x - 10.0,
+                        rect.center().y - badge.size().y / 2.0,
+                    );
+                    let left = pos.x - 8.0;
+                    ui.painter().galley(pos, badge, colors.green);
+                    left
+                } else {
+                    rect.right() - 10.0
+                };
+                let label_pos = rect.left_center() + egui::vec2(34.0, 0.0);
+                let mut layout = egui::text::LayoutJob::simple(
+                    label.into(),
                     FontId::proportional(13.0),
+                    color,
+                    (label_right - label_pos.x).max(0.0),
+                );
+                layout.wrap.max_rows = 1;
+                let galley = ui.painter().layout_job(layout);
+                ui.painter().galley(
+                    label_pos - egui::vec2(0.0, galley.size().y / 2.0),
+                    galley,
                     color,
                 );
                 response.widget_info(|| {
+                    let label = if command == Command::Automation && active_tasks > 0 {
+                        format!("{label}, {active_tasks} active")
+                    } else {
+                        label.into()
+                    };
                     egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
                 });
                 if response

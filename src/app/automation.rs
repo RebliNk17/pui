@@ -120,6 +120,12 @@ pub(super) struct Automation {
     delete: Option<String>,
 }
 impl Automation {
+    pub(super) fn active_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| job.enabled && !job.completed)
+            .count()
+    }
     pub(super) fn confirming(&self) -> bool {
         self.delete.is_some()
     }
