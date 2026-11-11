@@ -1211,13 +1211,7 @@ fn activity(
                                 .summary("Model reasoning")
                                 .icon(Icon::Spark)
                                 .show(ui, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(*text).size(12.0).color(colors.muted),
-                                        )
-                                        .wrap()
-                                        .selectable(true),
-                                    );
+                                    markdown::show(ui, text);
                                 });
                             earlier_changed |= response.clicked() || response.has_focus();
                         }
@@ -2256,6 +2250,114 @@ mod tests {
         assert!(changed);
         assert!((keyboard_expanded - expanded).abs() < 0.1);
     }
+    #[test]
+    fn thinking_renders_markdown_and_preserves_disclosure() {
+        fn collect(shape: &egui::Shape, text: &mut Vec<egui::epaint::TextShape>) {
+            match shape {
+                egui::Shape::Text(t) => text.push(t.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let source = "## Research\n\n**Gathering information** from `README.md`.\n\n- Review docs\n\n```rust\nlet ready = true;\n```";
+        for theme in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+            for width in [320.0, 800.0] {
+                for running in [false, true] {
+                    let ctx = egui::Context::default();
+                    crate::theme::install(&ctx);
+                    theme.apply(&ctx);
+                    let draw = |events| {
+                        let mut changed = false;
+                        let output = ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    egui::vec2(width, 800.0),
+                                )),
+                                events,
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                egui::CentralPanel::default().show(ctx, |ui| {
+                                    changed = activity(
+                                        ui,
+                                        &[ActivityItem::Thinking(source)],
+                                        0,
+                                        running,
+                                        true,
+                                    );
+                                });
+                            },
+                        );
+                        let mut text = Vec::new();
+                        for shape in output.shapes {
+                            collect(&shape.shape, &mut text);
+                        }
+                        (text, changed)
+                    };
+                    draw(vec![]);
+                    let (text, _) = draw(vec![]);
+                    assert!(!text.iter().any(|t| t.galley.job.text.contains("Research")));
+                    let pos = text
+                        .iter()
+                        .rev()
+                        .find(|t| t.galley.job.text == "Thinking")
+                        .unwrap()
+                        .pos
+                        + egui::vec2(5.0, 5.0);
+                    let pointer = |pressed| {
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ]
+                    };
+                    draw(pointer(true));
+                    let (_, changed) = draw(pointer(false));
+                    assert!(changed, "expansion must invalidate the turn height");
+                    let (text, _) = draw(vec![]);
+                    for expected in [
+                        "Research",
+                        "Gathering information",
+                        "README.md",
+                        "Review docs",
+                        "let ready = true;",
+                    ] {
+                        assert!(
+                            text.iter().any(|t| t.galley.job.text.contains(expected)),
+                            "missing {expected:?}: {:?}",
+                            text.iter().map(|t| &t.galley.job.text).collect::<Vec<_>>()
+                        );
+                    }
+                    for t in &text {
+                        assert!(!t.galley.job.text.contains("**"));
+                        assert!(!t.galley.job.text.contains('`'));
+                        assert!(!t.galley.job.text.contains("##"));
+                    }
+                    let formats: Vec<_> = text
+                        .iter()
+                        .flat_map(|t| &t.galley.job.sections)
+                        .map(|s| &s.format.font_id.family)
+                        .collect();
+                    assert!(formats.contains(&&egui::FontFamily::Name("body-bold".into())));
+                    assert!(formats.contains(&&egui::FontFamily::Monospace));
+                    draw(pointer(true));
+                    let (text, changed) = draw(pointer(false));
+                    assert!(changed, "collapse must invalidate the turn height");
+                    assert!(!text.iter().any(|t| t.galley.job.text.contains("Research")));
+                }
+            }
+        }
+    }
+
     #[test]
     fn expanded_activity_keeps_eleven_rows_compact() {
         let ctx = egui::Context::default();
