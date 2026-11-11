@@ -9,6 +9,7 @@ mod composer_history;
 mod confirmations;
 mod deletion;
 mod diagnostics;
+mod diff_viewer;
 mod files;
 mod kanban;
 mod menu;
@@ -1422,26 +1423,14 @@ impl Pui {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
-        let mut open = true;
         if let Some((path, diff)) = &self.selected_diff {
-            egui::Window::new(path)
-                .id(egui::Id::new("diff-viewer"))
-                .open(&mut open)
-                .default_size([850.0, 560.0])
-                .frame(prompt_ui::surface(ctx).inner_margin(20))
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    prompt_ui::style(ui);
-                    ui.label(theme::small(
-                        ui,
-                        "Read-only recorded change or working-tree diff · no files are modified",
-                    ));
-                    ui.separator();
-                    egui::ScrollArea::both().show(ui, |ui| markdown::diff(ui, diff));
-                });
-        }
-        if !open {
-            self.selected_diff = None;
+            let recorded = self
+                .outputs
+                .iter()
+                .any(|file| file.path == *path && file.diff == *diff);
+            if !diff_viewer::show(ctx, path, diff, recorded) {
+                self.selected_diff = None;
+            }
         }
     }
 
@@ -1709,6 +1698,7 @@ impl eframe::App for Pui {
             && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
+            && self.selected_diff.is_none()
             && self.state.dialogs.is_empty()
             && !self.completion_active(ctx)
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -1787,11 +1777,9 @@ impl eframe::App for Pui {
             && !self.automation.open
             && !theater
             && !confirming
-            && !self.model_picker_open
             && !self.search_open
             && self.state.dialogs.is_empty()
             && self.selected_diff.is_none()
-            && !egui::Popup::is_any_open(ctx)
         {
             self.files.show_web(frame, ctx);
         } else {

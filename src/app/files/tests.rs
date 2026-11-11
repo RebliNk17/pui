@@ -476,6 +476,107 @@ fn local_html_uses_browser_tabs_and_retains_file_selection_and_source() {
 }
 
 #[test]
+fn model_picker_only_obscures_the_browser_when_it_overlaps_the_page() {
+    for theme in [theme::Theme::Light, theme::Theme::Dark] {
+        for (width, zoom) in [(1600.0, 1.0), (1000.0, 1.25)] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.prefs.theme = theme;
+            theme.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            app.model_picker_open = true;
+            app.model_anchor = Some((
+                egui::Rect::from_min_size(egui::pos2(24.0, 720.0), egui::vec2(150.0, 28.0)),
+                egui::LayerId::background(),
+            ));
+            app.files.web_preview = Some(WebPreview {
+                rect: egui::Rect::from_min_max(egui::pos2(600.0, 180.0), egui::pos2(width, 800.0)),
+                key: "report.html".into(),
+                url: None,
+                html: Some("<h1>Report</h1>".into()),
+            });
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 850.0),
+                )),
+                ..Default::default()
+            };
+            for _ in 0..8 {
+                let _ = ctx.run(input(), |ctx| {
+                    app.model_picker(ctx);
+                    assert!(!app.files.web_obscured(ctx));
+                });
+            }
+            assert!(app.model_picker_open);
+            let popup = ctx
+                .read_response(egui::Id::new("model-picker-dropdown"))
+                .unwrap();
+            app.files.web_preview.as_mut().unwrap().rect = popup.rect;
+            let _ = ctx.run(input(), |ctx| {
+                app.model_picker(ctx);
+                assert!(app.files.web_obscured(ctx), "Popup must cover native view");
+            });
+            app.model_picker_open = false;
+            // egui retains last-frame areas for one frame after dismissal.
+            for _ in 0..2 {
+                let _ = ctx.run(input(), |ctx| app.model_picker(ctx));
+            }
+            assert!(!app.files.web_obscured(&ctx));
+        }
+    }
+}
+
+#[test]
+fn browser_popup_overlap_includes_nested_menus_and_layer_transforms() {
+    let ctx = egui::Context::default();
+    let mut browser = Browser::default();
+    browser.web_preview = Some(WebPreview {
+        rect: egui::Rect::from_min_max(egui::pos2(600.0, 180.0), egui::pos2(1000.0, 800.0)),
+        key: "https://example.com".into(),
+        url: Some("https://example.com".into()),
+        html: None,
+    });
+    let popup = egui::Id::new("browser-overlapping-menu");
+    let layer = egui::LayerId::new(egui::Order::Foreground, popup);
+    for _ in 0..3 {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 850.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                // A provider submenu can overlap even when its parent picker does not.
+                egui::Popup::new(
+                    popup,
+                    ctx.clone(),
+                    egui::pos2(580.0, 300.0),
+                    egui::LayerId::background(),
+                )
+                .open_memory(Some(egui::SetOpenCommand::Bool(true)))
+                .width(140.0)
+                .show(|ui| {
+                    ui.label("Provider submenu");
+                });
+                assert!(egui::Popup::is_any_open(ctx));
+                assert!(browser.web_obscured(ctx));
+                ctx.set_transform_layer(
+                    layer,
+                    egui::emath::TSTransform::from_translation(egui::vec2(-400.0, 0.0)),
+                );
+                assert!(!browser.web_obscured(ctx));
+                ctx.set_transform_layer(layer, egui::emath::TSTransform::IDENTITY);
+            },
+        );
+    }
+    browser.web_preview = None;
+    assert!(!browser.web_obscured(&ctx));
+}
+
+#[test]
 fn session_switch_restores_html_tabs_expansion_and_clears_stale_native_rect() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

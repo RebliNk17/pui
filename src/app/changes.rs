@@ -381,7 +381,7 @@ impl Changes {
 }
 
 /// Selectable source with quiet line numbers and full-width addition/deletion backgrounds.
-fn numbered_diff(ui: &mut egui::Ui, source: &str) {
+pub(super) fn numbered_diff(ui: &mut egui::Ui, source: &str) {
     let colors = theme::palette(ui.ctx());
     ui.push_id(ui.next_auto_id(), |ui| {
         egui::ScrollArea::horizontal()

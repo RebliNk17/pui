@@ -457,8 +457,31 @@ impl Browser {
         self.web.hide();
     }
 
+    fn web_obscured(&self, ctx: &egui::Context) -> bool {
+        let Some(preview) = &self.web_preview else {
+            return false;
+        };
+        // Native Chromium views sit above egui. Only hide for floating surfaces
+        // that actually cover the page, not unrelated popups in the chat pane.
+        let overlays = ctx.memory(|memory| {
+            memory
+                .areas()
+                .visible_layer_ids()
+                .into_iter()
+                .filter(|layer| layer.order >= egui::Order::Middle)
+                .filter_map(|layer| memory.area_rect(layer.id).map(|rect| (layer, rect)))
+                .collect::<Vec<_>>()
+        });
+        overlays.into_iter().any(|(layer, rect)| {
+            let rect = ctx
+                .layer_transform_to_global(layer)
+                .map_or(rect, |transform| transform * rect);
+            preview.rect.intersects(rect)
+        })
+    }
+
     pub(super) fn show_web(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
-        if !self.open {
+        if !self.open || self.web_obscured(ctx) {
             self.web.hide();
             return;
         }
