@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[path = "sidebar_dates.rs"]
+mod dates;
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(super) struct ChatPrefs {
@@ -277,9 +280,18 @@ impl Pui {
                                 ui.add_space(6.0);
                             }
                         } else {
+                            let today = chrono::Local::now().date_naive();
+                            let mut previous_date = None;
                             for index in visible {
-                                if let Some(next) = self.branch_row(ui, &branches[index], 0, &query)
-                                {
+                                let branch = &branches[index];
+                                let date = dates::Bucket::for_branch(branch, order.sort, today);
+                                if date != previous_date {
+                                    if let Some(date) = date {
+                                        date_separator(ui, date.label(), previous_date.is_none());
+                                    }
+                                    previous_date = date;
+                                }
+                                if let Some(next) = self.branch_row(ui, branch, 0, &query) {
                                     action = Some(next);
                                 }
                             }
@@ -1140,6 +1152,15 @@ impl Pui {
         action
     }
 }
+fn date_separator(ui: &mut egui::Ui, label: &str, first: bool) {
+    ui.add_space(if first { 4.0 } else { 8.0 });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(theme::small(ui, label).strong());
+        ui.add(egui::Separator::default().horizontal());
+    });
+}
+
 fn deletion_spinner(ui: &egui::Ui, center: egui::Pos2) {
     egui::Spinner::new()
         .color(theme::palette(ui.ctx()).red)
@@ -2032,6 +2053,113 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn date_separators_follow_sort_and_do_not_split_pins_projects_or_name_sort() {
+        use chrono::{Days, Local, NaiveTime};
+        let today = Local::now().date_naive();
+        let local_noon = |date: chrono::NaiveDate| {
+            date.and_time(NaiveTime::from_hms_opt(12, 0, 0).unwrap())
+                .and_local_timezone(Local)
+                .earliest()
+                .unwrap()
+                .into()
+        };
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.4] {
+                let ctx = egui::Context::default();
+                let mut app = app(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                app.projects = false;
+                app.state.session_file = None;
+                app.new_chat = true;
+                let template = app.sessions[0].clone();
+                app.sessions = [
+                    ("Recent one", today),
+                    ("Recent two", today),
+                    ("Previous day", today - Days::new(1)),
+                    ("Old conversation", today - Days::new(400)),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (title, date))| Session {
+                    path: format!("/fixture/date-{i}.jsonl").into(),
+                    title: title.into(),
+                    created: None,
+                    modified: local_noon(date),
+                    ..template.clone()
+                })
+                .collect();
+                for reverse in [false, true] {
+                    app.prefs.session_order.reverse = reverse;
+                    for _ in 0..3 {
+                        frame(&ctx, &mut app, vec![]);
+                    }
+                    let output = frame(&ctx, &mut app, vec![]);
+                    let mut headings = ["Today", "Yesterday", "Older"]
+                        .map(|label| label_rect(&output, label).unwrap());
+                    if reverse {
+                        headings.reverse();
+                    }
+                    assert!(headings[0].bottom() < headings[1].top());
+                    assert!(headings[1].bottom() < headings[2].top());
+                    assert!(headings.iter().all(|rect| rect.right() <= 254.0));
+                    let today_heading = label_rect(&output, "Today").unwrap();
+                    for title in ["Recent one", "Recent two"] {
+                        assert!(today_heading.bottom() < label_rect(&output, title).unwrap().top());
+                    }
+                    assert!(label_rect(&output, "This week").is_none());
+                    assert!(label_rect(&output, "Unknown date").is_none());
+                }
+                app.prefs.session_order.reverse = false;
+                app.search = "Recent".into();
+                frame(&ctx, &mut app, vec![]);
+                let output = frame(&ctx, &mut app, vec![]);
+                assert!(label_rect(&output, "Today").is_some());
+                assert!(label_rect(&output, "Yesterday").is_none());
+                assert!(label_rect(&output, "Older").is_none());
+                app.search.clear();
+
+                // Creation sorting uses creation time, never activity fallback.
+                app.prefs.session_order.sort = sidebar_order::Sort::Created;
+                app.sessions[0].created = Some(local_noon(today - Days::new(1)));
+                frame(&ctx, &mut app, vec![]);
+                let output = frame(&ctx, &mut app, vec![]);
+                assert!(label_rect(&output, "Today").is_none());
+                assert!(label_rect(&output, "Yesterday").is_some());
+                assert!(label_rect(&output, "Unknown date").is_some());
+
+                app.prefs.session_order.sort = sidebar_order::Sort::Activity;
+                for session in &app.sessions[..2] {
+                    app.prefs
+                        .chats
+                        .entry(session.path.clone())
+                        .or_default()
+                        .pinned = true;
+                }
+                frame(&ctx, &mut app, vec![]);
+                let output = frame(&ctx, &mut app, vec![]);
+                assert!(label_rect(&output, "PINNED").is_some());
+                assert!(label_rect(&output, "Today").is_none());
+                assert!(label_rect(&output, "Yesterday").is_some());
+
+                for projects in [false, true] {
+                    app.projects = projects;
+                    app.prefs.session_order.sort = if projects {
+                        sidebar_order::Sort::Activity
+                    } else {
+                        sidebar_order::Sort::Name
+                    };
+                    frame(&ctx, &mut app, vec![]);
+                    let output = frame(&ctx, &mut app, vec![]);
+                    for label in ["Today", "Yesterday", "Older", "Unknown date"] {
+                        assert!(label_rect(&output, label).is_none());
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn header_has_aligned_controls_below_native_traffic_light_clearance() {
         fn text(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
