@@ -53,41 +53,9 @@ impl Pui {
                         }
                     });
                 });
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 self.sidebar_navigation(ui);
-                ui.add_space(10.0);
-                egui::Frame::new()
-                    .fill(colors.bg)
-                    .stroke(Stroke::new(1.0, colors.border))
-                    .corner_radius(7)
-                    .inner_margin(7)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            icons::inline(ui, Icon::Search, colors.dim);
-                            let search = ui.add(
-                                egui::TextEdit::singleline(&mut self.search)
-                                    .id_salt("session-search")
-                                    .hint_text("Search sessions")
-                                    .font(FontId::proportional(12.0))
-                                    .frame(false)
-                                    .desired_width((ui.available_width() - 34.0).max(20.0)),
-                            );
-                            if self.focus_search {
-                                search.request_focus();
-                                self.focus_search = false;
-                            }
-                            ui.label(
-                                RichText::new(if cfg!(target_os = "macos") {
-                                    "⌘K"
-                                } else {
-                                    "^K"
-                                })
-                                .size(10.0)
-                                .color(colors.dim),
-                            );
-                        });
-                    });
-                ui.add_space(10.0);
+                ui.add_space(6.0);
                 // Reserve exactly the footer, not a 95px estimate followed by extra layout padding.
                 egui::TopBottomPanel::bottom("account-footer-v2")
                     .exact_height(55.0)
@@ -114,6 +82,7 @@ impl Pui {
                         self.session_list_controls(ui);
                     });
                 });
+                self.session_search(ui);
                 let query = self.search.trim().to_lowercase();
                 let mut visible: Vec<_> = branches
                     .iter()
@@ -395,64 +364,153 @@ impl Pui {
             }
         }
     }
-    fn session_list_controls(&mut self, ui: &mut egui::Ui) -> [egui::Response; 2] {
-        // The header lays these out right-to-left: Filter, then Group visually.
-        let group = icons::button(ui, Icon::Group, "Group sessions");
-        group.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Group sessions")
-        });
-        egui::Popup::menu(&group)
-            .id(ui.make_persistent_id("session-group-menu"))
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                theme::menu_controls(ui);
-                ui.set_min_width(150.0);
-                ui.label(theme::caption(ui, "GROUP BY"));
-                ui.radio_value(&mut self.projects, false, "Recent");
-                ui.radio_value(&mut self.projects, true, "Project");
-                ui.separator();
-                ui.checkbox(&mut self.show_hidden, "Show hidden chats");
+    fn session_list_controls(&mut self, ui: &mut egui::Ui) -> [egui::Response; 3] {
+        ui.scope(|ui| {
+            theme::compact_controls(ui);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            // The header is right-to-left: visually Search, Sort, View options.
+            let view = icons::button(
+                ui,
+                Icon::Group,
+                "View options · grouping and chat visibility",
+            );
+            view.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "View options")
             });
-        let filter = icons::button(ui, Icon::Filter, "Filter and sort sessions");
-        filter.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Filter and sort sessions")
-        });
-        egui::Popup::menu(&filter)
-            .id(ui.make_persistent_id("session-filter-menu"))
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                theme::menu_controls(ui);
-                ui.set_min_width(190.0);
-                ui.label(theme::caption(ui, "SORT BY"));
-                for sort in [
-                    sidebar_order::Sort::Activity,
-                    sidebar_order::Sort::Created,
-                    sidebar_order::Sort::Name,
-                ] {
-                    if ui
-                        .radio_value(&mut self.prefs.session_order.sort, sort, sort.label())
-                        .changed()
-                    {
-                        self.prefs.session_order.reverse = false;
-                    }
-                }
-                ui.horizontal(|ui| {
-                    let names = self.prefs.session_order.sort == sidebar_order::Sort::Name;
-                    ui.radio_value(
-                        &mut self.prefs.session_order.reverse,
-                        false,
-                        if names { "A–Z" } else { "Newest first" },
-                    );
-                    ui.radio_value(
-                        &mut self.prefs.session_order.reverse,
-                        true,
-                        if names { "Z–A" } else { "Oldest first" },
-                    );
+            if self.show_archived || self.show_hidden {
+                ui.painter().circle_filled(
+                    view.rect.right_bottom() - egui::vec2(5.0, 5.0),
+                    2.0,
+                    theme::palette(ui.ctx()).accent,
+                );
+            }
+            egui::Popup::menu(&view)
+                .id(ui.make_persistent_id("session-view-menu"))
+                .frame(prompt_ui::popup(ui.ctx()))
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    theme::menu_controls(ui);
+                    ui.set_min_width(170.0);
+                    ui.label(theme::caption(ui, "GROUP BY"));
+                    ui.radio_value(&mut self.projects, false, "None · flat list");
+                    ui.radio_value(&mut self.projects, true, "Project");
+                    ui.separator();
+                    ui.label(theme::caption(ui, "SHOW"));
+                    let mut visibility = (self.show_archived, self.show_hidden);
+                    ui.radio_value(&mut visibility, (false, false), "Active chats");
+                    ui.radio_value(&mut visibility, (true, false), "Archived chats");
+                    ui.radio_value(&mut visibility, (false, true), "Hidden chats");
+                    (self.show_archived, self.show_hidden) = visibility;
                 });
-                ui.separator();
-                ui.checkbox(&mut self.show_archived, "Show archived");
+            let order = self.prefs.session_order;
+            let (ascending, descending) = order.sort.directions();
+            let sort = icons::button(
+                ui,
+                Icon::Filter,
+                &format!(
+                    "Sort · {} · {}",
+                    order.sort.label(),
+                    if order.reverse { descending } else { ascending },
+                ),
+            );
+            sort.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Sort sessions")
             });
-        [filter, group]
+            egui::Popup::menu(&sort)
+                .id(ui.make_persistent_id("session-sort-menu"))
+                .frame(prompt_ui::popup(ui.ctx()))
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    theme::menu_controls(ui);
+                    ui.set_min_width(170.0);
+                    ui.label(theme::caption(ui, "SORT BY"));
+                    for sort in [
+                        sidebar_order::Sort::Activity,
+                        sidebar_order::Sort::Created,
+                        sidebar_order::Sort::Name,
+                    ] {
+                        if ui
+                            .radio_value(&mut self.prefs.session_order.sort, sort, sort.label())
+                            .changed()
+                        {
+                            self.prefs.session_order.reverse = false;
+                        }
+                    }
+                    ui.separator();
+                    ui.label(theme::caption(ui, "ORDER"));
+                    let (ascending, descending) = self.prefs.session_order.sort.directions();
+                    ui.radio_value(&mut self.prefs.session_order.reverse, false, ascending);
+                    ui.radio_value(&mut self.prefs.session_order.reverse, true, descending);
+                });
+            let search = icons::button(ui, Icon::Search, "Search sessions · ⌘K / Ctrl+K");
+            search.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search sessions")
+            });
+            if search.clicked() {
+                self.search_open = true;
+                self.focus_search = true;
+                self.focus_composer = false;
+            }
+            if !self.search.is_empty() {
+                ui.painter().circle_filled(
+                    search.rect.right_bottom() - egui::vec2(5.0, 5.0),
+                    2.0,
+                    theme::palette(ui.ctx()).accent,
+                );
+            }
+            [sort, view, search]
+        })
+        .inner
+    }
+
+    fn session_search(&mut self, ui: &mut egui::Ui) {
+        if self.focus_search || !self.search.is_empty() {
+            self.search_open = true;
+        }
+        if !self.search_open {
+            return;
+        }
+        let colors = theme::palette(ui.ctx());
+        egui::Frame::new()
+            .fill(colors.bg)
+            .stroke(Stroke::new(1.0, colors.border))
+            .corner_radius(7)
+            .inner_margin(6)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    icons::inline(ui, Icon::Search, colors.dim);
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .id(egui::Id::new("session-search"))
+                            .hint_text("Search sessions")
+                            .font(FontId::proportional(12.0))
+                            .frame(false)
+                            .desired_width((ui.available_width() - 24.0).max(20.0)),
+                    );
+                    if self.focus_search {
+                        search.request_focus();
+                        self.focus_search = false;
+                    }
+                    let escape = prompt_ui::keyboard_available(ui)
+                        && (search.has_focus() || search.lost_focus())
+                        && ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                        });
+                    let close = ui
+                        .scope(|ui| {
+                            ui.spacing_mut().interact_size.y = 20.0;
+                            icons::button(ui, Icon::Close, "Clear and close search · Esc").clicked()
+                        })
+                        .inner;
+                    if close || escape {
+                        self.search.clear();
+                        self.search_open = false;
+                        search.surrender_focus();
+                    }
+                });
+            });
+        ui.add_space(4.0);
     }
 
     fn begin_rename(&mut self, path: PathBuf) {
@@ -1567,22 +1625,30 @@ mod tests {
         ctx: &egui::Context,
         app: &mut Pui,
         events: Vec<egui::Event>,
-    ) -> (egui::FullOutput, [egui::Rect; 2]) {
-        let mut rects = [egui::Rect::NOTHING; 2];
+    ) -> (egui::FullOutput, [egui::Rect; 3]) {
+        controls_frame_sized(ctx, app, events, egui::vec2(1000.0, 800.0))
+    }
+    fn controls_frame_sized(
+        ctx: &egui::Context,
+        app: &mut Pui,
+        events: Vec<egui::Event>,
+        size: Vec2,
+    ) -> (egui::FullOutput, [egui::Rect; 3]) {
+        let mut rects = [egui::Rect::NOTHING; 3];
         let output = ctx.run(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1000.0, 800.0),
-                )),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 events,
                 ..Default::default()
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        rects = app.session_list_controls(ui).map(|r| r.rect);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            rects = app.session_list_controls(ui).map(|r| r.rect);
+                        });
                     });
+                    app.session_search(ui);
                 });
             },
         );
@@ -1617,7 +1683,7 @@ mod tests {
         click_controls_at(ctx, app, pos);
     }
     #[test]
-    fn icon_menus_separate_grouping_from_filter_sort_and_restore_actions() {
+    fn icon_menus_separate_sorting_from_grouping_and_visibility() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);
         app.prefs
@@ -1633,21 +1699,32 @@ mod tests {
         let (output, _) = controls_frame(&ctx, &mut app, vec![]);
         assert!(label_rect(&output, "GROUP BY").is_some());
         assert!(label_rect(&output, "SORT BY").is_none());
-        let recent = label_rect(&output, "Recent").unwrap();
+        let flat = label_rect(&output, "None · flat list").unwrap();
         let project = label_rect(&output, "Project").unwrap();
-        assert!(project.center().y - recent.center().y <= 27.0);
+        assert!(project.center().y - flat.center().y <= 27.0);
         click_label(&ctx, &mut app, "Project");
         assert!(app.projects);
-        click_label(&ctx, &mut app, "Recent");
+        click_label(&ctx, &mut app, "None · flat list");
         assert!(!app.projects);
-        click_label(&ctx, &mut app, "Show hidden chats");
-        assert!(app.show_hidden);
+        click_label(&ctx, &mut app, "Archived chats");
+        assert!(app.show_archived && !app.show_hidden);
+        click_label(&ctx, &mut app, "Hidden chats");
+        assert!(app.show_hidden && !app.show_archived);
         assert!(app.prefs.chats.values().any(|m| m.hidden));
+        click_label(&ctx, &mut app, "Active chats");
+        assert!(!app.show_hidden && !app.show_archived);
         click_control(&ctx, &mut app, 0);
         let (output, _) = controls_frame(&ctx, &mut app, vec![]);
         assert!(label_rect(&output, "SORT BY").is_some());
         assert!(label_rect(&output, "GROUP BY").is_none());
         assert!(label_rect(&output, "Refresh sessions").is_none());
+        assert!(label_rect(&output, "ORDER").is_some());
+        assert!(label_rect(&output, "Most recent first").is_some());
+        assert!(label_rect(&output, "SHOW").is_none());
+        let recent = label_rect(&output, "Most recent first").unwrap();
+        let least_recent = label_rect(&output, "Least recent first").unwrap();
+        assert!(recent.bottom() < least_recent.top());
+        assert_eq!(recent.left(), least_recent.left());
         click_label(&ctx, &mut app, "Name");
         assert!(app.prefs.session_order.sort == sidebar_order::Sort::Name);
         click_label(&ctx, &mut app, "Z–A");
@@ -1657,12 +1734,155 @@ mod tests {
         assert!(!app.prefs.session_order.reverse);
         click_label(&ctx, &mut app, "Oldest first");
         assert!(app.prefs.session_order.reverse);
-        click_label(&ctx, &mut app, "Show archived");
-        assert!(app.show_archived);
         assert!(label_rect(&output, "Restore hidden chats").is_none());
         click_control(&ctx, &mut app, 0);
         assert!(!egui::Popup::is_any_open(&ctx));
     }
+    #[test]
+    fn search_icon_and_shortcut_reveal_focus_and_clear_the_inline_search() {
+        for theme in [theme::Theme::Light, theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.prefs.theme = theme;
+            app.prefs.color_styles.apply(&ctx, theme);
+            for _ in 0..3 {
+                controls_frame(&ctx, &mut app, vec![]);
+            }
+            assert!(
+                label_rect(&controls_frame(&ctx, &mut app, vec![]).0, "Search sessions").is_none()
+            );
+            click_control(&ctx, &mut app, 2);
+            assert!(app.search_open && !app.focus_search);
+            let (output, _) = controls_frame(&ctx, &mut app, vec![]);
+            assert!(label_rect(&output, "Search sessions").is_some());
+            controls_frame(&ctx, &mut app, vec![egui::Event::Text("sidebar".into())]);
+            assert_eq!(app.search, "sidebar");
+            controls_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
+            assert!(!app.search_open && app.search.is_empty());
+            assert!(
+                label_rect(&controls_frame(&ctx, &mut app, vec![]).0, "Search sessions").is_none()
+            );
+
+            // Native Search and the keyboard shortcut both request focus this way.
+            app.focus_search = true;
+            app.prefs.hide_sidebar = false;
+            controls_frame(&ctx, &mut app, vec![]);
+            assert!(app.search_open && !app.focus_search);
+            controls_frame(&ctx, &mut app, vec![egui::Event::Text("shortcut".into())]);
+            assert_eq!(app.search, "shortcut");
+            // Click the close button at the right of the search field.
+            let (_, controls) = controls_frame(&ctx, &mut app, vec![]);
+            let pos = egui::pos2(controls[1].right() - 16.0, controls[1].bottom() + 22.0);
+            click_controls_at(&ctx, &mut app, pos);
+            assert!(!app.search_open && app.search.is_empty());
+        }
+    }
+
+    #[test]
+    fn list_controls_and_search_fit_narrow_widths_in_both_themes() {
+        for theme in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.0, 1.4] {
+                let ctx = egui::Context::default();
+                let mut app = app(&ctx);
+                app.prefs.color_styles.apply(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let size = egui::vec2(220.0, 600.0);
+                app.focus_search = true;
+                for _ in 0..3 {
+                    controls_frame_sized(&ctx, &mut app, vec![], size);
+                }
+                let (output, controls) = controls_frame_sized(&ctx, &mut app, vec![], size);
+                let search = label_rect(&output, "Search sessions").unwrap();
+                assert!(search.left() >= 0.0 && search.right() <= 220.0);
+                assert!(
+                    controls
+                        .iter()
+                        .all(|rect| rect.left() >= 0.0 && rect.right() <= 220.0),
+                    "{controls:?} at zoom {zoom}"
+                );
+                assert!(search.top() > controls[2].bottom());
+                for (index, heading, last) in [
+                    (0, "SORT BY", "Least recent first"),
+                    (1, "GROUP BY", "Hidden chats"),
+                ] {
+                    let pos = controls[index].center();
+                    for pressed in [true, false] {
+                        controls_frame_sized(
+                            &ctx,
+                            &mut app,
+                            vec![
+                                egui::Event::PointerMoved(pos),
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                            size,
+                        );
+                    }
+                    for _ in 0..2 {
+                        controls_frame_sized(&ctx, &mut app, vec![], size);
+                    }
+                    let (output, _) = controls_frame_sized(&ctx, &mut app, vec![], size);
+                    for label in [heading, last] {
+                        let rect = label_rect(&output, label).unwrap();
+                        assert!(
+                            rect.left() >= 0.0 && rect.right() <= 220.0,
+                            "{label} at zoom {zoom}"
+                        );
+                    }
+                    controls_frame_sized(&ctx, &mut app, vec![key(egui::Key::Escape)], size);
+                    assert!(!egui::Popup::is_any_open(&ctx));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_escape_does_not_stop_a_run_or_leave_the_board() {
+        for board in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            app.state.busy = true;
+            let (client, _events, commands) = rpc::Client::stub_with_records();
+            app.client = Some(client);
+            app.kanban.open = board;
+            app.focus_search = true;
+            app.focus_composer = false;
+            let mut window = eframe::Frame::_new_kittest();
+            let mut full_frame = |app: &mut Pui, events| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1500.0, 950.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(app, ctx, &mut window),
+                );
+            };
+            for _ in 0..3 {
+                full_frame(&mut app, vec![]);
+            }
+            full_frame(&mut app, vec![egui::Event::Text("sidebar".into())]);
+            assert_eq!(app.search, "sidebar");
+            let _ = commands.try_iter().collect::<Vec<_>>();
+            full_frame(&mut app, vec![key(egui::Key::Escape)]);
+            assert!(!app.search_open && app.search.is_empty());
+            assert!(app.state.busy);
+            assert_eq!(app.kanban.open, board);
+            assert!(
+                commands
+                    .try_iter()
+                    .all(|command| command["type"] != "abort")
+            );
+        }
+    }
+
     fn sidebar_click(
         ctx: &egui::Context,
         app: &mut Pui,
@@ -1845,11 +2065,7 @@ mod tests {
             let title = labels.iter().find(|(s, _)| s == "Agents board").unwrap().1;
             let navigation = ["Agents board", "Scheduled tasks", "Settings"]
                 .map(|label| labels.iter().find(|(s, _)| s == label).unwrap().1);
-            let search = labels
-                .iter()
-                .find(|(s, _)| s == "Search sessions")
-                .unwrap()
-                .1;
+            assert!(!labels.iter().any(|(s, _)| s == "Search sessions"));
             let heading = labels.iter().find(|(s, _)| s == "SESSIONS").unwrap().1;
             assert!(!labels.iter().any(|(s, _)| matches!(
                 s.as_str(),
@@ -1865,12 +2081,16 @@ mod tests {
             assert_eq!(title, navigation[0]);
             assert!(navigation[0].bottom() < navigation[1].top());
             assert!(navigation[1].bottom() < navigation[2].top());
-            assert!(navigation[2].bottom() < search.top());
-            assert!(search.bottom() < heading.top());
-            let (controls, [filter, group]) = controls_frame(&ctx, &mut app, vec![]);
-            assert!(filter.right() <= group.left());
-            assert!((filter.center().y - group.center().y).abs() <= 1.0 / zoom);
-            assert_eq!(filter.size(), group.size());
+            assert!(navigation[1].center().y - navigation[0].center().y <= 31.0);
+            assert!(navigation[2].center().y - navigation[1].center().y <= 31.0);
+            assert!(navigation[2].bottom() < heading.top());
+            let (controls, [sort, view, search]) = controls_frame(&ctx, &mut app, vec![]);
+            assert!(search.right() <= sort.left());
+            assert!(sort.right() <= view.left());
+            assert!((sort.center().y - view.center().y).abs() <= 1.0 / zoom);
+            assert!((search.center().y - view.center().y).abs() <= 1.0 / zoom);
+            assert_eq!(sort.size(), view.size());
+            assert_eq!(search.size(), view.size());
             assert!(
                 controls
                     .shapes

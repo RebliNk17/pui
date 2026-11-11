@@ -144,6 +144,7 @@ pub struct Pui {
     #[cfg(target_os = "macos")]
     _paste_monitor: Option<attachments::PasteMonitor>,
     search: String,
+    search_open: bool,
     projects: bool,
     model_picker_open: bool,
     model_anchor: Option<(egui::Rect, egui::LayerId)>,
@@ -262,6 +263,7 @@ impl Pui {
             #[cfg(target_os = "macos")]
             _paste_monitor: paste_monitor,
             search: String::new(),
+            search_open: false,
             projects,
             model_picker_open: false,
             model_anchor: None,
@@ -1681,7 +1683,13 @@ impl eframe::App for Pui {
         {
             self.new_session();
         }
-        let leaving_board = !confirming
+        let searching = self.search_open
+            && ctx.memory(|memory| {
+                let id = egui::Id::new("session-search");
+                memory.has_focus(id) || memory.had_focus_last_frame(id)
+            });
+        let leaving_board = !searching
+            && !confirming
             && !self.settings_open
             && (self.kanban.open || self.automation.open)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -1691,6 +1699,7 @@ impl eframe::App for Pui {
             self.focus_composer = true;
         }
         if !leaving_board
+            && !searching
             && !self.settings_open
             && !self.automation.open
             && !self.kanban.open

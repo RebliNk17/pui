@@ -22,6 +22,14 @@ impl Sort {
             Self::Name => "Name",
         }
     }
+
+    pub fn directions(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Activity => ("Most recent first", "Least recent first"),
+            Self::Created => ("Newest first", "Oldest first"),
+            Self::Name => ("A–Z", "Z–A"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]

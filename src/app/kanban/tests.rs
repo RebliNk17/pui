@@ -184,7 +184,7 @@ fn opening_board_preserves_busy_chat_draft_and_approvals() {
 }
 
 #[test]
-fn sidebar_places_navigation_between_header_and_search_without_pui_menu() {
+fn sidebar_places_compact_navigation_above_list_without_pui_menu() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     app.kanban.open = false;
@@ -198,13 +198,9 @@ fn sidebar_places_navigation_between_header_and_search_without_pui_menu() {
         .collect();
     assert!(!sidebar.iter().any(|(s, _)| s == "Pui"));
     assert!(!sidebar.iter().any(|(s, _)| s == "New task"));
-    let rows = [
-        "Agents board",
-        "Scheduled tasks",
-        "Settings",
-        "Search sessions",
-    ]
-    .map(|label| sidebar.iter().find(|(s, _)| s == label).unwrap().1);
+    assert!(!sidebar.iter().any(|(s, _)| s == "Search sessions"));
+    let rows = ["Agents board", "Scheduled tasks", "Settings"]
+        .map(|label| sidebar.iter().find(|(s, _)| s == label).unwrap().1);
     for pair in rows.windows(2) {
         assert!(pair[0].bottom() < pair[1].top());
     }

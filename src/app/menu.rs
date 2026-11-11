@@ -336,68 +336,71 @@ impl Pui {
     pub(super) fn sidebar_navigation(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
         let state = self.menu_state(ui.ctx());
-        for (label, icon, command, selected) in [
-            (
-                "Agents board",
-                Icon::Board,
-                Command::AgentsBoard,
-                state.agents_board,
-            ),
-            (
-                "Scheduled tasks",
-                Icon::Clock,
-                Command::Automation,
-                state.automation,
-            ),
-            (
-                "Settings",
-                Icon::Settings,
-                Command::Settings,
-                self.settings_open,
-            ),
-        ] {
-            let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), theme::CONTROL_HEIGHT),
-                Sense::click(),
-            );
-            let highlighted = selected || response.hovered() || response.has_focus();
-            if highlighted {
-                ui.painter().rect_filled(rect, 7, colors.hover);
-            }
-            let color = if highlighted {
-                colors.text
-            } else {
-                colors.muted
-            };
-            icons::draw(
-                ui,
-                egui::Rect::from_center_size(
-                    rect.left_center() + egui::vec2(16.0, 0.0),
-                    Vec2::splat(16.0),
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (label, icon, command, selected) in [
+                (
+                    "Agents board",
+                    Icon::Board,
+                    Command::AgentsBoard,
+                    state.agents_board,
                 ),
-                icon,
-                color,
-            );
-            ui.painter().text(
-                rect.left_center() + egui::vec2(34.0, 0.0),
-                egui::Align2::LEFT_CENTER,
-                label,
-                FontId::proportional(13.0),
-                color,
-            );
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
-            });
-            if response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked()
-            {
-                // Use the same dispatch as the native menu, before next frame's
-                // close guard and text editing. Never interrupt a running chat.
-                self.menu.pending.push(command);
-                ui.ctx().request_repaint();
+                (
+                    "Scheduled tasks",
+                    Icon::Clock,
+                    Command::Automation,
+                    state.automation,
+                ),
+                (
+                    "Settings",
+                    Icon::Settings,
+                    Command::Settings,
+                    self.settings_open,
+                ),
+            ] {
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), theme::COMPACT_HEIGHT),
+                    Sense::click(),
+                );
+                let highlighted = selected || response.hovered() || response.has_focus();
+                if highlighted {
+                    ui.painter().rect_filled(rect, 7, colors.hover);
+                }
+                let color = if highlighted {
+                    colors.text
+                } else {
+                    colors.muted
+                };
+                icons::draw(
+                    ui,
+                    egui::Rect::from_center_size(
+                        rect.left_center() + egui::vec2(16.0, 0.0),
+                        Vec2::splat(16.0),
+                    ),
+                    icon,
+                    color,
+                );
+                ui.painter().text(
+                    rect.left_center() + egui::vec2(34.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(13.0),
+                    color,
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
+                });
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    // Use the same dispatch as the native menu, before next frame's
+                    // close guard and text editing. Never interrupt a running chat.
+                    self.menu.pending.push(command);
+                    ui.ctx().request_repaint();
+                }
             }
-        }
+        });
     }
     #[cfg(not(target_os = "macos"))]
     pub(super) fn fallback_menu_bar(&mut self, ctx: &egui::Context) {
