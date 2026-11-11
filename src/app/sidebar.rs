@@ -657,8 +657,10 @@ impl Pui {
                             deletion_spinner(ui, icon_rect.center());
                         } else {
                             theme::status_dot(ui, icon_rect.right_bottom(), tint, 2.5);
+                            ui.interact(icon_rect, ui.id().with("branch-status"), Sense::hover())
+                                .on_hover_text(&branch.status);
                         }
-                        paint_text(
+                        let title_elided = paint_text(
                             ui,
                             &branch.title,
                             row.min + egui::vec2(28.0, title_y),
@@ -705,10 +707,17 @@ impl Pui {
                             row.right_center() - egui::vec2(12.0, 0.0),
                             Vec2::splat(24.0),
                         );
-                        let menu =
-                            ui.interact(menu_rect, ui.id().with("delete-menu"), Sense::click());
                         let has_menu = delete_target.is_some() || branch.path.is_some();
-                        if has_menu && (selected || response.hovered() || menu.hovered()) {
+                        let menu = has_menu.then(|| {
+                            ui.interact(menu_rect, ui.id().with("delete-menu"), Sense::click())
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("More options")
+                        });
+                        if has_menu
+                            && (selected
+                                || response.hovered()
+                                || menu.as_ref().is_some_and(|m| m.hovered()))
+                        {
                             for dx in [-4.0, 0.0, 4.0] {
                                 ui.painter().circle_filled(
                                     menu_rect.center() + egui::vec2(dx, 0.0),
@@ -717,7 +726,7 @@ impl Pui {
                                 );
                             }
                         }
-                        if has_menu {
+                        if let Some(menu) = &menu {
                             let mut contents = |ui: &mut egui::Ui| {
                                 theme::menu_controls(ui);
                                 if let Some(path) = &branch.path {
@@ -746,20 +755,30 @@ impl Pui {
                                     }
                                 }
                             };
-                            egui::Popup::menu(&menu).show(&mut contents);
+                            egui::Popup::menu(menu).show(&mut contents);
                             response.context_menu(&mut contents);
                         }
                         let keyboard = response.has_focus()
                             && ui.input_mut(|i| {
                                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             });
-                        if (response
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text(format!("{}\n{}", branch.title, branch.status))
-                            .clicked()
-                            && !menu_rect.contains(
-                                ui.input(|i| i.pointer.interact_pos()).unwrap_or_default(),
-                            ))
+                        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if title_elided {
+                            ui.interact(
+                                egui::Rect::from_min_max(
+                                    row.min + egui::vec2(28.0, 0.0),
+                                    egui::pos2(row.right() - 28.0, row.bottom()),
+                                ),
+                                ui.id().with("branch-title"),
+                                Sense::hover(),
+                            )
+                            .on_hover_text(&branch.title);
+                        }
+                        if (response.clicked()
+                            && !(has_menu
+                                && menu_rect.contains(
+                                    ui.input(|i| i.pointer.interact_pos()).unwrap_or_default(),
+                                )))
                             || keyboard
                         {
                             action = Some(match target {
@@ -959,16 +978,6 @@ impl Pui {
         } else {
             response.on_hover_cursor(egui::CursorIcon::PointingHand)
         };
-        let response = if compact {
-            response.on_hover_text(format!("{title}\n{status}"))
-        } else {
-            response
-        };
-        let response = if self.loading_chat && !selected {
-            response.on_hover_text("Open this chat instead")
-        } else {
-            response
-        };
         if selected || response.hovered() {
             ui.painter().rect_filled(
                 rect,
@@ -985,6 +994,12 @@ impl Pui {
             deletion_spinner(ui, indicator);
         } else {
             theme::status_dot(ui, indicator, status_color, 3.0);
+            ui.interact(
+                egui::Rect::from_center_size(indicator, Vec2::splat(16.0)),
+                ui.make_persistent_id(("chat-status", &path)),
+                Sense::hover(),
+            )
+            .on_hover_text(status);
         }
         if editing {
             let id = egui::Id::new(("chat-rename", &path));
@@ -1020,7 +1035,7 @@ impl Pui {
                 self.rename_chat = None;
             }
         } else {
-            paint_text(
+            let elided = paint_text(
                 ui,
                 &title,
                 rect.min + egui::vec2(24.0, if compact { rect.height() / 2.0 } else { 15.0 }),
@@ -1028,6 +1043,17 @@ impl Pui {
                 FontId::proportional(12.0),
                 colors.text,
             );
+            if elided && !deleting {
+                ui.interact(
+                    egui::Rect::from_min_max(
+                        rect.min + egui::vec2(24.0, 0.0),
+                        egui::pos2(rect.right() - 30.0, rect.bottom()),
+                    ),
+                    ui.make_persistent_id(("chat-title", &path)),
+                    Sense::hover(),
+                )
+                .on_hover_text(&title);
+            }
         }
         if !compact {
             paint_text(
@@ -1060,7 +1086,8 @@ impl Pui {
                 ui.make_persistent_id(("chat-menu", &path)),
                 Sense::click(),
             )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("More options");
         if selected || response.hovered() || menu.hovered() {
             for dx in [-4.0, 0.0, 4.0] {
                 ui.painter().circle_filled(
@@ -1123,11 +1150,8 @@ impl Pui {
                     !meta.pinned,
                     egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red)),
                 )
-                .on_hover_text(if meta.pinned {
-                    "Unpin this chat before hiding it"
-                } else {
-                    "Does not delete your Pi session file"
-                })
+                .on_hover_text("Does not delete your Pi session file")
+                .on_disabled_hover_text("Unpin this chat before hiding it")
                 .clicked()
             {
                 action = Some(Action::Hide(path.clone()));
@@ -1173,13 +1197,15 @@ fn paint_text(
     width: f32,
     font: FontId,
     color: Color32,
-) {
+) -> bool {
     let mut job = egui::text::LayoutJob::simple_singleline(text.into(), font, color);
     job.wrap.max_width = width.max(20.0);
     job.wrap.max_rows = 1;
     let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
     ui.painter()
         .galley(pos - egui::vec2(0.0, galley.size().y / 2.0), galley, color);
+    elided
 }
 
 #[cfg(test)]

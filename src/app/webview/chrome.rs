@@ -139,6 +139,7 @@ pub(in crate::app) fn tab(
     job.wrap.max_width = (width - 65.0).max(20.0);
     job.wrap.max_rows = 1;
     let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
     ui.painter().galley(
         egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0),
         galley,
@@ -159,8 +160,14 @@ pub(in crate::app) fn tab(
     );
     response
         .clone()
-        .on_hover_text(tip)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided || tip != title {
+        response.clone().on_hover_text(if elided && tip != title {
+            format!("{title}\n{tip}")
+        } else {
+            tip.to_owned()
+        });
+    }
     close
         .clone()
         .on_hover_text("Close tab")

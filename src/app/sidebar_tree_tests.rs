@@ -244,6 +244,68 @@ fn disclosure_click_only_collapses_children_and_state_roundtrips() {
     assert_eq!(app.agents.active, root);
 }
 #[test]
+fn child_tooltips_only_reveal_elided_names_and_keep_status_on_icon() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for projects in [false, true] {
+            let mut app = fixture();
+            app.projects = projects;
+            mode.apply(&app.ctx);
+            let child = app.agents.nodes[&app.agents.active].children[0].clone();
+            let mut time = 0.0;
+            for title in [
+                "Short name".to_owned(),
+                "Long subagent objective ".repeat(12),
+            ] {
+                app.agents.nodes.get_mut(&child).unwrap().name = title.clone();
+                let mut frame = |pointer: Option<egui::Pos2>| {
+                    time += 1.0;
+                    let output = app.ctx.clone().run(
+                        egui::RawInput {
+                            time: Some(time),
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1000.0, 850.0),
+                            )),
+                            events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                            ..Default::default()
+                        },
+                        |ctx| app.sidebar(ctx),
+                    );
+                    let mut text = vec![];
+                    for shape in output.shapes {
+                        labels(&shape.shape, &mut text);
+                    }
+                    text
+                };
+                for _ in 0..3 {
+                    frame(None);
+                }
+                let text = frame(None);
+                let rect = text.iter().find(|(s, _)| s == &title).unwrap().1;
+                frame(Some(rect.left_center() + egui::vec2(20.0, 0.0)));
+                frame(None);
+                let text = frame(None);
+                let copies = text.iter().filter(|(s, _)| s == &title).count();
+                assert_eq!(
+                    copies,
+                    if title == "Short name" { 1 } else { 2 },
+                    "{mode:?}, projects={projects}"
+                );
+                assert!(!text.iter().any(|(s, _)| s == &format!("{title}\nWorking…")));
+                frame(Some(rect.left_center() - egui::vec2(16.0, 0.0)));
+                frame(None);
+                frame(None);
+                let text = frame(None);
+                assert!(
+                    text.iter().any(|(s, _)| s == "Working…"),
+                    "Status icon retains hidden status"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn children_are_single_line_compact_rows_in_both_views_and_themes() {
     for projects in [false, true] {
         for mode in [theme::Theme::Dark, theme::Theme::Light] {

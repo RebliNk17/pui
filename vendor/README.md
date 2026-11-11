@@ -1,4 +1,4 @@
-# egui 0.32.3 text patches
+# egui 0.32.3 local patches
 
 These directories contain the published `egui` and `epaint` 0.32.3 sources, licensed under MIT OR Apache-2.0. The upstream licenses are alongside this file. `Cargo.toml` patches both crates together; there is no replacement application/editor implementation.
 
@@ -13,6 +13,8 @@ Upstream: https://github.com/emilk/egui/tree/0.32.3/crates
 - `epaint/src/shapes/text_shape.rs`: account for the new row metadata field in destructuring.
 - `egui/src/text_selection/visuals.rs`: paint discontiguous selected glyph ranges.
 - `egui/src/text_selection/cursor_range.rs`: collapse selections to the requested visual endpoint.
+- `egui/src/containers/tooltip.rs`: opt-in `TextStyle::Name("Tooltip")` sets a tooltip-local font without changing body text, menus or dialogs. Upstream behavior is unchanged when the named style is absent.
+- `egui/src/widgets/label.rs`: automatic elision tooltips honor that optional tooltip font, reset wrapping and keep full text available.
 
 Tests are in `src/theme/bidi_tests.rs` (including actual TextEdit copy/paste/insertion/backspace), the existing font/Markdown tests, and the application's regression suite. Previews: `cargo run -- --demo-languages` and `cargo run -- --demo-markdown` (mixed-style baselines).
 

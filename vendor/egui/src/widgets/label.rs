@@ -287,8 +287,22 @@ impl Widget for Label {
                     text: galley.job.text.clone(),
                     ..crate::text::LayoutJob::default()
                 };
-                // Show the full (non-elided) text on hover:
-                response = response.on_hover_text(job);
+                // Show the full (non-elided) text on hover, respecting the
+                // application's optional tooltip font rather than the label size.
+                response = response.on_hover_ui(|ui| {
+                    let mut job = job;
+                    if let Some(font) = ui
+                        .style()
+                        .text_styles
+                        .get(&crate::TextStyle::Name("Tooltip".into()))
+                    {
+                        for section in &mut job.sections {
+                            section.format.font_id.size = font.size;
+                        }
+                    }
+                    ui.set_max_width(ui.spacing().tooltip_width);
+                    ui.add(Label::new(job).wrap());
+                });
             }
 
             let response_color = if interactive {

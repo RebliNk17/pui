@@ -52,7 +52,6 @@ impl Pui {
                         );
                         if ui
                             .selectable_label(project == current, RichText::new(label).size(11.5))
-                            .on_hover_text(project.display().to_string())
                             .clicked()
                         {
                             selection = Some(project);

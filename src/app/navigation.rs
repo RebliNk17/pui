@@ -480,8 +480,7 @@ impl Pui {
                     ui.add(
                         egui::Label::new(RichText::new(&title).size(13.0).color(colors.text))
                             .truncate(),
-                    )
-                    .on_hover_text(title);
+                    );
                 }
                 // Only blank titlebar space drags the window, never breadcrumb links.
                 let (_, drag) = ui.allocate_exact_size(

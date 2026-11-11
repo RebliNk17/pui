@@ -199,7 +199,19 @@ impl Pui {
                                     )
                                     .truncate(),
                                 );
-                                if row.on_hover_text(&label).clicked() {
+                                let galley = egui::WidgetText::from(label.as_str()).into_galley(
+                                    ui,
+                                    Some(egui::TextWrapMode::Truncate),
+                                    (row.rect.width() - 2.0 * ui.spacing().button_padding.x)
+                                        .max(0.0),
+                                    egui::TextStyle::Button,
+                                );
+                                let row = if galley.elided {
+                                    row.on_hover_text(&label)
+                                } else {
+                                    row
+                                };
+                                if row.clicked() {
                                     selected = Some(task.id.clone());
                                 }
                             }
@@ -214,8 +226,22 @@ impl Pui {
                         .response
                 },
             )
-            .inner
-            .on_hover_text(title);
+            .inner;
+        let text_width = response.rect.width()
+            - 2.0 * ui.spacing().button_padding.x
+            - ui.spacing().icon_spacing
+            - ui.spacing().icon_width;
+        let galley = egui::WidgetText::from(title).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            text_width.max(0.0),
+            egui::TextStyle::Button,
+        );
+        let response = if galley.elided {
+            response.on_hover_text(title)
+        } else {
+            response
+        };
         #[cfg(test)]
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::new("task-picker-rect"), response.rect));

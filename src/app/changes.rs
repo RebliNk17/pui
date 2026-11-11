@@ -283,8 +283,7 @@ impl Changes {
                 ui.make_persistent_id(("change-row", &key)),
                 Sense::click(),
             )
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(path);
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
             open = !open;
             if open {
@@ -333,6 +332,9 @@ impl Changes {
         job.wrap.max_width = (rect.width() - 160.0).max(30.0);
         job.wrap.max_rows = 1;
         let galley = ui.painter().layout_job(job);
+        if galley.elided {
+            response.on_hover_text(path);
+        }
         ui.painter().galley(
             rect.left_center() + egui::vec2(60.0, -galley.size().y / 2.0),
             galley,

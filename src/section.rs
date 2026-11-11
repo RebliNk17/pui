@@ -144,6 +144,9 @@ impl Section {
                         Stroke::new(1.4, tint),
                     );
                 }
+                ui.interact(toggle, id.with("toggle-hint"), Sense::hover())
+                    .on_hover_text(if open { "Hide details" } else { "Show details" });
+                let mut elided = false;
                 let left = rect.left() + 50.0;
                 let mut right = toggle.left() - 10.0;
                 if let Some((status, color)) = &self.status {
@@ -155,7 +158,7 @@ impl Section {
                         );
                         ui.painter()
                             .rect_filled(badge, 6, color.gamma_multiply(0.12));
-                        paint(
+                        elided |= paint(
                             ui,
                             status,
                             badge.left_center() + egui::vec2(9.0, 0.0),
@@ -167,7 +170,7 @@ impl Section {
                     }
                 }
                 let text_width = (right - left).max(1.0);
-                paint(
+                elided |= paint(
                     ui,
                     &self.title,
                     egui::pos2(
@@ -187,7 +190,7 @@ impl Section {
                     } else {
                         self.summary.clone()
                     };
-                    paint(
+                    elided |= paint(
                         ui,
                         &summary,
                         egui::pos2(left, rect.center().y + 11.0),
@@ -202,36 +205,49 @@ impl Section {
                         ui.push_id(id, contents);
                     });
                 }
-                response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(format!(
-                        "{}{}\n{}",
-                        self.title,
-                        if self.summary.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n{}", self.summary)
-                        },
-                        if open { "Hide details" } else { "Show details" }
-                    ))
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                if elided {
+                    response.on_hover_text(
+                        [
+                            self.title.as_str(),
+                            self.summary.as_str(),
+                            self.status.as_ref().map(|s| s.0.as_str()).unwrap_or(""),
+                        ]
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    )
+                } else {
+                    response
+                }
             })
             .inner;
         ui.add_space(4.0);
         response
     }
 }
-fn paint(ui: &egui::Ui, text: &str, position: egui::Pos2, width: f32, size: f32, color: Color32) {
+fn paint(
+    ui: &egui::Ui,
+    text: &str,
+    position: egui::Pos2,
+    width: f32,
+    size: f32,
+    color: Color32,
+) -> bool {
     let mut job =
         egui::text::LayoutJob::simple_singleline(text.into(), FontId::proportional(size), color);
     job.wrap.max_width = width;
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
     ui.painter().galley(
         position - egui::vec2(0.0, galley.size().y / 2.0),
         galley,
         color,
     );
+    elided
 }
 
 #[cfg(test)]

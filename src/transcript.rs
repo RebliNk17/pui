@@ -843,7 +843,6 @@ fn user_footer(
             }
         }
         if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-            .on_hover_text("Copy message")
             .clicked()
         {
             ui.ctx().copy_text(text.to_owned());
@@ -1006,7 +1005,6 @@ fn assistant(
                 .on_hover_text(usage.cache_tooltip());
             }
             if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-                .on_hover_text("Copy response")
                 .clicked()
             {
                 ui.ctx().copy_text(

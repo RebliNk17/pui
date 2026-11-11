@@ -176,18 +176,20 @@ fn status_color(status: &str, colors: &theme::Palette) -> Color32 {
         _ => colors.dim,
     }
 }
-fn paint_line(ui: &egui::Ui, rect: egui::Rect, text: &str, size: f32, color: Color32) {
+fn paint_line(ui: &egui::Ui, rect: egui::Rect, text: &str, size: f32, color: Color32) -> bool {
     let mut job =
         egui::text::LayoutJob::simple_singleline(text.into(), FontId::proportional(size), color);
     job.wrap.max_width = rect.width().max(0.0);
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
     ui.painter().galley(
         rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
         galley,
         color,
     );
+    elided
 }
 fn line(
     ui: &mut egui::Ui,
@@ -204,8 +206,11 @@ fn line(
             Sense::hover()
         },
     );
-    paint_line(ui, rect, text, size, color);
-    response.on_hover_text(text)
+    if paint_line(ui, rect, text, size, color) {
+        response.on_hover_text(text)
+    } else {
+        response
+    }
 }
 fn step(
     ui: &mut egui::Ui,
@@ -243,7 +248,7 @@ fn step(
         rect.min + egui::vec2(34.0, 5.0),
         rect.max - egui::vec2(9.0, 5.0),
     );
-    paint_line(
+    let label_elided = paint_line(
         ui,
         egui::Rect::from_min_max(
             text_rect.min,
@@ -253,7 +258,7 @@ fn step(
         11.5,
         colors.text,
     );
-    paint_line(
+    let status_elided = paint_line(
         ui,
         egui::Rect::from_min_max(
             egui::pos2(text_rect.left(), text_rect.center().y),
@@ -266,7 +271,10 @@ fn step(
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{label}: {status}"))
     });
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(format!("{label}\n{status}"))
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if label_elided || status_elided {
+        response.on_hover_text(format!("{label}\n{status}"))
+    } else {
+        response
+    }
 }

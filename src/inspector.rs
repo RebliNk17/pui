@@ -213,12 +213,10 @@ pub fn stack(
                     }
                     response.context_menu(|ui| layout.menu(ui));
                     if let Some((_, label)) = button {
-                        let response = ui
-                            .add_sized(
-                                [button_width, crate::theme::COMPACT_HEIGHT],
-                                egui::Button::new(egui::RichText::new(label).size(11.0)),
-                            )
-                            .on_hover_text(label);
+                        let response = ui.add_sized(
+                            [button_width, crate::theme::COMPACT_HEIGHT],
+                            egui::Button::new(egui::RichText::new(label).size(11.0)),
+                        );
                         #[cfg(test)]
                         ui.ctx().data_mut(|d| {
                             d.insert_temp(

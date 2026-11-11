@@ -476,7 +476,7 @@ fn card_preview(
     let mut job = egui::text::LayoutJob::simple(text.into(), font, color, ui.available_width());
     job.wrap.max_rows = rows;
     job.wrap.break_anywhere = true;
-    ui.add(egui::Label::new(job).wrap()).on_hover_text(text);
+    ui.add(egui::Label::new(job).wrap());
 }
 
 fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
@@ -500,7 +500,8 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                                     .size(10.0)
                                     .color(colors.dim),
                             )
-                            .truncate(),
+                            .truncate()
+                            .show_tooltip_when_elided(false),
                         )
                         .on_hover_text(card.project.display().to_string());
                         if card.parent.is_some() {
@@ -590,9 +591,7 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                     egui::StrokeKind::Inside,
                 );
             }
-            response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(&card.title)
+            response.on_hover_cursor(egui::CursorIcon::PointingHand)
         })
         .inner;
     response.clicked()

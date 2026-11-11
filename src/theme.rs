@@ -7,6 +7,8 @@ use std::sync::Arc;
 mod bidi_tests;
 mod fonts;
 mod styles;
+#[cfg(test)]
+mod tooltip_tests;
 pub use styles::{DarkStyle, LightStyle, Styles};
 
 /// Shared logical-pixel height for app controls. Chat controls opt into compact spacing.
@@ -172,6 +174,13 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme, colors: &
     style.visuals.warn_fg_color = colors.amber;
     style.visuals.error_fg_color = colors.red;
     style.interaction.selectable_labels = false;
+    style.interaction.tooltip_delay = 0.3;
+    style.interaction.tooltip_grace_time = 0.15;
+    style.spacing.tooltip_width = 340.0;
+    style.text_styles.insert(
+        TextStyle::Name("Tooltip".into()),
+        FontId::proportional(11.0),
+    );
     style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     style.visuals.panel_fill = colors.bg;
     style.visuals.window_fill = colors.sidebar;

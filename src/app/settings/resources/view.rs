@@ -550,8 +550,7 @@ impl Resources {
                             );
                             ui.add(
                                 egui::Label::new(theme::small(ui, &item.description)).truncate(),
-                            )
-                            .on_hover_text(&item.description);
+                            );
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(item.source_label())
@@ -1068,12 +1067,17 @@ fn nav(ui: &mut egui::Ui, title: &str, icon: Icon, selected: bool, suffix: &str)
             rect.bottom(),
         ),
     );
-    ui.painter().with_clip_rect(text_rect).text(
-        text_rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        title,
-        FontId::proportional(11.5),
-        if selected { colors.accent } else { colors.text },
+    let color = if selected { colors.accent } else { colors.text };
+    let mut job =
+        egui::text::LayoutJob::simple_singleline(title.into(), FontId::proportional(11.5), color);
+    job.wrap.max_width = text_rect.width().max(0.0);
+    job.wrap.max_rows = 1;
+    let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
+    ui.painter().galley(
+        text_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
+        galley,
+        color,
     );
     if !suffix.is_empty() {
         ui.painter().text(
@@ -1084,5 +1088,9 @@ fn nav(ui: &mut egui::Ui, title: &str, icon: Icon, selected: bool, suffix: &str)
             colors.dim,
         );
     }
-    response.on_hover_text(title)
+    if elided {
+        response.on_hover_text(title)
+    } else {
+        response
+    }
 }

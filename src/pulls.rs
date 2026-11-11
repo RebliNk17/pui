@@ -273,7 +273,8 @@ impl Pulls {
                             egui::Label::new(
                                 egui::RichText::new(name).size(12.0).color(colors.text),
                             )
-                            .truncate(),
+                            .truncate()
+                            .show_tooltip_when_elided(false),
                         )
                         .on_hover_text(&pull.repo);
                     });

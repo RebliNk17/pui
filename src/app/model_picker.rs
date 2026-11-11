@@ -99,13 +99,18 @@ impl Pui {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let mut job = egui::text::LayoutJob::simple_singleline(
-            label,
+            label.clone(),
             FontId::proportional(11.0),
             colors.muted,
         );
         job.wrap.max_width = (width - 20.0).max(20.0);
         job.wrap.max_rows = 1;
         let galley = ui.painter().layout_job(job);
+        let response = if galley.elided {
+            response.on_hover_text(label)
+        } else {
+            response
+        };
         ui.painter().galley(
             rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0),
             galley,

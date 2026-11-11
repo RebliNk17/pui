@@ -179,8 +179,7 @@ impl Terminals {
                 Vec2::new((ui.available_width() - 116.0).max(20.0), 28.0),
                 egui::Label::new(RichText::new(path.as_ref()).size(11.0).color(colors.muted))
                     .truncate(),
-            )
-            .on_hover_text(path.as_ref());
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icons::button(ui, Icon::Close, "Hide terminal · commands keep running").clicked()
                 {

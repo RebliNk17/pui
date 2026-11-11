@@ -156,6 +156,16 @@ impl Tooltip<'_> {
             // Only tooltips that have actual interactive stuff (buttons, links, …)
             // will stick around when you try to click them.
             ui.style_mut().interaction.selectable_labels = false;
+            // Optional application typography, scoped to tooltips only. Menus,
+            // dialogs and ordinary body text retain their own font settings.
+            if let Some(font) = ui
+                .style()
+                .text_styles
+                .get(&crate::TextStyle::Name("Tooltip".into()))
+                .cloned()
+            {
+                ui.style_mut().override_font_id = Some(font);
+            }
 
             content(ui)
         });
