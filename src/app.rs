@@ -17,6 +17,7 @@ mod navigation;
 mod new_chat;
 mod notifications;
 mod permission_picker;
+mod permission_worker;
 #[cfg(test)]
 mod persistence_tests;
 mod prompt_ui;
@@ -126,6 +127,7 @@ pub struct Pui {
     settings_open: bool,
     settings_view: settings::View,
     bypass_pending: Option<String>,
+    worker_upgrade_pending: Option<(String, settings::PermissionMode)>,
     history_view: rewind::View,
     history_pending: Option<rewind::Pending>,
     history_drafts: Vec<run_status::WaitingMessage>,
@@ -246,6 +248,7 @@ impl Pui {
             settings_open: false,
             settings_view: Default::default(),
             bypass_pending: None,
+            worker_upgrade_pending: None,
             history_view: Default::default(),
             history_pending: None,
             history_drafts: Vec::new(),
@@ -589,7 +592,7 @@ impl Pui {
                 session.as_deref(),
                 ctx.clone(),
                 rpc::Launch {
-                    settings: self.prefs.settings.payload(),
+                    settings: self.agent_settings(&self.agents.active).payload(),
                     ..Default::default()
                 },
             ));
@@ -1398,7 +1401,7 @@ impl Pui {
             ui.label(
                 RichText::new(format!(
                     "{} · Enter: {} · ⌘Enter: {} · Shift+Enter: new line",
-                    self.prefs.settings.permission.label(),
+                    self.permission_label(),
                     self.prefs.settings.delivery.label(),
                     self.prefs.settings.delivery.opposite().label()
                 ))
@@ -1839,6 +1842,7 @@ impl eframe::App for Pui {
         Duration::from_secs(300)
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.agents.exiting = true;
         self.terminals.shutdown();
         self.tasks.shutdown();
         self.automation.running_stop();

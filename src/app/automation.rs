@@ -269,7 +269,7 @@ impl Pui {
                 "Another Pui window owns the scheduler; manage jobs there.".into()
             }));
         }
-        if self.prefs.settings.permission == settings::PermissionMode::Plan
+        if self.active_permission() == settings::PermissionMode::Plan
             || !self.ultracode_ready
             || self
                 .agents
@@ -370,6 +370,34 @@ impl Pui {
         self.automation.running.remove(id);
         self.automation.persist()
     }
+    pub(super) fn prepare_delete_chat_jobs(
+        &mut self,
+        ids: &std::collections::BTreeSet<String>,
+        paths: &[PathBuf],
+    ) -> Result<(), String> {
+        let jobs: Vec<_> = self
+            .automation
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.enabled
+                    && (ids.contains(&job.creator.id)
+                        || paths
+                            .iter()
+                            .any(|path| sync::identity(path) == sync::identity(&job.creator.path)))
+            })
+            .map(|job| job.id.clone())
+            .collect();
+        if !jobs.is_empty() && (!self.automation.writable() || self.agents.exiting) {
+            return Err("Pause linked scheduled jobs in their owning Pui window before deleting these chats.".into());
+        }
+        for id in jobs {
+            self.change_job(&id, "pause").map_err(|error| {
+                format!("Cannot persist paused jobs; chats were not deleted: {error}")
+            })?;
+        }
+        Ok(())
+    }
     pub(super) fn pause_agent_jobs(&mut self, id: &str) {
         if self.agents.exiting || !self.automation.writable() {
             return;
@@ -441,10 +469,6 @@ impl Pui {
             self.automation_response(&key, &json!({"success":false}));
         }
         self.restore_job_owners();
-        if self.prefs.settings.permission == settings::PermissionMode::Plan {
-            self.automation.running.clear();
-            return;
-        }
         let ids: Vec<_> = self
             .automation
             .jobs
@@ -460,6 +484,10 @@ impl Pui {
                 .position(|j| j.id == id)
                 .unwrap();
             let owner = self.automation.jobs[index].creator.id.clone();
+            if self.agent_settings(&owner).permission == settings::PermissionMode::Plan {
+                self.automation.running.remove(&id);
+                continue;
+            }
             if self
                 .deletion
                 .deleting_chat(&self.automation.jobs[index].creator.path)

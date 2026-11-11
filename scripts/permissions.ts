@@ -106,6 +106,9 @@ export function installPermissions(pi: any, initial: any = {}) {
     // network requests, so URL opens still pass the normal permission gate.
     if (!initial.readonly && name === "pui_open" && typeof args.target === "string" && !/^[a-z][a-z\d+.-]*:/i.test(args.target)) return;
     if (initial.readonly && ![...reads, "pui_agents", "pui_message_agent"].includes(name)) return block("Read-only Pui worker: tool not allowed");
+    // Read-only workers still need bounded parent/descendant communication.
+    // The host validates the target relationship; generic Plan chats cannot delegate.
+    if (initial.readonly && name === "pui_message_agent") return;
     if (mode === "bypassPermissions") return;
     const sensitiveRead = mode === "auto" && reads.has(name) && /(?:^|[\/])(?:\.env(?:\.[^\/]*)?|\.ssh|\.aws|\.gnupg|auth\.json|credentials(?:\.[^\/]*)?|id_(?:rsa|ed25519))(?:[\/]|$)/i.test(String(args.path ?? args.file ?? ""));
     if ((reads.has(name) && !sensitiveRead) || (inspect.has(name) && (mode !== "plan" || ["pui_jobs", "pui_agents", "tool_search"].includes(name)))) return;

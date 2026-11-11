@@ -8,6 +8,7 @@ impl Pui {
             cwd: PathBuf::from("/workspace/payments"),
             path: PathBuf::from("/example/release-readiness.jsonl"),
             access: "workspace".into(),
+            permission: None,
             worktree: None,
         };
         self.automation.jobs = vec![

@@ -65,7 +65,7 @@ impl Pui {
         let error = if self.demo || !self.ultracode_ready || self.is_mirror() {
             Some("A ready owning Pui chat is required.")
         } else if matches!(
-            self.prefs.settings.permission,
+            self.active_permission(),
             settings::PermissionMode::Plan | settings::PermissionMode::DontAsk
         ) {
             Some("Current permission mode does not allow offering workflows.")
@@ -161,7 +161,7 @@ impl Pui {
             || self.tasks.storage_failed
             || self.deletion.in_progress()
             || matches!(
-                self.prefs.settings.permission,
+                self.active_permission(),
                 settings::PermissionMode::Plan | settings::PermissionMode::DontAsk
             )
         {

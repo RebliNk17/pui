@@ -9,21 +9,25 @@ pub(super) struct Node {
     pub cwd: PathBuf,
     pub path: Option<PathBuf>,
     pub access: String,
+    pub permission: Option<settings::PermissionMode>,
     pub status: String,
     pub children: Vec<String>,
     pub stopped: bool,
     pub reported: bool,
     pub needs_report: bool,
     settled: bool,
-    launch: Option<rpc::Launch>,
+    pub(super) launch: Option<rpc::Launch>,
     failure: Option<String>,
     result: Option<String>,
     task: String,
     depends: Vec<String>,
     setup: Option<Receiver<Result<PathBuf, String>>>,
-    worktree: Option<PathBuf>,
+    pub(super) worktree: Option<PathBuf>,
 }
 impl Node {
+    pub(super) fn setup_pending(&self) -> bool {
+        self.setup.is_some()
+    }
     pub fn color(&self, colors: &theme::Palette) -> Color32 {
         if self.failure.is_some() {
             colors.red
@@ -47,6 +51,8 @@ pub(super) struct AgentRecord {
     pub(super) cwd: PathBuf,
     pub(super) path: PathBuf,
     pub(super) access: String,
+    #[serde(default)]
+    pub(super) permission: Option<settings::PermissionMode>,
     pub(super) worktree: Option<PathBuf>,
 }
 #[derive(Default)]
@@ -107,6 +113,8 @@ pub(super) struct Agents {
     pub close_prompt: bool,
     pub exiting: bool,
     pub background: bool,
+    pub(super) permission_changes: BTreeMap<String, permission_worker::Change>,
+    pub(super) permission_workers: Vec<std::thread::JoinHandle<()>>,
     mail: BTreeMap<String, (String, Option<String>)>,
     waits: Vec<AgentWait>,
     retiring: Vec<Receiver<()>>,
@@ -161,13 +169,20 @@ impl Pui {
     }
     pub(super) fn apply_settings(&mut self) {
         self.task_apply_settings();
-        let command = json!({"type":"prompt","message":format!("/pui-settings {}",self.prefs.settings.payload())});
         if self.client.is_some() {
-            self.send(command.clone());
+            self.send(json!({"type":"prompt","message":format!("/pui-settings {}",self.agent_settings(&self.agents.active).payload())}));
         }
-        for chat in self.agents.parked.values_mut() {
+        for (id, chat) in &mut self.agents.parked {
             if let Some(client) = chat.client.as_mut() {
-                let _ = client.send(command.clone());
+                let mut settings = self.prefs.settings.clone();
+                if let Some(node) = self.agents.nodes.get(id) {
+                    settings.permission = if node.access == "read-only" {
+                        settings::PermissionMode::Plan
+                    } else {
+                        node.permission.unwrap_or(settings.permission)
+                    };
+                }
+                let _ = client.send(json!({"type":"prompt","message":format!("/pui-settings {}",settings.payload())}));
             }
         }
     }
@@ -220,7 +235,12 @@ impl Pui {
                     name: record.name,
                     cwd: record.cwd,
                     path: Some(record.path),
-                    access: record.access,
+                    access: record.access.clone(),
+                    permission: if record.access == "workspace" {
+                        record.permission
+                    } else {
+                        Some(record.permission.unwrap_or(self.prefs.settings.permission))
+                    },
                     status: "Saved".into(),
                     children: Vec::new(),
                     stopped: true,
@@ -263,24 +283,17 @@ impl Pui {
             .iter()
             .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
     }
-    pub(super) fn forget_deleted_agents(&mut self, path: &std::path::Path) {
-        let ids: std::collections::BTreeSet<_> = self
-            .agents
-            .nodes
-            .values()
-            .filter(|n| {
-                n.path
-                    .as_ref()
-                    .is_some_and(|p| sync::identity(p) == sync::identity(path))
-            })
-            .map(|n| n.id.clone())
-            .collect();
-        for id in &ids {
+    pub(super) fn forget_deleted_agent_ids(&mut self, ids: &std::collections::BTreeSet<String>) {
+        self.agents
+            .permission_changes
+            .retain(|id, _| !ids.contains(id));
+        for id in ids {
             self.agents.nodes.remove(id);
             self.agents.parked.remove(id);
         }
         for node in self.agents.nodes.values_mut() {
             node.children.retain(|id| !ids.contains(id));
+            node.depends.retain(|id| !ids.contains(id));
             if node.parent.as_ref().is_some_and(|id| ids.contains(id)) {
                 node.parent = None;
             }
@@ -289,8 +302,26 @@ impl Pui {
             self.agents.active.clear();
         }
         self.agents.waits.retain(|w| !ids.contains(&w.source));
-        self.agents.mail.retain(|_, (id, _)| !ids.contains(id));
-        self.prefs.agent_tree = self.agent_records();
+        for wait in &mut self.agents.waits {
+            wait.ids.retain(|id| !ids.contains(id));
+        }
+        self.agents.mail.retain(|_, (id, report)| {
+            !ids.contains(id) && report.as_ref().is_none_or(|id| !ids.contains(id))
+        });
+        // Keep persisted-only unrelated records, not merely the restored subset.
+        self.prefs.agent_tree.retain(|n| !ids.contains(&n.id));
+        for record in &mut self.prefs.agent_tree {
+            if record.parent.as_ref().is_some_and(|id| ids.contains(id)) {
+                record.parent = None;
+            }
+        }
+        for record in self.agent_records() {
+            if let Some(saved) = self.prefs.agent_tree.iter_mut().find(|n| n.id == record.id) {
+                *saved = record;
+            } else {
+                self.prefs.agent_tree.push(record);
+            }
+        }
     }
     pub(super) fn agent_records(&self) -> Vec<AgentRecord> {
         self.agents
@@ -304,6 +335,7 @@ impl Pui {
                     cwd: n.cwd.clone(),
                     path,
                     access: n.access.clone(),
+                    permission: n.permission,
                     worktree: n.worktree.clone(),
                 })
             })
@@ -385,6 +417,7 @@ impl Pui {
                 cwd: self.prefs.cwd.clone(),
                 path: self.state.session_file.as_ref().map(PathBuf::from),
                 access: "workspace".into(),
+                permission: None,
                 status: "Connecting".into(),
                 children: Vec::new(),
                 stopped: false,
@@ -404,6 +437,7 @@ impl Pui {
     }
     pub(super) fn view_agent(&mut self, id: &str) {
         if self.deletion.in_progress()
+            || self.deletion.deleting_agent(id)
             || self
                 .agents
                 .nodes
@@ -450,6 +484,9 @@ impl Pui {
     }
     /// Reconnect a persisted automation owner without navigating or sending a prompt.
     pub(super) fn reconnect_job_owner(&mut self, id: &str) -> Result<(), String> {
+        if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
+            return Err("Creator access is changing; wait for its workspace to be ready.".into());
+        }
         let node = self
             .agents
             .nodes
@@ -461,7 +498,7 @@ impl Pui {
         }
         let cwd = node.cwd.clone();
         let mut launch = node.launch.clone().unwrap_or_default();
-        launch.settings = self.prefs.settings.payload();
+        launch.settings = self.agent_settings(id).payload();
         let ready = if id == self.agents.active {
             self.client.is_some()
         } else {
@@ -509,6 +546,15 @@ impl Pui {
         Ok(())
     }
     pub(super) fn resume_agent(&mut self) -> bool {
+        if self
+            .agents
+            .permission_changes
+            .contains_key(&self.agents.active)
+        {
+            self.loading_chat = true;
+            self.state.notice = Some("Worker access is changing. Your draft is preserved.".into());
+            return true;
+        }
         let Some(node) = self.agents.nodes.get_mut(&self.agents.active) else {
             return false;
         };
@@ -531,8 +577,8 @@ impl Pui {
                 return true;
             }
         }
+        launch.settings = self.agent_settings(&self.agents.active).payload();
         let node = self.agents.nodes.get_mut(&self.agents.active).unwrap();
-        launch.settings = self.prefs.settings.payload();
         let path = node.path.clone();
         let cwd = node.cwd.clone();
         node.stopped = false;
@@ -733,7 +779,7 @@ impl Pui {
                 self.automation_control(source, request)
             }
             "spawn" => {
-                if self.prefs.settings.permission == settings::PermissionMode::Plan {
+                if self.agent_settings(source).permission == settings::PermissionMode::Plan {
                     return Err("Plan mode cannot create workers".into());
                 }
                 if !self.ultracode_ready || self.agents.nodes[source].access == "read-only" {
@@ -789,6 +835,11 @@ impl Pui {
                     cwd: cwd.clone(),
                     path: None,
                     access: access.into(),
+                    permission: Some(if access == "read-only" {
+                        settings::PermissionMode::Plan
+                    } else {
+                        self.agent_settings(source).permission
+                    }),
                     status: "Queued".into(),
                     children: Vec::new(),
                     stopped: false,
@@ -880,6 +931,11 @@ impl Pui {
         };
         if let Some((target, report)) = self.agents.mail.remove(key) {
             if record["success"] == false {
+                if target == self.agents.active {
+                    self.state.pending = false;
+                } else if let Some(chat) = self.agents.parked.get_mut(&target) {
+                    chat.state.pending = false;
+                }
                 let error = protocol::string(record, "error");
                 if let Some(node) = self.agents.nodes.get_mut(&target) {
                     node.failure = Some(format!("Agent message rejected: {error}"));
@@ -899,7 +955,13 @@ impl Pui {
             }
         }
     }
+    pub(super) fn agent_mail_pending(&self, id: &str) -> bool {
+        self.agents.mail.values().any(|(target, _)| target == id)
+    }
     pub(super) fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
+        if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
+            return Err("Target agent is exiting or changing access; retry when ready.".into());
+        }
         let record = json!({"type":"prompt","message":format!("/pui-agent-message {}",json!({"text":text}))});
         if self.agents.nodes.get(id).is_some_and(|n| n.stopped) {
             return Err("Target agent is stopped".into());
@@ -919,6 +981,15 @@ impl Pui {
                 .ok_or("Agent has not started or is stopped")?
                 .enqueue(record)?
         };
+        if id == self.agents.active {
+            if self.state.ready() {
+                self.state.pending = true;
+            }
+        } else if let Some(chat) = self.agents.parked.get_mut(id) {
+            if chat.state.ready() {
+                chat.state.pending = true;
+            }
+        }
         let key = format!("{id}:{request_id}");
         self.agents.mail.insert(key.clone(), (id.into(), None));
         Ok(key)
@@ -932,6 +1003,12 @@ impl Pui {
             .cloned()
             .collect();
         for id in ids {
+            if self.agents.permission_changes.contains_key(&id) {
+                self.state.notice = Some(
+                    "Wait for this worker's access change to finish before stopping it.".into(),
+                );
+                continue;
+            }
             self.cancel_workflows_for(&id);
             self.pause_agent_jobs(&id);
             if let Some(node) = self.agents.nodes.get_mut(&id) {
@@ -1031,6 +1108,7 @@ impl Pui {
         if self.demo {
             return;
         }
+        self.poll_permission_changes();
         self.agent_status();
         if self.agents.parked.is_empty() {
             self.report_agent_result();
@@ -1232,7 +1310,7 @@ impl Pui {
                 Some(&model),
                 Some(&thinking),
             );
-            launch.settings = self.prefs.settings.payload();
+            launch.settings = self.agent_settings(&id).payload();
             let name = node.name.clone();
             let task = node.task.clone();
             let cwd = node.cwd.clone();
@@ -1326,6 +1404,7 @@ impl Pui {
                     cwd,
                     path: None,
                     access: "workspace".into(),
+                    permission: None,
                     status: status.into(),
                     children: Vec::new(),
                     stopped: false,
@@ -1376,6 +1455,7 @@ impl Pui {
                     cwd: self.prefs.cwd.clone(),
                     path: None,
                     access: "read-only".into(),
+                    permission: Some(settings::PermissionMode::Plan),
                     status: status.into(),
                     children: Vec::new(),
                     stopped: false,
@@ -1410,6 +1490,11 @@ impl Pui {
         }
     }
     pub(super) fn shutdown_agents(&mut self) {
+        // Hold WindowSync ownership until access relocation and old writers finish.
+        for worker in std::mem::take(&mut self.agents.permission_workers) {
+            let _ = worker.join();
+        }
+        self.agents.permission_changes.clear();
         let parked = std::mem::take(&mut self.agents.parked);
         let clients: Vec<_> = parked
             .into_values()
@@ -1425,7 +1510,8 @@ impl Pui {
         }
     }
     pub(super) fn agent_close_guard(&mut self, ctx: &egui::Context) {
-        let running = self.tasks.running()
+        let running = !self.agents.permission_changes.is_empty()
+            || self.tasks.running()
             || self.terminals.running()
             || (!self.is_mirror() && !self.state.ready())
             || self
@@ -1487,7 +1573,7 @@ impl Pui {
         }
     }
 }
-fn worker_launch(
+pub(super) fn worker_launch(
     readonly: bool,
     name: &str,
     model: Option<&str>,
@@ -1519,7 +1605,7 @@ fn worker_launch(
         ..Default::default()
     }
 }
-fn create_worktree(cwd: &std::path::Path, label: &str) -> Result<PathBuf, String> {
+pub(super) fn create_worktree(cwd: &std::path::Path, label: &str) -> Result<PathBuf, String> {
     let root = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)

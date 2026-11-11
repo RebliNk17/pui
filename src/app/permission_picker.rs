@@ -3,7 +3,7 @@ use super::*;
 use settings::{PermissionMode, Settings};
 
 impl Pui {
-    fn permission_scope(&self) -> String {
+    pub(super) fn permission_scope(&self) -> String {
         format!(
             "{}|{}|{}",
             self.agents.active,
@@ -12,17 +12,32 @@ impl Pui {
         )
     }
     pub(super) fn choose_permission(&mut self, mode: PermissionMode) {
-        if mode == PermissionMode::Bypass && self.prefs.settings.permission != mode {
+        if self
+            .agents
+            .permission_changes
+            .contains_key(&self.agents.active)
+        {
+            self.state.notice = Some(
+                "Wait for this worker's access change to finish before changing mode again.".into(),
+            );
+            return;
+        }
+        self.worker_upgrade_pending = None;
+        self.bypass_pending = None;
+        if self.readonly_worker() && mode != PermissionMode::Plan {
+            self.worker_upgrade_pending = Some((self.permission_scope(), mode));
+        } else if mode == PermissionMode::Bypass && self.active_permission() != mode {
             self.bypass_pending = Some(self.permission_scope());
         } else {
-            self.bypass_pending = None;
-            self.prefs.settings.permission = mode;
+            self.set_permission(mode);
         }
     }
     pub(super) fn propagate_settings(&mut self, before: &Settings) {
         if *before != self.prefs.settings
             && !self.demo
-            && !self.remote_action(sync::Action::Settings(self.prefs.settings.clone()))
+            && !self.remote_action(sync::Action::Settings(
+                self.agent_settings(&self.agents.active),
+            ))
             && before.payload() != self.prefs.settings.payload()
         {
             self.apply_settings();
@@ -31,8 +46,13 @@ impl Pui {
     pub(super) fn permission_button(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
         let before = self.prefs.settings.clone();
-        let label = self.prefs.settings.permission.short_label();
-        let color = if self.prefs.settings.permission == PermissionMode::Bypass {
+        let label = if self.readonly_worker() {
+            "Read-only"
+        } else {
+            self.active_permission().short_label()
+        };
+        let color = if !self.readonly_worker() && self.active_permission() == PermissionMode::Bypass
+        {
             colors.red
         } else {
             colors.muted
@@ -65,7 +85,11 @@ impl Pui {
         });
         let button = button
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Agent permission mode · applies to subsequent tool calls");
+            .on_hover_text(if self.readonly_worker() {
+                "Read-only worker · choosing a writable mode requires an explicit isolated-worktree upgrade"
+            } else {
+                "Agent permission mode · applies to subsequent tool calls in this chat"
+            });
         egui::Popup::menu(&button)
             .align(egui::emath::RectAlign::TOP_START)
             .align_alternatives(&[])
@@ -74,13 +98,16 @@ impl Pui {
             .show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(255.0);
-                ui.label(theme::small(ui, "Agent mode"));
+                ui.label(theme::small(ui, "Agent mode · this chat"));
+                if self.readonly_worker() {
+                    ui.label(theme::small(ui, "Read-only tools. Writable modes require a reconnect in an isolated Git worktree."));
+                }
                 for mode in PermissionMode::ALL {
                     if ui
                         .add(
-                            egui::Button::new(mode.label())
-                                .selected(self.prefs.settings.permission == mode)
-                                .fill(if self.prefs.settings.permission == mode {
+                            egui::Button::new(if self.readonly_worker() && mode == PermissionMode::Plan { "Read-only" } else { mode.label() })
+                                .selected(self.active_permission() == mode)
+                                .fill(if self.active_permission() == mode {
                                     colors.accent_bg
                                 } else {
                                     prompt_ui::background(ui.ctx())
@@ -98,6 +125,7 @@ impl Pui {
         self.propagate_settings(&before);
     }
     pub(super) fn permission_confirmation(&mut self, ui: &mut egui::Ui) {
+        self.worker_upgrade_confirmation(ui);
         let Some(scope) = self.bypass_pending.as_ref() else {
             return;
         };
@@ -118,7 +146,7 @@ impl Pui {
             prompt_ui::style(ui);
             confirmations::heading(ui, "Bypass all permissions?", "Only enable this for work you trust.", true);
             ui.add_space(14.0);
-            confirmations::note(ui, "Writable agents in this window can run commands, change or delete files, access credentials and use the network without asking. This also changes existing workers. Read-only workers stay restricted.");
+            confirmations::note(ui, "This chat can run commands, change or delete files, access credentials and use the network without asking. Other workers keep their own modes. This does not override OS permissions.");
             ui.add_space(18.0);
             let choice = if prompt_ui::keyboard_available(ui) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 Some(confirmations::Choice::Cancel)
@@ -127,7 +155,7 @@ impl Pui {
             };
             match choice {
                 Some(confirmations::Choice::Confirm) => {
-                    self.prefs.settings.permission = PermissionMode::Bypass;
+                    self.set_permission(PermissionMode::Bypass);
                     self.bypass_pending = None;
                 }
                 Some(confirmations::Choice::Cancel) => self.bypass_pending = None,

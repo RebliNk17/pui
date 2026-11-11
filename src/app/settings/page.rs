@@ -934,9 +934,9 @@ impl Pui {
         ui.label(theme::small(ui, "Changes apply to subsequent tool calls. Commands already executing are not interrupted."));
         ui.add_space(6.0);
         card(ui, |ui| {
-            ui.scope(|ui|row(ui,"Permission mode","Applied to this Pui owner and its workers; read-only worker restrictions always win.",|ui|{
-            egui::ComboBox::from_id_salt("settings-permission-mode").selected_text(self.prefs.settings.permission.label()).width(140.0).show_ui(ui,|ui|{
-                for mode in PermissionMode::ALL {if ui.selectable_label(self.prefs.settings.permission == mode,mode.label()).clicked(){self.choose_permission(mode);}}
+            ui.scope(|ui|row(ui,"Permission mode","Only this chat changes. Each subagent keeps its own mode; enabling writes on a read-only worker requires confirmation.",|ui|{
+            egui::ComboBox::from_id_salt("settings-permission-mode").selected_text(self.permission_label()).width(140.0).show_ui(ui,|ui|{
+                for mode in PermissionMode::ALL {if ui.selectable_label(self.active_permission() == mode, if self.readonly_worker() && mode == PermissionMode::Plan { "Read-only" } else { mode.label() }).clicked(){self.choose_permission(mode);}}
             });
         }));
         });
@@ -944,10 +944,14 @@ impl Pui {
         ui.add_space(12.0);
         note(
             ui,
-            self.prefs.settings.permission.label(),
-            self.prefs.settings.permission.description(),
+            self.permission_label(),
+            if self.readonly_worker() {
+                "This worker currently has no shell or write tools. Choose a writable mode above to explicitly reconnect in an isolated Git worktree."
+            } else {
+                self.active_permission().description()
+            },
         );
-        if self.prefs.settings.permission == PermissionMode::Auto {
+        if self.active_permission() == PermissionMode::Auto {
             section(ui, "Auto classifier", "");
             card(ui, |ui| {
                 row(

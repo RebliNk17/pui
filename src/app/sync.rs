@@ -41,6 +41,10 @@ pub(super) struct Snapshot {
     pub waiting: Vec<run_status::WaitingMessage>,
     pub settings: settings::Settings,
     #[serde(default)]
+    pub access: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<PathBuf>,
+    #[serde(default)]
     pub notifications: notifications::NotificationSettings,
     pub ultra: bool,
     pub ready: bool,
@@ -699,7 +703,15 @@ impl Pui {
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
-        self.prefs.settings.payload().to_string().hash(&mut hash);
+        self.agent_settings(&self.agents.active)
+            .payload()
+            .to_string()
+            .hash(&mut hash);
+        self.agents
+            .nodes
+            .get(&self.agents.active)
+            .map(|n| &n.access)
+            .hash(&mut hash);
         self.prefs.settings.delivery.label().hash(&mut hash);
         self.prefs.notifications.sound.hash(&mut hash);
         self.prefs.notifications.desktop.hash(&mut hash);
@@ -818,7 +830,29 @@ impl Pui {
                             snapshot.label
                         ));
                         self.waiting.insert(path.clone(), snapshot.waiting);
+                        if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+                            node.permission = Some(snapshot.settings.permission);
+                            if let Some(access) = snapshot.access {
+                                if node.access != access && access != "workspace" {
+                                    node.launch = Some(agents::worker_launch(
+                                        access == "read-only",
+                                        &node.name,
+                                        None,
+                                        None,
+                                    ));
+                                }
+                                node.access = access;
+                            }
+                            node.cwd = snapshot.cwd.clone();
+                            node.worktree = snapshot.worktree;
+                        }
+                        self.prefs.cwd = snapshot.cwd;
+                        let permission = self.prefs.settings.permission;
+                        let has_agent = self.agents.nodes.contains_key(&self.agents.active);
                         self.prefs.settings = snapshot.settings;
+                        if has_agent {
+                            self.prefs.settings.permission = permission;
+                        }
                         self.prefs.notifications = snapshot.notifications;
                         self.ultracode = snapshot.ultra;
                         self.ultracode_ready = snapshot.ready;
@@ -952,7 +986,17 @@ impl Pui {
                 .find(|(p, _)| identity(p) == path)
                 .map(|(_, q)| q.clone())
                 .unwrap_or_default(),
-            settings: self.prefs.settings.clone(),
+            settings: self.agent_settings(&self.agents.active),
+            access: self
+                .agents
+                .nodes
+                .get(&self.agents.active)
+                .map(|n| n.access.clone()),
+            worktree: self
+                .agents
+                .nodes
+                .get(&self.agents.active)
+                .and_then(|n| n.worktree.clone()),
             notifications: self.prefs.notifications,
             ultra: self.ultracode,
             ready: self.ultracode_ready,
@@ -1035,9 +1079,17 @@ impl Pui {
                 }
             }
             Action::Settings(settings) => {
-                let changed = self.prefs.settings.payload() != settings.payload();
-                self.prefs.settings = settings;
-                if changed {
+                if self.readonly_worker() && settings.permission != settings::PermissionMode::Plan {
+                    return Err(
+                        "Read-only worker upgrades must be confirmed in the owning window.".into(),
+                    );
+                }
+                let before = self.prefs.settings.clone();
+                self.set_permission(settings.permission);
+                self.prefs.settings.delivery = settings.delivery;
+                self.prefs.settings.compact_percent = settings.compact_percent;
+                self.prefs.settings.keep_recent_tokens = settings.keep_recent_tokens;
+                if before.payload() != self.prefs.settings.payload() {
                     self.apply_settings();
                 }
             }
@@ -1369,6 +1421,89 @@ mod tests {
         assert!(!owner.notifications.sent[0].sound);
         assert!(owner.notifications.sent[0].desktop);
         assert!(mirror.notifications.sent.is_empty());
+    }
+    #[test]
+    fn mirrored_compaction_never_promotes_a_manual_worker_to_the_window_default() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        owner.ensure_agent();
+        mirror.ensure_agent();
+        for app in [&mut owner, &mut mirror] {
+            app.prefs.settings.permission = settings::PermissionMode::Bypass;
+            let node = app.agents.nodes.get_mut(&app.agents.active).unwrap();
+            node.access = "worktree".into();
+            node.permission = Some(settings::PermissionMode::Manual);
+        }
+        owner.client = Some(rpc::Client::stub());
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.sync.revisions.contains_key(&path)
+        });
+        let before = mirror.prefs.settings.clone();
+        mirror.prefs.settings.compact_percent = 71;
+        mirror.propagate_settings(&before);
+        spin(&mut owner, &mut mirror, |a, b| {
+            a.prefs.settings.compact_percent == 71 && b.prefs.settings.compact_percent == 71
+        });
+        assert!(owner.active_permission() == settings::PermissionMode::Manual);
+        assert!(mirror.active_permission() == settings::PermissionMode::Manual);
+        assert!(owner.prefs.settings.permission == settings::PermissionMode::Bypass);
+        assert!(mirror.prefs.settings.permission == settings::PermissionMode::Bypass);
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
+    }
+    #[test]
+    fn mirrored_worker_upgrade_refreshes_workspace_and_reconnect_tools() {
+        let (directory, path) = location();
+        let workspace = directory.join("isolated");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        owner.ensure_agent();
+        let mirror_id = mirror.ensure_agent();
+        for app in [&mut owner, &mut mirror] {
+            let node = app.agents.nodes.get_mut(&app.agents.active).unwrap();
+            node.access = "read-only".into();
+            node.permission = Some(settings::PermissionMode::Plan);
+            node.launch = Some(agents::worker_launch(true, "reader", None, None));
+        }
+        owner.client = Some(rpc::Client::stub());
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.sync.revisions.contains_key(&path)
+        });
+        let node = owner.agents.nodes.get_mut(&owner.agents.active).unwrap();
+        node.access = "worktree".into();
+        node.permission = Some(settings::PermissionMode::Manual);
+        node.cwd = workspace.clone();
+        node.worktree = Some(workspace.clone());
+        node.launch = Some(agents::worker_launch(false, "reader", None, None));
+        owner.prefs.cwd = workspace.clone();
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| !b.readonly_worker());
+        let node = &mirror.agents.nodes[&mirror_id];
+        assert_eq!(node.cwd, workspace);
+        assert_eq!(node.worktree.as_ref(), Some(&workspace));
+        assert!(!node.launch.as_ref().unwrap().readonly);
+        assert_eq!(mirror.prefs.cwd, workspace);
+        assert!(mirror.active_permission() == settings::PermissionMode::Manual);
+        owner.shutdown_agents();
+        owner.sync.forget_deleted(&path);
+        mirror.sync.detach_mirror();
+        assert!(mirror.resume_agent());
+        assert!(
+            !mirror.agents.nodes[&mirror_id]
+                .launch
+                .as_ref()
+                .unwrap()
+                .readonly
+        );
+        mirror.shutdown_agents();
     }
     #[test]
     fn shared_permissions_and_compaction_can_change_while_owner_is_working() {

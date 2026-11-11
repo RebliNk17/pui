@@ -281,7 +281,15 @@ impl Pui {
                 }
                 .into(),
             ),
-            settings: self.prefs.settings.payload(),
+            settings: self
+                .agent_settings(
+                    self.tasks
+                        .parents
+                        .get(&t.id)
+                        .map(String::as_str)
+                        .unwrap_or(&self.agents.active),
+                )
+                .payload(),
         };
         #[cfg(not(test))]
         let mut client = rpc::Client::start_with(&cwd, None, self.ctx.clone(), launch);
@@ -817,9 +825,18 @@ impl Pui {
         self.tasks.questions = Default::default();
     }
     pub(in crate::app) fn task_apply_settings(&mut self) {
+        let owner = self
+            .tasks
+            .live
+            .as_ref()
+            .and_then(|id| self.tasks.parents.get(id))
+            .unwrap_or(&self.agents.active);
+        let settings = self.agent_settings(owner).payload();
         for p in &mut self.tasks.processes {
             if !p.ended {
-                let _=p.client.send(json!({"type":"prompt","message":format!("/pui-settings {}",self.prefs.settings.payload())}));
+                let _ = p
+                    .client
+                    .send(json!({"type":"prompt","message":format!("/pui-settings {settings}")}));
             }
         }
     }

@@ -1,6 +1,6 @@
 //! Explicit, confirmed deletion. Filesystem work and Pi shutdown stay off the UI thread.
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9,9 +9,22 @@ pub(super) enum Target {
     Task(String),
 }
 #[derive(Default)]
+struct ChatScope {
+    // Descendants first: a failed deletion must not remove their parent.
+    paths: Vec<PathBuf>,
+    members: BTreeMap<String, Option<PathBuf>>,
+    completed: Option<Receiver<PathBuf>>,
+}
+impl ChatScope {
+    fn contains(&self, path: &Path) -> bool {
+        self.paths.iter().any(|p| same(p, path))
+    }
+}
+#[derive(Default)]
 pub(super) struct View {
     pub pending: Option<Target>,
     jobs: Vec<(Target, Receiver<Result<(), String>>)>,
+    chats: BTreeMap<PathBuf, ChatScope>,
 }
 impl View {
     // Task deletion retains its existing modal behavior; chats never block the workspace.
@@ -33,12 +46,140 @@ impl View {
     }
     pub fn deleting_chat(&self, path: &Path) -> bool {
         self.contains(&Target::Chat(path.into()))
+            || self.chats.values().any(|scope| scope.contains(path))
+    }
+    pub fn deleting_agent(&self, id: &str) -> bool {
+        self.chats
+            .values()
+            .any(|scope| scope.members.contains_key(id))
     }
 }
 fn same(a: &Path, b: &Path) -> bool {
     sync::identity(a) == sync::identity(b)
 }
+fn chat_deletion_locks<L>(
+    paths: &[PathBuf],
+    mut lock: impl FnMut(&Path) -> Result<L, String>,
+) -> Result<Vec<L>, String> {
+    for path in paths {
+        sessions::validate_delete(path)?;
+    }
+    paths.iter().map(|path| lock(path)).collect()
+}
+fn delete_chat_paths(paths: &[PathBuf], mut completed: impl FnMut(&Path)) -> Result<(), String> {
+    for (index, path) in paths.iter().enumerate() {
+        if let Err(error) = sessions::delete(path) {
+            return Err(format!(
+                "Deleted {index} of {} transcripts. Failed at {}: {error}. Remaining chats were kept; retry deletion to finish.",
+                paths.len(),
+                path.display()
+            ));
+        }
+        completed(path);
+    }
+    Ok(())
+}
 impl Pui {
+    fn chat_delete_scope(&self, path: &Path) -> ChatScope {
+        // Include persisted-only nodes too (for example beyond the restore limit).
+        let mut records: BTreeMap<_, _> = self
+            .prefs
+            .agent_tree
+            .iter()
+            .map(|n| (n.id.clone(), (n.parent.clone(), Some(n.path.clone()))))
+            .collect();
+        for node in self.agents.nodes.values() {
+            let live_path = if node.id == self.agents.active {
+                self.state.session_file.as_ref().map(PathBuf::from)
+            } else {
+                self.agents
+                    .parked
+                    .get(&node.id)
+                    .and_then(|c| c.state.session_file.as_ref().map(PathBuf::from))
+            };
+            let saved_path = records.get(&node.id).and_then(|(_, path)| path.clone());
+            records.insert(
+                node.id.clone(),
+                (
+                    node.parent.clone(),
+                    node.path.clone().or(live_path).or(saved_path),
+                ),
+            );
+        }
+        let mut ids = BTreeSet::new();
+        let mut paths = vec![path.to_path_buf()];
+        loop {
+            let previous = ids.len();
+            for (id, (parent, file)) in &records {
+                if parent.as_ref().is_some_and(|p| ids.contains(p))
+                    || file
+                        .as_ref()
+                        .is_some_and(|p| paths.iter().any(|q| same(p, q)))
+                {
+                    ids.insert(id.clone());
+                    if let Some(file) = file {
+                        if !paths.iter().any(|p| same(p, file)) {
+                            paths.push(file.clone());
+                        }
+                    }
+                }
+            }
+            if ids.len() == previous {
+                break;
+            }
+        }
+        // Rank each path by its shallowest node. Shared transcripts are deleted once.
+        let depth = |id: &str| {
+            let mut seen = BTreeSet::new();
+            let mut cursor = Some(id.to_string());
+            while let Some(id) = cursor.filter(|id| ids.contains(id)) {
+                if !seen.insert(id.clone()) {
+                    break;
+                }
+                cursor = records.get(&id).and_then(|(parent, _)| parent.clone());
+            }
+            seen.len()
+        };
+        paths.sort_by_key(|path| {
+            std::cmp::Reverse(
+                records
+                    .iter()
+                    .filter(|(id, (_, p))| {
+                        ids.contains(*id) && p.as_ref().is_some_and(|p| same(p, path))
+                    })
+                    .map(|(id, _)| depth(id))
+                    .min()
+                    .unwrap_or(0),
+            )
+        });
+        ChatScope {
+            paths,
+            members: ids
+                .into_iter()
+                .map(|id| {
+                    // Pathless saved/queued nodes belong to their nearest saved ancestor.
+                    let mut cursor = Some(id.clone());
+                    let mut seen = BTreeSet::new();
+                    let mut path = None;
+                    while let Some(next) = cursor {
+                        if !seen.insert(next.clone()) {
+                            break;
+                        }
+                        let Some((parent, file)) = records.get(&next) else {
+                            break;
+                        };
+                        if file.is_some() {
+                            path = file.clone();
+                            break;
+                        }
+                        cursor = parent.clone();
+                    }
+                    (id, path)
+                })
+                .collect(),
+            completed: None,
+        }
+    }
     pub(super) fn request_delete(&mut self, target: Target) {
         if !self.deletion.in_progress() && !self.deletion.contains(&target) {
             self.deletion.pending = Some(target);
@@ -58,74 +199,99 @@ impl Pui {
         match target {
             Target::Task(id) => self.tasks.delete_blocked(id),
             Target::Chat(path) => {
-                if self.agents_still_retiring() {
-                    return Some("Wait for stopped chat processes to exit before deleting.".into());
+                let scope = self.chat_delete_scope(path);
+                for path in &scope.paths {
+                    if self.deletion.deleting_chat(path) {
+                        return Some("This chat or a descendant is already being deleted.".into());
+                    }
+                    if let Some(reason) = self.chat_deletion_blocked(path) {
+                        return Some(reason);
+                    }
                 }
-                if self
-                    .waiting
-                    .iter()
-                    .any(|(p, messages)| same(p, path) && !messages.is_empty())
-                {
-                    return Some("Clear this chat's queued messages before deleting it.".into());
-                }
-                if self.tasks.records.iter().any(|t| {
-                    t.runs
-                        .iter()
-                        .any(|r| r.session.as_ref().is_some_and(|p| same(p, path)))
+                if scope.members.keys().any(|id| {
+                    self.deletion.deleting_agent(id)
+                        || self.agents.permission_changes.contains_key(id)
+                        || self.agent_mail_pending(id)
+                        || (id == &self.agents.active
+                            && (!self.state.ready()
+                                || self.loading_chat
+                                || self.history_pending.is_some()
+                                || self.interrupt.is_some()
+                                || !self.deliveries.is_empty()
+                                || !self.state.dialogs.is_empty()))
+                        || self
+                            .agents
+                            .parked
+                            .get(id)
+                            .is_some_and(|c| !c.state.ready() || c.deletion_busy())
+                        || self.agents.nodes.get(id).is_some_and(|n| {
+                            !n.path.as_ref().is_some_and(|p| same(p, path))
+                                && !n.stopped
+                                && !matches!(n.status.as_str(), "Idle" | "Saved" | "Finished")
+                        })
                 }) {
                     return Some(
-                        "This transcript belongs to a task. Delete the task instead.".into(),
+                        "Stop this chat and all descendant workers before deleting.".into(),
                     );
-                }
-                if self.tasks.records.iter().any(|t| {
-                    t.phase.active() && t.parent_session.as_ref().is_some_and(|p| same(p, path))
-                }) {
-                    return Some("Stop this chat's active task before deleting the chat.".into());
-                }
-                if self
-                    .state
-                    .session_file
-                    .as_deref()
-                    .is_some_and(|p| same(Path::new(p), path))
-                    && (!self.state.ready()
-                        || self.loading_chat
-                        || self.history_pending.is_some()
-                        || self.interrupt.is_some()
-                        || !self.deliveries.is_empty()
-                        || !self.state.dialogs.is_empty())
-                {
-                    return Some(
-                        "Stop this chat and wait for it to become idle before deleting it.".into(),
-                    );
-                }
-                if self.agents.parked.values().any(|c| {
-                    c.state
-                        .session_file
-                        .as_deref()
-                        .is_some_and(|p| same(Path::new(p), path))
-                        && (!c.state.ready() || c.deletion_busy())
-                }) {
-                    return Some(
-                        "Stop this chat and wait for it to become idle before deleting it.".into(),
-                    );
-                }
-                let ids: BTreeSet<_> = self
-                    .agents
-                    .nodes
-                    .values()
-                    .filter(|n| n.path.as_ref().is_some_and(|p| same(p, path)))
-                    .map(|n| n.id.clone())
-                    .collect();
-                if self.agents.nodes.values().any(|n| {
-                    n.parent.as_ref().is_some_and(|p| ids.contains(p))
-                        && !n.stopped
-                        && !matches!(n.status.as_str(), "Idle" | "Saved" | "Finished")
-                }) {
-                    return Some("Stop linked workers before deleting their parent chat.".into());
                 }
                 None
             }
         }
+    }
+    fn chat_deletion_blocked(&self, path: &Path) -> Option<String> {
+        if self.agents_still_retiring() {
+            return Some("Wait for stopped chat processes to exit before deleting.".into());
+        }
+        if self
+            .waiting
+            .iter()
+            .any(|(p, messages)| same(p, path) && !messages.is_empty())
+        {
+            return Some("Clear this chat's queued messages before deleting it.".into());
+        }
+        if self.tasks.records.iter().any(|t| {
+            t.runs
+                .iter()
+                .any(|r| r.session.as_ref().is_some_and(|p| same(p, path)))
+        }) {
+            return Some("This transcript belongs to a task. Delete the task instead.".into());
+        }
+        if self
+            .tasks
+            .records
+            .iter()
+            .any(|t| t.phase.active() && t.parent_session.as_ref().is_some_and(|p| same(p, path)))
+        {
+            return Some("Stop this chat's active task before deleting the chat.".into());
+        }
+        if self
+            .state
+            .session_file
+            .as_deref()
+            .is_some_and(|p| same(Path::new(p), path))
+            && (!self.state.ready()
+                || self.loading_chat
+                || self.history_pending.is_some()
+                || self.interrupt.is_some()
+                || !self.deliveries.is_empty()
+                || !self.state.dialogs.is_empty())
+        {
+            return Some(
+                "Stop this chat and wait for it to become idle before deleting it.".into(),
+            );
+        }
+        if self.agents.parked.values().any(|c| {
+            c.state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| same(Path::new(p), path))
+                && (!c.state.ready() || c.deletion_busy())
+        }) {
+            return Some(
+                "Stop this chat and wait for it to become idle before deleting it.".into(),
+            );
+        }
+        None
     }
     pub(super) fn poll_deletions(&mut self) {
         let mut index = 0;
@@ -141,9 +307,40 @@ impl Pui {
                 }
             };
             let (target, _) = self.deletion.jobs.remove(index);
+            let scope = match &target {
+                Target::Chat(path) => self.deletion.chats.remove(&sync::identity(path)),
+                Target::Task(_) => None,
+            };
+            if let Some(scope) = &scope {
+                let deleted = if result.is_ok() {
+                    scope.paths.clone()
+                } else {
+                    scope
+                        .completed
+                        .as_ref()
+                        .map(|rx| rx.try_iter().collect())
+                        .unwrap_or_default()
+                };
+                let ids = scope
+                    .members
+                    .iter()
+                    .filter(|(_, path)| {
+                        result.is_ok()
+                            || path
+                                .as_ref()
+                                .is_some_and(|p| deleted.iter().any(|d| same(d, p)))
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                self.finish_deleted_chats(&deleted, &ids);
+            }
             match result {
                 Ok(()) => {
-                    self.finish_delete(&target);
+                    if scope.is_none() {
+                        self.finish_delete(&target);
+                    } else {
+                        self.state.notice = Some("Chat and descendant chats deleted. Workflow history, project files and worktrees were kept.".into());
+                    }
                     if matches!(target, Target::Chat(_))
                         && notifications::Notifications::supported()
                     {
@@ -176,7 +373,7 @@ impl Pui {
         let (title, description, confirm, name) = match &target {
             Target::Chat(path) => (
                 "Delete chat?",
-                "Permanently delete this chat's saved Pi transcript and remove it from Pui. This cannot be undone.",
+                "Permanently delete this chat and every descendant worker chat, including their saved Pi transcripts. This cannot be undone.",
                 "Delete chat",
                 self.prefs
                     .chats
@@ -213,7 +410,12 @@ impl Pui {
             .show(ctx, |ui| {
                 ui.add(egui::Label::new(RichText::new(name).strong()).wrap());
                 if let Target::Chat(path) = &target { ui.add(egui::Label::new(theme::small(ui, path.display().to_string())).wrap()); }
-                confirmations::note(ui, "Project files, Git worktrees and other chats are kept. Deleting a chat keeps its tasks and worker chats as separate items. Close any external terminal Pi process using this session first.");
+                if let Target::Chat(path) = &target {
+                    let scope = self.chat_delete_scope(path);
+                    confirmations::note(ui, &format!("Includes {} saved transcript(s) across this chat and {} descendant chat(s). Workflow history, project files, Git worktrees and unrelated chats are kept. Close external terminal Pi processes using any of these sessions first.", scope.paths.len(), scope.members.len().saturating_sub(1)));
+                } else {
+                    confirmations::note(ui, "Project files, Git worktrees and other chats are kept. Close external terminal Pi processes using these sessions first.");
+                }
                 if let Some(reason) = &blocked { ui.add(egui::Label::new(theme::small(ui, reason)).wrap()); }
             });
         if !working {
@@ -288,44 +490,77 @@ impl Pui {
                 self.tasks.delete_saved(id, paths, locks)?
             }
             Target::Chat(path) => {
-                sessions::validate_delete(path)?;
-                let lock = self.sync.deletion_lock(path)?;
-                let detach = self.tasks.prepare_detach_deleted_chat(path)?;
+                let mut scope = self.chat_delete_scope(path);
+                let locks = chat_deletion_locks(&scope.paths, |p| self.sync.deletion_lock(p))?;
+                // All validation and ownership checks precede task or client changes.
+                self.prepare_delete_chat_jobs(
+                    &scope.members.keys().cloned().collect(),
+                    &scope.paths,
+                )?;
+                let detach = scope
+                    .paths
+                    .iter()
+                    .map(|p| self.tasks.prepare_detach_deleted_chat(p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if self.agents.active.is_empty()
+                    && self
+                        .state
+                        .session_file
+                        .as_deref()
+                        .is_some_and(|p| scope.contains(Path::new(p)))
+                {
+                    let file = self.state.session_file.as_ref().map(PathBuf::from);
+                    let id = self.ensure_agent();
+                    scope.members.insert(id, file);
+                }
+                let ids: Vec<_> = scope.members.keys().cloned().collect();
+                for id in ids {
+                    if let Some(node) = self.agents.nodes.get_mut(&id) {
+                        node.stopped = true;
+                    }
+                }
                 let mut clients = Vec::new();
                 if self
                     .state
                     .session_file
                     .as_deref()
-                    .is_some_and(|p| same(Path::new(p), path))
+                    .is_some_and(|p| scope.contains(Path::new(p)))
+                    || scope.members.contains_key(&self.agents.active)
                 {
                     if let Some(client) = self.client.take() {
                         clients.push(client);
                     }
                     self.connected = false;
                 }
-                for chat in self.agents.parked.values_mut().filter(|c| {
-                    c.state
-                        .session_file
-                        .as_deref()
-                        .is_some_and(|p| same(Path::new(p), path))
+                for (_, chat) in self.agents.parked.iter_mut().filter(|(id, c)| {
+                    scope.members.contains_key(*id)
+                        || c.state
+                            .session_file
+                            .as_deref()
+                            .is_some_and(|p| scope.contains(Path::new(p)))
                 }) {
                     if let Some(client) = chat.client.take() {
                         clients.push(client);
                     }
                 }
                 let (tx, rx) = mpsc::channel();
-                let path = path.clone();
+                let paths = scope.paths.clone();
+                let (progress, completed) = mpsc::channel();
+                scope.completed = Some(completed);
+                self.deletion.chats.insert(sync::identity(path), scope);
                 std::thread::spawn(move || {
-                    // Hold ownership until all writers have exited and the file is gone.
-                    let _lock = lock;
+                    // Hold every lock until all writers exit and deletion completes.
+                    let _locks = locks;
                     drop(clients);
                     let result = (|| {
-                        if let Some(detach) = detach {
+                        for detach in detach.into_iter().flatten() {
                             detach.recv().map_err(
-                                |_| "Cannot detach linked tasks; chat was not deleted",
+                                |_| "Cannot detach linked tasks; chats were not deleted",
                             )??;
                         }
-                        sessions::delete(&path)
+                        delete_chat_paths(&paths, |path| {
+                            let _ = progress.send(path.to_path_buf());
+                        })
                     })();
                     let _ = tx.send(result);
                     ctx.request_repaint();
@@ -338,12 +573,16 @@ impl Pui {
         if let Target::Chat(path) = &target {
             // Detach in-memory links now too, so edits made while the worker
             // runs cannot save a stale parent relationship back to task storage.
-            self.tasks.detach_deleted_chat(path);
+            let paths = self.deletion.chats[&sync::identity(path)].paths.clone();
+            for path in paths {
+                self.tasks.detach_deleted_chat(&path);
+            }
             if self
                 .state
                 .session_file
                 .as_deref()
-                .is_some_and(|p| same(Path::new(p), path))
+                .is_some_and(|p| self.deletion.deleting_chat(Path::new(p)))
+                || self.deletion.deleting_agent(&self.agents.active)
             {
                 let models = self.state.models.clone();
                 self.ensure_agent();
@@ -372,6 +611,50 @@ impl Pui {
             }
         }
         Ok(())
+    }
+    fn finish_deleted_chats(&mut self, paths: &[PathBuf], ids: &BTreeSet<String>) {
+        let active = ids.contains(&self.agents.active)
+            || self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| paths.iter().any(|path| same(Path::new(p), path)));
+        for path in paths {
+            self.forget_session(path);
+            self.tasks.detach_deleted_chat(path);
+        }
+        self.forget_deleted_agent_ids(ids);
+        if active {
+            let models = std::mem::take(&mut self.state.models);
+            self.state = State {
+                models,
+                ..Default::default()
+            };
+            self.new_chat = true;
+            self.pending_session = None;
+            self.preview_rx = None;
+            self.transcript.clear();
+            self.draft.clear();
+            self.draft_images.clear();
+            self.image_picker_rx = None;
+            self.completions = Default::default();
+            self.interrupt = None;
+            self.deliveries.clear();
+            self.history_pending = None;
+            self.history_view = Default::default();
+            self.history_drafts.clear();
+            self.completion_run = Default::default();
+            self.questions = Default::default();
+            self.current_dialog.clear();
+            self.pending_dialog = None;
+            self.recall = Default::default();
+            self.connected = false;
+            self.loading_chat = false;
+            self.bypass_pending = None;
+            self.worker_upgrade_pending = None;
+            self.output_revision = u64::MAX;
+        }
+        self.refresh_sessions();
     }
     fn forget_session(&mut self, path: &Path) {
         self.sessions.retain(|s| !same(&s.path, path));
@@ -407,42 +690,19 @@ impl Pui {
                 self.state.notice = Some("Task and saved run transcripts deleted. Project files and worktrees were kept.".into());
             }
             Target::Chat(path) => {
-                let active = self
-                    .state
-                    .session_file
-                    .as_deref()
-                    .is_some_and(|p| same(Path::new(p), path));
-                self.forget_session(path);
-                self.forget_deleted_agents(path);
-                self.tasks.detach_deleted_chat(path);
-                if active {
-                    let models = std::mem::take(&mut self.state.models);
-                    self.state = State {
-                        models,
-                        ..Default::default()
-                    };
-                    self.new_chat = true;
-                    self.pending_session = None;
-                    self.preview_rx = None;
-                    self.transcript.clear();
-                    self.draft.clear();
-                    self.draft_images.clear();
-                    self.image_picker_rx = None;
-                    self.completions = Default::default();
-                    self.interrupt = None;
-                    self.deliveries.clear();
-                    self.history_pending = None;
-                    self.history_view = Default::default();
-                    self.history_drafts.clear();
-                    self.completion_run = Default::default();
-                    self.questions = Default::default();
-                    self.current_dialog.clear();
-                    self.pending_dialog = None;
-                    self.recall = Default::default();
-                    self.connected = false;
-                    self.loading_chat = false;
-                    self.bypass_pending = None;
-                    self.output_revision = u64::MAX;
+                if let Some(scope) = self.deletion.chats.remove(&sync::identity(path)) {
+                    self.finish_deleted_chats(
+                        &scope.paths,
+                        &scope.members.keys().cloned().collect(),
+                    );
+                } else {
+                    let ids = self
+                        .chat_delete_scope(path)
+                        .members
+                        .keys()
+                        .cloned()
+                        .collect();
+                    self.finish_deleted_chats(std::slice::from_ref(path), &ids);
                 }
                 self.state.notice =
                     Some("Chat deleted. Project files and worktrees were kept.".into());
@@ -459,3 +719,7 @@ mod tests;
 #[cfg(test)]
 #[path = "deletion_background_tests.rs"]
 mod background_tests;
+
+#[cfg(test)]
+#[path = "deletion_tree_tests.rs"]
+mod tree_tests;

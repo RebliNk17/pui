@@ -137,6 +137,17 @@ test('Plan blocks writes, scripts, codemode and delegation regardless of approva
   for(const command of ['ls; touch hacked','ls $(touch hacked)','git diff','find . -exec sh {} \\;','python -c pass','ls > file'])assert.equal((await h.gate('bash',{command})).block,true);
   assert.equal(h.prompts.length,0);assert.equal(h.calls.length,0);
 });
+test('read-only workers can report to their parent in every mode without gaining mutation tools', async () => {
+  for (const mode of ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions']) {
+    const h = host(mode, {readonly:true});
+    assert.equal(await h.gate('pui_message_agent', {agent_id:'parent',message:'Blocker found'}), undefined);
+    for (const tool of ['bash','write','edit','pui_spawn_agent','pui_stop_agent','codemode']) {
+      assert.equal((await h.gate(tool, {})).block, true, `${mode}: ${tool}`);
+    }
+    assert.equal(h.prompts.length, 0);
+    assert.equal(h.calls.length, 0);
+  }
+});
 test('Don’t ask grants bounded local operations and denies all prompts',async()=>{
   const h=host('dontAsk',{approve:true});
   assert.equal(await h.gate('write',{path:'src/local'}),undefined);
