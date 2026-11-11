@@ -115,7 +115,7 @@ impl Settings {
 mod appearance;
 mod page;
 mod resources;
-pub(super) use page::View;
+pub(super) use page::{View, search_entries};
 
 #[cfg(test)]
 mod tests {

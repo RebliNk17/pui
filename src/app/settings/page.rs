@@ -88,6 +88,100 @@ impl Page {
             .contains(query)
     }
 }
+pub(in crate::app) struct SearchEntry {
+    pub title: &'static str,
+    pub page: &'static str,
+    pub keywords: &'static str,
+}
+
+/// Curated setting labels and aliases only; never search credentials/config values.
+pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
+    let mut entries: Vec<_> = Page::ALL
+        .into_iter()
+        .map(|page| SearchEntry {
+            title: page.title(),
+            page: page.title(),
+            keywords: page.keywords(),
+        })
+        .collect();
+    for (title, page, keywords) in [
+        (
+            "Messages while working",
+            "General",
+            "steer queue delivery enter",
+        ),
+        (
+            "Auto compact at",
+            "General",
+            "context summarizing tokens threshold percentage compaction",
+        ),
+        (
+            "Keep recent context",
+            "General",
+            "tokens summarize retention",
+        ),
+        (
+            "Worker concurrency ceiling",
+            "General",
+            "agents subagents parallel limit",
+        ),
+        (
+            "Theme mode and colors",
+            "Appearance",
+            "dark light styles midnight ivory forest sage plum rose classic",
+        ),
+        ("Session sidebar", "Appearance", "layout show hide panel"),
+        (
+            "Inspector layout",
+            "Appearance",
+            "detail cards reset workspace",
+        ),
+        ("Interface scale", "Appearance", "zoom font text size"),
+        (
+            "Completion sound",
+            "Notifications",
+            "audio alerts finished deleted chat",
+        ),
+        (
+            "OS notification",
+            "Notifications",
+            "desktop banner macos access permission",
+        ),
+        (
+            "Permission mode",
+            "Permissions",
+            "manual auto accept edits plan dont ask bypass classifier safety approval tools",
+        ),
+        (
+            "Models and thinking levels",
+            "Models",
+            "reasoning effort pricing context",
+        ),
+        (
+            "Provider authentication",
+            "Providers",
+            "login credentials connected model catalog",
+        ),
+        (
+            "Skills and extensions",
+            "Resources",
+            "install packages prompts templates plugins themes",
+        ),
+        (
+            "MCP servers",
+            "Resources",
+            "tools http stdio connections configuration",
+        ),
+    ] {
+        entries.push(SearchEntry {
+            title,
+            page,
+            keywords,
+        });
+    }
+    entries
+}
+
 #[derive(Default)]
 pub(in crate::app) struct View {
     page: Page,
@@ -714,7 +808,7 @@ impl Pui {
         card(ui, |ui| {
             for (index, (title, keys)) in [
                 ("Open settings", vec![cmd, ","]),
-                ("Search sessions", vec![cmd, "K"]),
+                ("Search chats, messages and settings", vec![cmd, "K"]),
                 ("Toggle sidebar", vec![cmd, "B"]),
                 ("Toggle inspector", vec![cmd, "I"]),
                 ("New conversation", vec![cmd, "N"]),

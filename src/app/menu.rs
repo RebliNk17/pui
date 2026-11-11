@@ -245,12 +245,7 @@ impl Pui {
                 };
                 ctx.input_mut(|i| i.events.push(event));
             }
-            Search => {
-                self.settings_open = false;
-                self.prefs.hide_sidebar = false;
-                self.focus_search = true;
-                self.focus_composer = false;
-            }
+            Search => self.open_search(),
             DarkTheme | LightTheme => {
                 self.prefs.theme = if command == DarkTheme {
                     theme::Theme::Dark

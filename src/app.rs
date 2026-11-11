@@ -26,6 +26,7 @@ mod prompts;
 mod questions;
 mod rewind;
 mod run_status;
+mod search;
 mod session_layout;
 mod settings;
 mod sidebar;
@@ -145,6 +146,7 @@ pub struct Pui {
     _paste_monitor: Option<attachments::PasteMonitor>,
     search: String,
     search_open: bool,
+    spotlight: search::Search,
     projects: bool,
     model_picker_open: bool,
     model_anchor: Option<(egui::Rect, egui::LayerId)>,
@@ -264,6 +266,7 @@ impl Pui {
             _paste_monitor: paste_monitor,
             search: String::new(),
             search_open: false,
+            spotlight: Default::default(),
             projects,
             model_picker_open: false,
             model_anchor: None,
@@ -318,6 +321,10 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            if options.demo_search {
+                app.search = "context".into();
+                app.open_search();
+            }
             if options.demo_languages {
                 app.state.session_name = "Language glyph preview".into();
                 app.state.messages = vec![Message {
@@ -1608,6 +1615,8 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.remember_navigation();
         self.poll();
+        self.search_jump();
+        self.search_inputs(ctx);
         self.navigation_inputs(ctx);
         self.menu_commands(ctx);
         if self.screenshot.is_none() || self.agents.close_prompt {
@@ -1618,7 +1627,8 @@ impl eframe::App for Pui {
             || self.history_view.is_open()
             || self.deletion.confirming()
             || self.menu.about
-            || self.updates.open;
+            || self.updates.open
+            || self.search_open;
         let terminal_input = !self.settings_open
             && !self.kanban.open
             && !self.automation.open
@@ -1669,25 +1679,13 @@ impl eframe::App for Pui {
             self.prefs.hide_inspector = !self.prefs.hide_inspector;
         }
         if !self.settings_open
-            && (!terminal_input || cfg!(target_os = "macos"))
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K))
-        {
-            self.prefs.hide_sidebar = false;
-            self.focus_search = true;
-            self.focus_composer = false;
-        }
-        if !self.settings_open
             && !confirming
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
         {
             self.new_session();
         }
-        let searching = self.search_open
-            && ctx.memory(|memory| {
-                let id = egui::Id::new("session-search");
-                memory.has_focus(id) || memory.had_focus_last_frame(id)
-            });
+        let searching = self.search_open;
         let leaving_board = !searching
             && !confirming
             && !self.settings_open
@@ -1787,6 +1785,7 @@ impl eframe::App for Pui {
             && !theater
             && !confirming
             && !self.model_picker_open
+            && !self.search_open
             && self.state.dialogs.is_empty()
             && self.selected_diff.is_none()
             && !egui::Popup::is_any_open(ctx)
@@ -1797,6 +1796,7 @@ impl eframe::App for Pui {
         }
         self.process_open_links(ctx);
         self.deletion_dialog(ctx);
+        self.spotlight(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
         self.remember_navigation();

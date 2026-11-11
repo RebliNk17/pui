@@ -52,6 +52,7 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
         "src/app/confirmations.rs",
         "src/app/about.rs",
         "src/app/updates.rs",
+        "src/app/search.rs",
         "src/app/settings/resources/dialogs.rs",
     ] {
         let source = std::fs::read_to_string(root.join(path)).expect("read prompt source");

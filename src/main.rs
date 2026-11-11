@@ -34,6 +34,7 @@ pub struct Options {
     pub demo_collapsed: bool,
     pub demo_theater: bool,
     pub demo_model_picker: bool,
+    pub demo_search: bool,
     pub demo_compacting: bool,
     pub demo_working: bool,
     pub demo_settings: bool,
@@ -81,6 +82,10 @@ fn main() -> eframe::Result {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--demo" => options.demo = true,
+            "--demo-search" => {
+                options.demo = true;
+                options.demo_search = true;
+            }
             "--demo-languages" => {
                 options.demo = true;
                 options.demo_languages = true;

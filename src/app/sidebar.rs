@@ -85,8 +85,8 @@ impl Pui {
                         self.session_list_controls(ui);
                     });
                 });
-                self.session_search(ui);
-                let query = self.search.trim().to_lowercase();
+                // Spotlight is an overlay, never part of the sidebar layout.
+                let query = String::new();
                 let mut visible: Vec<_> = branches
                     .iter()
                     .enumerate()
@@ -454,75 +454,20 @@ impl Pui {
                     ui.radio_value(&mut self.prefs.session_order.reverse, false, ascending);
                     ui.radio_value(&mut self.prefs.session_order.reverse, true, descending);
                 });
-            let search = icons::button(ui, Icon::Search, "Search sessions · ⌘K / Ctrl+K");
+            let search = icons::button(
+                ui,
+                Icon::Search,
+                "Search chats, messages and settings · ⌘K / Ctrl+K",
+            );
             search.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search sessions")
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Search")
             });
             if search.clicked() {
-                self.search_open = true;
-                self.focus_search = true;
-                self.focus_composer = false;
-            }
-            if !self.search.is_empty() {
-                ui.painter().circle_filled(
-                    search.rect.right_bottom() - egui::vec2(5.0, 5.0),
-                    2.0,
-                    theme::palette(ui.ctx()).accent,
-                );
+                self.open_search();
             }
             [sort, view, search]
         })
         .inner
-    }
-
-    fn session_search(&mut self, ui: &mut egui::Ui) {
-        if self.focus_search || !self.search.is_empty() {
-            self.search_open = true;
-        }
-        if !self.search_open {
-            return;
-        }
-        let colors = theme::palette(ui.ctx());
-        egui::Frame::new()
-            .fill(colors.bg)
-            .stroke(Stroke::new(1.0, colors.border))
-            .corner_radius(7)
-            .inner_margin(6)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    icons::inline(ui, Icon::Search, colors.dim);
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .id(egui::Id::new("session-search"))
-                            .hint_text("Search sessions")
-                            .font(FontId::proportional(12.0))
-                            .frame(false)
-                            .desired_width((ui.available_width() - 24.0).max(20.0)),
-                    );
-                    if self.focus_search {
-                        search.request_focus();
-                        self.focus_search = false;
-                    }
-                    let escape = prompt_ui::keyboard_available(ui)
-                        && (search.has_focus() || search.lost_focus())
-                        && ui.input_mut(|input| {
-                            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                        });
-                    let close = ui
-                        .scope(|ui| {
-                            ui.spacing_mut().interact_size.y = 20.0;
-                            icons::button(ui, Icon::Close, "Clear and close search · Esc").clicked()
-                        })
-                        .inner;
-                    if close || escape {
-                        self.search.clear();
-                        self.search_open = false;
-                        search.surrender_focus();
-                    }
-                });
-            });
-        ui.add_space(4.0);
     }
 
     fn begin_rename(&mut self, path: PathBuf) {
@@ -1689,14 +1634,15 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
+                app.search_inputs(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             rects = app.session_list_controls(ui).map(|r| r.rect);
                         });
                     });
-                    app.session_search(ui);
                 });
+                app.spotlight(ctx);
             },
         );
         (output, rects)
@@ -1786,7 +1732,7 @@ mod tests {
         assert!(!egui::Popup::is_any_open(&ctx));
     }
     #[test]
-    fn search_icon_and_shortcut_reveal_focus_and_clear_the_inline_search() {
+    fn search_icon_and_shortcut_reveal_focus_and_close_spotlight() {
         for theme in [theme::Theme::Light, theme::Theme::Dark] {
             let ctx = egui::Context::default();
             let mut app = app(&ctx);
@@ -1801,7 +1747,7 @@ mod tests {
             click_control(&ctx, &mut app, 2);
             assert!(app.search_open && !app.focus_search);
             let (output, _) = controls_frame(&ctx, &mut app, vec![]);
-            assert!(label_rect(&output, "Search sessions").is_some());
+            assert!(label_rect(&output, "Search everything…").is_some());
             controls_frame(&ctx, &mut app, vec![egui::Event::Text("sidebar".into())]);
             assert_eq!(app.search, "sidebar");
             controls_frame(&ctx, &mut app, vec![key(egui::Key::Escape)]);
@@ -1817,10 +1763,7 @@ mod tests {
             assert!(app.search_open && !app.focus_search);
             controls_frame(&ctx, &mut app, vec![egui::Event::Text("shortcut".into())]);
             assert_eq!(app.search, "shortcut");
-            // Click the close button at the right of the search field.
-            let (_, controls) = controls_frame(&ctx, &mut app, vec![]);
-            let pos = egui::pos2(controls[1].right() - 16.0, controls[1].bottom() + 22.0);
-            click_controls_at(&ctx, &mut app, pos);
+            click_label(&ctx, &mut app, "Close");
             assert!(!app.search_open && app.search.is_empty());
         }
     }
@@ -1834,20 +1777,16 @@ mod tests {
                 app.prefs.color_styles.apply(&ctx, theme);
                 ctx.set_zoom_factor(zoom);
                 let size = egui::vec2(220.0, 600.0);
-                app.focus_search = true;
                 for _ in 0..3 {
                     controls_frame_sized(&ctx, &mut app, vec![], size);
                 }
-                let (output, controls) = controls_frame_sized(&ctx, &mut app, vec![], size);
-                let search = label_rect(&output, "Search sessions").unwrap();
-                assert!(search.left() >= 0.0 && search.right() <= 220.0);
+                let (_, controls) = controls_frame_sized(&ctx, &mut app, vec![], size);
                 assert!(
                     controls
                         .iter()
                         .all(|rect| rect.left() >= 0.0 && rect.right() <= 220.0),
                     "{controls:?} at zoom {zoom}"
                 );
-                assert!(search.top() > controls[2].bottom());
                 for (index, heading, last) in [
                     (0, "SORT BY", "Least recent first"),
                     (1, "GROUP BY", "Hidden chats"),
@@ -2039,7 +1978,10 @@ mod tests {
             assert!(!app.prefs.chats[&path].pinned);
             let output = frame(&ctx, &mut app, vec![]);
             assert!(label_rect(&output, "PINNED").is_none());
-            assert!(label_rect(&output, "Permanent favorite").is_none());
+            assert!(
+                label_rect(&output, "Permanent favorite").is_some(),
+                "Unpinned hidden chats remain in the explicit Hidden chats view; Spotlight no longer filters the sidebar"
+            );
         }
     }
     #[test]
@@ -2142,8 +2084,8 @@ mod tests {
                 frame(&ctx, &mut app, vec![]);
                 let output = frame(&ctx, &mut app, vec![]);
                 assert!(label_rect(&output, "Today").is_some());
-                assert!(label_rect(&output, "Yesterday").is_none());
-                assert!(label_rect(&output, "Older").is_none());
+                assert!(label_rect(&output, "Yesterday").is_some());
+                assert!(label_rect(&output, "Older").is_some());
                 app.search.clear();
 
                 // Creation sorting uses creation time, never activity fallback.

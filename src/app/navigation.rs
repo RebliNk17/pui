@@ -175,7 +175,8 @@ impl Pui {
     }
 
     fn navigation_blocked(&self) -> bool {
-        self.agents.close_prompt
+        self.search_open
+            || self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
             || self.deletion.confirming()
@@ -315,6 +316,57 @@ impl Pui {
         self.focus_search = false;
         self.ctx.request_repaint();
         true
+    }
+
+    /// Resolve Spotlight hits through the same owner-preserving navigation path.
+    pub(super) fn open_search_candidate(&mut self, candidate: &search::Candidate) -> bool {
+        if self.search_blocked() {
+            return false;
+        }
+        self.remember_navigation();
+        let mut location = self.navigation_location();
+        location.page = Page::Chat;
+        location.task = None;
+        location.file_target = None;
+        location.terminal = None;
+        match &candidate.target {
+            sidebar_tree::Target::Task(task, run) => {
+                location.page = Page::Task {
+                    task: task.clone(),
+                    run: run.clone(),
+                };
+            }
+            sidebar_tree::Target::Agent(id) => {
+                // An unsaved current chat must keep its anonymous identity.
+                if id != &self.agents.active || candidate.path != location.chat.path {
+                    location.chat = Chat {
+                        agent: id.clone(),
+                        anonymous: None,
+                        path: candidate.path.clone(),
+                        cwd: candidate.cwd.clone(),
+                        title: candidate.title.clone(),
+                    };
+                }
+            }
+            sidebar_tree::Target::Session(_) | sidebar_tree::Target::Saved(_) => {
+                location.chat = Chat {
+                    agent: candidate
+                        .path
+                        .as_deref()
+                        .and_then(|path| self.agent_for_path(path))
+                        .unwrap_or_default(),
+                    anonymous: None,
+                    path: candidate.path.clone(),
+                    cwd: candidate.cwd.clone(),
+                    title: candidate.title.clone(),
+                };
+            }
+        }
+        let restored = self.restore_location(&location);
+        if restored {
+            self.remember_navigation();
+        }
+        restored
     }
 
     pub(super) fn navigate_history(&mut self, forward: bool) {

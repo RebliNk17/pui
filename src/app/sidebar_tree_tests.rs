@@ -460,7 +460,7 @@ fn disclosure_keyboard_toggles_without_switching_chat() {
     assert_eq!(app.agents.active, root);
 }
 #[test]
-fn collapse_hides_the_whole_subtree_and_search_reveals_ancestors() {
+fn collapse_hides_the_whole_subtree_but_spotlight_finds_child_names() {
     let mut app = fixture();
     let tree = forest(&app);
     app.prefs.closed_threads.insert(tree[0].key.clone());
@@ -478,8 +478,14 @@ fn collapse_hides_the_whole_subtree_and_search_reveals_ancestors() {
         labels(&s.shape, &mut text);
     }
     assert!(text.iter().any(|(s, _)| s == "Parent agent"));
-    assert!(text.iter().any(|(s, _)| s == "Inspect model capabilities"));
+    assert!(!text.iter().any(|(s, _)| s == "Inspect model capabilities"));
     assert!(!text.iter().any(|(s, _)| s == "Review UI interactions"));
+    let children: Vec<_> = forest(&app).into_iter().flat_map(|b| b.children).collect();
+    assert!(
+        children
+            .iter()
+            .any(|child| child.title == "Inspect model capabilities" && child.matches(&app.search))
+    );
 }
 #[test]
 fn task_runs_open_under_their_creator_and_old_unlinked_runs_get_a_task_group() {

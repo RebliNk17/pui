@@ -118,6 +118,63 @@ impl Tasks {
         result.errors = Some(error_rx);
         result
     }
+    pub(super) fn search_dialogs_pending(&self) -> bool {
+        self.processes.iter().any(|p| !p.state.dialogs.is_empty())
+    }
+    pub(super) fn search_state(&self, run: &str) -> Option<&State> {
+        self.processes
+            .iter()
+            .find(|p| p.run == run)
+            .map(|p| &p.state)
+            .or_else(|| self.histories.get(run))
+    }
+    pub(super) fn search_revision(&self) -> u64 {
+        self.processes
+            .iter()
+            .map(|p| {
+                p.state
+                    .transcript_revision
+                    .wrapping_add(p.state.prose_revision)
+                    .wrapping_add(p.state.messages.len() as u64)
+            })
+            .chain(self.histories.values().map(|s| {
+                s.transcript_revision
+                    .wrapping_add(s.prose_revision)
+                    .wrapping_add(s.messages.len() as u64)
+            }))
+            .fold(0, u64::wrapping_add)
+    }
+    pub(super) fn search_jump(
+        &mut self,
+        task: &str,
+        run: &str,
+        role: &str,
+        timestamp: i64,
+        fingerprint: u64,
+    ) -> bool {
+        if self.selected.as_deref() != Some(task) || self.selected_run.as_deref() != Some(run) {
+            return true;
+        }
+        let Some(state) = self.search_state(run) else {
+            return false;
+        };
+        let indices: Vec<_> = state
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.role == role
+                    && m.timestamp == timestamp
+                    && super::search::text_fingerprint(&m.text) == fingerprint
+            })
+            .map(|(index, _)| index)
+            .take(2)
+            .collect();
+        if indices.len() == 1 {
+            self.transcript.jump_to_message(indices[0]);
+        }
+        true
+    }
     pub(super) fn loading_history(&self) -> bool {
         self.loaded.is_some()
     }

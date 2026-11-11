@@ -78,6 +78,12 @@ pub(super) struct Chat {
     pending_dialog: Option<String>,
 }
 impl Chat {
+    pub(super) fn search_state(&self) -> Option<&State> {
+        // Restored placeholders have a path but no loaded transcript. Loaded
+        // empty branches are authoritative and must not fall back to disk.
+        (self.client.is_some() || self.connected || !self.state.messages.is_empty())
+            .then_some(&self.state)
+    }
     pub(super) fn deletion_busy(&self) -> bool {
         self.loading
             || self.history_pending.is_some()

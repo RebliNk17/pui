@@ -189,6 +189,10 @@ impl Transcript {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
+    /// Jump to the containing turn after layout, including viewport-culled messages.
+    pub fn jump_to_message(&mut self, index: usize) {
+        self.restore = Some((index, 0.0));
+    }
     /// Keep the same visible turn when the saved tail is replaced by full RPC history.
     pub fn replace_history(&mut self, old: &[Message], new: &[Message]) {
         let at_bottom = self.total - self.viewport - self.scroll < 32.0;
