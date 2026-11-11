@@ -413,6 +413,7 @@ impl Pui {
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
         }
+        self.leave_session_layout();
         // An empty workspace (for example after deletion) is not a chat.
         if !self.agents.active.is_empty()
             || self.client.is_some()
@@ -426,6 +427,7 @@ impl Pui {
         self.agents.active = id.into();
         self.put_chat(next);
         self.prefs.cwd = self.agents.nodes[id].cwd.clone();
+        self.enter_session_layout();
         if self.client.is_none() && self.agents.nodes[id].path.is_some() {
             if self.agents.nodes[id].parent.is_some() {
                 self.resume_agent();
@@ -571,6 +573,7 @@ impl Pui {
         if self.agents.active.is_empty() {
             return;
         }
+        self.leave_session_layout();
         let id = self.agents.active.clone();
         let chat = self.take_chat();
         self.agents.parked.insert(id, chat);

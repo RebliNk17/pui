@@ -22,7 +22,7 @@ impl Browser {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if (self.browser_mode && self.urls.is_empty())
-                        || (!self.browser_mode && self.tabs.is_empty())
+                        || (!self.browser_mode && self.tabs.iter().all(|tab| is_html(&tab.path)))
                     {
                         ui.label(
                             RichText::new(if self.browser_mode {
@@ -44,12 +44,14 @@ impl Browser {
                                     let count = if self.browser_mode {
                                         self.urls.len()
                                     } else {
-                                        self.tabs.len()
+                                        self.tabs.iter().filter(|tab| !is_html(&tab.path)).count()
                                     };
                                     let width = ((tabs_width - 36.0) / count.max(1) as f32)
                                         .clamp(120.0, 200.0);
                                     for (index, file) in
-                                        self.tabs.iter().enumerate().filter(|_| !self.browser_mode)
+                                        self.tabs.iter().enumerate().filter(|(_, file)| {
+                                            !self.browser_mode && !is_html(&file.path)
+                                        })
                                     {
                                         let title = file
                                             .path
@@ -137,9 +139,9 @@ impl Browser {
             self.browser_mode = false;
         }
         if let Some(url) = select_url {
-            self.address = self.web.location(&url).unwrap_or_else(|| url.clone());
             self.selected_url = Some(url);
             self.browser_mode = true;
+            self.restore_address();
         }
         if let Some(index) = close_url {
             self.close_url_tab(index);
@@ -167,7 +169,10 @@ impl Browser {
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if let Some(key) = &page {
+                    if let Some(key) = page
+                        .as_ref()
+                        .filter(|key| super::super::webview::web_url(key))
+                    {
                         self.web.navigation(ui, key);
                     } else if chrome::icon_button(
                         ui,

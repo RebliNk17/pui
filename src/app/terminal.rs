@@ -32,6 +32,15 @@ impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
+    pub(super) fn layout(&self) -> (bool, bool) {
+        (self.open, self.expanded)
+    }
+    pub(super) fn set_layout(&mut self, ctx: &egui::Context, (open, expanded): (bool, bool)) {
+        self.close(ctx);
+        self.open = open;
+        self.expanded = expanded;
+        self.confirm_stop = false;
+    }
     pub(super) fn navigation_state(&self) -> Option<bool> {
         self.open.then_some(self.expanded)
     }

@@ -226,9 +226,14 @@ pub(super) struct Engine {
     tabs: BTreeMap<String, Tab>,
     active: String,
     // Runtime drops after tabs, not before their asynchronous close callbacks.
-    runtime: Option<crate::chromium::Runtime>,
+    runtime: Option<std::rc::Rc<crate::chromium::Runtime>>,
     initialization_error: Option<String>,
 }
+thread_local! {
+    // CEF is process-global; session-local engines must share its lifetime.
+    static RUNTIME: std::cell::RefCell<std::rc::Weak<crate::chromium::Runtime>> = Default::default();
+}
+
 impl Engine {
     pub fn focused(&self) -> bool {
         self.tabs.values().any(|tab| {
@@ -325,7 +330,15 @@ impl Engine {
             return Err(error.clone());
         }
         if self.runtime.is_none() {
-            match crate::chromium::Runtime::initialize(ctx) {
+            let runtime = RUNTIME.with(|shared| {
+                if let Some(runtime) = shared.borrow().upgrade() {
+                    return Ok(runtime);
+                }
+                let runtime = std::rc::Rc::new(crate::chromium::Runtime::initialize(ctx)?);
+                *shared.borrow_mut() = std::rc::Rc::downgrade(&runtime);
+                Ok::<_, String>(runtime)
+            });
+            match runtime {
                 Ok(runtime) => self.runtime = Some(runtime),
                 Err(error) => {
                     self.initialization_error = Some(error.clone());
@@ -367,11 +380,8 @@ impl Engine {
             let settings = BrowserSettings {
                 javascript_access_clipboard: State::DISABLED,
                 javascript_dom_paste: State::DISABLED,
-                javascript: if url.is_some() {
-                    State::DEFAULT
-                } else {
-                    State::DISABLED
-                },
+                // Local HTML is constrained by its opaque origin/CSP, not by disabling JS.
+                javascript: State::DEFAULT,
                 ..Default::default()
             };
             let mut handler = crate::chromium::context_handler();

@@ -209,6 +209,7 @@ impl Pui {
         self.connect(&self.ctx.clone(), None);
         let id = self.ensure_agent();
         self.agents.nodes.get_mut(&id).unwrap().name = "New conversation".into();
+        self.enter_session_layout();
         self.focus_composer = true;
         self.refresh_sessions();
     }

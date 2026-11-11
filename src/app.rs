@@ -26,6 +26,7 @@ mod prompts;
 mod questions;
 mod rewind;
 mod run_status;
+mod session_layout;
 mod settings;
 mod sidebar;
 mod sidebar_order;
@@ -168,6 +169,7 @@ pub struct Pui {
     output_revision: u64,
     inspector_panel: bool,
     files: files::Browser,
+    session_layouts: session_layout::SessionLayouts,
     terminals: terminal::Terminals,
     changes: changes::Changes,
     diff_rx: Option<Receiver<(String, String)>>,
@@ -293,6 +295,7 @@ impl Pui {
             output_revision: u64::MAX,
             inspector_panel: false,
             files: Default::default(),
+            session_layouts: Default::default(),
             terminals: Default::default(),
             changes: Default::default(),
             diff_rx: None,
@@ -649,6 +652,7 @@ impl Pui {
             self.prefs.cwd = session.cwd;
             self.connect(&self.ctx.clone(), Some(path));
             self.ensure_agent();
+            self.enter_session_layout();
             return;
         }
         if self.pending_session.as_ref() == Some(&path)
@@ -669,6 +673,7 @@ impl Pui {
             && self.client.is_some()
             && self.prefs.cwd == session.cwd
             && !self.sync.enabled();
+        self.leave_session_layout();
         self.prefs.cwd = session.cwd;
         self.workspace_rx = None;
         if reuse {
@@ -695,6 +700,7 @@ impl Pui {
         } else {
             self.connect(&self.ctx.clone(), Some(path));
         }
+        self.enter_session_layout();
         self.draft.clear();
         self.focus_composer = true;
         self.draft_images.clear();

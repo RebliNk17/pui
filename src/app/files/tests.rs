@@ -357,6 +357,98 @@ fn explicit_open_supports_tmp_reports_and_deduplicates_tabs() {
 }
 
 #[test]
+fn local_html_uses_browser_tabs_and_retains_file_selection_and_source() {
+    for theme in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.prefs.theme = theme;
+        let root = app.prefs.cwd.clone();
+        let html = root.join("preview.HTML");
+        fs::write(
+            &html,
+            "<button onclick=\"this.textContent='Clicked'\">Click</button>",
+        )
+        .unwrap();
+        app.files.open_target(&ctx, &root, "README.md").unwrap();
+        let file = app.files.navigation_target();
+        app.files
+            .open_target(&ctx, &root, &html.display().to_string())
+            .unwrap();
+        settle(&mut app.files);
+        assert!(app.files.browser_open());
+        assert!(!app.files.files_open());
+        assert_eq!(app.files.urls, [html.display().to_string()]);
+        frame(&ctx, &mut app, vec![]);
+        let output = frame(&ctx, &mut app, vec![]);
+        assert!(
+            app.files
+                .web_preview
+                .as_ref()
+                .unwrap()
+                .html
+                .as_ref()
+                .unwrap()
+                .contains("onclick")
+        );
+        assert!(app.files.web_preview.as_ref().unwrap().url.is_none());
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.job.text.contains("Search files"))));
+        click(&ctx, &mut app, text(&output, "Source"));
+        let output = frame(&ctx, &mut app, vec![]);
+        text(&output, "onclick");
+        assert!(app.files.web_preview.is_none());
+        app.files.toggle(&ctx, &root);
+        assert_eq!(app.files.navigation_target(), file);
+        app.files.toggle_browser(&ctx, &root);
+        app.files.close_active_browser_tab();
+        assert!(app.files.urls.is_empty());
+        assert_eq!(app.files.tabs.len(), 1);
+    }
+}
+
+#[test]
+fn session_switch_restores_html_tabs_expansion_and_clears_stale_native_rect() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let root = app.prefs.cwd.clone();
+    let html = root.join("report.html");
+    fs::write(&html, "<h1>Session A</h1>").unwrap();
+    app.state.session_file = Some("/fixture/browser-a".into());
+    let a = app.ensure_agent();
+    app.files
+        .open_target(&ctx, &root, &html.display().to_string())
+        .unwrap();
+    app.files.expanded = true;
+    settle(&mut app.files);
+    frame(&ctx, &mut app, vec![]);
+    assert!(app.files.web_preview.is_some());
+    app.park_tree();
+    assert!(app.files.web_preview.is_none());
+    app.state.session_file = Some("/fixture/browser-b".into());
+    let b = app.ensure_agent();
+    app.enter_session_layout();
+    assert!(!app.files.is_open());
+    app.files.open_target(&ctx, &root, "README.md").unwrap();
+    app.view_agent(&a);
+    assert!(app.files.browser_open());
+    assert!(app.files.expanded);
+    assert_eq!(
+        app.files.selected_url.as_deref(),
+        Some(html.to_str().unwrap())
+    );
+    assert!(
+        app.files.web_preview.is_none(),
+        "Never reuse the previous session's native-view rect"
+    );
+    frame(&ctx, &mut app, vec![]);
+    assert!(app.files.web_preview.is_some());
+    app.view_agent(&b);
+    assert!(app.files.files_open());
+    assert!(!app.files.expanded);
+    assert!(app.files.urls.is_empty());
+    assert!(app.files.web_preview.is_none());
+}
+
+#[test]
 fn explicit_open_blocks_sensitive_aliases_and_handles_missing_or_binary_files() {
     let root = fixture();
     let outside = fixture();

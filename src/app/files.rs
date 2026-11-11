@@ -145,6 +145,8 @@ impl Browser {
     fn close_url_tab(&mut self, index: usize) {
         let url = self.urls.remove(index);
         self.web.close(&url);
+        self.tabs
+            .retain(|tab| tab.path.to_string_lossy() != url.as_str());
         if self.selected_url.as_ref() == Some(&url) {
             self.selected_url = self
                 .urls
@@ -194,7 +196,13 @@ impl Browser {
         self.address = if self.browser_mode {
             self.selected_url
                 .as_ref()
-                .map(|key| self.web.location(key).unwrap_or_else(|| key.clone()))
+                .map(|key| {
+                    if super::webview::web_url(key) {
+                        self.web.location(key).unwrap_or_else(|| key.clone())
+                    } else {
+                        key.clone()
+                    }
+                })
                 .unwrap_or_default()
         } else {
             self.selected
@@ -271,16 +279,30 @@ impl Browser {
     }
 
     fn select_file(&mut self, ctx: &egui::Context, path: PathBuf, external: bool) {
-        self.browser_mode = false;
-        self.selected = Some(path.clone());
-        self.address = path.display().to_string();
+        self.browser_mode = is_html(&path);
+        if !self.browser_mode {
+            self.selected = Some(path.clone());
+        }
+        let key = path.display().to_string();
         self.web.hide();
+        if self.browser_mode {
+            if !self.urls.contains(&key) {
+                if self.urls.len() >= MAX_TABS {
+                    self.close_url_tab(0);
+                }
+                self.urls.push(key.clone());
+            }
+            self.selected_url = Some(key.clone());
+        }
+        self.address = key;
         if self.tabs.iter().any(|tab| tab.path == path) {
             return;
         }
         if self.tabs.len() == MAX_TABS {
             let old = self.tabs.remove(0);
-            self.web.close(&old.path.display().to_string());
+            let key = old.path.display().to_string();
+            self.web.close(&key);
+            self.urls.retain(|url| url != &key);
         }
         let root = self.root.clone();
         let ctx = ctx.clone();
@@ -305,7 +327,8 @@ impl Browser {
         if self.selected.as_ref() == Some(&tab.path) {
             self.selected = self
                 .tabs
-                .get(index.min(self.tabs.len().saturating_sub(1)))
+                .iter()
+                .find(|tab| !is_html(&tab.path))
                 .map(|tab| tab.path.clone());
             self.restore_address();
         }
@@ -320,7 +343,15 @@ impl Browser {
         for path in paths {
             self.load_directory(ctx, path);
         }
-        if let Some(path) = self.selected.clone() {
+        let path = if self.browser_mode {
+            self.selected_url
+                .as_ref()
+                .filter(|key| !super::webview::web_url(key))
+                .map(PathBuf::from)
+        } else {
+            self.selected.clone()
+        };
+        if let Some(path) = path {
             if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
                 let external = self.tabs.remove(index).external;
                 self.select_file(ctx, path, external);
@@ -451,6 +482,10 @@ impl Browser {
     fn poll(&mut self) {
         if self.browser_mode
             && let Some(location) = self.web.take_location()
+            && self
+                .selected_url
+                .as_deref()
+                .is_some_and(super::webview::web_url)
         {
             self.address = location;
         }
@@ -709,37 +744,45 @@ impl Browser {
         let colors = theme::palette(ui.ctx());
         if self.browser_mode {
             if let Some(url) = self.selected_url.clone() {
-                self.web_preview = Some(WebPreview {
-                    rect: self.web.viewport(ui, &url),
-                    key: url.clone(),
-                    url: Some(url),
-                    html: None,
+                if super::webview::web_url(&url) {
+                    self.web_preview = Some(WebPreview {
+                        rect: self.web.viewport(ui, &url),
+                        key: url.clone(),
+                        url: Some(url),
+                        html: None,
+                    });
+                    return;
+                }
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((ui.available_height() * 0.30).max(24.0));
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                    icons::draw(ui, rect, Icon::Globe, colors.dim);
+                    ui.add_space(14.0);
+                    ui.label(RichText::new("Open a page").size(18.0).color(colors.text));
+                    ui.add_space(6.0);
+                    ui.label(theme::small(
+                        ui,
+                        "Enter a URL above, including localhost development servers.",
+                    ));
+                    ui.add_space(12.0);
+                    ui.label(theme::small(
+                        ui,
+                        "Chromium · Console & DevTools · Desktop & mobile previews",
+                    ));
                 });
                 return;
             }
-            ui.vertical_centered(|ui| {
-                ui.add_space((ui.available_height() * 0.30).max(24.0));
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-                icons::draw(ui, rect, Icon::Globe, colors.dim);
-                ui.add_space(14.0);
-                ui.label(RichText::new("Open a page").size(18.0).color(colors.text));
-                ui.add_space(6.0);
-                ui.label(theme::small(
-                    ui,
-                    "Enter a URL above, including localhost development servers.",
-                ));
-                ui.add_space(12.0);
-                ui.label(theme::small(
-                    ui,
-                    "Chromium · Console & DevTools · Desktop & mobile previews",
-                ));
-            });
-            return;
         }
+        let path = if self.browser_mode {
+            self.selected_url.as_ref().map(PathBuf::from)
+        } else {
+            self.selected.clone()
+        };
         let Some(tab) = self
             .tabs
             .iter_mut()
-            .find(|tab| Some(&tab.path) == self.selected.as_ref())
+            .find(|tab| Some(&tab.path) == path.as_ref())
         else {
             ui.vertical_centered(|ui| {
                 ui.add_space(((ui.available_height() - 180.0) / 2.0).max(20.0));
@@ -788,7 +831,7 @@ impl Browser {
                     if html {
                         ui.label(theme::small(
                             ui,
-                            "Safe preview · scripts & network disabled",
+                            "Isolated preview · scripts enabled · network disabled",
                         ));
                     }
                 });
@@ -803,7 +846,7 @@ impl Browser {
                 }
                 Some(Ok(Content::Text(content))) if html && !tab.source => {
                     self.web_preview = Some(WebPreview {
-                        rect: ui.available_rect_before_wrap(),
+                        rect: self.web.viewport(ui, &tab.path.display().to_string()),
                         key: tab.path.display().to_string(),
                         url: None,
                         html: Some(content.clone()),
@@ -1102,6 +1145,12 @@ fn read_content(root: &Path, path: &Path, external: bool) -> Result<Content, Str
         )));
     }
     read_preview(parent, &path).map(Content::Text)
+}
+
+fn is_html(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+    })
 }
 
 fn read_preview(root: &Path, path: &Path) -> Result<String, String> {

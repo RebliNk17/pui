@@ -30,11 +30,11 @@ pub(super) fn local_preview_url(value: &str) -> bool {
         })
 }
 
-/// Local HTML gets no file origin, scripts, frames, forms, or network resources.
+/// Interactive local HTML has an opaque data origin and no network/file access.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn safe_html(source: &str) -> String {
     format!(
-        "<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-src 'none'\"><meta charset=\"utf-8\">{source}"
+        "<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'; frame-src 'none'\"><meta charset=\"utf-8\">{source}"
     )
 }
 
@@ -196,7 +196,12 @@ impl BrowserView {
         url::Url::parse(key)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_else(|| key.into())
+            .unwrap_or_else(|| {
+                std::path::Path::new(key)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| key.into())
+            })
     }
     pub(super) fn location(&self, key: &str) -> Option<String> {
         let location = self.state(key).location;
@@ -503,7 +508,8 @@ mod tests {
     fn local_preview_policy_precedes_untrusted_markup() {
         let html = safe_html("<script>alert(1)</script><img src='file:///etc/passwd'>");
         assert!(html.find("Content-Security-Policy").unwrap() < html.find("<script>").unwrap());
-        assert!(html.contains("script-src 'none'"));
+        assert!(html.contains("script-src 'unsafe-inline'"));
+        assert!(html.contains("connect-src 'none'"));
     }
     #[test]
     fn device_toolbar_stays_one_row_and_controls_work_at_narrow_widths() {
