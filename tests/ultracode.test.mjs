@@ -124,8 +124,26 @@ test('dynamic model router cannot invoke tools or shell even with bypass enabled
   for(const toolName of ['read','bash','write','codemode','pui_ask_questions']) assert.equal((await h.events.get('tool_call')({toolName,input:{}},h.ctx)).block,true);
   assert.equal((await h.events.get('user_bash')({command:'pwd'},h.ctx)).result.exitCode,1);
 });
-test('explicit mailbox delivery is compact, visible and non-interrupting', async () => {
-  const h = await host(); h.commands.get('pui-agent-message').handler(JSON.stringify({text:'Clarify the file ownership'}), h.ctx);
-  assert.equal(h.messages.length,1); assert.equal(h.messages[0][1].deliverAs,'followUp'); assert.equal(h.messages[0][0].display,true);
-  assert.throws(() => h.commands.get('pui-agent-message').handler(JSON.stringify({text:'x'.repeat(12001)}),h.ctx),/Invalid agent message/);
+test('agent mailbox steers busy recipients without aborting active tools', async () => {
+  for (const readonly of [false, true]) {
+    const h = await host(readonly);
+    Object.assign(h.ctx, { isIdle: () => false, abort: () => assert.fail('mail must not abort active tools') });
+    for (const text of ['Clarify the file ownership', 'Worker reader (agent-2) settled.\nBounded report with evidence']) {
+      h.commands.get('pui-agent-message').handler(JSON.stringify({text}), h.ctx);
+      assert.deepEqual(h.messages.at(-1), [
+        {customType:'pui-agent-message',content:text,display:true},
+        {triggerTurn:true,deliverAs:'steer'},
+      ]);
+    }
+    assert.equal(h.messages.length,2);
+    assert.throws(() => h.commands.get('pui-agent-message').handler(JSON.stringify({text:'x'.repeat(12001)}),h.ctx),/Invalid agent message/);
+    assert.equal(h.messages.length,2);
+  }
+});
+test('agent mailbox still wakes idle recipients', async () => {
+  const h = await host();
+  h.ctx.isIdle = () => true;
+  h.commands.get('pui-agent-message').handler(JSON.stringify({text:'Review the findings'}), h.ctx);
+  assert.equal(h.messages.length,1);
+  assert.deepEqual(h.messages[0][1], {triggerTurn:true,deliverAs:'steer'});
 });
