@@ -40,6 +40,61 @@ pub(super) fn popup(ctx: &egui::Context) -> egui::Frame {
     surface(ctx).inner_margin(10).corner_radius(10)
 }
 
+/// One hit target and one geometry for the label and switch, with a shared inset.
+pub(super) fn compact_toggle_row(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+) -> egui::Response {
+    let colors = theme::palette(ui.ctx());
+    let (target, mut response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
+    if response.clicked() && ui.is_enabled() {
+        *value = !*value;
+        response.mark_changed();
+    }
+    let content = target.shrink2(egui::vec2(7.0, 0.0));
+    ui.painter().text(
+        content.left_center(),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(11.5),
+        colors.text,
+    );
+    let rect = egui::Rect::from_center_size(
+        content.right_center() - egui::vec2(15.0, 0.0),
+        egui::vec2(30.0, 18.0),
+    );
+    ui.painter().rect_filled(
+        rect,
+        9,
+        if *value {
+            colors.switch_on
+        } else {
+            colors.switch_off
+        },
+    );
+    let x = if *value {
+        rect.right() - 9.0
+    } else {
+        rect.left() + 9.0
+    };
+    ui.painter()
+        .circle_filled(egui::pos2(x, rect.center().y), 6.5, colors.text);
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            target,
+            5,
+            Stroke::new(1.0, colors.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, title)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub(super) fn keyboard_available(ui: &egui::Ui) -> bool {
     ui.memory(|memory| memory.is_above_modal_layer(ui.layer_id()))
 }

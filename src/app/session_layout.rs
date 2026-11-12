@@ -36,6 +36,7 @@ impl Pui {
     }
 
     pub(super) fn leave_session_layout(&mut self) {
+        self.close_model_popovers();
         self.files.hide_web();
         self.files.begin_frame();
         let panels = PANELS

@@ -879,6 +879,21 @@ impl Memory {
         self.focus_mut().focused_widget = Some(FocusWidget::new(id));
     }
 
+    /// Give focus and install its event filter atomically, including on the first frame.
+    /// Custom menu navigation needs this when transferring focus on consecutive frames.
+    pub fn request_focus_with_filter(&mut self, id: Id, filter: EventFilter) {
+        self.request_focus(id);
+        let focus = self.focus_mut();
+        // The caller has already handled directional navigation this pass.
+        // Do not apply a second native move based on the previous widget's filter.
+        if focus.focus_direction.is_cardinal() {
+            focus.reset_focus();
+        }
+        if let Some(focused) = &mut focus.focused_widget {
+            focused.filter = filter;
+        }
+    }
+
     /// Surrender keyboard focus for a specific widget.
     /// See also [`crate::Response::surrender_focus`].
     #[inline(always)]

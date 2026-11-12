@@ -395,6 +395,7 @@ impl Pui {
         match name.as_str() {
             "new" => self.new_session(),
             "model" => {
+                self.effort_picker_open = false;
                 self.model_picker_open = true;
                 self.model_picker_focus = true;
                 self.model_query.clear();

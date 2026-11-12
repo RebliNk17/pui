@@ -1116,6 +1116,22 @@ impl Pui {
                 ) {
                     return Err("Unsupported shared action".into());
                 }
+                if matches!(kind, "set_model" | "set_thinking_level") {
+                    if let Some(reason) = self.model_change_blocked() {
+                        return Err(reason.into());
+                    }
+                    if kind == "set_thinking_level"
+                        && !self
+                            .state
+                            .levels
+                            .iter()
+                            .any(|level| record["level"] == *level)
+                    {
+                        return Err(
+                            "This effort level is not supported by the current model.".into()
+                        );
+                    }
+                }
                 if kind == "prompt" {
                     let message = protocol::string(&record, "message");
                     if !matches!(message, "/pui-ultracode on" | "/pui-ultracode off") {
@@ -1760,6 +1776,59 @@ mod tests {
         assert!(!mirror.agents.close_prompt);
         assert!(owner.client.is_some());
     }
+    #[test]
+    fn shared_effort_changes_route_while_busy_and_revalidate_the_owners_supported_levels() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        let (client, _events, requests) = rpc::Client::stub_with_records();
+        owner.client = Some(client);
+        owner.loading_chat = false;
+        owner.state.busy = true;
+        owner.state.levels = vec!["low".into(), "high".into()];
+        owner.state.thinking = "high".into();
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.busy && b.state.levels.len() == 2
+        });
+        mirror.send(json!({"type":"set_thinking_level","level":"low"}));
+        let received = std::cell::RefCell::new(None);
+        spin(&mut owner, &mut mirror, |_, _| {
+            if received.borrow().is_none() {
+                *received.borrow_mut() = requests.try_recv().ok();
+            }
+            received.borrow().is_some()
+        });
+        let sent = received.into_inner().unwrap();
+        assert_eq!(sent["type"], "set_thinking_level");
+        assert_eq!(sent["level"], "low");
+        assert!(owner.state.busy);
+        assert_eq!(owner.state.thinking, "high");
+        assert!(requests.try_recv().is_err());
+        assert!(
+            owner
+                .apply_remote_action(
+                    &path,
+                    0,
+                    Action::Rpc(json!({"type":"set_thinking_level","level":"xhigh"}))
+                )
+                .is_err()
+        );
+        owner.state.compacting = true;
+        assert!(
+            owner
+                .apply_remote_action(
+                    &path,
+                    0,
+                    Action::Rpc(json!({"type":"set_thinking_level","level":"low"}))
+                )
+                .is_err()
+        );
+        assert!(requests.try_recv().is_err());
+    }
+
     #[test]
     fn shared_rpc_cannot_change_sessions_or_approve_obsolete_dialogs() {
         let (directory, path) = location();

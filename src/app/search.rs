@@ -228,7 +228,7 @@ impl Pui {
             .memory_mut(|m| m.request_focus(egui::Id::new("spotlight-query")));
         self.focus_search = true;
         self.focus_composer = false;
-        self.model_picker_open = false;
+        self.close_model_popovers();
         self.spotlight.cancel();
         self.spotlight.messages = Default::default();
         self.spotlight.selected = 0;

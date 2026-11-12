@@ -116,7 +116,6 @@ pub struct Pui {
     deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
-    effort_draft: Option<(String, usize)>,
     state: State,
     client: Option<rpc::Client>,
     connected: bool,
@@ -152,6 +151,9 @@ pub struct Pui {
     spotlight: search::Search,
     projects: bool,
     model_picker_open: bool,
+    effort_picker_open: bool,
+    effort_anchor: Option<(egui::Rect, egui::LayerId)>,
+    effort_picker_focus: bool,
     model_anchor: Option<(egui::Rect, egui::LayerId)>,
     model_picker_focus: bool,
     model_query: String,
@@ -237,7 +239,6 @@ impl Pui {
             deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
-            effort_draft: None,
             state: State::default(),
             client: None,
             connected: false,
@@ -273,6 +274,9 @@ impl Pui {
             spotlight: Default::default(),
             projects,
             model_picker_open: false,
+            effort_picker_open: false,
+            effort_anchor: None,
+            effort_picker_focus: false,
             model_anchor: None,
             model_picker_focus: false,
             model_query: String::new(),
@@ -361,8 +365,9 @@ impl Pui {
                 app.state.busy = true;
                 app.state.dialogs.push_back(questions::demo_dialog());
             }
-            if options.demo_model_picker {
-                app.model_picker_open = true;
+            if options.demo_model_picker || options.demo_effort_picker {
+                app.model_picker_open = options.demo_model_picker;
+                app.effort_picker_open = options.demo_effort_picker;
                 app.ultracode_ready = true;
             }
             if options.demo_automation {
@@ -1286,6 +1291,8 @@ impl Pui {
                     self.focus_composer = false;
                 }
                 if response.has_focus()
+                    && !self.model_picker_open
+                    && !self.effort_picker_open
                     && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
                 {
                     submit = true;
@@ -1315,6 +1322,7 @@ impl Pui {
                     let (rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 28.0), Sense::hover());
                     icons::draw(ui, rect, Icon::Spark, colors.accent);
                     self.model_button(ui);
+                    self.effort_button(ui);
                     self.permission_button(ui);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let busy = !self.state.ready();
@@ -1414,7 +1422,7 @@ impl Pui {
         if let Some((anchor, layer)) = completion_anchor {
             self.completion_popup(ctx, anchor, layer);
         }
-        if submit {
+        if submit && !self.model_picker_open && !self.effort_picker_open {
             if alternate {
                 self.submit_mode(ctx, self.prefs.settings.delivery.opposite());
             } else {
@@ -1609,6 +1617,7 @@ impl eframe::App for Pui {
         self.remember_navigation();
         self.poll();
         self.search_jump();
+        self.model_picker_escape(ctx);
         self.search_inputs(ctx);
         self.navigation_inputs(ctx);
         self.menu_commands(ctx);
@@ -1637,7 +1646,7 @@ impl eframe::App for Pui {
         }
         let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
         if theater {
-            self.model_picker_open = false;
+            self.close_model_popovers();
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);
         }
@@ -1653,7 +1662,7 @@ impl eframe::App for Pui {
         );
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
             self.settings_open = !self.settings_open;
-            self.model_picker_open = false;
+            self.close_model_popovers();
         }
         if !self.settings_open
             && (!terminal_input || cfg!(target_os = "macos"))
@@ -1690,6 +1699,8 @@ impl eframe::App for Pui {
             self.focus_composer = true;
         }
         if !leaving_board
+            && !self.model_picker_open
+            && !self.effort_picker_open
             && !searching
             && !self.settings_open
             && !self.automation.open
@@ -1716,7 +1727,7 @@ impl eframe::App for Pui {
         if let Some(preview) = self.question_designs.as_mut() {
             preview.show(ctx);
         } else if self.settings_open {
-            self.model_picker_open = false;
+            self.close_model_popovers();
             self.session_settings(ctx);
         } else {
             if !self.prefs.hide_sidebar {
@@ -1766,7 +1777,11 @@ impl eframe::App for Pui {
                 }
             }
             self.dialogs(ctx);
-            self.model_picker(ctx);
+            if !central && !self.tasks.open && !confirming && !theater {
+                self.model_picker(ctx);
+            } else {
+                self.close_model_popovers();
+            }
             self.history_confirmation(ctx);
         }
         if !theater {

@@ -160,7 +160,7 @@ impl Pui {
             Updates => self.updates.start(ctx),
             Settings => {
                 self.settings_open = true;
-                self.model_picker_open = false;
+                self.close_model_popovers();
             }
             Shortcuts => {
                 self.settings_view.select("Keyboard shortcuts");

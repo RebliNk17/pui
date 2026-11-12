@@ -999,21 +999,24 @@ impl Pui {
             "Model choices and supported thinking levels come from Pi.",
         );
         let models = self.state.models.clone();
+        let blocked = self.model_change_blocked();
         card(ui, |ui| {
-            ui.scope(|ui|{
+            ui.add_enabled_ui(blocked.is_none(), |ui|{
                 row(ui,"Model","Changing the conversation model does not change Pi authentication.",|ui|{
-                    let name=if self.state.model_name.is_empty(){self.state.model.as_str()}else{self.state.model_name.as_str()};
-                    egui::ComboBox::from_id_salt("settings-model").selected_text(if name.is_empty(){"Loading models…"}else{name}).width(190.0).show_ui(ui,|ui|{
-                        for model in &models{if ui.selectable_label(model.id==self.state.model&&model.provider==self.state.provider,format!("{} · {}",model.name,model.provider)).clicked(){self.state.levels.clear();self.send(json!({"type":"set_model","provider":model.provider,"modelId":model.id}));}}
+                    egui::ComboBox::from_id_salt("settings-model").selected_text(model_picker::selected_label(&self.state)).width(190.0).show_ui(ui,|ui|{
+                        for model in &models{if ui.selectable_label(model.id==self.state.model&&model.provider==self.state.provider,format!("{} · {}",model.name,model.provider)).clicked(){self.send(json!({"type":"set_model","provider":model.provider,"modelId":model.id}));}}
                     });
                 });separator(ui);
                 row(ui,"Thinking effort","Only levels supported by the selected model are offered.",|ui|{
                     let levels=self.state.levels.clone();
-                    egui::ComboBox::from_id_salt("settings-effort").selected_text(thinking_label(&self.state.thinking)).width(120.0).show_ui(ui,|ui|{for level in levels{if ui.selectable_label(level==self.state.thinking,thinking_label(&level)).clicked(){self.send(json!({"type":"set_thinking_level","level":level}));}}});
+                    ui.add_enabled_ui(!self.state.levels.is_empty(), |ui| {egui::ComboBox::from_id_salt("settings-effort").selected_text(thinking_label(&self.state.thinking)).width(120.0).show_ui(ui,|ui|{for level in levels{if ui.selectable_label(level==self.state.thinking,thinking_label(&level)).clicked(){self.send(json!({"type":"set_thinking_level","level":level}));}}});});
                 });
             });
         });
         ui.add_space(8.0);
+        if let Some(reason) = blocked {
+            ui.label(theme::small(ui, reason));
+        }
         ui.label(theme::small(ui, "An in-flight provider response keeps its original model; Pi applies your selection to subsequent requests."));
         section(ui, "Available models", "");
         if models.is_empty() {

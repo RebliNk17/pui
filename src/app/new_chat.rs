@@ -195,8 +195,7 @@ impl Pui {
         self.selected_diff = None;
         self.diff_rx = None;
         self.inspector_panel = false;
-        self.model_picker_open = false;
-        self.effort_draft = None;
+        self.close_model_popovers();
         self.bypass_pending = None;
         self.state = State {
             models,

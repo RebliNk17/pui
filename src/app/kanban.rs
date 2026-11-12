@@ -160,7 +160,7 @@ impl Pui {
         }
         self.automation.open = false;
         self.kanban.open = true;
-        self.model_picker_open = false;
+        self.close_model_popovers();
         self.files.close();
         self.inspector_panel = false;
         if self.terminals.is_open() {

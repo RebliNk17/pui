@@ -274,7 +274,7 @@ impl Pui {
         self.tasks.open = false;
         self.files.close();
         self.inspector_panel = false;
-        self.model_picker_open = false;
+        self.close_model_popovers();
         self.terminals.close(&self.ctx);
         if let Some((task, run)) = &location.task {
             if self.tasks.records.iter().any(|record| record.id == *task) {

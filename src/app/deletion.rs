@@ -183,7 +183,7 @@ impl Pui {
     pub(super) fn request_delete(&mut self, target: Target) {
         if !self.deletion.in_progress() && !self.deletion.contains(&target) {
             self.deletion.pending = Some(target);
-            self.model_picker_open = false;
+            self.close_model_popovers();
         }
     }
     fn deletion_blocked(&self, target: &Target) -> Option<String> {
