@@ -3,6 +3,8 @@ use std::{
     process::Command,
 };
 
+pub(crate) mod branches;
+
 #[derive(Clone, Debug, Default)]
 pub struct FileChange {
     pub path: String,

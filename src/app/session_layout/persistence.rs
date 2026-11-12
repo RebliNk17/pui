@@ -11,6 +11,8 @@ pub(in crate::app) struct Saved {
     pub hide_inspector: bool,
     pub hide_sidebar: bool,
     pub terminal: (bool, bool),
+    // Window-local tab presentation. Missing means a legacy layout-only checkpoint.
+    pub terminal_tabs: Option<terminal::SavedTabs>,
     pub panels: Vec<Option<PanelState>>,
 }
 impl Pui {
@@ -30,9 +32,16 @@ impl Pui {
                 hide_inspector: layout.hide_inspector,
                 hide_sidebar: layout.hide_sidebar,
                 terminal: layout.terminal,
+                terminal_tabs: None,
                 panels: layout.panels.clone(),
             })
             .collect();
+        let mut terminal_tabs = self.terminals.saved_tabs();
+        for layout in retained.iter().take(64) {
+            if let Some(saved) = &layout.terminal_tabs {
+                terminal_tabs.retain_unopened(saved);
+            }
+        }
         let key = self.layout_key();
         layouts.retain(|layout| layout.key != key);
         layouts.push(Saved {
@@ -43,18 +52,21 @@ impl Pui {
             hide_inspector: self.prefs.hide_inspector,
             hide_sidebar: self.prefs.hide_sidebar,
             terminal: self.terminals.layout(),
+            terminal_tabs: Some(terminal_tabs),
             panels: PANELS
                 .iter()
                 .map(|name| PanelState::load(&self.ctx, egui::Id::new(name)))
                 .collect(),
         });
-        for layout in retained {
+        for mut layout in retained {
             if layouts.len() >= 64 {
                 break;
             }
             if !self.session_layouts.saved.contains_key(&layout.key)
                 && !layouts.iter().any(|saved| saved.key == layout.key)
             {
+                // One bounded window snapshot, not 64 competing copies of the same tabs.
+                layout.terminal_tabs = None;
                 layouts.push(layout);
             }
         }
@@ -64,6 +76,13 @@ impl Pui {
     }
 
     pub(in crate::app) fn restore_workspace_layout(&mut self) {
+        // Tabs belong to the window/project, not a chat. Consume all presentation
+        // metadata once, including hidden roots, without activating any process.
+        for layout in self.prefs.workspace_layouts.iter_mut().take(64) {
+            if let Some(saved) = layout.terminal_tabs.take() {
+                self.terminals.restore_tabs(&saved);
+            }
+        }
         let key = self.layout_key();
         let Some(index) = self
             .prefs

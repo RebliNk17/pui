@@ -617,7 +617,7 @@ impl Pui {
         ui.horizontal(|ui|{
             ui.label(RichText::new(format!("{} unsent/uncertain message(s) retained",self.sync.unsent.len())).size(11.0).color(colors.accent));
             if ui.small_button("Restore draft").clicked(){
-                if self.draft.is_empty()&&self.draft_images.is_empty(){let message=self.sync.unsent.remove(0);self.draft=message.text;self.draft_images.set_images(message.images);self.focus_composer=true;}else{self.state.error=Some("Clear the current draft first. Retained messages are not automatically retried.".into());}
+                if self.draft.is_empty()&&self.draft_images.is_empty(){let message=self.sync.unsent.remove(0);self.context_chips.clear();self.draft=message.text;self.draft_images.set_images(message.images);self.focus_composer=true;}else{self.state.error=Some("Clear the current draft first. Retained messages are not automatically retried.".into());}
             }
         });
     }
@@ -943,6 +943,7 @@ impl Pui {
                             && self.draft_images.is_empty()
                         {
                             let edited = self.sync.unsent.pop().unwrap();
+                            self.context_chips.clear();
                             self.draft = edited.text;
                             self.draft_images.set_images(edited.images);
                             self.focus_composer = true;

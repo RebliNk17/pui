@@ -58,7 +58,7 @@ fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
 }
 
 #[test]
-fn restoring_one_project_does_not_block_another_projects_terminal() {
+fn restoring_one_project_keeps_unknown_projects_inert_until_explicit_start() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     let root = app.prefs.cwd.clone();
@@ -66,9 +66,12 @@ fn restoring_one_project_does_not_block_another_projects_terminal() {
         .restore_saved_layout(&ctx, &root, (true, false));
     let other = root.join("src");
     app.prefs.cwd = other.clone();
-    frame(&ctx, &mut app, vec![]);
-    assert!(app.terminals.projects.contains_key(&other));
+    let output = frame(&ctx, &mut app, vec![]);
+    assert!(!app.terminals.projects.contains_key(&other));
     assert!(!app.terminals.projects.contains_key(&root));
+    text(&output, "Nothing was replayed");
+    click(&ctx, &mut app, text(&output, "Start shell"));
+    assert!(app.terminals.projects.contains_key(&other));
     app.prefs.cwd = root.clone();
     let output = frame(&ctx, &mut app, vec![]);
     text(&output, "Terminal restored");

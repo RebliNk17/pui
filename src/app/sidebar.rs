@@ -674,7 +674,26 @@ impl Pui {
                             row.right_center() - egui::vec2(12.0, 0.0),
                             Vec2::splat(24.0),
                         );
-                        let has_menu = delete_target.is_some() || branch.path.is_some();
+                        let unsaved_root = match target {
+                            sidebar_tree::Target::Agent(id) if depth == 0 => self
+                                .agents
+                                .nodes
+                                .get(id)
+                                .filter(|node| node.parent.is_none() && node.path.is_none())
+                                .map(|_| id.clone()),
+                            _ => None,
+                        };
+                        let has_menu = delete_target.is_some()
+                            || branch.path.is_some()
+                            || unsaved_root.is_some();
+                        if unsaved_root.is_some()
+                            && ui.memory(|memory| memory.has_focus(ui.id().with("delete-menu")))
+                        {
+                            ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+                                input.consume_key(egui::Modifiers::COMMAND, egui::Key::Backspace);
+                            });
+                        }
                         let menu = has_menu.then(|| {
                             ui.interact(menu_rect, ui.id().with("delete-menu"), Sense::click())
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -693,7 +712,40 @@ impl Pui {
                                 );
                             }
                         }
+                        #[cfg(test)]
                         if let Some(menu) = &menu {
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::new(("sidebar-unsaved-menu", &branch.key)),
+                                    menu.rect,
+                                );
+                                data.insert_temp(
+                                    egui::Id::new(("sidebar-unsaved-menu-id", &branch.key)),
+                                    menu.id,
+                                )
+                            });
+                        }
+                        if let Some(menu) = &menu {
+                            if unsaved_root.is_some() {
+                                let popup = if menu.clicked() {
+                                    egui::Popup::default_response_id(menu)
+                                } else {
+                                    response.id.with("popup")
+                                };
+                                if menu.clicked() || response.secondary_clicked() {
+                                    ui.input_mut(|input| {
+                                        input.consume_key(
+                                            egui::Modifiers::COMMAND,
+                                            egui::Key::Enter,
+                                        );
+                                        input.consume_key(
+                                            egui::Modifiers::COMMAND,
+                                            egui::Key::Backspace,
+                                        );
+                                    });
+                                    self.section_view.unsaved_popup = Some(popup);
+                                }
+                            }
                             let mut contents = |ui: &mut egui::Ui| {
                                 theme::menu_controls(ui);
                                 if let Some(path) = &branch.path {
@@ -721,6 +773,9 @@ impl Pui {
                                         action = Some(Action::Restore(path.clone()));
                                         ui.close();
                                     }
+                                }
+                                if let Some(id) = &unsaved_root {
+                                    self.unsaved_section_menu(ui, id);
                                 }
                                 if let Some(target) = &delete_target {
                                     let label = if matches!(target, deletion::Target::Task(_)) {

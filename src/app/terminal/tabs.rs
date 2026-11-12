@@ -34,11 +34,12 @@ pub(super) fn poll_tab(tab: &mut Tab) {
 }
 
 impl Terminals {
-    pub(super) fn total_tabs(&self) -> usize {
+    pub(in crate::app) fn total_tabs(&self) -> usize {
         self.projects
             .values()
             .map(|project| project.tabs.len())
-            .sum()
+            .sum::<usize>()
+            + self.restored_roots.len()
     }
     pub(super) fn owns_focus(&self, ctx: &egui::Context) -> bool {
         let input = self

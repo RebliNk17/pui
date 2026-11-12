@@ -1,4 +1,4 @@
-//! Presentation-only sections. Members are saved root chats; trees and pins keep precedence.
+//! Presentation-only sections. Root chats may be saved or pathless; trees/pins keep precedence.
 use super::*;
 use std::collections::BTreeSet;
 mod confirmation;
@@ -60,6 +60,9 @@ pub(in crate::app) struct View {
     remove: Option<String>,
     creating: Option<String>,
     focus: bool,
+    // Runtime agent identities only. Never serialize arbitrary pathless drafts.
+    unsaved: BTreeMap<String, String>,
+    pub(super) unsaved_popup: Option<egui::Id>,
 }
 impl View {
     pub(in crate::app) fn confirming(&self) -> bool {
@@ -114,11 +117,22 @@ pub(in crate::app) fn partition(
         .collect();
     let mut grouped = BTreeMap::<String, Vec<usize>>::new();
     visible.retain(|index| {
-        let section = branches[*index]
+        let branch = &branches[*index];
+        let pathless_root = if let sidebar_tree::Target::Agent(id) = &branch.target {
+            app.agents
+                .nodes
+                .get(id)
+                .filter(|node| node.parent.is_none() && node.path.is_none())
+                .and_then(|_| app.section_view.unsaved.get(id))
+        } else {
+            None
+        };
+        let section = branch
             .path
             .as_ref()
             .and_then(|path| app.prefs.chats.get(path))
             .and_then(|prefs| prefs.section.as_ref())
+            .or(pathless_root)
             .filter(|section| ids.contains(section.as_str()));
         if let Some(section) = section {
             grouped.entry(section.clone()).or_default().push(*index);
@@ -135,18 +149,21 @@ pub(in crate::app) fn assignment_menu(
     sections: &[Section],
     meta: &mut ChatPrefs,
 ) {
+    assignment(ui, sections, &mut meta.section);
+}
+fn assignment(ui: &mut egui::Ui, sections: &[Section], member: &mut Option<String>) {
     ui.menu_button("Move to section", |ui| {
         theme::menu_controls(ui);
         ui.set_width(240.0_f32.min((ui.ctx().screen_rect().width() - 40.0).max(120.0)));
-        if ui.add(egui::Button::selectable(meta.section.is_none(), "No section · use grouping").truncate()).clicked() {
-            meta.section = None;
+        if ui.add(egui::Button::selectable(member.is_none(), "No section · use grouping").truncate()).clicked() {
+            *member = None;
             ui.close();
         }
         egui::ScrollArea::vertical().id_salt("section-choices").max_height(240.0).show(ui, |ui| {
             for section in sections {
                 ui.push_id(&section.id, |ui| {
-                    if ui.add_sized([ui.available_width(), 24.0], egui::Button::selectable(meta.section.as_deref() == Some(&section.id), &section.name).truncate()).on_hover_text(&section.name).clicked() {
-                        meta.section = Some(section.id.clone());
+                    if ui.add_sized([ui.available_width(), 24.0], egui::Button::selectable(member.as_deref() == Some(&section.id), &section.name).truncate()).on_hover_text(&section.name).clicked() {
+                        *member = Some(section.id.clone());
                         ui.close();
                     }
                 });
@@ -158,6 +175,90 @@ pub(in crate::app) fn assignment_menu(
 }
 
 impl Pui {
+    pub(in crate::app) fn unsaved_section_inputs(&mut self, ctx: &egui::Context) {
+        let Some(owner) = self.section_view.unsaved_popup else {
+            return;
+        };
+        if !egui::Popup::is_id_open(ctx, owner)
+            || ctx.memory(|memory| memory.top_modal_layer().is_some())
+            || self.prefs.hide_sidebar
+            || self.settings_open
+            || self.question_designs.is_some()
+        {
+            egui::Popup::close_id(ctx, owner);
+            self.section_view.unsaved_popup = None;
+            return;
+        }
+        let escape = ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Backspace);
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+        });
+        if escape {
+            egui::Popup::close_id(ctx, owner);
+            self.section_view.unsaved_popup = None;
+        }
+    }
+    pub(in crate::app) fn forget_unsaved_sections(&mut self, ids: &BTreeSet<String>) {
+        self.section_view.unsaved.retain(|id, _| !ids.contains(id));
+    }
+    pub(in crate::app) fn promote_unsaved_section(&mut self, id: &str) {
+        let Some(node) = self.agents.nodes.get(id) else {
+            return;
+        };
+        if node.parent.is_some() {
+            self.section_view.unsaved.remove(id);
+            return;
+        }
+        let Some(path) = node.path.clone() else {
+            return;
+        };
+        if let Some(section) = self.section_view.unsaved.remove(id)
+            && self
+                .prefs
+                .sidebar_view
+                .sections
+                .iter()
+                .any(|candidate| candidate.id == section)
+        {
+            self.prefs
+                .chats
+                .entry(path)
+                .or_default()
+                .section
+                .get_or_insert(section);
+        }
+    }
+    fn set_unsaved_section(&mut self, id: &str, section: Option<String>) {
+        if let Some(section) = section {
+            if self.section_view.unsaved.contains_key(id) || self.section_view.unsaved.len() < 256 {
+                self.section_view.unsaved.insert(id.into(), section);
+            }
+        } else {
+            self.section_view.unsaved.remove(id);
+        }
+    }
+    pub(super) fn unsaved_section_menu(&mut self, ui: &mut egui::Ui, id: &str) {
+        self.section_view
+            .unsaved
+            .retain(|id, _| self.agents.nodes.contains_key(id));
+        let Some(node) = self.agents.nodes.get(id) else {
+            return;
+        };
+        if node.path.is_some() || node.parent.is_some() {
+            return;
+        }
+        let mut section = self.section_view.unsaved.get(id).cloned();
+        let available =
+            self.section_view.unsaved.contains_key(id) || self.section_view.unsaved.len() < 256;
+        ui.add_enabled_ui(available, |ui| {
+            assignment(ui, &self.prefs.sidebar_view.sections, &mut section)
+        });
+        if !available {
+            ui.label(theme::small(ui,"Pathless section limit reached (256 chats). Save a chat or remove an assignment first."));
+        }
+        self.set_unsaved_section(id, section);
+    }
     pub(in crate::app) fn demo_sidebar_sections(&mut self) {
         if !self.demo {
             return;
@@ -175,6 +276,11 @@ impl Pui {
                 later.id.clone()
             });
         }
+        // Include one pathless root to exercise runtime-only membership without a
+        // synthetic session path or process/model activity.
+        let unsent = self.ensure_agent();
+        self.agents.nodes.get_mut(&unsent).unwrap().name = "Unsent plan".into();
+        self.set_unsaved_section(&unsent, Some(review.id.clone()));
         self.prefs.sidebar_view.sections = vec![review, later];
         self.prefs.sidebar_view.empty_groups = true;
         self.prefs.hide_inspector = true;
@@ -248,6 +354,7 @@ impl Pui {
             .sidebar_view
             .sections
             .retain(|section| section.id != id);
+        self.section_view.unsaved.retain(|_, section| section != id);
         for meta in self.prefs.chats.values_mut() {
             if meta.section.as_deref() == Some(id) {
                 meta.section = None;
@@ -555,3 +662,11 @@ impl Pui {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unsaved_input_tests;
+#[cfg(test)]
+mod unsaved_layout_tests;
+#[cfg(test)]
+mod unsaved_lifecycle_tests;
+#[cfg(test)]
+mod unsaved_tests;

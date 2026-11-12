@@ -73,6 +73,7 @@ impl Pui {
     }
 
     pub(super) fn sidebar_view_inputs(&mut self, ctx: &egui::Context) {
+        self.unsaved_section_inputs(ctx);
         menu::inputs(self, ctx);
     }
 }

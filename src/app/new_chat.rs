@@ -233,10 +233,12 @@ impl Pui {
             self.remember_project(&folder);
             return;
         }
+        let context_chips = std::mem::take(&mut self.context_chips);
         let draft = std::mem::take(&mut self.draft);
         let images = std::mem::take(&mut self.draft_images);
         self.start_chat_in(folder);
         self.draft = draft;
+        self.context_chips = context_chips;
         self.draft_images = images;
     }
     pub(super) fn start_chat_in(&mut self, folder: PathBuf) {
@@ -284,6 +286,7 @@ impl Pui {
         self.bypass_pending = None;
         self.state = State::default();
         self.draft.clear();
+        self.context_chips.clear();
         self.draft_images.clear();
         self.recall = Default::default();
         self.connect(&self.ctx.clone(), None);

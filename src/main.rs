@@ -32,6 +32,7 @@ pub struct Options {
     pub demo_languages: bool,
     pub demo_markdown: bool,
     pub demo_quote_selection: bool,
+    pub demo_context_chips: bool,
     pub demo_expanded: bool,
     pub demo_collapsed: bool,
     pub demo_theater: bool,
@@ -64,6 +65,7 @@ pub struct Options {
     pub demo_preview_queue: bool,
     pub demo_source_context: bool,
     pub demo_changes: bool,
+    pub demo_branches: bool,
     pub demo_diff_context: bool,
     pub demo_diff_hunks: bool,
     pub demo_diff_wrap: bool,
@@ -189,6 +191,11 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_changes = true;
             }
+            "--demo-branches" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_branches = true;
+            }
             "--demo-git-files" => {
                 options.demo = true;
                 options.demo_changes = true;
@@ -284,6 +291,10 @@ fn main() -> eframe::Result {
             "--demo-markdown" => {
                 options.demo = true;
                 options.demo_markdown = true;
+            }
+            "--demo-context-chips" => {
+                options.demo = true;
+                options.demo_context_chips = true;
             }
             "--demo-quote-selection" => {
                 options.demo = true;

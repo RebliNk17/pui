@@ -1,14 +1,19 @@
 //! Explicit context actions append bounded excerpts to the draft, never directly to Pi.
 use super::*;
+mod chips;
 mod diff;
+pub(super) use chips::Draft;
 mod rendered;
 mod source;
 pub(super) use diff::{demo as demo_diff, offer as offer_diff_selection};
 pub(super) use rendered::demo as demo_rendered;
 pub(crate) use rendered::offer as offer_rendered_selection;
-pub(super) use source::{
-    clear as clear_source, demo as demo_source, offer as offer_source_selection,
-};
+pub(super) use source::{demo as demo_source, offer as offer_source_selection};
+
+pub(super) fn clear_source(ctx: &egui::Context) {
+    source::clear(ctx);
+    ctx.data_mut(|data| data.remove::<Snippet>(egui::Id::new("pui-context-capture")));
+}
 
 pub(super) fn inputs(ctx: &egui::Context) {
     source::inputs(ctx);
@@ -32,7 +37,14 @@ pub(crate) fn queue_parts<'a>(
 ) {
     let mut text = String::new();
     for part in parts {
+        if part.is_empty() {
+            continue;
+        }
         if !text.is_empty() {
+            if text.len() + 2 >= MAX_BYTES {
+                text.push_str("\n[Context excerpt limited to 24 KiB]");
+                break;
+            }
             text.push_str("\n\n");
         }
         let mut end = part.len().min(MAX_BYTES.saturating_sub(text.len()));
@@ -71,15 +83,10 @@ impl Pui {
         let Some(snippet) = snippet else {
             return;
         };
-        let addition = format!("[Context: {}]\n{}\n[/Context]", snippet.label, snippet.text);
-        let separator = if self.draft.is_empty() { "" } else { "\n\n" };
-        if self.draft.len() + separator.len() + addition.len() > 256 * 1024 {
-            self.state.error =
-                Some("Draft is too large to add more context. Existing text was kept.".into());
+        if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
+            self.state.error = Some(error.into());
             return;
         }
-        self.draft.push_str(separator);
-        self.draft.push_str(&addition);
         self.focus_composer = true;
         self.ctx.request_repaint();
     }

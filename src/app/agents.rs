@@ -71,6 +71,7 @@ pub(super) struct Chat {
     preview: Option<Receiver<Result<crate::history::Preview, String>>>,
     partial: bool,
     pub(super) draft: String,
+    context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     completions: completions::View,
     images: attachments::DraftImages,
@@ -288,6 +289,7 @@ impl Pui {
             .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
     }
     pub(super) fn forget_deleted_agent_ids(&mut self, ids: &std::collections::BTreeSet<String>) {
+        self.forget_unsaved_sections(ids);
         self.agents
             .permission_changes
             .retain(|id, _| !ids.contains(id));
@@ -359,6 +361,7 @@ impl Pui {
             preview: self.preview_rx.take(),
             partial: std::mem::take(&mut self.preview_partial),
             draft: std::mem::take(&mut self.draft),
+            context_chips: std::mem::take(&mut self.context_chips),
             recall: std::mem::take(&mut self.recall),
             completions: std::mem::take(&mut self.completions),
             images: std::mem::take(&mut self.draft_images),
@@ -387,6 +390,7 @@ impl Pui {
         self.preview_rx = chat.preview;
         self.preview_partial = chat.partial;
         self.draft = chat.draft;
+        self.context_chips = chat.context_chips;
         self.recall = chat.recall;
         self.draft_images = chat.images;
         self.image_picker_rx = chat.image_picker;
@@ -719,6 +723,7 @@ impl Pui {
                 }
             }
         }
+        self.promote_unsaved_section(&id);
     }
     pub(super) fn agent_event(&mut self, record: &Value) {
         if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {

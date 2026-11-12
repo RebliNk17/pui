@@ -148,6 +148,7 @@ pub struct Pui {
     deliveries: Vec<run_status::Delivery>,
     interrupt: Option<run_status::Interrupt>,
     draft: String,
+    context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     recall_width: f32,
     completions: completions::View,
@@ -276,6 +277,7 @@ impl Pui {
             deliveries: Vec::new(),
             interrupt: None,
             draft: String::new(),
+            context_chips: Default::default(),
             recall: Default::default(),
             recall_width: 700.0,
             completions: Default::default(),
@@ -391,6 +393,27 @@ impl Pui {
                 app.prefs.hide_inspector = true;
                 app.draft = "Keep this draft".into();
             }
+            if options.demo_context_chips {
+                app.draft = "Keep this draft".into();
+                app.prefs.hide_inspector = true;
+                for (label, text) in [
+                    (
+                        "src/main.rs:4–5 · selected source",
+                        "let chosen = \"frozen literal\";",
+                    ),
+                    (
+                        "Terminal · visible viewport · /demo/project",
+                        "$ example output\nLiteral untrusted text",
+                    ),
+                    (
+                        "Browser Console · https://example.test · app.js:12",
+                        "Example error: selected console message",
+                    ),
+                ] {
+                    context_capture::queue(&cc.egui_ctx, label, text);
+                    app.collect_context_capture();
+                }
+            }
             app.menu.about = options.demo_about;
             // Preview only: opening Updates must not start a network check.
             app.updates.open = options.demo_updates;
@@ -493,6 +516,21 @@ impl Pui {
             }
             if options.demo_changes {
                 app.inspector_panel = true;
+            }
+            if options.demo_branches {
+                app.workspace = Workspace {
+                    root: app.prefs.cwd.clone(),
+                    branch: "fixture/main".into(),
+                    is_git: true,
+                    ..Default::default()
+                };
+                app.changes.demo_branches(
+                    &cc.egui_ctx,
+                    &app.prefs.cwd,
+                    app.state.session_file.as_deref().unwrap_or("new"),
+                    &app.workspace,
+                );
+                app.focus_composer = false;
             }
             if options.demo_review_files {
                 app.outputs = activity::recorded_files(&app.state.messages);
@@ -847,6 +885,7 @@ impl Pui {
         self.prefs.cwd = session.cwd;
         self.workspace_rx = None;
         self.draft.clear();
+        self.context_chips.clear();
         self.draft_images.clear();
         self.state.restart_notice.clear();
         if reuse {
@@ -1011,6 +1050,7 @@ impl Pui {
                     if kind == "extension_ui_request"
                         && protocol::string(&record, "method") == "set_editor_text"
                     {
+                        self.context_chips.clear();
                         self.draft = protocol::string(&record, "text").into();
                         self.focus_composer = true;
                     }
@@ -1319,6 +1359,7 @@ impl Pui {
         self.state.restart_notice.clear();
         self.draft_images.clear();
         self.draft.clear();
+        self.context_chips.clear();
         self.recall = Default::default();
         self.focus_composer = true;
     }
@@ -1414,6 +1455,7 @@ impl Pui {
                 .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
+                self.context_chips.clear();
                 self.draft = prompt.into();
                 self.focus_composer = true;
             }
@@ -1476,6 +1518,7 @@ impl Pui {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 self.draft_images.show(ui);
+                self.context_chips(ui);
                 self.recall_width = ui.available_width();
                 let completing = self.completion_active(ctx);
                 self.completion_keys(ctx);
@@ -1513,6 +1556,9 @@ impl Pui {
                     .show(ui);
                 composer_text::links(ui, &output, &self.draft);
                 let response = output.response;
+                if response.changed() {
+                    self.context_chips.clear();
+                }
                 completion_anchor = Some((response.rect, ui.layer_id()));
                 if self.focus_composer {
                     response.request_focus();
@@ -1869,6 +1915,7 @@ impl eframe::App for Pui {
         self.search_jump();
         self.model_picker_escape(ctx);
         context_capture::inputs(ctx);
+        self.context_chip_inputs(ctx);
         self.changes.review_inputs(
             ctx,
             self.inspector_panel

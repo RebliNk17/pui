@@ -114,6 +114,7 @@ impl Pui {
         if next.is_none() {
             self.recall = Recall::default();
         }
+        self.context_chips.clear();
         self.draft = message.text;
         self.draft_images.set_images(message.images);
         let cursor = CCursor::new(if older { 0 } else { self.draft.chars().count() });

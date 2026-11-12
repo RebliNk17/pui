@@ -1,6 +1,7 @@
 //! Docked changes inspector. Git and recorded edits are deliberately separate sources.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+mod branches;
 pub(super) mod git_files;
 pub(super) mod lines;
 mod review_files;
@@ -29,6 +30,7 @@ pub(super) struct Changes {
     close: bool,
     review_files: review_files::Files,
     git_files: git_files::Git,
+    branches: branches::Branches,
 }
 
 impl Changes {
@@ -57,6 +59,7 @@ impl Changes {
         cwd: &std::path::Path,
         session: &str,
     ) {
+        self.close_branches(ctx);
         self.bind(cwd, session);
         document.3 = recorded;
         document.2.focus(ctx);
@@ -74,6 +77,7 @@ impl Changes {
         revision: u64,
         workspace: &Workspace,
     ) {
+        self.branch_inputs(ctx, visible, workspace);
         if visible {
             self.poll_git_files(ctx, workspace);
             self.git_file_inputs(ctx, workspace);
@@ -104,6 +108,7 @@ impl Changes {
             self.review = None;
             self.review_files = Default::default();
             self.git_files = Default::default();
+            self.branches.cancel();
             if session_changed {
                 self.source = Source::Recorded;
             }
@@ -130,9 +135,13 @@ impl Changes {
         loading: bool,
     ) -> bool {
         let (outputs, revision) = recorded;
+        if self.identity.0 != cwd || self.identity.1 != session {
+            self.close_branches(ctx);
+        }
         self.bind(cwd, session);
         self.poll_git_files(ctx, workspace);
         self.poll_inline_diffs();
+        self.poll_branches(workspace);
         let colors = theme::palette(ctx);
         let expanded = self.expanded;
         if expanded {
@@ -184,6 +193,7 @@ impl Changes {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let close = icons::button(ui, Icon::Close, "Hide changes pane");
                         if close.clicked() {
+                            self.close_branches(ui.ctx());
                             self.close = true;
                         }
                         #[cfg(test)]
@@ -214,9 +224,7 @@ impl Changes {
                             self.refresh = true;
                             self.invalidate();
                         }
-                        if loading {
-                            ui.label(theme::small(ui, "Loading…"));
-                        }
+                        self.branch_button(ui, workspace);
                     });
                 });
             });

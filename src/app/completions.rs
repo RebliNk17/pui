@@ -316,6 +316,7 @@ impl Pui {
         };
         let insert = choice.insert.clone();
         let end = self.draft[..t.start].chars().count() + insert.chars().count();
+        self.context_chips.clear();
         self.draft.replace_range(t.start..t.end, &insert);
         let id = egui::Id::new("composer");
         let mut state = TextEditState::load(ctx, id).unwrap_or_default();
@@ -471,6 +472,7 @@ impl Pui {
             self.state.error = Some("Connect to Pi before compacting. Your draft was kept.".into());
             return true;
         }
+        self.context_chips.clear();
         self.draft.clear();
         self.recall = Default::default();
         self.completions = Default::default();

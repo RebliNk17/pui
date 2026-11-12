@@ -153,6 +153,9 @@ impl Pui {
             .position(|c| c.path == path && (path.is_some() || c.cwd == self.prefs.cwd))
         {
             let checkpoint = self.restart_pending.remove(index);
+            if self.draft.is_empty() {
+                self.context_chips.clear();
+            }
             checkpoint.apply(&mut self.state, &mut self.draft);
         }
     }

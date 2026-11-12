@@ -64,6 +64,7 @@ impl Pui {
         self.files.begin_frame();
         self.diff_rx = None; // abandoned Git worker cannot select a file in another chat
         self.changes.cancel_git_read();
+        self.changes.close_branches(&self.ctx);
         let panels = PANELS
             .iter()
             .map(|name| PanelState::load(&self.ctx, egui::Id::new(name)))
@@ -138,5 +139,7 @@ impl Pui {
 
 #[cfg(test)]
 mod persistence_tests;
+#[cfg(test)]
+mod terminal_tests;
 #[cfg(test)]
 mod tests;

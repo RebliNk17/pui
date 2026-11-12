@@ -4,7 +4,9 @@ use crate::terminal::Session;
 use std::{collections::BTreeMap, path::Path};
 mod capture;
 mod chrome;
+mod persistence;
 mod tabs;
+pub(super) use persistence::SavedTabs;
 
 type Selection = Option<((u16, u16), (u16, u16))>;
 
@@ -18,6 +20,7 @@ pub(super) struct Terminals {
     confirm_stop: Option<(PathBuf, u64)>,
     controls: Vec<egui::Id>,
     restored_roots: std::collections::BTreeSet<PathBuf>,
+    restore_guard: bool,
     demo_context: bool,
 }
 #[derive(Default)]
@@ -30,6 +33,7 @@ struct Tab {
     selection: Selection,
     scroll: f32,
     demo: Option<vt100::Parser>,
+    restored: bool,
 }
 
 #[derive(Default)]
@@ -117,8 +121,13 @@ impl Terminals {
         layout: (bool, bool),
     ) {
         self.set_layout(ctx, layout);
+        self.restore_guard = true;
         self.root = root.into();
-        if layout.0 && !self.projects.contains_key(root) {
+        if layout.0
+            && !self.projects.contains_key(root)
+            && self.projects.len() + self.restored_roots.len() < tabs::MAX_TOTAL_TABS
+            && self.total_tabs() < tabs::MAX_TOTAL_TABS
+        {
             self.restored_roots.insert(root.into());
         }
     }
@@ -186,48 +195,38 @@ impl Terminals {
             self.focus = true;
             self.confirm_stop = None;
         }
-        if !self.projects.contains_key(root) && !self.restored_roots.contains(root) {
+        if !self.projects.contains_key(root)
+            && !self.restored_roots.contains(root)
+            && !self.restore_guard
+        {
             self.start(ctx, demo);
         }
     }
-    fn start(&mut self, ctx: &egui::Context, demo: bool) {
-        if self
-            .projects
+    fn can_start(&self) -> bool {
+        let reserved = usize::from(self.restored_roots.contains(&self.root));
+        self.projects
             .get(&self.root)
-            .is_some_and(|project| project.tabs.len() >= tabs::MAX_TABS)
-            || self.total_tabs() >= tabs::MAX_TOTAL_TABS
-        {
+            .is_none_or(|project| project.tabs.len() < tabs::MAX_TABS)
+            && self.total_tabs().saturating_sub(reserved) < tabs::MAX_TOTAL_TABS
+            && (self.projects.contains_key(&self.root)
+                || (self.projects.len() + self.restored_roots.len()).saturating_sub(reserved)
+                    < tabs::MAX_TOTAL_TABS)
+    }
+    fn start(&mut self, ctx: &egui::Context, demo: bool) {
+        if !self.can_start() {
             return;
         }
         self.restored_roots.remove(&self.root);
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let label = self
             .projects
             .get(&self.root)
             .map_or(1, |project| project.next_label.saturating_add(1));
         let mut project = Tab {
-            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            id: next_tab_id(),
             label,
             ..Default::default()
         };
-        if demo {
-            let mut parser =
-                vt100::Parser::new(16.try_into().unwrap(), 90.try_into().unwrap(), 100);
-            parser.process(b"\x1b[32mproject\x1b[0m \x1b[36m$\x1b[0m pwd\r\n");
-            parser.process(self.root.to_string_lossy().as_bytes());
-            parser.process(b"\r\n\x1b[32mproject\x1b[0m \x1b[36m$\x1b[0m ");
-            project.demo = Some(parser);
-        } else {
-            let (tx, rx) = mpsc::channel();
-            project.starting = Some(rx);
-            let root = self.root.clone();
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let result = Session::start(&ctx, &root, portable_pty::PtySize::default());
-                let _ = tx.send(result);
-                ctx.request_repaint();
-            });
-        }
+        launch(&mut project, ctx, &self.root, demo);
         let group = self.projects.entry(self.root.clone()).or_default();
         group.next_label = label;
         group.tabs.push(project);
@@ -310,12 +309,21 @@ impl Terminals {
                     ui,
                     "Start shell",
                     prompt_ui::Button::Primary,
-                    self.total_tabs() < tabs::MAX_TOTAL_TABS,
+                    self.can_start()
+                        && prompt_ui::keyboard_available(ui)
+                        && !egui::Popup::is_any_open(ui.ctx()),
                 )
                 .on_disabled_hover_text(
                     "Close another terminal tab first · maximum 32 per window.",
                 );
                 self.controls.push(start.id);
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new("terminal-legacy-start"),
+                        (start.id, start.rect, start.enabled()),
+                    );
+                });
                 if start.clicked() {
                     tabs::consume_activation(ui.ctx());
                     self.start(ui.ctx(), demo);
@@ -497,6 +505,88 @@ impl Terminals {
         });
     }
     fn screen(&mut self, ui: &mut egui::Ui, demo: bool, capture_button: Option<&egui::Response>) {
+        if !self.projects.contains_key(&self.root) {
+            prompt_ui::heading(
+                ui,
+                "Terminal · not running",
+                "Start a new shell explicitly for this project. Nothing was replayed.",
+            );
+            ui.add_space(12.0);
+            let start = prompt_ui::button(
+                ui,
+                "Start shell",
+                prompt_ui::Button::Primary,
+                self.can_start()
+                    && prompt_ui::keyboard_available(ui)
+                    && !egui::Popup::is_any_open(ui.ctx()),
+            );
+            self.controls.push(start.id);
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new("terminal-unknown-start"),
+                    (start.id, start.rect, start.enabled()),
+                );
+            });
+            if start.clicked() {
+                tabs::consume_activation(ui.ctx());
+                self.start(ui.ctx(), demo);
+            }
+            return;
+        }
+        let restored = self
+            .projects
+            .get(&self.root)
+            .and_then(Project::active)
+            .is_some_and(|tab| tab.restored);
+        if restored {
+            let tab = self
+                .projects
+                .get(&self.root)
+                .and_then(Project::active)
+                .unwrap();
+            // Keep an inert, independently owned input surface alive so switching
+            // placeholders cannot hand terminal shortcuts to an inline approval.
+            let response = ui.interact(
+                ui.available_rect_before_wrap(),
+                tab.input_id(),
+                Sense::click(),
+            );
+            if self.focus || response.clicked() {
+                tab.focus(ui.ctx());
+                self.focus = false;
+            }
+            if response.has_focus() {
+                ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                });
+            }
+            prompt_ui::heading(
+                ui,
+                "Terminal restored · not running",
+                "Output is not saved. No commands or processes were replayed.",
+            );
+            ui.add_space(12.0);
+            let start = prompt_ui::button(
+                ui,
+                "Start shell",
+                prompt_ui::Button::Primary,
+                prompt_ui::keyboard_available(ui) && !egui::Popup::is_any_open(ui.ctx()),
+            );
+            self.controls.push(start.id);
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new("terminal-restored-start"),
+                    (start.id, start.rect),
+                );
+            });
+            if start.clicked() {
+                tabs::consume_activation(ui.ctx());
+                self.activate_restored(ui.ctx(), demo);
+            }
+            return;
+        }
         let colors = theme::palette(ui.ctx());
         let Some(project) = self
             .projects
@@ -638,6 +728,30 @@ impl Terminals {
                 project.error = Some(error);
             }
         }
+    }
+}
+
+fn next_tab_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+fn launch(tab: &mut Tab, ctx: &egui::Context, root: &Path, demo: bool) {
+    if demo {
+        let mut parser = vt100::Parser::new(16.try_into().unwrap(), 90.try_into().unwrap(), 100);
+        parser.process(b"\x1b[32mproject\x1b[0m \x1b[36m$\x1b[0m pwd\r\n");
+        parser.process(root.to_string_lossy().as_bytes());
+        parser.process(b"\r\n\x1b[32mproject\x1b[0m \x1b[36m$\x1b[0m ");
+        tab.demo = Some(parser);
+    } else {
+        let (tx, rx) = mpsc::channel();
+        tab.starting = Some(rx);
+        let root = root.to_path_buf();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = Session::start(&ctx, &root, portable_pty::PtySize::default());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
     }
 }
 
