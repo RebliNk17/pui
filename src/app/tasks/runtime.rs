@@ -65,12 +65,6 @@ impl Pui {
             self.tasks.error = Some(e);
             return;
         }
-        if t.dirty_source {
-            self.tasks.error = Some(
-                "Source has uncommitted changes. Prepare a clean source or continue regular development.".into(),
-            );
-            return;
-        }
         let id = t.id.clone();
         let source = t.source.clone();
         let head = t.base_head.clone();
@@ -85,7 +79,7 @@ impl Pui {
             return;
         };
         self.task_job(id.clone(), move || {
-            domain::workspace::prepare(&source, &id, &home, false, &head)
+            domain::workspace::prepare(&source, &id, &home, &head)
                 .map(|(p, i)| JobResult::Prepared(p, i))
         });
     }
@@ -103,10 +97,6 @@ impl Pui {
                     return;
                 };
                 if t.phase != Phase::Proposing {
-                    return;
-                }
-                if i.dirty && t.initial_approved {
-                    self.tasks.block("Source has uncommitted changes. Workflow stopped before provider calls; no changes were copied or silently omitted. Continue regular development in this workspace, or prepare a clean source and ask again.");
                     return;
                 }
                 let t = self.tasks.live_mut().unwrap();

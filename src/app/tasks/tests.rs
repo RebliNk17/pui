@@ -213,6 +213,7 @@ fn initially_approved_proposal_starts_without_manual_check_approval() {
     let t = app.tasks.live_mut().unwrap();
     t.source = root;
     t.initial_approved = true;
+    t.dirty_source = true;
     t.approved = None;
     process(&mut app, Role::Proposal);
     event(&mut app, json!({"type":"agent_start"}));

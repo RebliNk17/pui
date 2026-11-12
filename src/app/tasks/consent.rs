@@ -116,7 +116,7 @@ impl Pui {
         );
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
-            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). Uses provider credits; normal permissions apply. Clean Git worktree or non-Git in place. No commit, merge or deployment."),
+            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). Uses provider credits; normal permissions apply. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Original checkout is left untouched. No commit, merge or deployment."),
             "options":["Use workflow", "Regular development"]
         }));
         true

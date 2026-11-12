@@ -142,19 +142,25 @@ fn initial_question_is_inline_and_readable_in_both_themes_without_setup_actions(
     }
 }
 #[test]
-fn initial_approval_does_not_silently_drop_dirty_source_changes() {
+fn initial_approval_allows_dirty_source_for_an_isolated_snapshot() {
     let mut app = app();
     app.control_request(&request("ask"));
     app.workflow_answer(&json!({"type":"extension_ui_response","id":"ask","value":"Use workflow"}));
     app.tasks.job = None;
+    // Pin the fixture model: routing policy has its own coverage and needs a catalog.
+    app.tasks.current_mut().unwrap().dynamic_routing = false;
     app.task_job_result(Ok(JobResult::Inspected(domain::workspace::Inspection {
         root: app.prefs.cwd.clone(),
         git: true,
         dirty: true,
         head: "head".into(),
     })));
-    assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
-    assert!(app.tasks.processes.is_empty());
+    let task = app.tasks.current().unwrap();
+    assert_eq!(task.phase, Phase::Proposing);
+    assert!(task.dirty_source);
+    assert_eq!(task.base_head, "head");
+    assert_eq!(app.tasks.processes.len(), 1);
+    app.tasks.stop();
     app.finish_workflow_requests();
     assert!(app.tasks.requests.is_empty());
 }

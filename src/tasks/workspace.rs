@@ -1,4 +1,6 @@
 //! Bounded source fingerprints and deliberate Git isolation. Never commit/merge/delete.
+#[path = "workspace/snapshot.rs"]
+mod snapshot;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -11,9 +13,16 @@ const MAX_FILES: usize = 30000;
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
     Command::new("git")
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|e| format!("Cannot inspect Git: {e}"))
 }
@@ -71,16 +80,9 @@ pub fn inspect(source: &Path) -> Result<Inspection, String> {
         head: String::from_utf8_lossy(&head.stdout).trim().into(),
     })
 }
-fn validate_source(
-    inspection: &Inspection,
-    allow_clean_head: bool,
-    expected_head: &str,
-) -> Result<(), String> {
+fn validate_source(inspection: &Inspection, expected_head: &str) -> Result<(), String> {
     if inspection.head != expected_head {
         return Err("Committed HEAD changed since the proposal. Create a new task so checks are proposed against the correct source.".into());
-    }
-    if inspection.dirty && !allow_clean_head {
-        return Err("Source has uncommitted changes. Explicitly choose committed HEAD or cancel; changes were not copied.".into());
     }
     Ok(())
 }
@@ -88,7 +90,6 @@ pub fn prepare(
     source: &Path,
     id: &str,
     home: &Path,
-    allow_clean_head: bool,
     expected_head: &str,
 ) -> Result<(PathBuf, bool), String> {
     let inspection = inspect(source)?;
@@ -100,11 +101,22 @@ pub fn prepare(
         }
         return Ok((inspection.root, false));
     }
-    validate_source(&inspection, allow_clean_head, expected_head)?;
+    validate_source(&inspection, expected_head)?;
+    let before = snapshot::capture(&inspection.root, None)?;
     fs::create_dir_all(home).map_err(|e| e.to_string())?;
     let target = home.join(format!("task-{id}"));
     let output = Command::new("git")
-        .args(["worktree", "add", "--detach"])
+        // Populate files ourselves: no checkout filters, hooks, or destination symlinks.
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "worktree",
+            "add",
+            "--detach",
+            "--no-checkout",
+        ])
         .arg(&target)
         .arg(&inspection.head)
         .current_dir(&inspection.root)
@@ -117,6 +129,21 @@ pub fn prepare(
                 .into(),
         );
     }
+    let copied = (|| {
+        let copied = snapshot::capture(&inspection.root, Some(&target))?;
+        let after = snapshot::capture(&inspection.root, None)?;
+        validate_source(&inspect(source)?, expected_head)?;
+        if before != copied || copied != after || snapshot::capture(&target, None)? != copied {
+            return Err("Source changed while creating the workflow snapshot. Start a new workflow when edits have settled.".into());
+        }
+        Ok::<_, String>(())
+    })();
+    copied.map_err(|e| {
+        format!(
+            "{e} Original files and index were not modified. Worktree retained at {}.",
+            target.display()
+        )
+    })?;
     let relative = fs::canonicalize(source)
         .map_err(|e| e.to_string())?
         .strip_prefix(&inspection.root)
@@ -125,7 +152,7 @@ pub fn prepare(
     let cwd = target.join(relative);
     if !cwd.is_dir() {
         return Err(
-            "Source subfolder does not exist at committed HEAD. Retained worktree was not deleted."
+            "Source subfolder is absent from the snapshot. Retained worktree was not deleted."
                 .into(),
         );
     }
@@ -312,7 +339,7 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn dir() -> PathBuf {
+    pub(super) fn dir() -> PathBuf {
         let p = std::env::temp_dir().join(format!("pui-task-ws-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&p).unwrap();
         p
@@ -323,7 +350,7 @@ mod tests {
         fs::write(root.join("app.rs"), "draft remains").unwrap();
         assert!(!inspect(&root).unwrap().git);
         assert_eq!(
-            prepare(&root, "fixture", &root.join("unused"), false, "").unwrap(),
+            prepare(&root, "fixture", &root.join("unused"), "").unwrap(),
             (fs::canonicalize(&root).unwrap(), false)
         );
         let a = fingerprint(&root).unwrap();
@@ -338,16 +365,15 @@ mod tests {
         assert_ne!(b, fingerprint(&root).unwrap());
     }
     #[test]
-    fn dirty_source_requires_explicit_head_choice_and_head_must_match() {
+    fn dirty_source_is_allowed_but_head_must_match() {
         let i = Inspection {
             root: PathBuf::from("/fixture"),
             git: true,
             dirty: true,
             head: "head-a".into(),
         };
-        assert!(validate_source(&i, false, "head-a").is_err());
-        assert!(validate_source(&i, true, "head-a").is_ok());
-        assert!(validate_source(&i, true, "head-b").is_err());
+        assert!(validate_source(&i, "head-a").is_ok());
+        assert!(validate_source(&i, "head-b").is_err());
     }
     #[test]
     fn broken_git_metadata_never_falls_back_in_place() {
