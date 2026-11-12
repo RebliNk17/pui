@@ -175,6 +175,23 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         );
     }
     ui.add_space(7.0);
+    if !demo {
+        let threshold = match state.compact_percent {
+            Some(percent) if state.compaction_settings_error.is_none() && window > 0.0 => {
+                format!(
+                    "Auto-compacts at {percent}% · {} tokens",
+                    number(window * f64::from(percent) / 100.0)
+                )
+            }
+            _ if state.compaction_settings_error.is_some() => {
+                "Auto-compaction override unavailable".into()
+            }
+            _ => "Auto-compaction threshold not reported".into(),
+        };
+        ui.label(RichText::new(threshold).size(10.0).color(colors.dim))
+            .on_hover_text("The model limit is not the auto-compaction trigger. Settings → General controls the threshold; the remaining space is a safety buffer. Overflow or truncated-response recovery can compact earlier.");
+        ui.add_space(7.0);
+    }
     crate::section::Section::new("Usage details").summary("Tokens and prompt cache").icon(crate::icons::Icon::Details).id_salt("usage-details").show(ui,|ui|{
         ui.label(RichText::new("Prompt cache").size(12.0));
         let usage = PromptUsage::last_response(&state.messages);

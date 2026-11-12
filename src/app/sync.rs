@@ -725,6 +725,7 @@ impl Pui {
         self.state.permission_classifier.hash(&mut hash);
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);
+        self.state.compact_percent.hash(&mut hash);
         self.state.cost.to_bits().hash(&mut hash);
         self.state.context_tokens.map(f64::to_bits).hash(&mut hash);
         self.state.context_window.to_bits().hash(&mut hash);
@@ -1449,6 +1450,11 @@ mod tests {
         owner.publish_live();
         spin(&mut owner, &mut mirror, |_, b| {
             b.state.context_breakdown.is_none()
+        });
+        owner.state.compact_percent = Some(85);
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.compact_percent == Some(85)
         });
     }
     #[test]

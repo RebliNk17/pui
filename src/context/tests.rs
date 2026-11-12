@@ -32,7 +32,8 @@ fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
                     ctx.set_zoom_factor(zoom);
                     let state = State {
                         context_tokens: reported,
-                        context_window: 10000.0,
+                        context_window: 600000.0,
+                        compact_percent: Some(85),
                         context_breakdown: Some(ContextBreakdown {
                             system: 100.0,
                             tools: 200.0,
@@ -70,6 +71,11 @@ fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
                     assert!(labels.iter().any(|(s, _)| s == "Messages"));
                     assert!(labels.iter().any(|(s, _)| s == "You"));
                     assert!(labels.iter().any(|(s, _)| s.contains("Estimated split")));
+                    assert!(
+                        labels
+                            .iter()
+                            .any(|(s, _)| s == "Auto-compacts at 85% · 510k tokens")
+                    );
                     assert!(!labels.iter().any(|(s, _)| s.contains("not supplied")));
                     for (label, bounds) in &labels {
                         assert!(

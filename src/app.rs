@@ -888,6 +888,7 @@ impl Pui {
                         && !record["errorMessage"].is_string();
                     let user_message = matches!(kind.as_str(), "message_start" | "message_end")
                         && record["message"]["role"] == "user";
+                    let was_compacting = self.state.compacting;
                     self.state.apply(record);
                     if user_message || (kind == "response" && command == "get_entries") {
                         self.state.reconcile_pending_messages();
@@ -915,6 +916,11 @@ impl Pui {
                             self.send(protocol::command("get_state"));
                             self.send(protocol::command("get_entries"));
                         }
+                    }
+                    // Runs can contain hundreds of turns; settle-only stats leave
+                    // the context meter stale until after auto-compaction starts.
+                    if kind == "turn_end" || (!was_compacting && self.state.compacting) {
+                        self.send(protocol::command("get_session_stats"));
                     }
                     // Boundary-hook compactions need not emit compaction_end.
                     // Refresh at settle too, when Pi has persisted the full turn.

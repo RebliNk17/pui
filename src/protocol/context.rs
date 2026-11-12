@@ -147,6 +147,27 @@ mod tests {
     }
 
     #[test]
+    fn compaction_threshold_is_adapter_reported_and_survives_shared_snapshots() {
+        let mut state = State::default();
+        assert_eq!(state.compact_percent, None);
+        for (percent, expected) in [(85, Some(85)), (50, Some(50)), (95, Some(95)), (100, None)] {
+            state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-compaction",
+                "statusText":json!({"percent":percent,"working":false}).to_string()}));
+            let restored: State =
+                serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+            assert_eq!(restored.compact_percent, expected);
+        }
+        let mut old = serde_json::to_value(&state).unwrap();
+        old.as_object_mut().unwrap().remove("compact_percent");
+        assert_eq!(
+            serde_json::from_value::<State>(old)
+                .unwrap()
+                .compact_percent,
+            None
+        );
+    }
+
+    #[test]
     fn compaction_drops_old_split_and_allows_new_estimate_without_reported_total() {
         let mut state = State {
             session_file: Some("current".into()),

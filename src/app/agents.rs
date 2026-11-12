@@ -1789,6 +1789,55 @@ mod tests {
         );
     }
     #[test]
+    fn context_stats_refresh_each_turn_and_when_compaction_starts() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let (client, events, commands) = rpc::Client::stub_with_commands();
+        app.client = Some(client);
+        app.state.context_tokens = Some(459000.0);
+        app.state.context_window = 600000.0;
+        app.state.busy = true;
+        for event in [
+            json!({"type":"turn_end"}),
+            json!({"type":"compaction_start","reason":"threshold"}),
+        ] {
+            events.send(rpc::Event::Record(event)).unwrap();
+            app.poll_rpc();
+            assert_eq!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
+                "get_session_stats"
+            );
+            assert!(commands.try_recv().is_err());
+        }
+        events
+            .send(rpc::Event::Record(
+                json!({"type":"response","command":"get_session_stats","success":true,
+            "data":{"contextUsage":{"tokens":510719,"contextWindow":600000}}}),
+            ))
+            .unwrap();
+        app.poll_rpc();
+        assert_eq!(app.state.context_tokens, Some(510719.0));
+        assert!(app.state.busy);
+        assert!(app.state.compacting);
+
+        app.state.compacting = false;
+        let status = json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-compaction",
+            "statusText":json!({"percent":85,"working":true}).to_string()});
+        events.send(rpc::Event::Record(status.clone())).unwrap();
+        app.poll_rpc();
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
+            "get_session_stats"
+        );
+        events.send(rpc::Event::Record(status)).unwrap();
+        app.poll_rpc();
+        assert!(
+            commands.try_recv().is_err(),
+            "unchanged status must not poll stats"
+        );
+    }
+
+    #[test]
     fn full_history_refreshes_after_settle_and_manual_compaction_without_losing_draft() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);

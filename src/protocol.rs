@@ -183,6 +183,7 @@ pub struct State {
     pub permission_mode: Option<String>,
     pub permission_cost: f64,
     pub compaction_settings_error: Option<String>,
+    pub compact_percent: Option<u32>,
     pub pending: bool,
     pub cost: f64,
     pub context_tokens: Option<f64>,
@@ -424,6 +425,10 @@ impl State {
                     }
                     "pui-compaction" => {
                         self.compacting = value["working"] == true;
+                        self.compact_percent = value["percent"]
+                            .as_u64()
+                            .filter(|p| (50..=95).contains(p))
+                            .map(|p| p as u32);
                         self.compaction_settings_error = value["error"].as_str().map(str::to_owned);
                         return;
                     }
