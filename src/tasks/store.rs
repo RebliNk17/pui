@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 const MAX_RECORD: u64 = 4 * 1024 * 1024;
+pub const LOCK_CONFLICT: &str =
+    "This task is open in another Pui window. Close it there before changing or deleting it.";
 pub fn home() -> Option<PathBuf> {
     dirs::data_local_dir().map(|p| p.join("pui/tasks-v1"))
 }
@@ -43,7 +45,13 @@ pub fn lock(home: &Path, id: &str) -> Result<fs::File, String> {
         options.mode(0o600);
     }
     let file = options.open(path).map_err(|e| e.to_string())?;
-    file.try_lock_exclusive().map_err(|_| "This task is open in another Pui window. Close it there before changing or deleting it.")?;
+    file.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            LOCK_CONFLICT.into()
+        } else {
+            format!("Cannot lock task storage: {error}")
+        }
+    })?;
     Ok(file)
 }
 pub fn save(home: &Path, task: &Task) -> Result<(), String> {

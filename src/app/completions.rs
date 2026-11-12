@@ -410,7 +410,6 @@ impl Pui {
             "browser" => {
                 self.files.toggle_browser(&self.ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
-                self.terminals.close(&self.ctx);
             }
             "terminal" => self.terminals.toggle(&self.ctx, &self.prefs.cwd, self.demo),
             "help" => {

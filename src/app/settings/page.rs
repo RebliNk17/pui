@@ -186,6 +186,7 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
 pub(in crate::app) struct View {
     page: Page,
     search: String,
+    scale: super::scale::Scale,
     pub(in crate::app) resources: resources::Resources,
 }
 
@@ -528,7 +529,7 @@ impl Pui {
                                 ui.add_space(8.0);
                                 match page {
                                     Page::General => self.settings_general(ui),
-                                    Page::Appearance => self.settings_appearance(ui, ctx),
+                                    Page::Appearance => self.settings_appearance(ui),
                                     Page::Notifications => self.settings_notifications(ui, ctx),
                                     Page::Shortcuts => self.settings_shortcuts(ui),
                                     Page::Permissions => self.settings_permissions(ui),
@@ -647,7 +648,7 @@ impl Pui {
             )
         });
     }
-    fn settings_appearance(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn settings_appearance(&mut self, ui: &mut egui::Ui) {
         section(ui, "Theme", "");
         card(ui, |ui| {
             row(
@@ -706,22 +707,8 @@ impl Pui {
             row(
                 ui,
                 "Interface scale",
-                "Adjust text and controls throughout this window.",
-                |ui| {
-                    let mut zoom = ctx.zoom_factor();
-                    ui.spacing_mut().slider_width = 110.0;
-                    theme::slider_style(ui);
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut zoom, 0.8..=1.4)
-                                .step_by(0.05)
-                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                        )
-                        .changed()
-                    {
-                        ctx.set_zoom_factor(zoom);
-                    }
-                },
+                "Changes apply when you release the slider. Type a percentage and press Enter for an exact value.",
+                |ui| self.settings_view.scale.show(ui),
             )
         });
     }
@@ -809,6 +796,7 @@ impl Pui {
             for (index, (title, keys)) in [
                 ("Open settings", vec![cmd, ","]),
                 ("Search chats, messages and settings", vec![cmd, "K"]),
+                ("Quick Open workspace file (:line)", vec![cmd, "P"]),
                 ("Toggle sidebar", vec![cmd, "B"]),
                 ("Toggle inspector", vec![cmd, "I"]),
                 ("New conversation", vec![cmd, "N"]),
@@ -1016,6 +1004,16 @@ impl Pui {
         ui.add_space(8.0);
         if let Some(reason) = blocked {
             ui.label(theme::small(ui, reason));
+        }
+        if self.state.models_cached {
+            ui.label(theme::small(
+                ui,
+                if self.state.error.is_some() {
+                    "Cached models · live refresh unavailable"
+                } else {
+                    "Cached models · refreshing from Pi…"
+                },
+            ));
         }
         ui.label(theme::small(ui, "An in-flight provider response keeps its original model; Pi applies your selection to subsequent requests."));
         section(ui, "Available models", "");

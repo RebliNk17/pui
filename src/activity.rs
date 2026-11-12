@@ -1,6 +1,8 @@
 //! Compact activity summaries shared by the transcript and recorded outputs.
+mod turn;
 use crate::protocol::{Message, Tool};
 use serde_json::{Value, json};
+pub use turn::turn_files;
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RecordedFile {

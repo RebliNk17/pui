@@ -3,6 +3,8 @@
 mod mac;
 #[cfg(target_os = "macos")]
 mod privacy;
+#[cfg(any(target_os = "macos", test))]
+mod pump;
 #[cfg(target_os = "macos")]
 pub(crate) use privacy::{context_handler, context_settings};
 
@@ -28,5 +30,5 @@ impl Runtime {
     pub fn initialize(_ctx: &eframe::egui::Context) -> Result<Self, String> {
         Err("Bundled Chromium is currently packaged for macOS only.".into())
     }
-    pub fn pump() {}
+    pub fn pump(_ctx: &eframe::egui::Context) {}
 }

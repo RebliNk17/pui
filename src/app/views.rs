@@ -20,10 +20,18 @@ impl Pui {
                     ui.add_space(24.0 / ctx.zoom_factor());
                 }
                 ui.horizontal_centered(|ui| {
-                    if self.prefs.hide_sidebar
-                        && icons::button(ui, Icon::Sidebar, "Show sessions · ⌘B").clicked()
+                    if icons::button(
+                        ui,
+                        Icon::Sidebar,
+                        if self.prefs.hide_sidebar {
+                            "Show sessions · ⌘B"
+                        } else {
+                            "Hide sessions · ⌘B"
+                        },
+                    )
+                    .clicked()
                     {
-                        self.prefs.hide_sidebar = false;
+                        self.prefs.hide_sidebar = !self.prefs.hide_sidebar;
                     }
                     let narrow = ui.available_width() < 520.0;
                     let width =
@@ -99,7 +107,6 @@ impl Pui {
                             self.automation.open = false;
                             self.files.toggle_browser(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
-                            self.terminals.close(ctx);
                         }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
                         if self.files.files_open() {
@@ -173,8 +180,9 @@ impl Pui {
     pub(super) fn inspector(&mut self, ctx: &egui::Context) {
         let colors = crate::theme::palette(ctx);
         egui::SidePanel::right("floating-inspector-v2")
-            .exact_width(350.0)
-            .resizable(false)
+            .default_width(300.0)
+            .width_range(220.0..=(ctx.available_rect().width() - 320.0).clamp(220.0, 600.0))
+            .resizable(true)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
@@ -208,7 +216,7 @@ impl Pui {
                             .map(|a| a.changes.clone())
                             .unwrap_or_default();
                         let workflow_summary = self
-                            .active_workflow()
+                            .inspector_workflow()
                             .map(|t| t.phase.label())
                             .unwrap_or("")
                             .to_owned();
@@ -235,7 +243,7 @@ impl Pui {
                                 .hidden
                                 .extend([Card::Context, Card::Pulls, Card::Changes]);
                         }
-                        let workflow_id = self.active_workflow().map(|t| t.id.clone());
+                        let workflow_id = self.inspector_workflow().map(|t| t.id.clone());
                         if workflow_id.is_none() {
                             layout.hidden.insert(Card::Workflow);
                         }
@@ -395,12 +403,12 @@ impl Pui {
                                         }
                                     }
                                     if let Some(index) = selected {
-                                        if task.is_some() {
-                                            self.tasks.selected_run = None;
+                                        if let Some(task) = &task {
+                                            self.open_work_item_tab(task.id.clone(), tasks::work_item::Tab::Changes);
                                         } else {
                                             let file = &self.outputs[index];
-                                            self.selected_diff =
-                                                Some((file.path.clone(), file.diff.clone()));
+                                            let document = (file.path.clone(), file.diff.clone()).into();
+                                            self.open_diff_review(document, true);
                                         }
                                     }
                                 }
@@ -453,15 +461,7 @@ impl Pui {
         }
         if let Some(index) = selected {
             let file = self.workspace.files[index].clone();
-            let root = self.workspace.root.clone();
-            let ctx = self.ctx.clone();
-            let (tx, rx) = mpsc::channel();
-            self.diff_rx = Some(rx);
-            std::thread::spawn(move || {
-                let diff = workspace::diff(&root, &file);
-                let _ = tx.send((file.path, diff));
-                ctx.request_repaint();
-            });
+            self.diff_rx = Some(changes::git_files::start(&self.ctx, &self.workspace, file));
         }
     }
 
@@ -502,25 +502,20 @@ impl Pui {
                 self.transcript.progress = self.transcript_progress();
                 let has_tasks = self.tasks.records.iter().any(|t| self.task_in_chat(t));
                 if has_tasks {
-                    let mut transcript = std::mem::take(&mut self.transcript);
-                    let messages = self.state.messages.clone();
-                    let model = self.state.model.clone();
-                    let thinking = self.state.thinking.clone();
-                    let session = self
-                        .state
-                        .session_file
-                        .clone()
-                        .unwrap_or_else(|| "new".into());
-                    transcript.show_with_footer(
+                    let cards = self.chat_task_cards();
+                    let mut selected = None;
+                    self.transcript.show_with_footer(
                         ui,
-                        &messages,
-                        &model,
-                        &thinking,
+                        &self.state.messages,
+                        &self.state.model,
+                        &self.state.thinking,
                         !self.state.ready(),
-                        &session,
-                        |ui| self.task_chat_cards(ui),
+                        self.state.session_file.as_deref().unwrap_or("new"),
+                        |ui| selected = tasks::chat::task_chat_cards(ui, &cards),
                     );
-                    self.transcript = transcript;
+                    if let Some(id) = selected {
+                        self.open_task_from_board(id, None);
+                    }
                 } else if self.state.messages.is_empty()
                     && (!self.new_chat || !self.state.pending_messages.is_empty())
                     && self.transcript.progress.is_some()

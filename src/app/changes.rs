@@ -1,6 +1,9 @@
 //! Docked changes inspector. Git and recorded edits are deliberately separate sources.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+pub(super) mod git_files;
+pub(super) mod lines;
+mod review_files;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Source {
@@ -22,15 +25,99 @@ pub(super) struct Changes {
     open_rows: BTreeSet<(bool, String)>,
     diffs: BTreeMap<String, Diff>,
     refresh: bool,
+    pub(super) review: Option<diff_viewer::Document>,
+    close: bool,
+    review_files: review_files::Files,
+    git_files: git_files::Git,
 }
 
 impl Changes {
+    #[cfg(test)]
+    pub(super) fn test_diff(&mut self, path: &str, content: &str) {
+        self.diffs.insert(
+            path.into(),
+            Diff {
+                content: Some(content.into()),
+                rx: None,
+            },
+        );
+    }
+    pub(super) fn expanded(&self) -> bool {
+        self.expanded
+    }
+    pub(super) fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+    }
+
+    pub(super) fn open_review(
+        &mut self,
+        ctx: &egui::Context,
+        mut document: diff_viewer::Document,
+        recorded: bool,
+        cwd: &std::path::Path,
+        session: &str,
+    ) {
+        self.bind(cwd, session);
+        document.3 = recorded;
+        document.2.focus(ctx);
+        self.review = Some(document);
+        self.review_files = Default::default();
+        self.git_files = Default::default();
+        self.expanded = false; // opening never implicitly replaces chat
+        self.close = false;
+    }
+    pub(super) fn review_inputs(
+        &mut self,
+        ctx: &egui::Context,
+        visible: bool,
+        outputs: &[RecordedFile],
+        revision: u64,
+        workspace: &Workspace,
+    ) {
+        if visible {
+            self.poll_git_files(ctx, workspace);
+            self.git_file_inputs(ctx, workspace);
+            self.review_file_inputs(ctx, outputs, revision);
+        } else {
+            self.cancel_git_read();
+        }
+        if visible
+            && let Some(document) = &mut self.review
+            && diff_viewer::inputs(ctx, document)
+        {
+            self.review = None;
+            self.git_files = Default::default();
+            context_capture::clear_source(ctx);
+        }
+    }
+    pub(super) fn take_close(&mut self) -> bool {
+        std::mem::take(&mut self.close)
+    }
+
+    fn bind(&mut self, cwd: &std::path::Path, session: &str) {
+        let session_changed = self.identity.1 != session;
+        if self.identity.0 != cwd || session_changed {
+            self.identity = (cwd.to_path_buf(), session.to_owned());
+            self.open_rows.clear();
+            self.diffs.clear();
+            self.query.clear();
+            self.review = None;
+            self.review_files = Default::default();
+            self.git_files = Default::default();
+            if session_changed {
+                self.source = Source::Recorded;
+            }
+        }
+    }
+
     pub(super) fn take_refresh(&mut self) -> bool {
         std::mem::take(&mut self.refresh)
     }
 
     pub(super) fn invalidate(&mut self) {
         self.diffs.clear();
+        self.git_files.stale = true;
+        self.cancel_git_read();
     }
 
     pub(super) fn show(
@@ -39,19 +126,12 @@ impl Changes {
         cwd: &std::path::Path,
         session: &str,
         workspace: &Workspace,
-        outputs: &[RecordedFile],
+        recorded: (&[RecordedFile], u64),
         loading: bool,
     ) -> bool {
-        let session_changed = self.identity.1 != session;
-        if self.identity != (cwd.to_path_buf(), session.to_owned()) {
-            self.identity = (cwd.to_path_buf(), session.to_owned());
-            self.open_rows.clear();
-            self.diffs.clear();
-            self.query.clear();
-            if session_changed {
-                self.source = Source::Recorded;
-            }
-        }
+        let (outputs, revision) = recorded;
+        self.bind(cwd, session);
+        self.poll_git_files(ctx, workspace);
         for diff in self.diffs.values_mut() {
             if let Some(content) = diff.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
                 diff.content = Some(content);
@@ -63,15 +143,30 @@ impl Changes {
         if expanded {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(colors.bg))
-                .show(ctx, |ui| self.contents(ui, workspace, outputs, loading));
+                .show(ctx, |ui| {
+                    self.contents(ui, workspace, outputs, loading, revision)
+                });
         } else {
-            let available = ctx.available_rect().width();
-            egui::SidePanel::right("workspace-changes-dock")
-                .default_width((available * 0.58).clamp(420.0, 760.0))
-                .width_range(360.0..=(available - 220.0).max(360.0))
-                .resizable(true)
-                .frame(egui::Frame::new().fill(colors.bg))
-                .show(ctx, |ui| self.contents(ui, workspace, outputs, loading));
+            let available = ctx.available_rect();
+            if available.width() < 700.0 {
+                egui::TopBottomPanel::bottom("workspace-changes-stack")
+                    .default_height((available.height() * 0.45).clamp(160.0, 340.0))
+                    .height_range(140.0..=(available.height() - 240.0).max(140.0))
+                    .resizable(true)
+                    .frame(egui::Frame::new().fill(colors.bg))
+                    .show(ctx, |ui| {
+                        self.contents(ui, workspace, outputs, loading, revision)
+                    });
+            } else {
+                egui::SidePanel::right("workspace-changes-dock")
+                    .default_width((available.width() * 0.52).clamp(320.0, 760.0))
+                    .width_range(280.0..=(available.width() - 320.0).max(280.0))
+                    .resizable(true)
+                    .frame(egui::Frame::new().fill(colors.bg))
+                    .show(ctx, |ui| {
+                        self.contents(ui, workspace, outputs, loading, revision)
+                    });
+            }
         }
         expanded
     }
@@ -82,6 +177,7 @@ impl Changes {
         workspace: &Workspace,
         outputs: &[RecordedFile],
         loading: bool,
+        revision: u64,
     ) {
         let colors = theme::palette(ui.ctx());
         egui::TopBottomPanel::top("changes-heading")
@@ -91,6 +187,14 @@ impl Changes {
                 ui.horizontal_centered(|ui| {
                     ui.label(RichText::new("Changes").size(13.0).color(colors.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close = icons::button(ui, Icon::Close, "Hide changes pane");
+                        if close.clicked() {
+                            self.close = true;
+                        }
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::new("changes-close"), close.rect)
+                        });
                         if icons::button(
                             ui,
                             if self.expanded {
@@ -121,6 +225,27 @@ impl Changes {
                     });
                 });
             });
+        if let Some(recorded) = self.review.as_ref().map(|doc| doc.3) {
+            let files = if recorded {
+                self.review_file_navigation(ui.ctx(), outputs, revision)
+            } else {
+                self.git_file_navigation(ui.ctx())
+            };
+            let action =
+                diff_viewer::contents_with_files(ui, self.review.as_mut().unwrap(), Some(&files));
+            if action.back {
+                self.review = None;
+                self.git_files = Default::default();
+                context_capture::clear_source(ui.ctx());
+            } else if let Some(next) = action.next {
+                if recorded {
+                    self.step_recorded_file(ui.ctx(), outputs, revision, next);
+                } else {
+                    self.step_git_file(ui.ctx(), workspace, next);
+                }
+            }
+            return;
+        }
         egui::TopBottomPanel::top("changes-controls")
             .frame(egui::Frame::new().inner_margin(16))
             .show_inside(ui, |ui| {
@@ -213,7 +338,12 @@ impl Changes {
                                         &file.removed.to_string(),
                                         false,
                                     ) {
-                                        numbered_diff(ui, &file.diff);
+                                        ui.push_id(
+                                            (&self.identity, "recorded-diff", &file.path),
+                                            |ui| {
+                                                numbered_diff(ui, &file.path, &file.diff, true);
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -237,7 +367,16 @@ impl Changes {
                                             None => {
                                                 ui.label(theme::small(ui, "Loading diff…"));
                                             }
-                                            Some(content) => numbered_diff(ui, content),
+                                            Some(content) => {
+                                                ui.push_id(
+                                                    (&self.identity, "working-diff", &file.path),
+                                                    |ui| {
+                                                        numbered_diff(
+                                                            ui, &file.path, content, false,
+                                                        );
+                                                    },
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -381,72 +520,35 @@ impl Changes {
 }
 
 /// Selectable source with quiet line numbers and full-width addition/deletion backgrounds.
-pub(super) fn numbered_diff(ui: &mut egui::Ui, source: &str) {
+pub(super) fn numbered_diff(ui: &mut egui::Ui, path: &str, source: &str, recorded: bool) {
+    let _ = numbered_diff_target(ui, path, source, recorded, None, false);
+}
+
+pub(super) fn numbered_diff_target(
+    ui: &mut egui::Ui,
+    path: &str,
+    source: &str,
+    recorded: bool,
+    target: Option<usize>,
+    wrap: bool,
+) -> egui::Id {
     let colors = theme::palette(ui.ctx());
-    ui.push_id(ui.next_auto_id(), |ui| {
-        egui::ScrollArea::horizontal()
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                let mut job = egui::text::LayoutJob::default();
-                let mut backgrounds = Vec::new();
-                let mut old = 0;
-                let mut new = 0;
-                for line in source.lines() {
-                    if line.starts_with("@@") {
-                        if let Some((before, after)) =
-                            line.strip_prefix("@@ -").and_then(|s| s.split_once(" +"))
-                        {
-                            old = before
-                                .split(',')
-                                .next()
-                                .and_then(|s| s.parse::<usize>().ok())
-                                .unwrap_or(1)
-                                .saturating_sub(1);
-                            new = after
-                                .split([',', ' '])
-                                .next()
-                                .and_then(|s| s.parse::<usize>().ok())
-                                .unwrap_or(1)
-                                .saturating_sub(1);
-                        }
-                        backgrounds.push(None);
-                        job.append(
-                            "        …\n",
-                            0.0,
-                            egui::TextFormat {
-                                font_id: FontId::monospace(12.0),
-                                color: colors.dim,
-                                line_height: Some(21.0),
-                                ..Default::default()
-                            },
-                        );
-                        continue;
-                    }
-                    let added = line.starts_with('+') && !line.starts_with("+++");
-                    let removed = line.starts_with('-') && !line.starts_with("---");
-                    let context = line.starts_with(' ');
-                    if added || context {
-                        new += 1;
-                    }
-                    if removed || context {
-                        old += 1;
-                    }
-                    let number = if added || context {
-                        new.to_string()
-                    } else if removed {
-                        old.to_string()
-                    } else {
-                        String::new()
-                    };
-                    backgrounds.push(if added {
-                        Some(colors.diff_add_bg)
-                    } else if removed {
-                        Some(colors.diff_remove_bg)
-                    } else {
-                        None
-                    });
+    ui.push_id(("numbered-diff", path, recorded), |ui| {
+        let mut response_id = ui.id();
+        let mut reveal = None;
+        let mut scroll = egui::ScrollArea::new([!wrap, false]).auto_shrink([false, true]);
+        if wrap || target.is_some() {
+            scroll = scroll.horizontal_scroll_offset(0.0);
+        }
+        scroll.show(ui, |ui| {
+            let mut job = egui::text::LayoutJob::default();
+            let mut backgrounds = Vec::new();
+            for row in lines::rows(source) {
+                let line = row.text;
+                if row.header {
+                    backgrounds.push(None);
                     job.append(
-                        &format!("{number:>5}   "),
+                        lines::HUNK_CAPTION,
                         0.0,
                         egui::TextFormat {
                             font_id: FontId::monospace(12.0),
@@ -455,43 +557,95 @@ pub(super) fn numbered_diff(ui: &mut egui::Ui, source: &str) {
                             ..Default::default()
                         },
                     );
-                    job.append(
-                        &format!("{line}\n"),
-                        0.0,
-                        egui::TextFormat {
-                            font_id: FontId::monospace(12.0),
-                            color: colors.text,
-                            line_height: Some(21.0),
-                            ..Default::default()
-                        },
-                    );
+                    continue;
                 }
-                let background = ui.painter().add(egui::Shape::Noop);
-                let response = ui.add(egui::Label::new(job).selectable(true).extend());
-                let width = response.rect.width().max(ui.available_width());
-                ui.painter().set(
-                    background,
-                    egui::Shape::Vec(
-                        backgrounds
-                            .into_iter()
-                            .enumerate()
-                            .filter_map(|(i, color)| {
-                                color.map(|color| {
-                                    egui::Shape::rect_filled(
-                                        egui::Rect::from_min_size(
-                                            response.rect.min + egui::vec2(0.0, i as f32 * 21.0),
-                                            Vec2::new(width, 21.0),
-                                        ),
-                                        0,
-                                        color,
-                                    )
-                                })
-                            })
-                            .collect(),
-                    ),
+                backgrounds.push(if row.added {
+                    Some(colors.diff_add_bg)
+                } else if row.removed {
+                    Some(colors.diff_remove_bg)
+                } else {
+                    None
+                });
+                job.append(
+                    &row.gutter(),
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::monospace(12.0),
+                        color: colors.dim,
+                        line_height: Some(21.0),
+                        ..Default::default()
+                    },
                 );
-            });
-    });
+                job.append(
+                    &format!("{line}\n"),
+                    0.0,
+                    egui::TextFormat {
+                        font_id: FontId::monospace(12.0),
+                        color: colors.text,
+                        line_height: Some(21.0),
+                        ..Default::default()
+                    },
+                );
+            }
+            job.wrap.max_width = if wrap {
+                ui.available_width().max(1.0)
+            } else {
+                f32::INFINITY
+            };
+            job.wrap.break_anywhere = wrap;
+            let galley = ui.fonts(|fonts| fonts.layout_job(job));
+            let background = ui.painter().add(egui::Shape::Noop);
+            let response = ui.add(
+                egui::Label::new(galley.clone())
+                    .selectable(true)
+                    .halign(Align::Min),
+            );
+            response_id = response.id;
+            context_capture::offer_diff_selection(&response, path, source, recorded);
+            let width = response.rect.width().max(ui.available_width());
+            let mut logical = 0;
+            let mut shapes = Vec::new();
+            let mut target_rect = egui::Rect::NOTHING;
+            let mut target_rows = 0;
+            for row in &galley.rows {
+                let rect = egui::Rect::from_min_size(
+                    response.rect.min + row.pos.to_vec2(),
+                    Vec2::new(width, row.size.y),
+                );
+                if target_rows < 2
+                    && target.is_some_and(|target| logical == target || logical == target + 1)
+                {
+                    target_rect = target_rect.union(rect);
+                    target_rows += 1;
+                }
+                if let Some(Some(color)) = backgrounds.get(logical) {
+                    shapes.push(egui::Shape::rect_filled(rect, 0, *color));
+                }
+                if row.ends_with_newline {
+                    logical += 1;
+                }
+            }
+            if target_rect.is_positive() {
+                target_rect.set_width(1.0);
+                reveal = Some(target_rect);
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new("diff-hunk-target"),
+                        (target.unwrap(), target_rect),
+                    );
+                });
+            }
+            ui.painter().set(background, egui::Shape::Vec(shapes));
+        });
+        // The inner horizontal area consumes both scroll targets. Issue the
+        // vertical reveal only after leaving it so the enclosing area receives it.
+        if let Some(rect) = reveal {
+            ui.scroll_to_rect(rect, Some(Align::Center));
+        }
+        response_id
+    })
+    .inner
 }
 
 #[cfg(test)]

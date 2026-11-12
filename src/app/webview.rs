@@ -3,6 +3,8 @@ use super::*;
 use std::collections::BTreeMap;
 
 pub(super) mod chrome;
+mod console;
+use console::ConsoleLine;
 #[cfg(target_os = "macos")]
 mod chromium;
 
@@ -95,11 +97,6 @@ struct PageState {
     forward: bool,
     error: Option<String>,
     console: std::collections::VecDeque<ConsoleLine>,
-}
-#[derive(Clone)]
-struct ConsoleLine {
-    error: bool,
-    text: String,
 }
 #[derive(Clone, Copy)]
 enum Action {
@@ -320,6 +317,15 @@ impl BrowserView {
     }
     pub(super) fn viewport(&mut self, ui: &mut egui::Ui, key: &str) -> egui::Rect {
         let state = self.state(key);
+        self.viewport_with_state(ui, key, state)
+    }
+
+    fn viewport_with_state(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &str,
+        state: PageState,
+    ) -> egui::Rect {
         let options = self.options.entry(key.into()).or_default();
         if options.console {
             let colors = theme::palette(ui.ctx());
@@ -353,8 +359,12 @@ impl BrowserView {
                             }
                         });
                     });
+                    ui.add(egui::Label::new(theme::small(ui,
+                        "Local only unless added to your draft · review for secrets before sending."
+                    )).wrap());
                     ui.separator();
                     egui::ScrollArea::vertical()
+                        .id_salt(("browser-console-lines", key))
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             if state.console.is_empty() {
@@ -363,30 +373,46 @@ impl BrowserView {
                                     "No messages yet. Open DevTools for the interactive console.",
                                 ));
                             }
-                            for line in state.console {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(line.text).monospace().size(11.0).color(
-                                            if line.error { colors.red } else { colors.muted },
-                                        ),
-                                    )
-                                    .wrap()
-                                    .selectable(true),
-                                );
+                            for line in &state.console {
+                                console::show(ui, key, line);
                             }
                         });
                 });
         }
-        let available = ui.available_rect_before_wrap();
         if let Some(error) = state.error {
-            ui.colored_label(theme::palette(ui.ctx()).red, error);
+            let colors = theme::palette(ui.ctx());
+            egui::Frame::new().fill(colors.error_bg).inner_margin(12).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(error).size(12.0).color(colors.red)).wrap());
+                ui.add(egui::Label::new(theme::small(ui, "Check the URL and connection, then Reload. Certificate checks remain enabled.")).wrap());
+            });
+        } else if state.loading {
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                theme::status::indicator(
+                    ui,
+                    rect.center(),
+                    "Working",
+                    theme::palette(ui.ctx()).accent,
+                    4.0,
+                );
+                ui.label(theme::small(ui, "Loading page…"));
+            });
+        }
+        // Native views composite above egui: reserve status/console space first.
+        let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+        if !available.is_positive() {
+            return egui::Rect::NOTHING;
         }
         let Some((width, height)) = options.dimensions() else {
             return available;
         };
         let colors = theme::palette(ui.ctx());
         ui.painter().rect_filled(available, 0, colors.sidebar);
-        let available = available.shrink(14.0);
+        let inset = 14.0_f32
+            .min(available.width() * 0.25)
+            .min(available.height() * 0.25);
+        let available = available.shrink(inset);
         let scale = if options.fit {
             (available.width() / width as f32)
                 .min(available.height() / height as f32)
@@ -412,7 +438,7 @@ impl BrowserView {
             Stroke::new(1.0, colors.border),
             egui::StrokeKind::Outside,
         );
-        rect.intersect(available)
+        rect.intersect(available).intersect(ui.clip_rect())
     }
     pub(super) fn show(
         &mut self,
@@ -454,6 +480,9 @@ impl BrowserView {
         Some(location)
     }
 }
+
+#[cfg(test)]
+mod layout_tests;
 
 #[cfg(test)]
 mod tests {

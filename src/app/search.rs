@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod files;
 mod index;
 #[cfg(test)]
 mod tests;
@@ -16,15 +17,23 @@ pub(super) enum Scope {
     Chats,
     Messages,
     Settings,
+    Files,
 }
 impl Scope {
-    const ALL: [Self; 4] = [Self::All, Self::Chats, Self::Messages, Self::Settings];
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Chats,
+        Self::Messages,
+        Self::Settings,
+        Self::Files,
+    ];
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Chats => "Chats",
             Self::Messages => "Messages",
             Self::Settings => "Settings",
+            Self::Files => "Files",
         }
     }
     fn messages(self) -> bool {
@@ -44,6 +53,7 @@ enum Kind {
     Chat,
     Message,
     Setting,
+    File,
 }
 #[derive(Clone)]
 struct Hit {
@@ -70,6 +80,7 @@ pub(super) struct Search {
     selected: usize,
     hits: Vec<Hit>,
     messages: index::Found,
+    files: files::Files,
     rx: Option<Receiver<index::Found>>,
     cancel: Arc<AtomicBool>,
     requested: Option<(String, Scope, u64)>,
@@ -81,6 +92,7 @@ pub(super) struct Search {
 }
 impl Search {
     fn cancel(&mut self) {
+        self.files.cancel();
         self.cancel.store(true, Ordering::Relaxed);
         self.rx = None;
         self.requested = None;
@@ -131,6 +143,7 @@ fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool) -> egui::Response {
             .unwrap_or("Settings")
             .to_owned(),
         Kind::Chat => sessions::project_name(&hit.candidate.project),
+        Kind::File => "File".into(),
         Kind::Message => format!(
             "Message · {}",
             sessions::project_name(&hit.candidate.project)
@@ -203,6 +216,7 @@ pub(super) fn text_fingerprint(text: &str) -> u64 {
 impl Pui {
     pub(super) fn search_blocked(&self) -> bool {
         self.agents.close_prompt
+            || self.section_view.confirming()
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
             || self.deletion.confirming()
@@ -211,7 +225,6 @@ impl Pui {
             || self.menu.about
             || self.updates.open
             || self.bypass_pending.is_some()
-            || self.selected_diff.is_some()
             || !self.state.dialogs.is_empty()
             || self.tasks.search_dialogs_pending()
             || self.transcript.gallery.is_open()
@@ -249,6 +262,9 @@ impl Pui {
         self.ctx.request_repaint();
     }
     pub(super) fn search_inputs(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
+            self.open_quick_files();
+        }
         let shortcut = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K));
         if shortcut || (self.focus_search && !self.search_open) {
             self.open_search();
@@ -349,6 +365,15 @@ impl Pui {
         }).collect()
     }
     fn refresh_search(&mut self, ctx: &egui::Context) {
+        if self.spotlight.scope == Scope::Files {
+            self.spotlight.cancel.store(true, Ordering::Relaxed);
+            self.spotlight.rx = None;
+            self.spotlight.requested = None;
+            self.spotlight.messages = Default::default();
+            self.refresh_quick_files(ctx);
+            return;
+        }
+        self.spotlight.files.cancel();
         let query = self.search.trim().to_lowercase();
         let scope = self.spotlight.scope;
         let revision = self.search_revision();
@@ -486,7 +511,15 @@ impl Pui {
         let response = prompt_ui::modal(ctx, egui::Id::new("spotlight-search"), 560.0, |ui| {
             let colors = theme::palette(ctx);
             close |= prompt_ui::close(ui);
-            prompt_ui::heading(ui, "Search", "");
+            prompt_ui::heading(
+                ui,
+                if self.spotlight.scope == Scope::Files {
+                    "Quick Open"
+                } else {
+                    "Search"
+                },
+                "",
+            );
             ui.add_space(4.0);
             // Reserve navigation keys before TextEdit can treat them as caret
             // movement or submit them to a previously focused control.
@@ -500,7 +533,11 @@ impl Pui {
                     [width, 32.0],
                     egui::TextEdit::singleline(&mut self.search)
                         .id(egui::Id::new("spotlight-query"))
-                        .hint_text("Search everything…")
+                        .hint_text(if self.spotlight.scope == Scope::Files {
+                            "Workspace path, optionally :line"
+                        } else {
+                            "Search everything…"
+                        })
                         .char_limit(256)
                         .font(FontId::proportional(15.0))
                         .frame(false),
@@ -555,6 +592,10 @@ impl Pui {
                                     && self.spotlight.scope == Scope::Messages
                                 {
                                     "Type to search conversation text."
+                                } else if self.spotlight.scope == Scope::Files
+                                    && self.spotlight.files.pending()
+                                {
+                                    "Finding workspace filenames…"
                                 } else if self.spotlight.rx.is_some() {
                                     "Searching messages…"
                                 } else {
@@ -586,6 +627,18 @@ impl Pui {
                         }
                     }
                 });
+            if self.spotlight.scope == Scope::Files {
+                ui.add(
+                    egui::Label::new(theme::small(
+                        ui,
+                        "Filenames only · workspace scope · Enter opens read-only",
+                    ))
+                    .wrap(),
+                );
+                if let Some(note) = self.spotlight.files.note() {
+                    ui.add(egui::Label::new(theme::small(ui, note)).wrap());
+                }
+            }
             if self.spotlight.rx.is_some() {
                 ui.label(theme::small(ui, "Searching saved messages…"));
             }
@@ -614,6 +667,10 @@ impl Pui {
     }
     fn activate_search_hit(&mut self, hit: Hit) {
         if self.search_blocked() {
+            return;
+        }
+        if hit.kind == Kind::File {
+            self.activate_quick_file(&hit);
             return;
         }
         if hit.kind != Kind::Setting

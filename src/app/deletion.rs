@@ -623,8 +623,17 @@ impl Pui {
             self.forget_session(path);
             self.tasks.detach_deleted_chat(path);
         }
+        for id in ids {
+            self.session_layouts.forget_agent(id);
+            self.prefs
+                .workspace_layouts
+                .retain(|layout| layout.key != format!("agent:{id}"));
+        }
         self.forget_deleted_agent_ids(ids);
         if active {
+            self.files = Default::default();
+            self.changes = Default::default();
+            self.inspector_panel = false;
             let models = std::mem::take(&mut self.state.models);
             self.state = State {
                 models,
@@ -657,6 +666,11 @@ impl Pui {
         self.refresh_sessions();
     }
     fn forget_session(&mut self, path: &Path) {
+        self.session_layouts.forget_path(path);
+        self.prefs.workspace_layouts.retain(|layout| {
+            layout.key.starts_with("agent:") || !same(Path::new(&layout.key), path)
+        });
+        self.forget_restart_checkpoint(path);
         self.sessions.retain(|s| !same(&s.path, path));
         self.prefs.chats.retain(|p, _| !same(p, path));
         self.waiting.retain(|p, _| !same(p, path));

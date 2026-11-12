@@ -22,6 +22,8 @@ pub(super) struct Branch {
     pub project: PathBuf,
     pub created: Option<SystemTime>,
     pub modified: SystemTime,
+    /// This row's own observed activity, never its descendants' sorting time.
+    pub activity: Option<SystemTime>,
     pub children: Vec<Branch>,
     pub pinned: bool,
     pub archived: bool,
@@ -126,6 +128,7 @@ fn empty(
         project,
         created: None,
         modified: SystemTime::UNIX_EPOCH,
+        activity: None,
         children: Vec::new(),
         pinned: false,
         archived: false,
@@ -164,6 +167,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
         );
         row.created = s.created;
         row.modified = s.modified;
+        row.activity = (s.modified > SystemTime::UNIX_EPOCH).then_some(s.modified);
         preferences(app, &mut row);
         order.push(key.clone());
         rows.insert(key, row);
@@ -187,6 +191,21 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
         }
         let row = rows.get_mut(&key).unwrap();
         row.status = node.status.clone();
+        let state = if node.id == app.agents.active {
+            Some(&app.state)
+        } else {
+            app.agents.parked.get(&node.id).map(|chat| &chat.state)
+        };
+        // History is already loaded; inspecting its last message is O(1), not
+        // a transcript scan or file read. Events supply fresh tool/stream time.
+        let message_time = state
+            .and_then(|state| state.messages.last())
+            .and_then(|message| u64::try_from(message.timestamp).ok())
+            .filter(|timestamp| *timestamp > 0)
+            .and_then(|timestamp| {
+                SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(timestamp))
+            });
+        row.activity = row.activity.max(node.last_activity).max(message_time);
         if node.parent.is_some() {
             row.target = Target::Agent(node.id.clone());
             if row
@@ -226,6 +245,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
         row.modified = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(task.updated))
             .unwrap_or(SystemTime::UNIX_EPOCH);
+        row.activity = (task.updated > 0).then_some(row.modified);
         let parent = task
             .parent_session
             .as_deref()
@@ -286,6 +306,9 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
             row.modified = SystemTime::UNIX_EPOCH
                 .checked_add(Duration::from_secs(task.updated))
                 .unwrap_or(SystemTime::UNIX_EPOCH);
+            // A workflow update is not a per-worker activity timestamp. Keep
+            // the run's own discovered session date only, if one is available.
+            row.activity = rows.get(&run_key).and_then(|existing| existing.activity);
             // Worker rows always navigate to the existing task process/evidence,
             // including historical sessions that are also in the recent scan.
             if !rows.contains_key(&run_key) {

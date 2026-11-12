@@ -22,7 +22,7 @@ impl Browser {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     if (self.browser_mode && self.urls.is_empty())
-                        || (!self.browser_mode && self.tabs.iter().all(|tab| is_html(&tab.path)))
+                        || (!self.browser_mode && self.tabs.iter().all(|tab| !self.file_tab(tab)))
                     {
                         ui.label(
                             RichText::new(if self.browser_mode {
@@ -44,13 +44,13 @@ impl Browser {
                                     let count = if self.browser_mode {
                                         self.urls.len()
                                     } else {
-                                        self.tabs.iter().filter(|tab| !is_html(&tab.path)).count()
+                                        self.tabs.iter().filter(|tab| self.file_tab(tab)).count()
                                     };
                                     let width = ((tabs_width - 36.0) / count.max(1) as f32)
                                         .clamp(120.0, 200.0);
                                     for (index, file) in
                                         self.tabs.iter().enumerate().filter(|(_, file)| {
-                                            !self.browser_mode && !is_html(&file.path)
+                                            !self.browser_mode && self.file_tab(file)
                                         })
                                     {
                                         let title = file
@@ -128,21 +128,29 @@ impl Browser {
                         {
                             self.expanded = !self.expanded;
                         }
-                        if !self.browser_mode
-                            && chrome::icon_button(
+                        if !self.browser_mode {
+                            let refresh = chrome::icon_button(
                                 ui,
                                 Icon::Refresh,
                                 "Refresh files and selected preview",
                                 false,
-                            )
-                            .clicked()
-                        {
-                            self.refresh(&ctx);
+                            );
+                            if refresh.clicked() {
+                                self.refresh(&ctx);
+                            }
+                            #[cfg(test)]
+                            ctx.data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::new("file-preview-refresh"),
+                                    (refresh.id, refresh.rect),
+                                );
+                            });
                         }
                     });
                 });
             });
         if let Some(path) = select {
+            context_capture::clear_source(&ctx);
             self.address = path.display().to_string();
             self.selected = Some(path);
             self.browser_mode = false;
@@ -196,7 +204,7 @@ impl Browser {
                     {
                         self.refresh(&ctx);
                     }
-                    let trailing = if page.is_some() { 66.0 } else { 34.0 };
+                    let trailing = if page.is_some() { 98.0 } else { 34.0 };
                     ui.allocate_ui_with_layout(
                         Vec2::new((ui.available_width() - trailing).max(50.0), 32.0),
                         Layout::left_to_right(Align::Center),
@@ -204,12 +212,10 @@ impl Browser {
                             open = chrome::address(ui, &mut self.address, self.browser_mode, focus);
                         },
                     );
+                    open |=
+                        chrome::icon_button(ui, Icon::ArrowRight, "Go to address", false).clicked();
                     if let Some(key) = &page {
                         self.web.tools(ui, key);
-                    } else {
-                        open |=
-                            chrome::icon_button(ui, Icon::ArrowRight, "Open file or page", false)
-                                .clicked();
                     }
                 });
             });

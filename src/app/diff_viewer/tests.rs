@@ -20,15 +20,18 @@ fn text(output: &egui::FullOutput) -> Vec<&egui::epaint::TextShape> {
     output
         .shapes
         .iter()
-        .filter_map(|shape| match &shape.shape {
-            egui::Shape::Text(text) => Some(text),
-            _ => None,
+        .filter_map(|shape| {
+            if let egui::Shape::Text(text) = &shape.shape {
+                Some(text)
+            } else {
+                None
+            }
         })
         .collect()
 }
 
 #[test]
-fn utility_diff_is_compact_bounded_numbered_and_neutral_in_both_themes() {
+fn embedded_diff_is_bounded_numbered_neutral_and_never_creates_a_floating_window() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for (size, zoom) in [
             (Vec2::new(1200.0, 900.0), 1.0),
@@ -37,153 +40,116 @@ fn utility_diff_is_compact_bounded_numbered_and_neutral_in_both_themes() {
             let ctx = egui::Context::default();
             theme::install(&ctx);
             mode.apply(&ctx);
-            let _ = ctx.run(input(size, vec![]), |_| {});
             ctx.set_zoom_factor(zoom);
             let path = format!("src/{}/tests.rs", "long-directory/".repeat(12));
             let diff = format!(
                 "@@ -10,2 +10,3 @@\n before\n-old\n+new\n+{}",
                 "long source ".repeat(200)
             );
-            let mut widths = vec![];
-            for _ in 0..10 {
-                let output = ctx.run(input(size, vec![]), |ctx| {
+            for _ in 0..5 {
+                let out = ctx.run(input(size, vec![]), |ctx| {
                     assert!(show(ctx, &path, &diff, true));
                 });
-                let rect = ctx
-                    .memory(|memory| memory.area_rect(egui::Id::new("diff-viewer")))
-                    .unwrap();
-                widths.push(rect.width());
                 assert!(
-                    rect.width() <= size.x - 20.0,
-                    "Window too wide at {size:?}, zoom {zoom}: {rect:?}"
+                    ctx.memory(|m| m.area_rect(egui::Id::new("diff-viewer")))
+                        .is_none()
                 );
-                assert!(rect.height() <= size.y - 20.0, "Window too tall: {rect:?}");
-                let labels = text(&output);
-                if labels.is_empty() {
-                    continue;
-                } // First sizing pass is invisible.
+                let labels = text(&out);
                 let code = labels
                     .iter()
-                    .find(|text| text.galley.job.text.contains("+new"))
+                    .find(|t| t.galley.job.text.contains("+new"))
                     .unwrap();
-                assert!(code.galley.job.text.contains("   10    before"));
-                assert!(code.galley.job.text.contains("   11   +new"));
-                let source = code
+                assert!(
+                    code.galley.job.text.contains("   10    before")
+                        && code.galley.job.text.contains("   11   +new")
+                );
+                let section = code
                     .galley
                     .job
                     .sections
                     .iter()
-                    .find(|section| {
-                        code.galley.job.text[section.byte_range.clone()].contains("+new")
-                    })
+                    .find(|s| code.galley.job.text[s.byte_range.clone()].contains("+new"))
                     .unwrap();
-                assert_eq!(
-                    source.format.color,
-                    theme::palette(&ctx).text,
-                    "Code should not be solid green"
-                );
-                assert!(labels.iter().any(|text| text.galley.job.text == "tests.rs"));
-                assert!(labels.iter().any(|text| text.galley.job.text == "+2"));
-                assert!(labels.iter().any(|text| text.galley.job.text == "−1"));
-                assert!(
-                    labels
-                        .iter()
-                        .any(|text| text.galley.job.text == "Recorded edits · read-only")
-                );
-                let filename = labels
-                    .iter()
-                    .find(|text| text.galley.job.text == "tests.rs")
-                    .unwrap();
-                assert!(filename.galley.size().y < 24.0, "No oversized title");
-                let close = ctx
-                    .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-close")))
-                    .unwrap();
-                let copy = ctx
-                    .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-copy")))
-                    .unwrap();
-                assert!(rect.contains_rect(close) && rect.contains_rect(copy));
-                assert!(copy.right() < close.left());
+                assert_eq!(section.format.color, theme::palette(&ctx).text);
+                for label in ["tests.rs", "+2", "−1", "Recorded edits · read-only"] {
+                    assert!(
+                        labels.iter().any(|t| t.galley.job.text == label),
+                        "missing {label:?}: {:?}",
+                        labels
+                            .iter()
+                            .map(|t| &t.galley.job.text)
+                            .filter(|t| t.len() < 200)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                for id in ["diff-close", "diff-copy"] {
+                    let rect = ctx
+                        .data(|d| d.get_temp::<egui::Rect>(egui::Id::new(id)))
+                        .unwrap();
+                    assert!(ctx.screen_rect().contains_rect(rect), "{rect:?} {size:?}");
+                }
             }
-            assert!(
-                widths[3..]
-                    .iter()
-                    .all(|width| (width - widths[3]).abs() < 0.5),
-                "Long lines must not grow the window: {widths:?}"
-            );
         }
     }
 }
 
 #[test]
-fn utility_window_remains_resizable_and_handles_large_counts_and_empty_diffs() {
+fn built_in_changes_pane_resizes_and_expands_only_on_explicit_action() {
     let ctx = egui::Context::default();
-    theme::install(&ctx);
-    let size = Vec2::new(1200.0, 900.0);
-    let diff = "+line\n".repeat(12_345);
-    for _ in 0..3 {
-        let _ = ctx.run(input(size, vec![]), |ctx| {
-            show(ctx, "large.rs", &diff, true);
-        });
+    let mut app = files::tests::app(&ctx);
+    app.prefs.hide_sidebar = true;
+    app.open_diff_review(("large.rs".into(), "+line\n".repeat(12345)).into(), true);
+    for _ in 0..4 {
+        files::tests::frame(&ctx, &mut app, vec![]);
     }
-    let before = ctx
-        .memory(|memory| memory.area_rect(egui::Id::new("diff-viewer")))
-        .unwrap();
-    let corner = before.max - Vec2::splat(1.0);
+    let before =
+        egui::containers::panel::PanelState::load(&ctx, egui::Id::new("workspace-changes-dock"))
+            .unwrap()
+            .rect;
+    assert!(!app.changes.expanded());
+    let corner = before.left_center();
     for (pos, pressed) in [
         (corner, true),
-        (corner - egui::vec2(160.0, 100.0), true),
-        (corner - egui::vec2(160.0, 100.0), false),
+        (corner + egui::vec2(80.0, 0.0), true),
+        (corner + egui::vec2(80.0, 0.0), false),
     ] {
-        let _ = ctx.run(
-            input(
-                size,
-                vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            ),
-            |ctx| {
-                show(ctx, "large.rs", &diff, true);
-            },
+        files::tests::frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
         );
     }
-    let resized = ctx
-        .memory(|memory| memory.area_rect(egui::Id::new("diff-viewer")))
-        .unwrap();
+    let after =
+        egui::containers::panel::PanelState::load(&ctx, egui::Id::new("workspace-changes-dock"))
+            .unwrap()
+            .rect;
     assert!(
-        resized.width() < before.width() - 100.0,
-        "Window must remain resizable: {before:?} -> {resized:?}"
+        after.width() < before.width() - 40.0,
+        "{before:?} {after:?}"
     );
-    let output = ctx.run(input(size, vec![]), |ctx| {
-        show(ctx, "large.rs", &diff, true);
-    });
-    let labels = text(&output);
-    let title = labels
-        .iter()
-        .find(|text| text.galley.job.text == "large.rs")
-        .unwrap();
-    let count = labels
-        .iter()
-        .find(|text| text.galley.job.text == "+12345")
-        .unwrap();
-    assert!(title.pos.x + title.galley.size().x < count.pos.x);
-    let output = ctx.run(input(size, vec![]), |ctx| {
-        show(ctx, "empty.rs", "", false);
-    });
+    app.changes.set_expanded(true);
+    files::tests::frame(&ctx, &mut app, vec![]);
+    assert!(app.changes.expanded());
+    app.changes.set_expanded(false);
+    app.open_diff_review(("empty.rs".into(), String::new()).into(), false);
+    let out = files::tests::frame(&ctx, &mut app, vec![]);
     assert!(
-        text(&output)
+        text(&out)
             .iter()
-            .any(|text| text.galley.job.text == "No changes to display.")
+            .any(|t| t.galley.job.text == "No changes to display.")
     );
 }
 
 #[test]
-fn copy_preserves_diff_and_both_close_actions_work() {
+fn copy_preserves_complete_diff_and_back_or_focused_escape_return_to_list() {
     let ctx = egui::Context::default();
     theme::install(&ctx);
     let size = Vec2::new(1100.0, 850.0);
@@ -194,17 +160,13 @@ fn copy_preserves_diff_and_both_close_actions_work() {
             show(ctx, "src/file.rs", diff, false);
         });
     }
-    let copy = ctx
-        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-copy")))
-        .unwrap()
-        .center();
-    let close = ctx
-        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-close")))
-        .unwrap()
-        .center();
-    for (pos, closing) in [(copy, false), (close, true)] {
+    for (id, back) in [("diff-copy", false), ("diff-close", true)] {
+        let pos = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::new(id)))
+            .unwrap()
+            .center();
         for pressed in [true, false] {
-            let output = ctx.run(
+            let out = ctx.run(
                 input(
                     size,
                     vec![
@@ -218,16 +180,16 @@ fn copy_preserves_diff_and_both_close_actions_work() {
                     ],
                 ),
                 |ctx| {
-                    assert_eq!(
-                        show(ctx, "src/file.rs", diff, false),
-                        !(closing && !pressed)
-                    );
+                    assert_eq!(show(ctx, "src/file.rs", diff, false), !back || pressed);
                 },
             );
-            if !closing && !pressed {
-                assert!(output.platform_output.commands.iter().any(
-                    |command| matches!(command, egui::OutputCommand::CopyText(text) if text == diff)
-                ));
+            if !back && !pressed {
+                assert!(
+                    out.platform_output
+                        .commands
+                        .iter()
+                        .any(|c| matches!(c,egui::OutputCommand::CopyText(t) if t==diff))
+                );
             }
         }
     }
@@ -237,41 +199,45 @@ fn copy_preserves_diff_and_both_close_actions_work() {
 }
 
 #[test]
-fn clicking_outputs_opens_numbered_diff_and_escape_never_stops_the_agent() {
+fn clicking_outputs_opens_builtin_changes_and_focused_escape_never_stops_agent() {
     let ctx = egui::Context::default();
     let mut app = files::tests::app(&ctx);
     app.prefs.hide_sidebar = true;
     app.prefs.hide_inspector = false;
     app.state.busy = true;
-    let (client, _, commands) = rpc::Client::stub_with_commands();
+    let (client, _, commands) = rpc::Client::stub_with_records();
     app.client = Some(client);
     files::tests::frame(&ctx, &mut app, vec![]);
     let file = app.outputs.first().unwrap().clone();
-    let output = files::tests::frame(&ctx, &mut app, vec![]);
+    let out = files::tests::frame(&ctx, &mut app, vec![]);
     let name = std::path::Path::new(&file.path)
         .file_name()
         .unwrap()
         .to_str()
         .unwrap();
-    let row = files::tests::text(&output, name);
-    files::tests::click(&ctx, &mut app, row);
-    assert_eq!(app.selected_diff.as_ref().unwrap().0, file.path);
-    let output = files::tests::frame(&ctx, &mut app, vec![]);
+    let pos = files::tests::text(&out, name);
+    files::tests::click(&ctx, &mut app, pos);
+    assert!(app.inspector_panel);
+    assert_eq!(app.changes.review.as_ref().unwrap().0, file.path);
+    assert!(!app.changes.expanded());
+    let out = files::tests::frame(&ctx, &mut app, vec![]);
     assert!(
-        text(&output)
+        text(&out)
             .iter()
-            .any(|text| text.galley.job.text == "Recorded edits · read-only")
+            .any(|t| t.galley.job.text == "Recorded edits · read-only"),
+        "{:?}",
+        text(&out)
+            .iter()
+            .map(|t| &t.galley.job.text)
+            .filter(|t| t.len() < 200)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        ctx.memory(|m| m.area_rect(egui::Id::new("diff-viewer")))
+            .is_none()
     );
     files::tests::frame(&ctx, &mut app, vec![key()]);
-    assert!(app.selected_diff.is_none());
-    assert!(app.state.busy);
-    app.send(json!({"type":"diff-close-barrier"}));
-    loop {
-        let command = commands.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_ne!(command["type"], "abort");
-        assert_ne!(command["type"], "clear_queue");
-        if command["type"] == "diff-close-barrier" {
-            break;
-        }
-    }
+    assert!(app.changes.review.is_none());
+    assert!(app.inspector_panel && app.state.busy);
+    assert!(commands.try_recv().is_err());
 }

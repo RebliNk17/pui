@@ -125,6 +125,38 @@ impl Pui {
         }
     }
     pub(super) fn task_fingerprint(&mut self, step: FingerprintStep) {
+        if step == FingerprintStep::Revalidate && self.tasks.live.is_none() {
+            let Some(id) = self.tasks.current().map(|t| t.id.clone()) else {
+                return;
+            };
+            if self.tasks.revalidate_claim.is_none() {
+                if let Some(store) = &self.tasks.store {
+                    let (reply, rx) = mpsc::channel();
+                    if store
+                        .send(StoreCommand::Claim {
+                            id: id.clone(),
+                            reply,
+                        })
+                        .is_err()
+                    {
+                        self.state.notice = Some(
+                            "Workflow storage is unavailable; evidence was not changed.".into(),
+                        );
+                    } else {
+                        self.tasks.revalidate_claim = Some((id, rx));
+                    }
+                    return;
+                }
+                if !cfg!(test) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        self.task_fingerprint_owned(step);
+    }
+    pub(super) fn task_fingerprint_owned(&mut self, step: FingerprintStep) {
         if self.tasks.job.is_some() {
             return;
         }
@@ -329,13 +361,7 @@ impl Pui {
             routing_for,
             route_prompt,
         });
-        if !self.tasks.open || self.tasks.selected_run.is_some() {
-            self.tasks.selected_run = if role == Role::Checks {
-                None
-            } else {
-                Some(run)
-            };
-        }
+        // New stages update evidence, not the user's selected tab or log.
         self.tasks.save();
         self.ctx.request_repaint_after(DEADLINE);
     }
@@ -793,6 +819,15 @@ impl Pui {
         self.task_launch(Role::Builder);
     }
     pub(super) fn task_answer(&mut self, run: &str, id: &str, mut response: Value) {
+        if !self.tasks.open
+            || self.tasks.selected != self.tasks.live
+            || !self
+                .tasks
+                .live_task()
+                .is_some_and(|task| task.runs.iter().any(|r| r.id == run))
+        {
+            return;
+        }
         let Some(p) = self
             .tasks
             .processes

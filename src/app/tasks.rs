@@ -5,13 +5,14 @@ use crate::tasks::{
 };
 use std::collections::BTreeMap;
 
-mod chat;
+pub(super) mod chat;
 mod consent;
 mod routing;
 mod runtime;
 #[cfg(test)]
 mod tests;
 mod view;
+pub(super) mod work_item;
 mod workflow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +55,12 @@ struct Process {
 }
 enum StoreCommand {
     Save(Box<Task>),
+    // Observers may inspect evidence without stealing a task's writer lock.
+    // Conflict is local to this revalidation, not a broken storage subsystem.
+    Claim {
+        id: String,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     Detach {
         tasks: Vec<Task>,
         reply: mpsc::Sender<Result<(), String>>,
@@ -71,13 +78,17 @@ pub(super) struct Tasks {
     pub selected: Option<String>,
     pub(super) records: Vec<Task>,
     pub(super) parents: BTreeMap<String, String>,
+    display_paths: chat::DisplayPaths,
     live: Option<String>,
     processes: Vec<Process>,
     retiring: Vec<Receiver<()>>,
     histories: BTreeMap<String, State>,
     pub(super) selected_run: Option<String>,
+    activity_target: Option<(String, usize)>,
+    pub(super) views: BTreeMap<String, work_item::View>,
     pub(super) transcript: Transcript,
     job: Option<Job>,
+    revalidate_claim: Option<(String, Receiver<Result<(), String>>)>,
     store: Option<mpsc::Sender<StoreCommand>>,
     store_worker: Option<std::thread::JoinHandle<()>>,
     loaded: Option<Receiver<Result<Vec<Task>, String>>>,
@@ -172,6 +183,8 @@ impl Tasks {
             .collect();
         if indices.len() == 1 {
             self.transcript.jump_to_message(indices[0]);
+            self.activity_target = Some((run.into(), indices[0]));
+            self.views.entry(task.into()).or_default().tab = work_item::Tab::Activity;
         }
         true
     }
@@ -265,6 +278,7 @@ impl Tasks {
         }
         self.records.retain(|t| t.id != id);
         self.parents.remove(id);
+        self.views.remove(id);
         if self.selected.as_deref() == Some(id) {
             self.selected = self.records.first().map(|t| t.id.clone());
             self.selected_run = None;
@@ -350,6 +364,7 @@ impl Tasks {
             t.note = "Stopped by you. No commands were replayed; files and sessions are retained."
                 .into();
         }
+        self.revalidate_claim = None;
         if self.job.take().is_some() {
             if let Some(t) = self.live_mut() {
                 t.note.push_str(" An already-started filesystem preparation may finish; any resulting worktree is retained, never automatically deleted.");
@@ -378,6 +393,7 @@ impl Tasks {
         }
     }
     fn block(&mut self, reason: impl Into<String>) {
+        self.revalidate_claim = None;
         let reason = reason.into();
         if let Some(t) = self.live_mut() {
             for run in &mut t.runs {
@@ -446,6 +462,21 @@ fn run_store(
     let mut owned = std::collections::BTreeMap::new();
     while let Ok(command) = rx.recv() {
         match command {
+            StoreCommand::Claim { id, reply } => {
+                let result = if deleted.contains(&id) {
+                    Err("This workflow was deleted; nothing was revalidated.".into())
+                } else {
+                    match owned.entry(id) {
+                        std::collections::btree_map::Entry::Occupied(_) => Ok(()),
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            domain::store::lock(home, entry.key()).map(|lock| {
+                                entry.insert(lock);
+                            })
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
             StoreCommand::Save(task) => {
                 if !deleted.contains(&task.id) {
                     let result = (|| {
@@ -551,7 +582,25 @@ impl Pui {
             }
         }
     }
+    pub(super) fn open_work_item_tab(&mut self, task: String, tab: work_item::Tab) {
+        self.open_task_from_board(task.clone(), None);
+        self.tasks.views.entry(task).or_default().tab = tab;
+    }
+    pub(super) fn work_item_tab(&self, task: &str) -> work_item::Tab {
+        self.tasks
+            .views
+            .get(task)
+            .map(|view| view.tab)
+            .unwrap_or_default()
+    }
     pub(super) fn open_task_from_board(&mut self, task: String, run: Option<String>) {
+        self.tasks.activity_target = None;
+        let view = self.tasks.views.entry(task.clone()).or_default();
+        view.tab = if run.is_some() {
+            work_item::Tab::Activity
+        } else {
+            work_item::Tab::Overview
+        };
         self.tasks.selected = Some(task);
         self.tasks.selected_run = run;
         self.tasks.transcript = Default::default();
@@ -751,6 +800,33 @@ impl Pui {
                 self.tasks.job = None;
                 if self.tasks.live.as_ref() == Some(&id) {
                     self.task_job_result(result);
+                }
+            }
+        }
+        if let Some((id, rx)) = &self.tasks.revalidate_claim {
+            let result = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Workflow ownership check disconnected. No evidence was changed.".into(),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                let id = id.clone();
+                self.tasks.revalidate_claim = None;
+                match result {
+                    Ok(())
+                        if self.tasks.live.is_none()
+                            && self.tasks.selected.as_ref() == Some(&id) =>
+                    {
+                        self.task_fingerprint_owned(FingerprintStep::Revalidate)
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.state.notice = Some(format!(
+                            "Could not revalidate this workflow: {error} Other workflows are still available."
+                        ))
+                    }
                 }
             }
         }

@@ -12,9 +12,51 @@ fn app() -> Pui {
     app.ultracode_ready = true;
     app.state.provider = "fixture-provider".into();
     app.state.model = "fixture-model".into();
+    app.state.models = vec![crate::protocol::Model {
+        id: "claude-haiku-5-5".into(),
+        name: "Fixture Haiku".into(),
+        provider: "fixture-provider".into(),
+        context_window: 200000,
+        input_cost: 0.1,
+        output_cost: 0.5,
+    }];
     app.client = Some(rpc::Client::stub());
     app
 }
+#[test]
+fn unsupported_catalog_is_rejected_before_consent_or_task_creation() {
+    let mut app = app();
+    let (client, _, replies) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    app.state.models.clear();
+    app.control_request(&request("unsupported"));
+    assert!(app.state.dialogs.is_empty());
+    assert!(app.tasks.requests.is_empty());
+    assert!(app.tasks.records.is_empty());
+    assert!(app.tasks.job.is_none());
+    let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+    let result: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("no workflow was created")
+    );
+}
+
+#[test]
+fn catalog_change_after_question_prevents_workflow_creation() {
+    let mut app = app();
+    app.control_request(&request("ask"));
+    app.state.models.clear();
+    assert!(app.workflow_answer(
+        &json!({"type":"extension_ui_response","id":"ask","value":"Use workflow"})
+    ));
+    assert!(app.tasks.records.is_empty());
+    assert!(app.tasks.job.is_none());
+    assert!(app.tasks.requests.is_empty());
+}
+
 fn request(id: &str) -> Value {
     json!({"type":"extension_ui_request","method":"input","title":"Pui agent control","id":id,
         "placeholder":json!({"action":"workflow_request","id":id,"objective":"Preserve keyboard navigation","reason":"Separate checks and review help catch focus regressions.","approved":true}).to_string()})

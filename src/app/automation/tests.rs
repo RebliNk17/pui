@@ -30,6 +30,49 @@ fn create(app: &mut Pui, kind: &str) -> String {
     app.automation_control(&source, &json!({"action":"automation_create","kind":kind,"name":"CI ready","message":"Review the result","command":"exit 0","interval_seconds":10,"schedule":"*/5 * * * *"})).unwrap()["job"]["job_id"].as_str().unwrap().into()
 }
 #[test]
+fn idle_scheduler_has_no_timer_and_future_jobs_use_their_deadline() {
+    let mut a = app(&egui::Context::default());
+    assert_eq!(a.automation.next_wake(), None);
+    let id = create(&mut a, "cron");
+    a.automation.jobs[0].next_run = now() + 120;
+    assert!(a.automation.next_wake().unwrap() >= Duration::from_secs(119));
+    a.change_job(&id, "pause").unwrap();
+    assert_eq!(a.automation.next_wake(), None);
+    a.automation.failed = true;
+    assert_eq!(a.automation.next_wake(), None);
+}
+#[test]
+fn monitor_completion_drains_before_creator_readiness_and_reconnect_has_deadline() {
+    let ctx = egui::Context::default();
+    let mut a = app(&ctx);
+    let id = create(&mut a, "monitor");
+    a.loading_chat = true;
+    let (tx, rx) = mpsc::channel();
+    tx.send(runner::Check {
+        success: false,
+        output: String::new(),
+        error: None,
+    })
+    .unwrap();
+    a.automation.running.insert(
+        id.clone(),
+        Running {
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx,
+        },
+    );
+    a.poll_automation();
+    assert!(!a.automation.running.contains_key(&id));
+    assert!(a.automation.jobs[0].next_run > now());
+    assert!(a.automation.next_wake().is_some());
+    a.automation.jobs[0].next_run = now() + 3600;
+    a.automation
+        .reconnect_at
+        .insert(a.agents.active.clone(), std::time::Instant::now());
+    assert!(a.automation.next_wake().unwrap() <= Duration::from_secs(31));
+}
+
+#[test]
 fn creator_scoping_validation_and_pause_resume() {
     let mut a = app(&egui::Context::default());
     let id = create(&mut a, "cron");
@@ -79,6 +122,24 @@ fn scheduled_message_routes_to_creator_and_waits_for_ack() {
     assert!(commands.try_recv().is_err());
 }
 #[test]
+fn interrupted_chat_defers_scheduled_delivery_until_recovery_is_acknowledged() {
+    let mut a = app(&egui::Context::default());
+    let (client, _, commands) = rpc::Client::stub_with_commands();
+    a.client = Some(client);
+    create(&mut a, "cron");
+    a.automation.jobs[0].pending = Some("Review scheduled result".into());
+    a.state.restart_notice = "Interrupted while waiting for approval".into();
+    a.poll_automation();
+    assert!(commands.try_recv().is_err());
+    assert!(!a.automation.jobs[0].dispatching);
+    assert!(a.automation.jobs[0].pending.is_some());
+    a.state.restart_notice.clear();
+    a.poll_automation();
+    let command = commands.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(protocol::string(&command, "message").starts_with("/pui-agent-message "));
+}
+
+#[test]
 fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
     let mut a = app(&egui::Context::default());
     let id = create(&mut a, "monitor");
@@ -96,9 +157,18 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
             rx,
         },
     );
-    a.poll_automation();
+    // Clear startup repaints so this verifies the completion path rearms itself.
+    let ctx = a.ctx.clone();
+    for _ in 0..3 {
+        let _ = ctx.run(Default::default(), |_| {});
+    }
+    let output = ctx.run(Default::default(), |_| a.poll_automation());
     assert!(a.automation.jobs[0].pending.is_none());
     assert!(a.automation.mail.is_empty());
+    assert!(
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay < Duration::MAX,
+        "unsuccessful monitor completion must schedule its next check"
+    );
     let (tx, rx) = mpsc::channel();
     tx.send(runner::Check {
         success: true,

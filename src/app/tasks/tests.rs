@@ -1,4 +1,6 @@
 use super::*;
+#[path = "reliability_tests.rs"]
+mod reliability_tests;
 fn app() -> Pui {
     let ctx = egui::Context::default();
     let mut app = Pui::new(
@@ -39,6 +41,8 @@ fn live(app: &mut Pui, phase: Phase) {
     t.proposed = contract();
     t.approved = Some(contract());
     t.attempts.push(Attempt::new(0));
+    let owner = app.ensure_agent();
+    app.tasks.parents.insert(t.id.clone(), owner);
     app.tasks.live = Some(t.id.clone());
     app.tasks.selected = Some(t.id.clone());
     app.tasks.records = vec![t];
@@ -571,6 +575,15 @@ fn workflow_nodes_open_agent_transcripts_and_check_evidence() {
         }
         assert_eq!(app.tasks.selected_run.as_deref(), expected);
         assert!(app.tasks.open);
+        let expected_tab = if expected.is_some() {
+            work_item::Tab::Activity
+        } else {
+            work_item::Tab::Evidence
+        };
+        assert_eq!(
+            app.work_item_tab(app.tasks.selected.as_ref().unwrap()),
+            expected_tab
+        );
     }
 }
 fn routing_catalog() -> Vec<crate::protocol::Model> {

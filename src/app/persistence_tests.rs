@@ -264,6 +264,307 @@ fn both_color_styles_survive_save_and_reopen_in_the_selected_mode() {
 }
 
 #[test]
+fn restart_keeps_draft_and_question_hint_without_restoring_a_live_wait() {
+    let (cwd, path) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = false;
+    app.prefs.cwd = cwd.clone();
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        busy: true,
+        ..Default::default()
+    };
+    app.state.dialogs.push_back(questions::demo_dialog());
+    app.draft = "Keep my unsent answer".into();
+    eframe::App::save(&mut app, &mut storage);
+    let mut restored = reopen(&storage, Options::default());
+    assert_eq!(restored.draft, "Keep my unsent answer");
+    assert!(
+        restored
+            .state
+            .restart_notice
+            .contains("waiting for your answer")
+    );
+    assert!(restored.state.dialogs.is_empty());
+    assert!(!restored.state.busy);
+    assert!(!restored.state.pending);
+    assert!(restored.waiting.is_empty());
+    assert!(restored.deliveries.is_empty());
+    // The checkpoint survives another save while other saved chats are unopened.
+    eframe::App::save(&mut restored, &mut storage);
+    let restored = reopen(&storage, Options::default());
+    assert_eq!(restored.draft, "Keep my unsent answer");
+    assert!(!restored.state.restart_notice.is_empty());
+}
+
+#[test]
+fn startup_blank_draft_is_not_reused_by_new_chat_or_explicit_workspace() {
+    let (cwd, _) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = true;
+    app.prefs.cwd = cwd.clone();
+    app.state = State {
+        session_file: Some("allocated-but-unsent.jsonl".into()),
+        ..Default::default()
+    };
+    app.draft = "Unsent new conversation".into();
+    eframe::App::save(&mut app, &mut storage);
+    let mut restored = reopen(&storage, Options::default());
+    assert_eq!(restored.draft, "Unsent new conversation");
+    restored.new_session();
+    assert!(restored.draft.is_empty());
+    let explicit = reopen(
+        &storage,
+        Options {
+            cwd: Some(cwd),
+            ..Default::default()
+        },
+    );
+    assert!(explicit.draft.is_empty());
+}
+
+#[test]
+fn quit_checkpoint_is_captured_before_stop_clears_the_run() {
+    let (cwd, path) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = false;
+    app.prefs.cwd = cwd;
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        busy: true,
+        ..Default::default()
+    };
+    app.draft = "Still here".into();
+    app.checkpoint_chats();
+    app.agents.exiting = true;
+    app.state.busy = false;
+    app.state.dialogs.clear();
+    eframe::App::save(&mut app, &mut storage);
+    let restored = reopen(&storage, Options::default());
+    assert_eq!(restored.draft, "Still here");
+    assert!(restored.state.restart_notice.contains("interrupted"));
+}
+
+#[test]
+fn navigating_to_non_tree_chat_restores_checkpoint_after_clearing_outgoing_draft() {
+    let (cwd, path) = fixture();
+    let other = cwd.join("other.jsonl");
+    std::fs::write(&other, "").unwrap();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = false;
+    app.prefs.cwd = cwd.clone();
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        busy: true,
+        ..Default::default()
+    };
+    app.draft = "Recovered on navigation".into();
+    eframe::App::save(&mut app, &mut storage);
+    for reuse in [false, true] {
+        let mut restored = reopen(
+            &storage,
+            Options {
+                session: Some(other.clone()),
+                ..Default::default()
+            },
+        );
+        restored.new_chat = false;
+        restored.connected = reuse;
+        restored.loading_chat = false;
+        restored.open_chat(Session {
+            path: path.clone(),
+            cwd: cwd.clone(),
+            project: cwd.clone(),
+            title: "Recovered".into(),
+            created: None,
+            modified: std::time::SystemTime::now(),
+        });
+        assert_eq!(restored.draft, "Recovered on navigation");
+        assert!(!restored.state.restart_notice.is_empty());
+    }
+}
+
+#[test]
+fn deleting_recovery_data_removes_both_persisted_and_startup_copies() {
+    let (cwd, path) = fixture();
+    let storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = false;
+    app.prefs.cwd = cwd;
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        ..Default::default()
+    };
+    app.draft = "Delete this too".into();
+    app.checkpoint_chats();
+    app.restart_pending = app.prefs.restart_checkpoints.clone();
+    app.forget_restart_checkpoint(&path);
+    assert!(app.prefs.restart_checkpoints.is_empty());
+    assert!(app.restart_pending.is_empty());
+}
+
+#[test]
+fn same_session_reconnect_keeps_recovery_notice_until_explicit_dismissal() {
+    let (cwd, path) = fixture();
+    let storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.prefs.cwd = cwd;
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        restart_notice: "Review interrupted work".into(),
+        ..Default::default()
+    };
+    app.connect(&app.ctx.clone(), Some(path));
+    assert_eq!(app.state.restart_notice, "Review interrupted work");
+    app.connect(&app.ctx.clone(), None);
+    assert!(app.state.restart_notice.is_empty());
+}
+
+#[test]
+fn custom_sections_restore_stable_membership_order_and_collapse_without_execution() {
+    let (cwd, path) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.new_chat = false;
+    app.prefs.cwd = cwd.clone();
+    app.state = State {
+        session_file: Some(path.display().to_string()),
+        ..Default::default()
+    };
+    let mut section = sidebar::sections::Section::new("Focused review".into());
+    section.collapsed = true;
+    section.expanded = true;
+    let id = section.id.clone();
+    app.prefs.sidebar_view.sections.push(section);
+    app.prefs.chats.entry(path.clone()).or_default().section = Some(id.clone());
+    app.new_sidebar_section(); // Autosave must not persist a half-created section.
+    assert_eq!(app.prefs.sidebar_view.sections.len(), 2);
+    eframe::App::save(&mut app, &mut storage);
+    assert_eq!(app.prefs.sidebar_view.sections.len(), 2);
+    let restored = reopen(&storage, Options::default());
+    assert_eq!(restored.prefs.sidebar_view.sections.len(), 1);
+    let section = &restored.prefs.sidebar_view.sections[0];
+    assert_eq!(section.id, id);
+    assert_eq!(section.name, "Focused review");
+    assert!(section.collapsed && section.expanded);
+    assert_eq!(
+        restored.prefs.chats[&path].section.as_deref(),
+        Some(id.as_str())
+    );
+    assert_eq!(restored.pending_session.as_ref(), Some(&path));
+    assert!(!restored.state.pending);
+    assert!(restored.state.dialogs.is_empty());
+}
+
+#[test]
+fn table_header_overrides_save_reopen_without_loading_any_files_or_replaying_work() {
+    let (cwd, chat) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        },
+    );
+    let path = cwd.join("nonexistent-headerless.csv");
+    assert!(app.prefs.table_headers.set(&cwd, &path, false));
+    app.demo = false;
+    app.state = State {
+        session_file: Some(chat.display().to_string()),
+        ..Default::default()
+    };
+    let (client, _, commands) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    eframe::App::save(&mut app, &mut storage);
+    assert!(commands.try_recv().is_err());
+    let mut restored = reopen(
+        &storage,
+        Options {
+            demo: true,
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(!restored.prefs.table_headers.header(&cwd, &path));
+    assert!(
+        restored
+            .prefs
+            .table_headers
+            .header(&cwd.join("other"), &path)
+    );
+    assert!(!restored.files.is_open());
+    assert!(restored.files.navigation_target().is_none());
+    assert!(restored.state.dialogs.is_empty() && restored.draft.is_empty());
+    restored.prefs.table_headers.set(&cwd, &path, true);
+    restored.demo = false;
+    eframe::App::save(&mut restored, &mut storage);
+    let cleared = reopen(
+        &storage,
+        Options {
+            demo: true,
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(cleared.prefs.table_headers.header(&cwd, &path));
+}
+
+#[test]
 fn older_preferences_default_to_recent_and_a_blank_chat() {
     let prefs: Preferences = serde_json::from_str("{}").unwrap();
     assert!(!prefs.projects_view);

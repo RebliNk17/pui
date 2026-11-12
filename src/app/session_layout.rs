@@ -1,13 +1,18 @@
 //! Session-local workspace panes. The sessions sidebar's width stays window-global.
+mod persistence;
 use super::*;
 use egui::containers::panel::PanelState;
+pub(super) use persistence::Saved;
 use std::collections::BTreeMap;
 
-const PANELS: [&str; 4] = [
+const PANELS: [&str; 7] = [
     "workspace-files-dock",
+    "workspace-files-stack",
     "files-tree",
     "workspace-changes-dock",
+    "workspace-changes-stack",
     "project-terminal",
+    "floating-inspector-v2",
 ];
 
 #[derive(Default)]
@@ -26,6 +31,18 @@ pub(super) struct SessionLayouts {
     saved: BTreeMap<String, Layout>,
 }
 
+impl SessionLayouts {
+    pub(super) fn forget_path(&mut self, path: &std::path::Path) {
+        let canonical = sync::identity(path);
+        self.saved.retain(|key, _| {
+            key.starts_with("agent:") || sync::identity(std::path::Path::new(key)) != canonical
+        });
+    }
+    pub(super) fn forget_agent(&mut self, id: &str) {
+        self.saved.remove(&format!("agent:{id}"));
+    }
+}
+
 impl Pui {
     fn layout_key(&self) -> String {
         self.pending_session
@@ -37,8 +54,16 @@ impl Pui {
 
     pub(super) fn leave_session_layout(&mut self) {
         self.close_model_popovers();
+        context_capture::clear_source(&self.ctx);
+        let mut selection = egui::text_selection::LabelSelectionState::load(&self.ctx);
+        selection.clear_selection();
+        selection.store(&self.ctx);
+        self.transcript.gallery.release_textures();
+        self.draft_images.gallery.release_textures();
         self.files.hide_web();
         self.files.begin_frame();
+        self.diff_rx = None; // abandoned Git worker cannot select a file in another chat
+        self.changes.cancel_git_read();
         let panels = PANELS
             .iter()
             .map(|name| PanelState::load(&self.ctx, egui::Id::new(name)))
@@ -58,6 +83,12 @@ impl Pui {
     }
 
     pub(super) fn enter_session_layout(&mut self) {
+        let key = self.layout_key();
+        let had_memory_layout = self.session_layouts.saved.contains_key(&key)
+            || self
+                .session_layouts
+                .saved
+                .contains_key(&format!("agent:{}", self.agents.active));
         let layout = self
             .session_layouts
             .saved
@@ -77,13 +108,25 @@ impl Pui {
         self.prefs.hide_sidebar = layout.hide_sidebar;
         self.terminals.set_layout(&self.ctx, layout.terminal);
         self.set_layout_panels(&layout.panels);
+        if !had_memory_layout {
+            self.restore_workspace_layout();
+        }
     }
 
     fn set_layout_panels(&self, panels: &[Option<PanelState>]) {
         self.ctx.data_mut(|data| {
             for (index, name) in PANELS.iter().enumerate() {
                 let id = egui::Id::new(name);
-                if let Some(Some(state)) = panels.get(index) {
+                if let Some(Some(state)) = panels.get(index).filter(|state| {
+                    state.as_ref().is_some_and(|state| {
+                        let size = state.rect.size();
+                        state.rect.is_finite()
+                            && size.x > 0.0
+                            && size.y > 0.0
+                            && size.x <= 16_384.0
+                            && size.y <= 16_384.0
+                    })
+                }) {
                     data.insert_persisted(id, *state);
                 } else {
                     data.remove::<PanelState>(id);
@@ -93,5 +136,7 @@ impl Pui {
     }
 }
 
+#[cfg(test)]
+mod persistence_tests;
 #[cfg(test)]
 mod tests;

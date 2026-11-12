@@ -11,6 +11,7 @@ pub(super) struct Node {
     pub access: String,
     pub permission: Option<settings::PermissionMode>,
     pub status: String,
+    pub last_activity: Option<std::time::SystemTime>,
     pub children: Vec<String>,
     pub stopped: bool,
     pub reported: bool,
@@ -58,17 +59,17 @@ pub(super) struct AgentRecord {
 #[derive(Default)]
 pub(super) struct Chat {
     pub(super) state: State,
-    new_chat: bool,
+    pub(super) new_chat: bool,
     pub(super) history_pending: Option<rewind::Pending>,
     history_drafts: Vec<run_status::WaitingMessage>,
     completion_run: notifications::CompletionRun,
     pub(super) client: Option<rpc::Client>,
-    connected: bool,
+    pub(super) connected: bool,
     loading: bool,
-    pending: Option<PathBuf>,
+    pub(super) pending: Option<PathBuf>,
     preview: Option<Receiver<Result<crate::history::Preview, String>>>,
     partial: bool,
-    draft: String,
+    pub(super) draft: String,
     recall: composer_history::Recall,
     completions: completions::View,
     images: attachments::DraftImages,
@@ -242,6 +243,7 @@ impl Pui {
                         Some(record.permission.unwrap_or(self.prefs.settings.permission))
                     },
                     status: "Saved".into(),
+                    last_activity: None,
                     children: Vec::new(),
                     stopped: true,
                     reported: true,
@@ -419,6 +421,7 @@ impl Pui {
                 access: "workspace".into(),
                 permission: None,
                 status: "Connecting".into(),
+                last_activity: None,
                 children: Vec::new(),
                 stopped: false,
                 reported: true,
@@ -531,12 +534,14 @@ impl Pui {
             app.loading_chat = true;
             app.connected = false;
             app.ultracode_ready = false;
+            app.seed_model_catalog();
+            app.restore_restart_checkpoint();
             for kind in [
                 "get_state",
-                "get_entries",
-                "get_commands",
                 "get_available_models",
                 "get_available_thinking_levels",
+                "get_entries",
+                "get_commands",
             ] {
                 app.send(protocol::command(kind));
             }
@@ -572,6 +577,7 @@ impl Pui {
             return true;
         };
         let reconnect_path = node.path.clone();
+        self.restore_restart_checkpoint();
         if let Some(path) = reconnect_path.as_ref() {
             if !self.attach_or_claim(path) {
                 return true;
@@ -601,12 +607,14 @@ impl Pui {
         self.loading_chat = true;
         self.ultracode_ready = false;
         self.connected = false;
+        self.seed_model_catalog();
+        self.restore_restart_checkpoint();
         for kind in [
             "get_state",
-            "get_entries",
-            "get_commands",
             "get_available_models",
             "get_available_thinking_levels",
+            "get_entries",
+            "get_commands",
         ] {
             self.send(protocol::command(kind));
         }
@@ -708,6 +716,22 @@ impl Pui {
     }
     pub(super) fn agent_event(&mut self, record: &Value) {
         if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+            if matches!(
+                protocol::string(record, "type"),
+                "agent_start"
+                    | "agent_end"
+                    | "agent_settled"
+                    | "message_start"
+                    | "message_update"
+                    | "message_end"
+                    | "tool_execution_start"
+                    | "tool_execution_update"
+                    | "tool_execution_end"
+                    | "auto_compaction_start"
+                    | "auto_compaction_end"
+            ) {
+                node.last_activity = Some(std::time::SystemTime::now());
+            }
             if record["type"] == "agent_start" {
                 node.settled = false;
             }
@@ -841,6 +865,7 @@ impl Pui {
                         self.agent_settings(source).permission
                     }),
                     status: "Queued".into(),
+                    last_activity: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: false,
@@ -1406,6 +1431,7 @@ impl Pui {
                     access: "workspace".into(),
                     permission: None,
                     status: status.into(),
+                    last_activity: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: true,
@@ -1457,6 +1483,7 @@ impl Pui {
                     access: "read-only".into(),
                     permission: Some(settings::PermissionMode::Plan),
                     status: status.into(),
+                    last_activity: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: status == "Idle",
@@ -1547,11 +1574,12 @@ impl Pui {
                 "Keep working",
                 "Stop all and quit",
             ).show(ctx, |ui| {
-                confirmations::note(ui, "Sessions and worktrees will be kept. Running terminal commands will stop, and queued messages will be lost. Active cron jobs and monitors resume when Pui reopens.");
+                confirmations::note(ui, "Sessions, worktrees and draft text will be kept. Interrupted chats are marked for review on reopening; tools and approvals are never replayed. Running terminal commands will stop, and queued messages and unsent attachments will be lost. Active cron jobs and monitors resume when Pui reopens.");
             });
             match choice {
                 Some(confirmations::Choice::Cancel) => self.agents.close_prompt = false,
                 Some(confirmations::Choice::Confirm) => {
+                    self.checkpoint_chats();
                     self.agents.exiting = true;
                     self.tasks.stop();
                     let roots: Vec<_> = self

@@ -2,6 +2,23 @@ use super::*;
 use domain::routing::{self, Decision};
 
 impl Pui {
+    /// Use the workflow creator's catalog even while another chat is visible.
+    /// Never substitute the current chat when a retained owner is unavailable.
+    pub(super) fn task_routing_models(&self, task: &Task) -> Option<&[crate::protocol::Model]> {
+        if let Some(owner) = self.tasks.parents.get(&task.id) {
+            return if *owner == self.agents.active {
+                Some(&self.state.models)
+            } else {
+                self.agents
+                    .parked
+                    .get(owner)
+                    .map(|chat| chat.state.models.as_slice())
+            };
+        }
+        self.task_in_chat(task)
+            .then_some(self.state.models.as_slice())
+    }
+
     pub(super) fn task_budget_stop(&mut self, inflight: f64) -> bool {
         if !self
             .tasks
@@ -23,7 +40,11 @@ impl Pui {
             return;
         };
         // A single workflow approval never authorizes exceptional-price models.
-        let mut pool = routing::candidates(&self.state.models, &task.provider);
+        let Some(models) = self.task_routing_models(task) else {
+            self.tasks.block("The workflow owner's model catalog is unavailable. No stage was launched; return to its owning chat before starting a new workflow.");
+            return;
+        };
+        let mut pool = routing::candidates(models, &task.provider);
         pool.retain(|m| !m.family.exceptional());
         let router = match routing::router(&pool) {
             Ok(s) => s,
@@ -39,7 +60,13 @@ impl Pui {
         let Some(task) = self.tasks.live_task() else {
             return;
         };
-        let pool = routing::candidates(&self.state.models, &task.provider);
+        let Some(models) = self.task_routing_models(task) else {
+            self.tasks.block(
+                "The workflow owner's model catalog is unavailable. No routed stage was launched.",
+            );
+            return;
+        };
+        let pool = routing::candidates(models, &task.provider);
         let selection = match domain::json_result::<Decision>(answer)
             .and_then(|d| routing::validate(d, &pool, task, role))
         {

@@ -117,7 +117,7 @@ fn pinned_and_hidden_descendants_are_reachable_once_without_their_parent() {
 }
 
 #[test]
-fn light_sidebar_uses_larger_saturated_dots_for_chats_and_compact_children() {
+fn light_sidebar_uses_working_rings_and_saturated_settled_dots() {
     for projects in [false, true] {
         let mut app = fixture();
         app.projects = projects;
@@ -140,9 +140,12 @@ fn light_sidebar_uses_larger_saturated_dots_for_chats_and_compact_children() {
             "Root idle status stays green"
         );
         assert!(
-            dots.iter()
-                .any(|c| c.radius == 4.0 && c.fill == Color32::from_rgb(80, 42, 198)),
-            "Compact working status stays purple"
+            output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::Path(path) if path.points.len() == 17
+                    && path.stroke.color == egui::epaint::ColorMode::Solid(theme::palette(&app.ctx).accent)
+            )),
+            "Observed working children use an unobscured activity ring, not a filled dot"
         );
         assert!(
             dots.iter()
@@ -217,9 +220,12 @@ fn disclosure_click_only_collapses_children_and_state_roundtrips() {
     for shape in render(&mut app, vec![]).shapes {
         labels(&shape.shape, &mut text);
     }
-    let row = text.iter().find(|(s, _)| s == "Parent agent").unwrap().1;
-    click(&mut app, egui::pos2(row.left() - 35.0, row.center().y));
     let key = forest(&app)[0].key.clone();
+    let toggle = app
+        .ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("sidebar-disclosure-rect", &key))))
+        .unwrap();
+    click(&mut app, toggle.center());
     assert!(app.prefs.closed_threads.contains(&key));
     assert_eq!(app.agents.active, root);
     let mut hidden = Vec::new();
@@ -234,7 +240,7 @@ fn disclosure_click_only_collapses_children_and_state_roundtrips() {
     let saved: Preferences =
         serde_json::from_value(serde_json::to_value(&app.prefs).unwrap()).unwrap();
     assert!(saved.closed_threads.contains(&key));
-    click(&mut app, egui::pos2(row.left() - 35.0, row.center().y));
+    click(&mut app, toggle.center());
     assert!(!app.prefs.closed_threads.contains(&key));
     let mut shown = Vec::new();
     for shape in render(&mut app, vec![]).shapes {
@@ -333,7 +339,7 @@ fn children_are_single_line_compact_rows_in_both_views_and_themes() {
                     .1;
                 let gap = second.center().y - first.center().y;
                 assert!(
-                    (28.0..=34.0).contains(&gap),
+                    (28.0..=30.0).contains(&gap),
                     "Compact child pitch must not retain a second status line: {gap}"
                 );
                 assert!(
@@ -402,7 +408,7 @@ fn project_rows_are_single_line_with_dot_status_across_themes_and_zoom() {
             for pair in rows.windows(2) {
                 let pitch = pair[1].center().y - pair[0].center().y;
                 assert!(
-                    (32.0..=34.0).contains(&pitch),
+                    (28.0..=30.0).contains(&pitch),
                     "All project rows must use the compact pitch: {pitch}"
                 );
             }
@@ -411,9 +417,10 @@ fn project_rows_are_single_line_with_dot_status_across_themes_and_zoom() {
 }
 
 #[test]
-fn recent_view_keeps_project_and_status_subtitles() {
+fn metadata_opt_in_keeps_project_and_status_subtitles() {
     let mut app = fixture();
     app.projects = false;
+    app.prefs.sidebar_view.metadata = true;
     for _ in 0..3 {
         render(&mut app, vec![]);
     }
@@ -428,7 +435,7 @@ fn recent_view_keeps_project_and_status_subtitles() {
         .find(|(s, _)| s == "Inspect model capabilities")
         .unwrap()
         .1;
-    assert!(child.center().y - parent.center().y > 48.0);
+    assert!((44.0..=46.0).contains(&(child.center().y - parent.center().y)));
 }
 
 #[test]
@@ -442,9 +449,12 @@ fn disclosure_keyboard_toggles_without_switching_chat() {
     for shape in render(&mut app, vec![]).shapes {
         labels(&shape.shape, &mut text);
     }
-    let row = text.iter().find(|(s, _)| s == "Parent agent").unwrap().1;
-    click(&mut app, egui::pos2(row.left() - 35.0, row.center().y));
     let key = forest(&app)[0].key.clone();
+    let toggle = app
+        .ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("sidebar-disclosure-rect", &key))))
+        .unwrap();
+    click(&mut app, toggle.center());
     assert!(app.prefs.closed_threads.contains(&key));
     render(
         &mut app,

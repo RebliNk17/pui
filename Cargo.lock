@@ -2794,6 +2794,7 @@ dependencies = [
  "cef",
  "chrono",
  "dirs",
+ "dispatch2",
  "eframe",
  "fs2",
  "image",

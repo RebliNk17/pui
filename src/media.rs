@@ -155,6 +155,12 @@ impl Gallery {
         let mut changed = false;
         for decoded in self.rx.try_iter() {
             self.pending = self.pending.saturating_sub(1);
+            // A viewer may close/navigate while its decode is still in flight.
+            // Never upload an obsolete full-resolution result to the GPU.
+            if decoded.large && self.selected.as_ref().map(|image| image.key) != Some(decoded.key) {
+                self.cache.remove(&(decoded.key, true));
+                continue;
+            }
             let entry = match decoded.result {
                 Ok(image) => Entry::Ready(ctx.load_texture(
                     format!("attachment-{}-{}", decoded.key, decoded.large),
@@ -340,6 +346,17 @@ impl Gallery {
     }
     pub fn is_open(&self) -> bool {
         self.selected.is_some()
+    }
+    pub fn close(&mut self) {
+        self.selected = None;
+        self.collection.clear();
+        self.cache.retain(|(_, large), _| !*large);
+        // Late full-resolution results are discarded by poll before upload.
+    }
+    /// Release disposable GPU/decoded caches when this chat leaves the screen.
+    /// A fresh channel prevents late workers from resurrecting parked textures.
+    pub fn release_textures(&mut self) {
+        *self = Self::default();
     }
     pub fn viewer(&mut self, ctx: &egui::Context) {
         let colors = crate::theme::styles(ctx).palette(crate::theme::Theme::Dark);
@@ -576,8 +593,7 @@ impl Gallery {
             ctx.request_repaint();
         }
         if close {
-            self.selected = None;
-            self.collection.clear();
+            self.close();
         }
     }
 }
@@ -862,6 +878,44 @@ mod tests {
         assert!(!fixture.gallery.is_open());
     }
 
+    #[test]
+    fn closing_viewer_releases_large_texture_and_discards_late_decode() {
+        let mut fixture = ViewerFixture::new([800, 400], 1.0, 1);
+        let key = fixture.gallery.selected.as_ref().unwrap().key;
+        fixture.gallery.close();
+        assert!(!fixture.gallery.cache.contains_key(&(key, true)));
+        assert!(fixture.gallery.cache.contains_key(&(key, false)));
+        fixture.gallery.pending = 1;
+        fixture
+            .gallery
+            .tx
+            .send(Decoded {
+                key,
+                large: true,
+                result: Ok(ColorImage::filled([4, 4], egui::Color32::WHITE)),
+            })
+            .unwrap();
+        fixture.gallery.poll(&fixture.ctx);
+        assert_eq!(fixture.gallery.pending, 0);
+        assert!(!fixture.gallery.cache.contains_key(&(key, true)));
+    }
+    #[test]
+    fn parked_gallery_disconnects_decoders_and_releases_all_textures() {
+        let mut fixture = ViewerFixture::new([800, 400], 1.0, 1);
+        let sender = fixture.gallery.tx.clone();
+        fixture.gallery.release_textures();
+        assert!(fixture.gallery.cache.is_empty());
+        assert!(!fixture.gallery.is_open());
+        assert!(
+            sender
+                .send(Decoded {
+                    key: 1,
+                    large: false,
+                    result: Ok(ColorImage::filled([4, 4], egui::Color32::WHITE)),
+                })
+                .is_err()
+        );
+    }
     #[test]
     fn visible_attachment_creates_texture_and_opens_viewer() {
         let ctx = egui::Context::default();

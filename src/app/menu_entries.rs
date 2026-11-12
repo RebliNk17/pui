@@ -40,6 +40,7 @@ pub(super) enum Command {
     Browser,
     AgentsBoard,
     Automation,
+    QuickOpen,
 }
 impl Command {
     #[cfg(any(target_os = "macos", test))]
@@ -80,6 +81,7 @@ impl Command {
         Self::Browser,
         Self::AgentsBoard,
         Self::Automation,
+        Self::QuickOpen,
     ];
     #[cfg(any(target_os = "macos", test))]
     pub fn from_tag(tag: isize) -> Option<Self> {
@@ -110,6 +112,7 @@ impl Command {
             Self::Paste => (M::COMMAND, Key::V),
             Self::SelectAll => (M::COMMAND, Key::A),
             Self::Search => (M::COMMAND, Key::K),
+            Self::QuickOpen => (M::COMMAND, Key::P),
             Self::Sidebar => (M::COMMAND, Key::B),
             Self::Inspector => (M::COMMAND, Key::I),
             Self::ZoomReset => (M::COMMAND, Key::Num0),
@@ -196,6 +199,7 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
             A("Scheduled tasks", Command::Automation),
             S,
             A("Search Sessions…", Command::Search),
+            A("Quick Open File…", Command::QuickOpen),
             A("Session Sidebar", Command::Sidebar),
             A("Session Details", Command::Inspector),
             A("Workspace Files", Command::Files),

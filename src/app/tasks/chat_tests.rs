@@ -1,4 +1,29 @@
 use super::*;
+#[path = "work_item_ui_tests.rs"]
+mod work_item_ui_tests;
+
+#[test]
+fn display_path_cache_reuses_identity_bounds_retention_and_expires() {
+    let cache = DisplayPaths::default();
+    let path = Path::new("/fixture/display-chat");
+    let resolved = cache.resolve(path);
+    let stamp = cache.0.borrow()[path].1;
+    for _ in 0..100 {
+        assert_eq!(cache.resolve(path), resolved);
+    }
+    assert_eq!(
+        cache.0.borrow()[path].1,
+        stamp,
+        "cache hit must not re-resolve"
+    );
+    cache.0.borrow_mut().get_mut(path).unwrap().1 = Instant::now() - Duration::from_secs(3);
+    cache.resolve(path);
+    assert!(cache.0.borrow()[path].1 > stamp);
+    for i in 0..600 {
+        cache.resolve(Path::new(&format!("/fixture/display-{i}")));
+    }
+    assert!(cache.0.borrow().len() <= 512);
+}
 
 fn app() -> Pui {
     Pui::new(
@@ -250,7 +275,7 @@ fn workflow_header_action_stays_next_to_title_when_collapsed_and_does_not_toggle
 }
 
 #[test]
-fn inspector_hides_inactive_workflows_but_history_stays_accessible() {
+fn inspector_keeps_terminal_workflows_visible_and_history_accessible() {
     for phase in [
         Phase::Draft,
         Phase::AwaitingApproval,
@@ -272,12 +297,11 @@ fn inspector_hides_inactive_workflows_but_history_stays_accessible() {
         }
         let text = labels(&inspector(&mut app, vec![]));
         assert!(
-            !text.iter().any(|(s, _)| s == Card::Workflow.label()),
-            "inactive {phase:?} must not render a workflow inspector box"
+            text.iter().any(|(s, _)| s == Card::Workflow.label()),
+            "{phase:?} must keep a persistent workflow inspector"
         );
         assert!(
-            !text
-                .iter()
+            text.iter()
                 .any(|(s, _)| s == "Keep drafts while switching chats")
         );
         app.open_task_from_board(id.clone(), None);
@@ -465,7 +489,6 @@ fn legacy_workflow_shows_composer_and_read_only_checks_without_changing_state() 
             "Conversation context stays here",
             "This legacy workflow is read-only. Ask the agent in chat to start a new workflow.",
             "The exact draft survives switching away and back",
-            "cargo test draft_switch",
         ] {
             assert!(
                 text.iter().any(|(s, _)| s.contains(expected)),
@@ -557,7 +580,7 @@ fn workflow_results_and_exceptional_routing_are_read_only() {
             text.iter()
                 .any(|(s, _)| s.contains("Exceptional routing is blocked"))
         );
-        assert!(text.iter().any(|(s, _)| s == "Acceptance checks"));
+        assert!(text.iter().any(|(s, _)| s == "The finish line"));
         for removed in [
             "Accept this result",
             "Revalidate source",
@@ -586,9 +609,9 @@ fn active_workflow_is_not_hidden_by_an_older_selected_history_record() {
     app.tasks.current_mut().unwrap().phase = Phase::Building;
     app.tasks.open = false;
     app.tasks.selected = Some(old.clone());
-    assert_eq!(app.active_workflow().unwrap().id, active);
-    app.open_task_from_board(old, None);
-    assert!(app.active_workflow().is_none());
+    assert_eq!(app.inspector_workflow().unwrap().id, active);
+    app.open_task_from_board(old.clone(), None);
+    assert_eq!(app.inspector_workflow().unwrap().id, old);
 }
 
 #[test]

@@ -2,6 +2,7 @@
 use super::*;
 use crate::terminal::Session;
 use std::{collections::BTreeMap, path::Path};
+mod capture;
 
 type Selection = Option<((u16, u16), (u16, u16))>;
 
@@ -13,6 +14,8 @@ pub(super) struct Terminals {
     projects: BTreeMap<PathBuf, Project>,
     focus: bool,
     confirm_stop: bool,
+    restored_roots: std::collections::BTreeSet<PathBuf>,
+    demo_context: bool,
 }
 #[derive(Default)]
 struct Project {
@@ -31,6 +34,34 @@ fn terminal_id() -> egui::Id {
 impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
+    }
+    pub(super) fn context_inputs(&self, ctx: &egui::Context, visible: bool) {
+        if visible && self.open {
+            capture::inputs(ctx);
+        } else {
+            capture::clear(ctx);
+        }
+    }
+    pub(super) fn demo_context(&mut self) {
+        if let Some(project) = self.projects.get_mut(&self.root)
+            && let Some(parser) = project.demo.as_mut()
+        {
+            parser.process(b"\x1b[2J\x1b[HBuild complete: 42 tests passed.\r\nNo commands are sent by adding context.\r\n");
+            project.selection = Some(((0, 0), (0, 31)));
+            self.demo_context = true;
+        }
+    }
+    pub(super) fn restore_saved_layout(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        layout: (bool, bool),
+    ) {
+        self.set_layout(ctx, layout);
+        self.root = root.into();
+        if layout.0 && !self.projects.contains_key(root) {
+            self.restored_roots.insert(root.into());
+        }
     }
     pub(super) fn layout(&self) -> (bool, bool) {
         (self.open, self.expanded)
@@ -59,6 +90,7 @@ impl Terminals {
         }
     }
     pub(super) fn close(&mut self, ctx: &egui::Context) {
+        capture::clear(ctx);
         self.open = false;
         self.focus = false;
         ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
@@ -76,6 +108,7 @@ impl Terminals {
     }
     pub(super) fn shutdown(&mut self) {
         self.projects.clear();
+        self.restored_roots.clear();
     }
     pub(super) fn toggle(&mut self, ctx: &egui::Context, root: &Path, demo: bool) {
         self.open = !self.open;
@@ -83,20 +116,23 @@ impl Terminals {
             self.workspace(ctx, root, demo);
             self.focus = true;
         } else {
+            capture::clear(ctx);
             ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
         }
     }
     fn workspace(&mut self, ctx: &egui::Context, root: &Path, demo: bool) {
         if self.root != root {
+            capture::clear(ctx);
             self.root = root.to_path_buf();
             self.focus = true;
             self.confirm_stop = false;
         }
-        if !self.projects.contains_key(root) {
+        if !self.projects.contains_key(root) && !self.restored_roots.contains(root) {
             self.start(ctx, demo);
         }
     }
     fn start(&mut self, ctx: &egui::Context, demo: bool) {
+        self.restored_roots.remove(&self.root);
         let mut project = Project::default();
         if demo {
             let mut parser =
@@ -170,19 +206,48 @@ impl Terminals {
         expanded
     }
     fn content(&mut self, ui: &mut egui::Ui, demo: bool) {
+        if self.restored_roots.contains(&self.root) {
+            prompt_ui::heading(
+                ui,
+                "Terminal restored · not running",
+                "The previous process was not restarted. Start a shell explicitly to continue.",
+            );
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                if prompt_ui::button(ui, "Start shell", prompt_ui::Button::Primary, true).clicked()
+                {
+                    self.start(ui.ctx(), demo);
+                    self.focus = true;
+                }
+                if prompt_ui::button(ui, "Hide terminal", prompt_ui::Button::Secondary, true)
+                    .clicked()
+                {
+                    self.close(ui.ctx());
+                }
+                if self.expanded
+                    && prompt_ui::button(ui, "Restore chat", prompt_ui::Button::Secondary, true)
+                        .clicked()
+                {
+                    self.expanded = false;
+                }
+            });
+            return;
+        }
         let colors = theme::palette(ui.ctx());
         let mut restart = false;
+        let mut capture_button = None;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Terminal").size(12.0).color(colors.text));
             let path = self.root.to_string_lossy();
             ui.add_sized(
-                Vec2::new((ui.available_width() - 116.0).max(20.0), 28.0),
+                Vec2::new((ui.available_width() - 144.0).max(20.0), 28.0),
                 egui::Label::new(RichText::new(path.as_ref()).size(11.0).color(colors.muted))
                     .truncate(),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icons::button(ui, Icon::Close, "Hide terminal · commands keep running").clicked()
                 {
+                    capture::clear(ui.ctx());
                     self.open = false;
                     ui.ctx().memory_mut(|m| m.surrender_focus(terminal_id()));
                 }
@@ -203,6 +268,32 @@ impl Terminals {
                 {
                     self.expanded = !self.expanded;
                 }
+                let available = self
+                    .projects
+                    .get(&self.root)
+                    .is_some_and(|project| project.session.is_some() || project.demo.is_some());
+                capture_button = Some(
+                    ui.add_enabled_ui(available, |ui| {
+                        let response =
+                            icons::button(ui, Icon::Details, "Add terminal context to chat");
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                available,
+                                "Add terminal context to chat",
+                            )
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::new("terminal-context-button"),
+                                response.rect,
+                            )
+                        });
+                        response
+                    })
+                    .inner,
+                );
                 let running = self.projects.get(&self.root).is_some_and(|p| {
                     p.starting.is_some() || p.session.as_ref().is_some_and(Session::running)
                 });
@@ -277,6 +368,12 @@ impl Terminals {
                 )
             });
         }
+        if demo
+            && std::mem::take(&mut self.demo_context)
+            && let Some(button) = &capture_button
+        {
+            egui::Popup::open_id(ui.ctx(), button.id.with("terminal-context"));
+        }
         let rows = ((rect.height() / cell.y) as u16).clamp(1, 200);
         let cols = ((rect.width() / cell.x) as u16).clamp(1, 400);
         if let Some(parser) = project.demo.as_mut() {
@@ -299,6 +396,16 @@ impl Terminals {
                 project.selection,
                 response.has_focus(),
             );
+            capture::offer(
+                &response,
+                parser.screen(),
+                project.selection,
+                &self.root,
+                false,
+            );
+            if let Some(button) = &capture_button {
+                capture::offer(button, parser.screen(), project.selection, &self.root, true);
+            }
         }
         if let Some(session) = project.session.as_mut() {
             session.resize(rows, cols);
@@ -321,6 +428,22 @@ impl Terminals {
                 project.selection,
                 response.has_focus(),
             );
+            capture::offer(
+                &response,
+                state.parser.screen(),
+                project.selection,
+                &self.root,
+                false,
+            );
+            if let Some(button) = &capture_button {
+                capture::offer(
+                    button,
+                    state.parser.screen(),
+                    project.selection,
+                    &self.root,
+                    true,
+                );
+            }
             drop(state);
             if let Err(error) = session.send(input) {
                 project.error = Some(error);
@@ -338,6 +461,9 @@ fn interact<CB: vt100::Callbacks>(
     selection: &mut Selection,
     scroll: &mut f32,
 ) -> Vec<u8> {
+    if egui::Popup::is_any_open(ui.ctx()) || !prompt_ui::keyboard_available(ui) {
+        return Vec::new();
+    }
     let screen = parser.screen_mut();
     let (rows, cols) = screen.size();
     if response.hovered() {
@@ -350,13 +476,20 @@ fn interact<CB: vt100::Callbacks>(
         }
     }
     if let Some(pos) = response.interact_pointer_pos() {
-        let point = (
-            (((pos.y - rect.top()) / cell.y) as u16).min(rows.get() - 1),
-            (((pos.x - rect.left()) / cell.x) as u16).min(cols.get() - 1),
-        );
-        if response.drag_started() {
-            *selection = Some((point, point));
-        } else if response.dragged() {
+        let point_at = |pos: egui::Pos2| {
+            (
+                (((pos.y - rect.top()) / cell.y) as u16).min(rows.get() - 1),
+                (((pos.x - rect.left()) / cell.x) as u16).min(cols.get() - 1),
+            )
+        };
+        let point = point_at(pos);
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui
+                .input(|input| input.pointer.press_origin())
+                .unwrap_or(pos);
+            *selection = Some((point_at(origin), point));
+        }
+        if response.dragged_by(egui::PointerButton::Primary) {
             if let Some((_, end)) = selection {
                 *end = (point.0, (point.1 + 1).min(cols.get()));
             }
@@ -675,5 +808,7 @@ fn paint(
     }
 }
 
+#[cfg(test)]
+mod restore_tests;
 #[cfg(test)]
 mod tests;

@@ -100,6 +100,13 @@ impl Pui {
             self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":error}).to_string()}));
             return true;
         }
+        // Reject unsupported routing before asking for consent or creating a
+        // workflow, rather than spending on a task that cannot start.
+        let pool = domain::routing::candidates(&self.state.models, &self.state.provider);
+        if let Err(error) = domain::routing::router(&pool) {
+            self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":format!("Workflow unavailable for this chat: {error} Use regular development or explicitly choose a supported provider; no workflow was created.")}).to_string()}));
+            return true;
+        }
         self.tasks.requests.insert(
             rpc_id.clone(),
             Request {
@@ -136,7 +143,12 @@ impl Pui {
         }
         let context_changed = request.cwd != self.prefs.cwd
             || request.provider != self.state.provider
-            || request.model != self.state.model;
+            || request.model != self.state.model
+            || domain::routing::router(&domain::routing::candidates(
+                &self.state.models,
+                &request.provider,
+            ))
+            .is_err();
         let id = id.to_owned();
         // Only a still-visible host question may authorize creation. Never trust
         // an agent-supplied approved=true flag or a stale RPC response.

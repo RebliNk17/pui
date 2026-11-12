@@ -1,0 +1,66 @@
+use super::*;
+use crate::app::files::tests::{app, click, frame, text};
+
+#[test]
+fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.prefs.theme = mode;
+        let root = app.prefs.cwd.clone();
+        app.terminals
+            .restore_saved_layout(&ctx, &root, (true, false));
+        for _ in 0..3 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        assert!(app.terminals.projects.is_empty());
+        app.terminals.close(&ctx);
+        app.terminals.toggle(&ctx, &root, true);
+        let output = frame(&ctx, &mut app, vec![]);
+        assert!(app.terminals.projects.is_empty());
+        let start = text(&output, "Start shell");
+        click(&ctx, &mut app, start);
+        frame(&ctx, &mut app, vec![]);
+        assert_eq!(app.terminals.projects.len(), 1);
+        assert!(app.terminals.projects[&root].demo.is_some());
+        app.terminals
+            .projects
+            .get_mut(&root)
+            .unwrap()
+            .demo
+            .as_mut()
+            .unwrap()
+            .process(b"RETAINED");
+        app.terminals
+            .restore_saved_layout(&ctx, &root, (true, false));
+        frame(&ctx, &mut app, vec![]);
+        assert!(!app.terminals.restored_roots.contains(&root));
+        assert!(
+            app.terminals.projects[&root]
+                .demo
+                .as_ref()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("RETAINED")
+        );
+    }
+}
+
+#[test]
+fn restoring_one_project_does_not_block_another_projects_terminal() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let root = app.prefs.cwd.clone();
+    app.terminals
+        .restore_saved_layout(&ctx, &root, (true, false));
+    let other = root.join("src");
+    app.prefs.cwd = other.clone();
+    frame(&ctx, &mut app, vec![]);
+    assert!(app.terminals.projects.contains_key(&other));
+    assert!(!app.terminals.projects.contains_key(&root));
+    app.prefs.cwd = root.clone();
+    let output = frame(&ctx, &mut app, vec![]);
+    text(&output, "Terminal restored");
+    assert!(!app.terminals.projects.contains_key(&root));
+}
