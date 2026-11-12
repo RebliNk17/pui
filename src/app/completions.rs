@@ -66,6 +66,79 @@ struct Choice {
     description: String,
     insert: String,
 }
+const ROW_HEIGHT: f32 = 26.0;
+
+fn completion_row(
+    ui: &mut egui::Ui,
+    choice: &Choice,
+    selected: bool,
+    file: bool,
+) -> egui::Response {
+    let colors = theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            5,
+            if selected {
+                colors.selection_bg
+            } else {
+                colors.hover
+            },
+        );
+    }
+    let content = rect.shrink2(egui::vec2(8.0, 0.0));
+    let description_left = content.left() + content.width() * 0.36;
+    let show_description = !file && content.width() >= 340.0;
+    let label_right = if show_description {
+        description_left - 12.0
+    } else {
+        content.right()
+    };
+    let paint = |text: &str, left: f32, right: f32, size: f32, color: Color32| {
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text.into(),
+            FontId::proportional(size),
+            color,
+        );
+        job.wrap.max_width = (right - left).max(0.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(left, content.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    };
+    paint(
+        &choice.label,
+        content.left(),
+        label_right,
+        12.0,
+        colors.text,
+    );
+    if show_description {
+        paint(
+            &choice.description,
+            description_left,
+            content.right(),
+            11.0,
+            if selected { colors.text } else { colors.muted },
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            &choice.label,
+        )
+    });
+    response.on_hover_text(format!("{}\n{}", choice.label, choice.description))
+}
+
 type SearchResult = Result<(Vec<PathBuf>, bool), String>;
 #[derive(Default)]
 pub(super) struct View {
@@ -277,7 +350,11 @@ impl Pui {
                 },
             )
         });
-        let width = anchor.width().clamp(180.0, 560.0);
+        let file = self.completions.token.as_ref().is_some_and(|t| t.file);
+        let width = anchor
+            .width()
+            .clamp(180.0, if file { 480.0 } else { 440.0 })
+            .min((ctx.screen_rect().width() - 16.0).max(0.0));
         let mut chosen = None;
         let mut open = true;
         let popup = egui::Popup::new(
@@ -291,13 +368,11 @@ impl Pui {
         .align_alternatives(&[])
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(width)
-        .gap(8.0)
+        .frame(prompt_ui::popup(ctx).inner_margin(6))
+        .gap(6.0)
         .show(|ui| {
-            ui.set_width(width - 20.0);
-            ui.label(theme::small(
-                ui,
-                "↑↓ select · Tab / Enter insert · Esc dismiss",
-            ));
+            theme::menu_controls(ui);
+            ui.set_width((width - 14.0).max(0.0));
             if self.completions.rx.is_some() {
                 ui.label(theme::small(ui, "Finding workspace files…"));
             }
@@ -309,13 +384,12 @@ impl Pui {
             }
             egui::ScrollArea::vertical()
                 .id_salt("composer-completion-results")
-                .max_height((anchor.top() - 70.0).clamp(50.0, 260.0))
+                .max_height((anchor.top() - 80.0).clamp(ROW_HEIGHT, 222.0))
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (index, choice) in self.completions.choices.iter().enumerate() {
                         let selected = index == self.completions.selected;
-                        let response = ui
-                            .selectable_label(selected, RichText::new(&choice.label).size(12.0))
-                            .on_hover_text(&choice.description);
+                        let response = completion_row(ui, choice, selected, file);
                         if selected && self.completions.scroll_selection {
                             response.scroll_to_me(Some(Align::Center));
                         }
@@ -327,9 +401,17 @@ impl Pui {
             if self.completions.limited {
                 ui.label(theme::small(
                     ui,
-                    "Search bounded; type a more specific path to narrow results.",
+                    "Search limited · type a more specific path",
                 ));
             }
+            ui.separator();
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    "↑↓ select · Tab / Enter insert · Esc dismiss",
+                ))
+                .truncate(),
+            );
         });
         self.completions.popup_rect = popup.map(|p| p.response.rect);
         self.completions.scroll_selection = false;
