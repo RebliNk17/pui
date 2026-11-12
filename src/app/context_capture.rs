@@ -8,11 +8,15 @@ mod source;
 pub(super) use diff::{demo as demo_diff, offer as offer_diff_selection};
 pub(super) use rendered::demo as demo_rendered;
 pub(crate) use rendered::offer as offer_rendered_selection;
+pub(in crate::app) use source::console_menu as offer_console_selection;
 pub(super) use source::{demo as demo_source, offer as offer_source_selection};
 
 pub(super) fn clear_source(ctx: &egui::Context) {
     source::clear(ctx);
-    ctx.data_mut(|data| data.remove::<Snippet>(egui::Id::new("pui-context-capture")));
+    ctx.data_mut(|data| {
+        data.remove::<Snippet>(egui::Id::new("pui-context-capture"));
+        data.remove::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"));
+    });
 }
 
 pub(super) fn inputs(ctx: &egui::Context) {
@@ -30,11 +34,32 @@ pub(crate) fn queue(ctx: &egui::Context, label: &str, source: &str) {
     queue_parts(ctx, label, std::iter::once(source));
 }
 
+/// Local-review batching retains exact draft ownership across the deferred collection step.
+/// This is still the same bounded context queue, never a send/execute/approval action.
+pub(in crate::app) fn queue_review(
+    ctx: &egui::Context,
+    root: &std::path::Path,
+    session: &str,
+    label: &str,
+    source: &str,
+) {
+    queue(ctx, label, source);
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("pui-review-capture-owner"),
+            (root.to_path_buf(), session.to_owned()),
+        )
+    });
+}
+
 pub(crate) fn queue_parts<'a>(
     ctx: &egui::Context,
     label: &str,
     parts: impl IntoIterator<Item = &'a str>,
 ) {
+    ctx.data_mut(|data| {
+        data.remove::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"))
+    });
     let mut text = String::new();
     for part in parts {
         if part.is_empty() {
@@ -75,14 +100,30 @@ pub(crate) fn queue_parts<'a>(
     });
 }
 impl Pui {
+    /// Runtime owner for local review: an unsaved chat is not the shared string "new".
+    pub(super) fn review_comment_owner(&mut self) -> String {
+        self.state
+            .session_file
+            .clone()
+            .unwrap_or_else(|| format!("agent:{}", self.ensure_agent()))
+    }
     pub(super) fn collect_context_capture(&mut self) {
         source::finish(&self.ctx);
         let snippet = self
             .ctx
             .data_mut(|data| data.remove_temp::<Snippet>(egui::Id::new("pui-context-capture")));
+        let owner = self.ctx.data_mut(|data| {
+            data.remove_temp::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"))
+        });
         let Some(snippet) = snippet else {
             return;
         };
+        if owner.is_some_and(|(root, session)| {
+            root != self.prefs.cwd || session != self.review_comment_owner()
+        }) {
+            self.state.error = Some("Local review context was not added: repository/session changed. Original notes remain in Changes.".into());
+            return;
+        }
         if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
             self.state.error = Some(error.into());
             return;

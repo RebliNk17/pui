@@ -66,7 +66,10 @@ impl Pui {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     ui.label(RichText::new("Pui").size(13.0).strong().color(colors.text));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Plus, "New chat · ⌘N").clicked() {
+                        self.attention_button(ui);
+                        let new_chat = icons::button(ui, Icon::Plus, "New chat · ⌘N");
+                        self.attention_reverse_from(new_chat.id);
+                        if new_chat.clicked() {
                             action = Some(Action::NewChat(self.prefs.cwd.clone()));
                         }
                     });

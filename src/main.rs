@@ -70,11 +70,13 @@ pub struct Options {
     pub demo_diff_hunks: bool,
     pub demo_diff_wrap: bool,
     pub demo_review_files: bool,
+    pub demo_review_comments: bool,
     pub demo_git_files: bool,
     pub demo_terminal: bool,
     pub demo_terminal_tabs: bool,
     pub demo_terminal_context: bool,
     pub demo_notifications: bool,
+    pub demo_attention: bool,
     pub open: Option<String>,
     pub browser_device: Option<String>,
     pub browser_console: bool,
@@ -169,6 +171,10 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_notifications = true;
             }
+            "--demo-attention" => {
+                options.demo = true;
+                options.demo_attention = true;
+            }
             "--demo-send-now" => {
                 options.demo = true;
                 options.demo_send_now = true;
@@ -205,6 +211,12 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_changes = true;
                 options.demo_review_files = true;
+            }
+            "--demo-review-comments" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_review_files = true;
+                options.demo_review_comments = true;
             }
             "--demo-diff-wrap" => {
                 options.demo = true;

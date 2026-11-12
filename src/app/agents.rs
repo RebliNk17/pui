@@ -64,6 +64,7 @@ pub(super) struct Chat {
     pub(super) history_pending: Option<rewind::Pending>,
     history_drafts: Vec<run_status::WaitingMessage>,
     completion_run: notifications::CompletionRun,
+    attention_observed: attention::Observed,
     pub(super) client: Option<rpc::Client>,
     pub(super) connected: bool,
     loading: bool,
@@ -290,6 +291,7 @@ impl Pui {
     }
     pub(super) fn forget_deleted_agent_ids(&mut self, ids: &std::collections::BTreeSet<String>) {
         self.forget_unsaved_sections(ids);
+        self.attention.forget_agents(ids);
         self.agents
             .permission_changes
             .retain(|id, _| !ids.contains(id));
@@ -354,6 +356,7 @@ impl Pui {
             history_pending: self.history_pending.take(),
             history_drafts: std::mem::take(&mut self.history_drafts),
             completion_run: std::mem::take(&mut self.completion_run),
+            attention_observed: std::mem::take(&mut self.attention_observed),
             client: self.client.take(),
             connected: std::mem::take(&mut self.connected),
             loading: std::mem::take(&mut self.loading_chat),
@@ -383,6 +386,7 @@ impl Pui {
         self.history_pending = chat.history_pending;
         self.history_drafts = chat.history_drafts;
         self.completion_run = chat.completion_run;
+        self.attention_observed = chat.attention_observed;
         self.client = chat.client;
         self.connected = chat.connected;
         self.loading_chat = chat.loading;
@@ -724,6 +728,7 @@ impl Pui {
             }
         }
         self.promote_unsaved_section(&id);
+        self.promote_attention();
     }
     pub(super) fn agent_event(&mut self, record: &Value) {
         if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
@@ -1055,6 +1060,7 @@ impl Pui {
             }
             if id == self.agents.active {
                 self.completion_run.cancel();
+                self.attention_observed.cancel();
                 if let Some(mut client) = self.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
@@ -1073,6 +1079,7 @@ impl Pui {
                 self.state.dialogs.clear();
             } else if let Some(chat) = self.agents.parked.get_mut(&id) {
                 chat.completion_run.cancel();
+                chat.attention_observed.cancel();
                 if let Some(mut client) = chat.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));

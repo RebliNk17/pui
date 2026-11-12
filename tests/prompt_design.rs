@@ -51,6 +51,8 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
     for path in [
         "src/app/confirmations.rs",
         "src/app/about.rs",
+        "src/app/attention.rs",
+        "src/app/attention/ui.rs",
         "src/app/updates.rs",
         "src/app/search.rs",
         "src/app/settings/resources/dialogs.rs",

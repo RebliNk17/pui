@@ -118,6 +118,8 @@ pub(super) fn modal<R>(
     width: f32,
     content: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::ModalResponse<R> {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("prompt-rendered-this-pass"), pass));
     egui::Modal::new(id)
         .frame(surface(ctx))
         .backdrop_color(Color32::from_black_alpha(
@@ -133,6 +135,11 @@ pub(super) fn modal<R>(
             style(ui);
             content(ui)
         })
+}
+
+pub(super) fn modal_owns_current_pass(ctx: &egui::Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(egui::Id::new("prompt-rendered-this-pass")) == Some(pass))
 }
 
 pub(super) fn badge(ui: &mut egui::Ui, icon: Icon, danger: bool) {

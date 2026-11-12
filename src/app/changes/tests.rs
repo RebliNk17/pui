@@ -316,11 +316,7 @@ fn git_diff_loads_off_thread_and_session_switch_discards_old_results() {
         .unwrap()
         .recv_timeout(Duration::from_secs(5))
         .unwrap();
-    assert!(
-        content
-            .unwrap_err()
-            .contains("Cannot start read-only Git diff")
-    );
+    assert!(content.unwrap_err().contains("Cannot start read-only Git"));
     changes.invalidate();
     assert!(changes.diffs.is_empty());
 }
@@ -349,7 +345,7 @@ fn inline_errors_are_labels_not_numbered_patch_and_disconnection_is_visible() {
             "file.rs".into(),
             Diff {
                 content: None,
-                rx: Some(rx),
+                rx: Some(rx.into()),
             },
         );
         tx.send(Err("+not a patch: review failed".into())).unwrap();
@@ -372,7 +368,7 @@ fn inline_errors_are_labels_not_numbered_patch_and_disconnection_is_visible() {
             "file.rs".into(),
             Diff {
                 content: None,
-                rx: Some(rx),
+                rx: Some(rx.into()),
             },
         );
         drop(tx);

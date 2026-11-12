@@ -8,7 +8,7 @@ fn explicit_replacement_and_refreshed_workspace_drop_initial_open_result() {
     app.workspace = super::tests::workspace();
     let workspace = app.workspace.clone();
     let (tx, rx) = mpsc::channel();
-    app.diff_rx = Some(rx);
+    app.diff_rx = Some(rx.into());
     tx.send(super::tests::loaded(&workspace, 1, Ok("+old read".into())))
         .unwrap();
     app.open_diff_review(
@@ -19,11 +19,11 @@ fn explicit_replacement_and_refreshed_workspace_drop_initial_open_result() {
     file_tests::frame(&ctx, &mut app, vec![]);
     assert_eq!(app.changes.review.as_ref().unwrap().0, "recorded.rs");
     let (tx, rx) = mpsc::channel();
-    app.diff_rx = Some(rx);
+    app.diff_rx = Some(rx.into());
     tx.send(super::tests::loaded(&workspace, 1, Ok("+stale".into())))
         .unwrap();
     let (tx, rx) = mpsc::channel();
-    app.workspace_rx = Some(rx);
+    app.workspace_rx = Some(rx.into());
     tx.send(workspace.clone()).unwrap();
     file_tests::frame(&ctx, &mut app, vec![]);
     assert!(app.diff_rx.is_none());
@@ -62,7 +62,7 @@ fn information_modal_defers_completed_body_and_initial_open_does_not_close_setti
     app.workspace = workspace.clone();
     app.settings_open = true;
     let (tx, rx) = mpsc::channel();
-    app.diff_rx = Some(rx);
+    app.diff_rx = Some(rx.into());
     tx.send(super::tests::loaded(
         &workspace,
         1,
@@ -79,7 +79,7 @@ fn information_modal_defers_completed_body_and_initial_open_does_not_close_setti
 
 fn pending_open(app: &mut Pui) -> mpsc::Sender<Loaded> {
     let (tx, rx) = mpsc::channel();
-    app.diff_rx = Some(rx);
+    app.diff_rx = Some(rx.into());
     tx
 }
 

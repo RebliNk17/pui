@@ -7,8 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-const MAX_FILES: usize = 256;
-const MAX_PATH_BYTES: usize = 64 * 1024;
+use workspace::{MAX_FILES, MAX_PATH_BYTES, read_only::Request};
 
 #[derive(Clone)]
 struct List {
@@ -94,7 +93,7 @@ impl Loaded {
     }
 }
 struct Pending {
-    rx: Receiver<Loaded>,
+    rx: Request<Loaded>,
     target: usize,
     owner: egui::Id,
 }
@@ -112,7 +111,7 @@ pub(in crate::app) fn start(
     ctx: &egui::Context,
     workspace: &Workspace,
     file: workspace::FileChange,
-) -> Receiver<Loaded> {
+) -> Request<Loaded> {
     let loaded = Loaded {
         root: workspace.root.clone(),
         file,
@@ -125,11 +124,11 @@ pub(in crate::app) fn start(
         let (tx, rx) = mpsc::channel();
         let _ = tx.send(loaded);
         ctx.request_repaint();
-        return rx;
+        return Request::new(rx, Arc::new(AtomicBool::new(false)));
     };
-    spawn_read(ctx, permit, move || {
+    spawn_read(ctx, permit, move |cancel| {
         let mut loaded = loaded;
-        loaded.result = workspace::diff(&loaded.root, &loaded.file);
+        loaded.result = workspace::diff_cancellable(&loaded.root, &loaded.file, cancel);
         loaded
     })
 }
@@ -143,8 +142,11 @@ impl Drop for Permit {
     }
 }
 fn permit(ctx: &egui::Context) -> Option<Permit> {
+    named_permit(ctx, "git-review-worker")
+}
+fn named_permit(ctx: &egui::Context, id: &str) -> Option<Permit> {
     let gate = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<Arc<AtomicBool>>(egui::Id::new("git-review-worker"))
+        data.get_temp_mut_or_default::<Arc<AtomicBool>>(egui::Id::new(id))
             .clone()
     });
     gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
@@ -154,34 +156,50 @@ fn permit(ctx: &egui::Context) -> Option<Permit> {
 fn spawn_read<T: Send + 'static>(
     ctx: &egui::Context,
     permit: Permit,
-    read: impl FnOnce() -> T + Send + 'static,
-) -> Receiver<T> {
+    read: impl FnOnce(&AtomicBool) -> T + Send + 'static,
+) -> Request<T> {
     let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let request = Request::new(rx, cancel.clone());
     let repaint = ctx.clone();
     // Failure drops the permit and sender; callers display disconnection.
     if std::thread::Builder::new()
         .name("pui-git-review".into())
         .spawn(move || {
-            let result = read();
+            let result = read(&cancel);
             drop(permit);
-            let _ = tx.send(result);
+            if !cancel.load(Ordering::Acquire) {
+                let _ = tx.send(result);
+            }
             repaint.request_repaint();
         })
         .is_err()
     {
         ctx.request_repaint();
     }
-    rx
+    request
+}
+pub(in crate::app) fn start_workspace(ctx: &egui::Context, root: PathBuf) -> Request<Workspace> {
+    let Some(permit) = named_permit(ctx, "git-workspace-worker") else {
+        let (tx, rx) = mpsc::channel();
+        let _ = tx.send(Workspace {
+            root,
+            error: Some("A Git workspace read is still finishing. Refresh to retry.".into()),
+            ..Default::default()
+        });
+        return Request::new(rx, Arc::new(AtomicBool::new(false)));
+    };
+    spawn_read(ctx, permit, move |cancel| workspace::read(&root, cancel))
 }
 pub(super) fn start_inline(
     ctx: &egui::Context,
     root: &Path,
     file: workspace::FileChange,
-) -> Option<Receiver<Result<String, String>>> {
+) -> Option<Request<Result<String, String>>> {
     let permit = permit(ctx)?;
     let root = root.to_path_buf();
-    Some(spawn_read(ctx, permit, move || {
-        workspace::diff(&root, &file)
+    Some(spawn_read(ctx, permit, move |cancel| {
+        workspace::diff_cancellable(&root, &file, cancel)
     }))
 }
 
@@ -419,6 +437,8 @@ fn clear_selection(ctx: &egui::Context) {
     selection.clear_selection();
     selection.store(ctx);
 }
+#[cfg(test)]
+mod cancellation_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

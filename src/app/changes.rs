@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod branches;
 pub(super) mod git_files;
 pub(super) mod lines;
+pub(super) mod review_comments;
 mod review_files;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -15,7 +16,7 @@ enum Source {
 #[derive(Default)]
 struct Diff {
     content: Option<Result<String, String>>,
-    rx: Option<Receiver<Result<String, String>>>,
+    rx: Option<workspace::read_only::Request<Result<String, String>>>,
 }
 #[derive(Default)]
 pub(super) struct Changes {
@@ -31,6 +32,7 @@ pub(super) struct Changes {
     review_files: review_files::Files,
     git_files: git_files::Git,
     branches: branches::Branches,
+    pub(super) review_comments: review_comments::Comments,
 }
 
 impl Changes {
@@ -62,6 +64,10 @@ impl Changes {
         self.close_branches(ctx);
         self.bind(cwd, session);
         document.3 = recorded;
+        context_capture::clear_source(ctx);
+        let mut selection = egui::text_selection::LabelSelectionState::load(ctx);
+        selection.clear_selection();
+        selection.store(ctx);
         document.2.focus(ctx);
         self.review = Some(document);
         self.review_files = Default::default();
@@ -78,6 +84,20 @@ impl Changes {
         workspace: &Workspace,
     ) {
         self.branch_inputs(ctx, visible, workspace);
+        if self
+            .review_comments
+            .bind(&self.identity.0, &self.identity.1, revision)
+            && let Some(document) = &mut self.review
+            && document.3
+        {
+            document.2.stale_comments();
+        }
+        if visible
+            && let Some(document) = &self.review
+            && self.review_comments.inputs(ctx, document)
+        {
+            return;
+        }
         if visible {
             self.poll_git_files(ctx, workspace);
             self.git_file_inputs(ctx, workspace);
@@ -109,6 +129,7 @@ impl Changes {
             self.review_files = Default::default();
             self.git_files = Default::default();
             self.branches.cancel();
+            self.review_comments.stale(None);
             if session_changed {
                 self.source = Source::Recorded;
             }
@@ -119,7 +140,13 @@ impl Changes {
         std::mem::take(&mut self.refresh)
     }
 
+    pub(super) fn cancel_inline_reads(&mut self) {
+        // Completed bodies may stay cached in saved layouts; workers may not.
+        self.diffs.retain(|_, diff| diff.rx.is_none());
+    }
+
     pub(super) fn invalidate(&mut self) {
+        self.stale_review_comments();
         self.diffs.clear();
         self.git_files.stale = true;
         self.cancel_git_read();
@@ -139,6 +166,12 @@ impl Changes {
             self.close_branches(ctx);
         }
         self.bind(cwd, session);
+        if self.review_comments.bind(cwd, session, revision)
+            && let Some(document) = &mut self.review
+            && document.3
+        {
+            document.2.stale_comments();
+        }
         self.poll_git_files(ctx, workspace);
         self.poll_inline_diffs();
         self.poll_branches(workspace);
@@ -234,8 +267,21 @@ impl Changes {
             } else {
                 self.git_file_navigation(ui.ctx())
             };
-            let action =
-                diff_viewer::contents_with_files(ui, self.review.as_mut().unwrap(), Some(&files));
+            let source_root = if recorded {
+                Some(&self.identity.0)
+            } else {
+                workspace.is_git.then_some(&workspace.root)
+            };
+            if self.review_comments.source_root.as_ref() != source_root {
+                self.review_comments.stale(Some(recorded));
+                self.review_comments.source_root = source_root.cloned();
+            }
+            let action = diff_viewer::contents_with_review(
+                ui,
+                self.review.as_mut().unwrap(),
+                Some(&files),
+                Some(&mut self.review_comments),
+            );
             if action.back {
                 self.review = None;
                 self.git_files = Default::default();
@@ -265,6 +311,9 @@ impl Changes {
                     ))
                     .wrap(),
                 );
+                if let Some(error) = &workspace.error {
+                    ui.label(theme::small(ui, error));
+                }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     let tabs = ["Current Git", "Recorded edits"].map(|label| {
@@ -319,7 +368,7 @@ impl Changes {
                                 if self.source == Source::Recorded {
                                     "Recorded edits, in order—not a net Git diff."
                                 } else {
-                                    "Current working tree vs HEAD—not recorded session edits."
+                                    "Current working tree vs HEAD—not recorded session edits. Submodule worktree edits are not inspected."
                                 },
                             ));
                         });
@@ -399,6 +448,8 @@ impl Changes {
                                         "No successful recorded edits in this chat."
                                     } else if loading {
                                         "Loading Git changes…"
+                                    } else if let Some(error) = &workspace.error {
+                                        error
                                     } else if workspace.is_git {
                                         "Working tree is clean."
                                     } else {
@@ -436,6 +487,9 @@ impl Changes {
                 self.open_rows.insert(key);
             } else {
                 self.open_rows.remove(&key);
+                if git {
+                    self.diffs.remove(path); // dropping pending delivery cancels the child
+                }
             }
         }
         ui.painter().rect_filled(

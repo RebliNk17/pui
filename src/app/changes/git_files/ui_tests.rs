@@ -22,7 +22,7 @@ fn completed(app: &mut Pui) {
         let result = pending.rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let (tx, rx) = mpsc::channel();
         tx.send(result).unwrap();
-        pending.rx = rx;
+        pending.rx = rx.into();
     }
 }
 

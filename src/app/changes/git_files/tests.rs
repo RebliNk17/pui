@@ -14,6 +14,7 @@ pub(super) fn workspace() -> Workspace {
         branch: "main".into(),
         is_git: true,
         files: vec![file("first.rs"), file("second.rs"), file("third.rs")],
+        ..Default::default()
     }
 }
 pub(super) fn changes(ctx: &egui::Context, workspace: &Workspace) -> Changes {
@@ -35,7 +36,7 @@ pub(super) fn inject(
 ) -> mpsc::Sender<Loaded> {
     let (tx, rx) = mpsc::channel();
     changes.git_files.pending = Some(Pending {
-        rx,
+        rx: rx.into(),
         target,
         owner: changes.review.as_ref().unwrap().2.focus_id(),
     });
@@ -191,7 +192,7 @@ fn inline_rows_wait_without_spawning_or_caching_busy_errors_while_shared_worker_
     let ctx = egui::Context::default();
     let workspace = workspace();
     let (tx, release) = mpsc::channel();
-    let active = spawn_read(&ctx, permit(&ctx).unwrap(), move || {
+    let active = spawn_read(&ctx, permit(&ctx).unwrap(), move |_| {
         release.recv_timeout(Duration::from_secs(5)).unwrap();
     });
     let mut changes = Changes::default();
@@ -288,7 +289,7 @@ fn keyboard_navigation_uses_real_pending_read_and_preserves_approval_draft_and_h
         let loaded = pending.rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let (tx, rx) = mpsc::channel();
         tx.send(loaded).unwrap();
-        pending.rx = rx;
+        pending.rx = rx.into();
     }
     file_tests::frame(&ctx, &mut app, vec![]);
     assert_eq!(app.changes.review.as_ref().unwrap().0, "second.rs");

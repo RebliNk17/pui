@@ -62,13 +62,17 @@ impl Pui {
         self.draft_images.gallery.release_textures();
         self.files.hide_web();
         self.files.begin_frame();
+        self.workspace_rx = None;
         self.diff_rx = None; // abandoned Git worker cannot select a file in another chat
         self.changes.cancel_git_read();
+        self.changes.cancel_inline_reads();
         self.changes.close_branches(&self.ctx);
         let panels = PANELS
             .iter()
             .map(|name| PanelState::load(&self.ctx, egui::Id::new(name)))
             .collect();
+        // Review notes are bounded per window, not per parked session layout.
+        let review_comments = std::mem::take(&mut self.changes.review_comments);
         let layout = Layout {
             files: std::mem::take(&mut self.files),
             changes: std::mem::take(&mut self.changes),
@@ -78,6 +82,7 @@ impl Pui {
             terminal: self.terminals.layout(),
             panels,
         };
+        self.changes.review_comments = review_comments;
         self.session_layouts.saved.insert(self.layout_key(), layout);
         self.terminals.set_layout(&self.ctx, (false, false));
         self.set_layout_panels(&[]);
@@ -103,7 +108,9 @@ impl Pui {
             .unwrap_or_default();
         self.files.hide_web();
         self.files = layout.files;
+        let review_comments = std::mem::take(&mut self.changes.review_comments);
         self.changes = layout.changes;
+        self.changes.review_comments = review_comments;
         self.inspector_panel = layout.inspector;
         self.prefs.hide_inspector = layout.hide_inspector;
         self.prefs.hide_sidebar = layout.hide_sidebar;

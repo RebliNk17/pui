@@ -2,6 +2,7 @@ mod about;
 mod agents;
 mod approval_view;
 mod attachments;
+mod attention;
 mod automation;
 mod changes;
 mod completions;
@@ -120,6 +121,8 @@ pub struct Pui {
     navigation: navigation::Navigation,
     updates: updates::Updates,
     completion_run: notifications::CompletionRun,
+    attention: attention::Attention,
+    attention_observed: attention::Observed,
     demo: bool,
     agents: agents::Agents,
     restart_pending: Vec<restart::Checkpoint>,
@@ -184,7 +187,7 @@ pub struct Pui {
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
     workspace: Workspace,
-    workspace_rx: Option<Receiver<Workspace>>,
+    workspace_rx: Option<workspace::read_only::Request<Workspace>>,
     ctx: egui::Context,
     transcript: Transcript,
     outputs: Vec<RecordedFile>,
@@ -195,7 +198,7 @@ pub struct Pui {
     session_layouts: session_layout::SessionLayouts,
     terminals: terminal::Terminals,
     changes: changes::Changes,
-    diff_rx: Option<Receiver<changes::git_files::Loaded>>,
+    diff_rx: Option<workspace::read_only::Request<changes::git_files::Loaded>>,
     dialog_text: String,
     questions: questions::View,
     question_designs: Option<questions::designs::Preview>,
@@ -248,6 +251,13 @@ impl Pui {
             navigation: Default::default(),
             updates: Default::default(),
             completion_run: Default::default(),
+            attention: attention::Attention::restore(
+                cc.storage
+                    .and_then(|s| eframe::get_value::<attention::Stored>(s, "attention-v1"))
+                    .unwrap_or_default()
+                    .0,
+            ),
+            attention_observed: Default::default(),
             restart_pending: prefs.restart_checkpoints.clone(),
             prefs,
             demo: options.demo,
@@ -349,6 +359,9 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            if options.demo_attention {
+                app.demo_attention();
+            }
             if options.demo_sections {
                 app.demo_sidebar_sections();
             }
@@ -524,15 +537,16 @@ impl Pui {
                     is_git: true,
                     ..Default::default()
                 };
+                let review_owner = app.review_comment_owner();
                 app.changes.demo_branches(
                     &cc.egui_ctx,
                     &app.prefs.cwd,
-                    app.state.session_file.as_deref().unwrap_or("new"),
+                    &review_owner,
                     &app.workspace,
                 );
                 app.focus_composer = false;
             }
-            if options.demo_review_files {
+            if options.demo_review_files || options.demo_review_comments {
                 app.outputs = activity::recorded_files(&app.state.messages);
                 app.output_revision = app.state.outputs_revision;
                 if let Some(file) = app.outputs.last() {
@@ -540,6 +554,9 @@ impl Pui {
                     app.open_diff_review(document, true);
                 }
                 app.focus_composer = false;
+            }
+            if options.demo_review_comments {
+                app.changes.demo_review_comments(app.output_revision);
             }
             if options.demo_git_files {
                 app.workspace = Workspace {
@@ -554,6 +571,7 @@ impl Pui {
                             ..Default::default()
                         })
                         .collect(),
+                    ..Default::default()
                 };
                 app.open_diff_review(
                     (
@@ -686,14 +704,10 @@ impl Pui {
         if self.workspace_rx.is_some() || self.demo {
             return;
         }
-        let cwd = self.prefs.cwd.clone();
-        let (tx, rx) = mpsc::channel();
-        self.workspace_rx = Some(rx);
-        let ctx = self.ctx.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(workspace::inspect(&cwd));
-            ctx.request_repaint();
-        });
+        self.workspace_rx = Some(changes::git_files::start_workspace(
+            &self.ctx,
+            self.prefs.cwd.clone(),
+        ));
     }
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
@@ -723,6 +737,7 @@ impl Pui {
         }
         self.recall = Default::default();
         self.completion_run = Default::default();
+        self.attention_observed = Default::default();
         self.dialog_text.clear();
         self.questions = Default::default();
         self.current_dialog.clear();
@@ -922,6 +937,7 @@ impl Pui {
     fn send(&mut self, record: Value) {
         if record["type"] == "abort" {
             self.completion_run.cancel();
+            self.attention_observed.cancel();
         }
         if self.remote_action(sync::Action::Rpc(record.clone())) {
             return;
@@ -1021,6 +1037,7 @@ impl Pui {
                     if self.control_request(&record) {
                         continue;
                     }
+                    self.attention_request(&record);
                     if record["type"] == "extension_ui_request"
                         && record["method"] == "setStatus"
                         && record["statusKey"] == "pui-ultracode"
@@ -1162,11 +1179,14 @@ impl Pui {
                     }
                 }
                 rpc::Event::Error(error) => {
+                    self.attention_failure();
                     self.uncertain_deliveries();
                     self.agent_failed(&error);
                     self.state.error = Some(error);
                 }
                 rpc::Event::Exited => {
+                    self.attention_failure();
+                    self.attention_observed = Default::default();
                     self.cancel_workflows_for(&self.agents.active.clone());
                     self.uncertain_deliveries();
                     self.completion_run = Default::default();
@@ -1188,6 +1208,7 @@ impl Pui {
                 }
             }
         }
+        self.promote_attention();
         self.update_session_title();
     }
     fn update_session_title(&mut self) {
@@ -1247,7 +1268,21 @@ impl Pui {
         {
             self.refresh_sessions();
         }
-        if let Some(result) = self.workspace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+        let workspace = self
+            .workspace_rx
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Workspace {
+                    root: self.prefs.cwd.clone(),
+                    error: Some(
+                        "Git workspace worker ended without a result. Refresh to retry.".into(),
+                    ),
+                    ..Default::default()
+                }),
+            });
+        if let Some(result) = workspace {
             self.workspace = result;
             self.workspace_rx = None;
             self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
@@ -1565,6 +1600,7 @@ impl Pui {
                     self.focus_composer = false;
                 }
                 if response.has_focus()
+                    && !self.attention.open
                     && !self.model_picker_open
                     && !self.effort_picker_open
                     && ctx.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
@@ -1719,12 +1755,13 @@ impl Pui {
             self.outputs = activity::recorded_files(&self.state.messages);
             self.output_revision = self.state.outputs_revision;
         }
+        let review_owner = self.review_comment_owner();
         self.changes.open_review(
             &self.ctx,
             document,
             recorded,
             &self.prefs.cwd,
-            self.state.session_file.as_deref().unwrap_or("new"),
+            &review_owner,
         );
         self.changes
             .bind_review_files(&self.outputs, self.output_revision);
@@ -1912,6 +1949,9 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.remember_navigation();
         self.poll();
+        self.attention_inputs(ctx);
+        let attention_was_open = self.attention.open;
+        self.attention_panel(ctx);
         self.search_jump();
         self.model_picker_escape(ctx);
         context_capture::inputs(ctx);
@@ -1952,7 +1992,9 @@ impl eframe::App for Pui {
         self.sidebar_view_inputs(ctx);
         self.search_inputs(ctx);
         self.navigation_inputs(ctx);
-        self.menu_commands(ctx);
+        if !self.attention.open {
+            self.menu_commands(ctx);
+        }
         if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
         }
@@ -1964,7 +2006,8 @@ impl eframe::App for Pui {
             || self.deletion.confirming()
             || self.menu.about
             || self.updates.open
-            || self.search_open;
+            || self.search_open
+            || self.attention.open;
         let terminal_input = !self.settings_open
             && !self.kanban.open
             && !self.automation.open
@@ -1994,17 +2037,21 @@ impl eframe::App for Pui {
             self.state.prose_revision,
             self.demo,
         );
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+        if !self.attention.open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma))
+        {
             self.settings_open = !self.settings_open;
             self.close_model_popovers();
         }
-        if !self.settings_open
+        if !self.attention.open
+            && !self.settings_open
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B))
         {
             self.prefs.hide_sidebar = !self.prefs.hide_sidebar;
         }
-        if !self.settings_open
+        if !self.attention.open
+            && !self.settings_open
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I))
         {
@@ -2068,6 +2115,9 @@ impl eframe::App for Pui {
                 self.sidebar(ctx);
             }
             self.top_bar(ctx);
+            if !attention_was_open {
+                self.attention_panel(ctx);
+            }
             let terminal_expanded = !self.kanban.open
                 && !self.automation.open
                 && self.terminals.is_open()
@@ -2087,10 +2137,11 @@ impl eframe::App for Pui {
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {
+                let review_owner = self.review_comment_owner();
                 self.changes.show(
                     ctx,
                     &self.prefs.cwd,
-                    self.state.session_file.as_deref().unwrap_or("new"),
+                    &review_owner,
                     &self.workspace,
                     (&self.outputs, self.output_revision),
                     self.workspace_rx.is_some(),
@@ -2184,6 +2235,11 @@ impl eframe::App for Pui {
         if !self.demo && self.screenshot.is_none() {
             self.checkpoint_chats();
             self.save_workspace_layouts();
+            eframe::set_value(
+                storage,
+                "attention-v1",
+                &attention::Stored(self.attention.persisted()),
+            );
             self.prefs.agent_tree = self.agent_records();
             self.prefs.projects_view = self.projects;
             self.prefs.last_session = self.pending_session.clone().or_else(|| {
@@ -2213,6 +2269,11 @@ impl eframe::App for Pui {
         Duration::from_secs(10)
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.workspace_rx = None;
+        self.diff_rx = None;
+        self.changes.cancel_git_read();
+        self.changes.cancel_inline_reads();
+        self.changes.close_branches(&self.ctx);
         self.agents.exiting = true;
         self.terminals.shutdown();
         self.tasks.shutdown();

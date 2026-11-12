@@ -75,6 +75,7 @@ impl Pui {
                 && !self.settings_open
                 && !self.model_picker_open
                 && !self.effort_picker_open
+                && !self.changes.local_comment_editor_owns_keyboard(ui.ctx())
                 && prompt_ui::keyboard_available(ui);
             if let Some(response) = self
                 .questions

@@ -23,8 +23,10 @@ pub(in crate::app) struct Navigation {
     wrap_available: bool,
     layout_width: f32,
     focus: egui::Id,
-    controls: [Option<egui::Id>; 8],
+    controls: [Option<egui::Id>; 10],
     untracked: bool,
+    comment_digest: Option<[u8; 32]>,
+    comments_stale: bool,
 }
 impl Default for Navigation {
     fn default() -> Self {
@@ -42,12 +44,25 @@ impl Default for Navigation {
                 "file-review",
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             )),
-            controls: [None; 8],
+            controls: [None; 10],
             untracked: false,
+            comment_digest: None,
+            comments_stale: false,
         }
     }
 }
 impl Navigation {
+    pub(in crate::app) fn comment_digest(&self) -> Option<[u8; 32]> {
+        (!self.comments_stale)
+            .then_some(self.comment_digest)
+            .flatten()
+    }
+    pub(in crate::app) fn stale_comments(&mut self) {
+        self.comments_stale = true;
+    }
+    pub(in crate::app) fn selection_response(&self, ctx: &egui::Context) -> Option<egui::Response> {
+        ctx.read_response(self.controls[5]?)
+    }
     pub(in crate::app) fn set_untracked(&mut self, untracked: bool) {
         self.untracked = untracked;
     }
@@ -114,6 +129,9 @@ impl Navigation {
             nav.limited = true;
             return nav;
         }
+        // Bound once, not in the render/idle loop. No second source body is retained.
+        use sha2::Digest;
+        nav.comment_digest = Some(sha2::Sha256::digest(source.as_bytes()).into());
         for row in changes::lines::rows(source).filter(|row| row.header && row.located) {
             if nav.rows.len() == MAX_HUNKS {
                 nav.rows.clear();

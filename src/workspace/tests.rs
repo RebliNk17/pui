@@ -10,14 +10,17 @@ pub(crate) fn file(path: &str) -> FileChange {
 }
 
 fn git(root: &Path, args: &[&str]) -> Vec<u8> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .arg("--no-optional-locks")
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "Git fixture failed: {args:?}");
-    output.stdout
+    let (bytes, status) = read_only::run(
+        read_only::command(root).args(args),
+        &AtomicBool::new(false),
+        Instant::now() + DEADLINE,
+        1024 * 1024,
+        "Git fixture",
+        "Git fixture exceeds 1 MiB",
+    )
+    .unwrap();
+    assert!(status.success(), "Git fixture failed: {args:?}");
+    bytes
 }
 
 // Setup writes only the disposable fixture's index using existing local objects.
@@ -25,15 +28,63 @@ fn git(root: &Path, args: &[&str]) -> Vec<u8> {
 pub(crate) fn fixture() -> PathBuf {
     let root = std::env::temp_dir().join(format!("pui-git-review-{}", uuid::Uuid::new_v4()));
     assert!(
-        Command::new("git")
-            .args(["clone", "--quiet", "--shared", "--no-checkout"])
-            .arg(std::env::current_dir().unwrap())
-            .arg(&root)
-            .status()
-            .unwrap()
-            .success()
+        read_only::run(
+            read_only::command(&std::env::current_dir().unwrap())
+                .args(["clone", "--quiet", "--shared", "--no-checkout"])
+                .arg(std::env::current_dir().unwrap())
+                .arg(&root),
+            &AtomicBool::new(false),
+            Instant::now() + DEADLINE,
+            1024,
+            "fixture clone",
+            "fixture output too large",
+        )
+        .unwrap()
+        .1
+        .success()
     );
+    // Parent validation may be on a detached worktree. Seed a private local
+    // branch using its existing object id so the branch fixture stays local.
+    let oid = git(&root, &["rev-parse", "HEAD"]);
+    fs::write(root.join(".git/refs/heads/pui-fixture-root"), oid).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/pui-fixture-root\n").unwrap();
     git(&root, &["read-tree", "HEAD"]);
+    // Keep the clone sparse without reporting every absent source file deleted.
+    // Only this private index changes; README remains a real tracked modification.
+    let cancel = AtomicBool::new(false);
+    let deadline = Instant::now() + DEADLINE;
+    let (paths, status) = read_only::run(
+        read_only::command(&root).args(["ls-files", "-z"]),
+        &cancel,
+        deadline,
+        1024 * 1024,
+        "fixture paths",
+        "fixture paths too large",
+    )
+    .unwrap();
+    assert!(status.success());
+    let list_path = root.join(".git/pui-fixture-paths");
+    fs::write(&list_path, paths).unwrap();
+    let mut skip = read_only::command(&root);
+    skip.args(["update-index", "--skip-worktree", "-z", "--stdin"])
+        .stdin(fs::File::open(&list_path).unwrap());
+    assert!(
+        read_only::run(
+            &mut skip,
+            &cancel,
+            deadline,
+            1024,
+            "fixture index",
+            "fixture output too large"
+        )
+        .unwrap()
+        .1
+        .success()
+    );
+    git(
+        &root,
+        &["update-index", "--no-skip-worktree", "--", "README.md"],
+    );
     fs::write(root.join("README.md"), "fixture modified README\n").unwrap();
     root
 }

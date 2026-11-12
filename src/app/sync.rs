@@ -48,6 +48,8 @@ pub(super) struct Snapshot {
     pub worktree: Option<PathBuf>,
     #[serde(default)]
     pub notifications: notifications::NotificationSettings,
+    #[serde(default)]
+    pub attention: Option<attention::Metadata>,
     pub ultra: bool,
     pub ready: bool,
     pub cwd: PathBuf,
@@ -122,6 +124,8 @@ pub(super) struct WindowSync {
     pub error: Option<String>,
     mirror: Option<PathBuf>,
     unsent: Vec<run_status::WaitingMessage>,
+    // Reuse identities already resolved by claim; attention never probes disk.
+    attention_aliases: std::collections::VecDeque<(PathBuf, PathBuf)>,
 }
 fn key(path: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -278,6 +282,7 @@ impl WindowSync {
             error: None,
             mirror: None,
             unsent: Vec::new(),
+            attention_aliases: Default::default(),
         };
         if disabled {
             return this;
@@ -474,6 +479,8 @@ impl WindowSync {
     pub(super) fn forget_deleted(&mut self, path: &Path) {
         let path = identity(path);
         self.owned.remove(&path);
+        self.attention_aliases
+            .retain(|(raw, canonical)| raw != &path && canonical != &path);
         self.endpoints.remove(&path);
         self.pending.remove(&path);
         self.revisions.remove(&path);
@@ -495,8 +502,24 @@ impl WindowSync {
             mirror == &path && !self.owned.contains_key(&path)
         })
     }
+    pub(super) fn attention_identity(&self, path: &Path) -> PathBuf {
+        self.attention_aliases
+            .iter()
+            .find(|(raw, _)| raw == path)
+            .map(|(_, canonical)| canonical.clone())
+            .unwrap_or_else(|| attention::lexical_identity(path))
+    }
     pub fn claim(&mut self, path: &Path) -> Result<bool, String> {
+        let raw = path;
         let path = identity(path);
+        if attention::valid_path(raw) && attention::valid_path(&path) {
+            self.attention_aliases.retain(|(alias, _)| alias != raw);
+            self.attention_aliases
+                .push_back((raw.to_path_buf(), path.clone()));
+            if self.attention_aliases.len() > 256 {
+                self.attention_aliases.pop_front();
+            }
+        }
         if self.owned.contains_key(&path) {
             return Ok(true);
         }
@@ -727,6 +750,7 @@ impl Pui {
                 image.key.hash(&mut hash);
             }
         }
+        self.attention.metadata(&path).hash(&mut hash);
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
@@ -867,6 +891,11 @@ impl Pui {
                         {
                             self.transcript
                                 .replace_history(&self.state.messages, &snapshot.state.messages);
+                        }
+                        if let Some(metadata) = snapshot.attention {
+                            // The owner supplies event identity, never derive unread
+                            // from status/transcript or a transport revision.
+                            self.attention.import_for(&path, metadata);
                         }
                         self.state = snapshot.state;
                         self.state.notice = Some(format!(
@@ -1043,6 +1072,10 @@ impl Pui {
                 .get(&self.agents.active)
                 .and_then(|n| n.worktree.clone()),
             notifications: self.prefs.notifications,
+            attention: self
+                .attention
+                .metadata(path)
+                .map(attention::Metadata::unread_snapshot),
             ultra: self.ultracode,
             ready: self.ultracode_ready,
             cwd: self.prefs.cwd.clone(),
@@ -1250,6 +1283,72 @@ mod tests {
             a.state.error,
             b.state.error
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn attention_claim_identity_cache_reuses_real_alias_without_new_path_probes() {
+        let (directory, path) = location();
+        let alias = directory.join("alias.jsonl");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let mut owner = app(&directory, &alias);
+        assert!(owner.attach_or_claim(&alias));
+        assert_eq!(owner.sync.attention_identity(&alias), path);
+        for n in 0..300 {
+            assert!(
+                owner
+                    .sync
+                    .claim(&directory.join(format!("missing-{n}.jsonl")))
+                    .unwrap()
+            );
+        }
+        assert_eq!(owner.sync.attention_aliases.len(), 256);
+        owner.sync.forget_deleted(&path);
+        assert!(!owner.sync.attention_aliases.iter().any(|(_, p)| p == &path));
+    }
+    #[test]
+    fn observed_attention_mirrors_same_revision_without_replaying_or_sharing_reads() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        owner.ensure_agent();
+        assert!(owner.attach_or_claim(&path));
+        owner.completion_event(&json!({"type":"agent_start"}));
+        owner.completion_event(&json!({"type":"agent_settled"}));
+        owner.publish_live();
+        let original = owner.attention.metadata(&path).unwrap();
+        let mut mirror = app(&directory, &path);
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.attention.unread() == 1 && b.connected
+        });
+        assert_eq!(mirror.attention.metadata(&path).unwrap(), original);
+        let _ = mirror.ctx.clone().run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| mirror.attention_rendered(ui));
+        });
+        assert_eq!(mirror.attention.unread(), 0);
+        assert_eq!(owner.attention.unread(), 1);
+        owner.state.notice = Some("transport revision only".into());
+        owner.publish_live();
+        let wanted = owner.sync.owned[&path].revision;
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.sync.revisions.get(&path).copied().unwrap_or(0) >= wanted
+        });
+        assert_eq!(mirror.attention.unread(), 0);
+        mirror.completion_event(&json!({"type":"agent_start"}));
+        mirror.completion_event(&json!({"type":"agent_settled"}));
+        assert_eq!(
+            mirror.attention.metadata(&path).unwrap().unread_snapshot(),
+            original
+        );
+        let mut snapshot = serde_json::to_value(owner.live_snapshot(&path).unwrap()).unwrap();
+        snapshot["attention"]["path"] = json!("x".repeat(5000));
+        let snapshot: Snapshot = serde_json::from_value(snapshot).unwrap();
+        mirror
+            .attention
+            .import_for(&path, snapshot.attention.unwrap());
+        assert_eq!(mirror.attention.unread(), 0);
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
     }
     #[test]
     fn kanban_discovers_other_windows_without_attaching_or_duplicating_sessions() {

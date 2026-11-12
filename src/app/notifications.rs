@@ -194,6 +194,7 @@ impl Pui {
         }
     }
     pub(super) fn completion_event(&mut self, record: &Value) {
+        self.attention_event(record);
         let completed = self.completion_run.observe(record);
         if !completed || self.demo || self.is_mirror() || self.client.is_none() {
             return;

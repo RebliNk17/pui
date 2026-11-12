@@ -3,7 +3,7 @@ use super::*;
 mod chrome;
 mod navigation;
 pub(super) use chrome::FileNavigation;
-pub(super) use navigation::{Document, demo as demo_hunks, demo_wrap};
+pub(super) use navigation::{Document, Navigation, demo as demo_hunks, demo_wrap};
 
 pub(super) fn inputs(ctx: &egui::Context, document: &mut Document) -> bool {
     if !document.2.owns_focus(ctx)
@@ -21,10 +21,20 @@ pub(super) fn inputs(ctx: &egui::Context, document: &mut Document) -> bool {
 }
 
 /// One header for file identity/actions; no floating Area/Window or extra file toolbar.
+#[cfg(test)]
 pub(super) fn contents_with_files(
     ui: &mut egui::Ui,
     document: &mut Document,
     files: Option<&FileNavigation>,
+) -> chrome::Action {
+    contents_with_review(ui, document, files, None)
+}
+
+pub(super) fn contents_with_review(
+    ui: &mut egui::Ui,
+    document: &mut Document,
+    files: Option<&FileNavigation>,
+    comments: Option<&mut changes::review_comments::Comments>,
 ) -> chrome::Action {
     let Document(path, diff, navigation, recorded) = document;
     let ctx = ui.ctx().clone();
@@ -144,6 +154,9 @@ pub(super) fn contents_with_files(
             });
             if let Some(warning) = files.and_then(|files| files.warning.as_ref()) {
                 ui.add(egui::Label::new(theme::small(ui, warning)).wrap());
+            }
+            if let Some(comments) = comments {
+                comments.show(ui, path, diff, *recorded, navigation);
             }
         });
     ui.painter().hline(

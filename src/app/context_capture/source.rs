@@ -17,6 +17,7 @@ pub(super) enum Kind {
     Source,
     Diff,
     Rendered,
+    Console,
 }
 impl Kind {
     fn action(self) -> &'static str {
@@ -24,6 +25,7 @@ impl Kind {
             Self::Source => "Add selected source to chat",
             Self::Diff => "Add selected diff to chat",
             Self::Rendered => "Quote selected text to chat",
+            Self::Console => "Add selected console text to chat",
         }
     }
     fn hint(self) -> &'static str {
@@ -36,6 +38,9 @@ impl Kind {
             }
             Self::Rendered => {
                 "One rendered paragraph, code block or table cell only—not exact Markdown source. Adds up to 24 KiB to the draft; never sends."
+            }
+            Self::Console => {
+                "Select text within one console message. No whole-message fallback; adds only to your draft, never sends."
             }
         }
     }
@@ -180,6 +185,16 @@ pub(in crate::app) fn offer(
     });
 }
 
+pub(in crate::app) fn console_menu(
+    response: &egui::Response,
+    snapshot: impl FnOnce(Option<Range<usize>>) -> Option<(String, String)>,
+) {
+    menu(response, Kind::Console, false, |range| {
+        let selected = snapshot(range).map(|(label, text)| Arc::new(Snippet { label, text }));
+        (selected, None)
+    });
+}
+
 pub(super) fn menu(
     response: &egui::Response,
     kind: Kind,
@@ -191,6 +206,13 @@ pub(super) fn menu(
     inputs(ctx);
     // Freeze before creating the popup; its click may deselect the label next pass.
     if response.secondary_clicked() || demo {
+        // Opening-frame ownership precedes later inline approvals, including
+        // secondary-click plus an approval/send/Stop chord in the same pass.
+        ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter);
+            input.consume_key(egui::Modifiers::COMMAND, egui::Key::Backspace);
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        });
         let range = egui::text_selection::LabelSelectionState::load(ctx)
             .range_for_response(response)
             .map(|range| range.as_sorted_char_range());
@@ -235,7 +257,7 @@ pub(super) fn menu(
     } else {
         popup
     };
-    popup.show(|ui| {
+    let shown = popup.show(|ui| {
         theme::menu_controls(ui);
         ui.set_width(240.0_f32.min((ctx.screen_rect().width() - 40.0).max(120.0)));
         let Some(menu) = ctx
@@ -249,7 +271,15 @@ pub(super) fn menu(
             egui::Button::new(menu.kind.action()).wrap(),
         );
         if response.secondary_clicked() && menu.selected.is_some() {
-            selection.request_focus();
+            ui.memory_mut(|memory| {
+                memory.request_focus_with_filter(
+                    selection.id,
+                    egui::EventFilter {
+                        escape: true,
+                        ..Default::default()
+                    },
+                )
+            });
         }
         if selection.clicked()
             && let Some(selected) = &menu.selected
@@ -274,6 +304,24 @@ pub(super) fn menu(
             data.insert_temp(egui::Id::new("source-context-selection"), selection.rect)
         });
     });
+    // A new inline structured question may request focus later in this pass.
+    // Let this popup consume its navigation/activation first, then remove only
+    // keyboard/text events so no second surface can reuse them, even on close.
+    if shown.is_some() {
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key { .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Copy
+                        | egui::Event::Cut
+                        | egui::Event::Ime(_)
+                )
+            })
+        });
+    }
     if !egui::Popup::is_id_open(ctx, owner)
         && ctx.data(|data| {
             data.get_temp::<SourceMenu>(key())

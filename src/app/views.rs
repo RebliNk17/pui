@@ -33,6 +33,9 @@ impl Pui {
                     {
                         self.prefs.hide_sidebar = !self.prefs.hide_sidebar;
                     }
+                    if self.prefs.hide_sidebar {
+                        self.attention_button(ui);
+                    }
                     let narrow = ui.available_width() < 520.0;
                     let width =
                         (ui.available_width() - if narrow { 68.0 } else { 346.0 }).max(40.0);
@@ -458,7 +461,9 @@ impl Pui {
         if self.workspace.files.is_empty() {
             ui.label(theme::small(
                 ui,
-                if self.workspace.is_git {
+                if let Some(error) = &self.workspace.error {
+                    error
+                } else if self.workspace.is_git {
                     "Working tree is clean."
                 } else {
                     "Not a Git repository."
@@ -563,6 +568,7 @@ impl Pui {
                         }),
                     );
                 }
+                self.attention_rendered(ui);
             });
         self.history_action();
     }

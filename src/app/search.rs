@@ -215,7 +215,8 @@ pub(super) fn text_fingerprint(text: &str) -> u64 {
 
 impl Pui {
     pub(super) fn search_blocked(&self) -> bool {
-        self.agents.close_prompt
+        self.attention.open
+            || self.agents.close_prompt
             || self.tasks.attachment_confirming()
             || self.section_view.confirming()
             || self.terminals.confirming_stop()

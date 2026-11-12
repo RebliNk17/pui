@@ -675,7 +675,10 @@ impl Pui {
         self.forget_deleted_agent_ids(ids);
         if active {
             self.files = Default::default();
+            self.changes.stale_review_comments();
+            let review_comments = std::mem::take(&mut self.changes.review_comments);
             self.changes = Default::default();
+            self.changes.review_comments = review_comments;
             self.inspector_panel = false;
             let models = std::mem::take(&mut self.state.models);
             self.state = State {
@@ -697,6 +700,7 @@ impl Pui {
             self.history_view = Default::default();
             self.history_drafts.clear();
             self.completion_run = Default::default();
+            self.attention_observed = Default::default();
             self.questions = Default::default();
             self.current_dialog.clear();
             self.pending_dialog = None;
@@ -710,6 +714,8 @@ impl Pui {
         self.refresh_sessions();
     }
     fn forget_session(&mut self, path: &Path) {
+        self.attention
+            .forget_path(&self.sync.attention_identity(path));
         self.session_layouts.forget_path(path);
         self.prefs.workspace_layouts.retain(|layout| {
             layout.key.starts_with("agent:") || !same(Path::new(&layout.key), path)

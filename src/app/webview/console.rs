@@ -1,6 +1,7 @@
 //! Bounded page console records; explicit draft capture is the only agent-facing action.
 use super::*;
 use std::sync::Arc;
+mod selection;
 
 #[cfg(any(test, target_os = "macos"))]
 const MAX_CHARS: usize = 4_000;
@@ -126,6 +127,7 @@ pub(super) fn show(ui: &mut egui::Ui, key: &str, line: &ConsoleLine) {
                     },
                 )
                 .inner;
+            selection::offer(&response, key, line);
             let (lane, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
             // A long message can begin above the scrolled viewport. Keep its action
             // inside the visible part of that same row, never over the native page.
