@@ -34,6 +34,7 @@ pub(in crate::app) struct View {
     activity_width: f32,
     activity_heights: BTreeMap<usize, (u64, f32)>,
     activity_rendered: usize,
+    preview: changes_preview::Preview,
 }
 
 #[cfg(test)]
@@ -86,9 +87,18 @@ impl Pui {
                 if self.work_item_waiting(&task) && view.permission_open { self.task_dialog(ui); ui.add_space(12.0); }
                 match view.tab {
                     Tab::Overview => self.work_item_overview(ui, &task, &mut view),
-                    Tab::Evidence => evidence(ui, &task),
-                    Tab::Changes => changes(ui, &task),
+                    Tab::Evidence => {
+                        self.work_item_revalidation(ui, &task);
+                        evidence(ui, &task);
+                    },
+                    Tab::Changes => {
+                        self.task_changes_preview(ui, &task, &mut view.preview);
+                        changes(ui, &task);
+                    },
                     Tab::Activity => self.work_item_activity(ui, &task, &mut view),
+                }
+                if matches!(task.phase, Phase::Blocked | Phase::Interrupted | Phase::Failed | Phase::Stale | Phase::Cancelled) {
+                    self.work_item_recovery(ui, &task);
                 }
                 ui.add_space(14.0);
                 ui.separator();
@@ -175,6 +185,35 @@ impl Pui {
                         ui.ctx().copy_text(format!("Workflow: {}\nState: {}\nWorkspace: {}\nBlocker: {}\nInspect existing evidence before proposing scoped recovery. Do not replay uncertain commands, install dependencies, or apply changes without explicit permission.", task.objective, task.phase.label(), task.workspace.as_ref().unwrap_or(&task.source).display(), task.note));
                     }
                 });
+            });
+    }
+
+    fn work_item_revalidation(&mut self, ui: &mut egui::Ui, task: &Task) {
+        let blocked = self.task_revalidate_blocked(&task.id);
+        ui.add(egui::Label::new(theme::small(ui, "Source revalidation compares the retained files to the captured fingerprint only. It does not rerun commands, resume work or turn stale checks into a pass.")).wrap());
+        let response = ui.add_enabled(
+            blocked.is_none(),
+            egui::Button::new("Revalidate retained source"),
+        );
+        if let Some(reason) = blocked {
+            response.on_hover_text(reason);
+        } else if response.clicked() {
+            if let Err(error) = self.task_revalidate_retained(&task.id) {
+                self.state.notice = Some(error);
+            }
+        }
+        ui.add_space(10.0);
+    }
+
+    fn work_item_recovery(&mut self, ui: &mut egui::Ui, task: &Task) {
+        let plan = self.task_recovery_plan(&task.id);
+        crate::section::Section::new("Recovery options")
+            .id_salt((&task.id, "recovery-options"))
+            .summary(plan.summary)
+            .icon(Icon::Shield)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(plan.detail).wrap());
+                self.work_item_revalidation(ui, task);
             });
     }
 

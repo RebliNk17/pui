@@ -102,7 +102,7 @@ impl Pui {
                 let t = self.tasks.live_mut().unwrap();
                 t.dirty_source = i.dirty;
                 t.base_head = i.head;
-                self.task_launch(Role::Proposal);
+                self.task_environment(environment::Stage::Proposal);
             }
             JobResult::Prepared(path, isolated) => {
                 let Some(t) = self.tasks.live_mut() else {
@@ -113,15 +113,71 @@ impl Pui {
                 }
                 t.workspace = Some(path);
                 t.isolated = isolated;
-                t.phase = Phase::Building;
                 if !isolated {
                     t.note = "Non-Git task works in place. Other chats and external tools can touch these files; concurrent changes invalidate verification.".into();
                 }
-                t.attempts.push(Attempt::new(0));
+                self.tasks.save();
+                self.task_environment(environment::Stage::Implementation);
+            }
+            JobResult::Environment(stage, report) => self.task_environment_result(stage, report),
+            JobResult::Fingerprint(step, fingerprint) => self.task_fingerprinted(step, fingerprint),
+        }
+    }
+    fn task_environment(&mut self, stage: environment::Stage) {
+        let Some(t) = self.tasks.live_task() else {
+            return;
+        };
+        let source = t.source.clone();
+        let workspace = t.workspace.clone().unwrap_or_else(|| source.clone());
+        let contract = t.approved.clone();
+        self.task_job(t.id.clone(), move || {
+            Ok(JobResult::Environment(
+                stage,
+                environment::inspect(&source, &workspace, contract.as_ref()),
+            ))
+        });
+    }
+    fn task_environment_result(&mut self, stage: environment::Stage, report: environment::Report) {
+        let Some(task) = self.tasks.live_mut() else {
+            return;
+        };
+        let expected = match stage {
+            environment::Stage::Proposal => Phase::Proposing,
+            environment::Stage::Implementation => Phase::Preparing,
+            environment::Stage::Checks | environment::Stage::Repair(_) => Phase::Checking,
+        };
+        if task.phase != expected {
+            return;
+        }
+        let note = report.note();
+        if !report.blockers.is_empty() {
+            self.tasks.block(note);
+            return;
+        }
+        task.note = format!("{}\n{}", task.note, note).trim().to_owned();
+        match stage {
+            environment::Stage::Proposal => {
+                self.tasks.save();
+                self.task_launch(Role::Proposal);
+            }
+            environment::Stage::Implementation => {
+                task.phase = Phase::Building;
+                task.attempts.push(Attempt::new(0));
                 self.tasks.save();
                 self.task_launch(Role::Builder);
             }
-            JobResult::Fingerprint(step, fingerprint) => self.task_fingerprinted(step, fingerprint),
+            environment::Stage::Checks => {
+                self.tasks.save();
+                self.task_launch(Role::Checks);
+            }
+            environment::Stage::Repair(number) => {
+                // Preflight failures never create or consume a repair attempt.
+                task.attempts.last_mut().unwrap().invalidated = true;
+                task.attempts.push(Attempt::new(number));
+                task.phase = Phase::Building;
+                self.tasks.save();
+                self.task_launch(Role::Builder);
+            }
         }
     }
     pub(super) fn task_fingerprint(&mut self, step: FingerprintStep) {
@@ -133,8 +189,8 @@ impl Pui {
                 if let Some(store) = &self.tasks.store {
                     let (reply, rx) = mpsc::channel();
                     if store
-                        .send(StoreCommand::Claim {
-                            id: id.clone(),
+                        .send(StoreCommand::ClaimCurrent {
+                            expected: Box::new(self.tasks.current().unwrap().clone()),
                             reply,
                         })
                         .is_err()
@@ -184,7 +240,7 @@ impl Pui {
             t.attempts.last_mut().unwrap().fingerprint = Some(fingerprint);
             t.phase = Phase::Checking;
             self.tasks.save();
-            self.task_launch(Role::Checks);
+            self.task_environment(environment::Stage::Checks);
             return;
         }
         if t.latest().and_then(|a| a.fingerprint.as_ref()) != Some(&fingerprint) {
@@ -243,6 +299,9 @@ impl Pui {
         route_prompt: Option<String>,
     ) {
         if self.demo || self.task_budget_stop(0.0) {
+            return;
+        }
+        if !self.task_validate_model_launch(role, &selection, routing_for.is_some()) {
             return;
         }
         let Some(t) = self.tasks.live_task() else {
@@ -641,7 +700,17 @@ impl Pui {
                 cancelled: data["cancelled"] == true,
                 duration_ms: pending.unwrap().started.elapsed().as_millis() as u64,
             });
+            let last = a.checks.last().unwrap();
+            let environment_blocker = if last.cancelled || last.exit_code.is_none() {
+                Some("Check was cancelled or returned no exit status. Outcome may be incomplete; no subsequent command, verifier, repair, or replay was started.".into())
+            } else {
+                environment::failed_requirement(last)
+            };
             self.tasks.save();
+            if let Some(reason) = environment_blocker {
+                self.tasks.block(reason);
+                return;
+            }
             self.task_send_work(i);
             return;
         }
@@ -811,12 +880,10 @@ impl Pui {
             return;
         }
         let number = a.number + 1;
-        t.attempts.last_mut().unwrap().invalidated = true;
-        t.attempts.push(Attempt::new(number));
-        t.phase = Phase::Building;
+        t.phase = Phase::Checking;
         self.tasks.save();
         self.tasks.retire();
-        self.task_launch(Role::Builder);
+        self.task_environment(environment::Stage::Repair(number));
     }
     pub(super) fn task_answer(&mut self, run: &str, id: &str, mut response: Value) {
         if !self.tasks.open

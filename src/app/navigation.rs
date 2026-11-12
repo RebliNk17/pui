@@ -185,6 +185,7 @@ impl Pui {
 
     fn navigation_blocked(&self) -> bool {
         self.search_open
+            || self.tasks.attachment_confirming()
             || self.section_view.confirming()
             || self.agents.close_prompt
             || self.terminals.confirming_stop()

@@ -14,6 +14,7 @@ pub(super) struct Request {
     cwd: PathBuf,
     provider: String,
     model: String,
+    approval: domain::routing::Approval,
     task: Option<String>,
 }
 
@@ -102,11 +103,20 @@ impl Pui {
         }
         // Reject unsupported routing before asking for consent or creating a
         // workflow, rather than spending on a task that cannot start.
-        let pool = domain::routing::candidates(&self.state.models, &self.state.provider);
-        if let Err(error) = domain::routing::router(&pool) {
-            self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":format!("Workflow unavailable for this chat: {error} Use regular development or explicitly choose a supported provider; no workflow was created.")}).to_string()}));
-            return true;
-        }
+        let approval = match domain::routing::Approval::from_request(
+            &value,
+            &self.state.models,
+            &self.state.provider,
+            &self.state.model,
+            &self.state.thinking,
+        ) {
+            Ok(approval) => approval,
+            Err(error) => {
+                self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":format!("Workflow unavailable for this chat: {error} Use regular development or explicitly choose a supported policy; no workflow was created.")}).to_string()}));
+                return true;
+            }
+        };
+        let policy_description = approval.description();
         self.tasks.requests.insert(
             rpc_id.clone(),
             Request {
@@ -118,12 +128,13 @@ impl Pui {
                 cwd: self.prefs.cwd.clone(),
                 provider: self.state.provider.clone(),
                 model: self.state.model.clone(),
+                approval,
                 task: None,
             },
         );
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
-            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). Uses provider credits; normal permissions apply. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Original checkout is left untouched. No commit, merge or deployment."),
+            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block; automatic bootstrap/install and command-replay recovery are unsupported. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Original checkout is left untouched. No commit, merge or deployment."),
             "options":["Use workflow", "Regular development"]
         }));
         true
@@ -144,11 +155,15 @@ impl Pui {
         let context_changed = request.cwd != self.prefs.cwd
             || request.provider != self.state.provider
             || request.model != self.state.model
-            || domain::routing::router(&domain::routing::candidates(
-                &self.state.models,
-                &request.provider,
-            ))
-            .is_err();
+            || request
+                .approval
+                .revalidate(
+                    &self.state.models,
+                    &self.state.provider,
+                    &self.state.model,
+                    &self.state.thinking,
+                )
+                .is_err();
         let id = id.to_owned();
         // Only a still-visible host question may authorize creation. Never trust
         // an agent-supplied approved=true flag or a stale RPC response.
@@ -188,6 +203,7 @@ impl Pui {
         let request = self.tasks.requests.get_mut(&id).unwrap();
         let objective = request.objective.clone();
         let constraints = request.constraints.clone();
+        let approval = request.approval.clone();
         request.task = self.tasks.selected.clone();
         let Some(task) = self.tasks.current_mut() else {
             return true;
@@ -195,6 +211,12 @@ impl Pui {
         task.objective = objective;
         task.constraints = constraints;
         task.initial_approved = true;
+        if let Err(error) = approval.bind(task) {
+            task.phase = Phase::Blocked;
+            task.note = error;
+            self.tasks.save();
+            return true;
+        }
         self.tasks.save();
         self.task_propose();
         if let Some(error) = self.tasks.error.clone() {

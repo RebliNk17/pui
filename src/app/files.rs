@@ -1,4 +1,4 @@
-//! Docked, read-only file and page viewer. Reads require a click or pui_open.
+//! Docked, read-only file and page viewer. Retained visible tabs restore automatically.
 mod budget;
 mod chrome;
 mod delimited;
@@ -260,47 +260,41 @@ impl Browser {
         let root = self.root.clone();
         let browser_mode = self.browser_mode;
         self.workspace(ctx, &root);
-        for path in &saved.paths {
-            self.select_file(ctx, path.clone(), saved.external_paths.contains(path));
+        // Queue the visible tab first, while retaining the user's original tab order.
+        let visible = if browser_mode {
+            saved.selected_url.as_deref().map(Path::new)
+        } else {
+            saved.selected.as_deref()
+        };
+        let paths = saved
+            .paths
+            .iter()
+            .filter(|path| Some(path.as_path()) == visible)
+            .chain(
+                saved
+                    .paths
+                    .iter()
+                    .filter(|path| Some(path.as_path()) != visible),
+            );
+        for path in paths {
+            self.select_file_mode(
+                ctx,
+                path.clone(),
+                saved.external_paths.contains(path),
+                saved.source_paths.contains(path),
+            );
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.path == *path) {
+                tab.source = saved.source_paths.contains(path);
+            }
         }
-        for tab in &mut self.tabs {
-            tab.source = saved.source_paths.contains(&tab.path);
-        }
+        self.tabs
+            .sort_by_key(|tab| saved.paths.iter().position(|path| path == &tab.path));
         self.urls = saved.urls;
         self.selected = saved.selected;
         self.selected_url = saved.selected_url;
         self.expanded_dirs = saved.directories.into_iter().collect();
         self.browser_mode = browser_mode;
         self.restore_address();
-    }
-
-    fn restore_notice(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        egui::Frame::new().inner_margin(16).show(ui, |ui| {
-            // A bare with_layout consumes the pane's full remaining height,
-            // pushing the restore notice and action below the visible viewport.
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icons::button(ui, Icon::Close, "Hide restored viewer").clicked() {
-                        self.close();
-                    }
-                    if self.expanded
-                        && icons::button(ui, Icon::Collapse, "Restore viewer panel").clicked()
-                    {
-                        self.expanded = false;
-                    }
-                });
-            });
-            prompt_ui::heading(
-                ui,
-                "Workspace restored",
-                "Tabs were retained. Files and web pages stay unloaded until you restore them.",
-            );
-            ui.add_space(12.0);
-            if prompt_ui::button(ui, "Restore tabs", prompt_ui::Button::Primary, true).clicked() {
-                self.activate_restored_tabs(&ctx);
-            }
-        });
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -389,9 +383,10 @@ impl Browser {
             self.close();
             return;
         }
-        if self.restored.is_none() || self.root != root {
-            self.workspace(ctx, root);
+        if self.root == root {
+            self.activate_restored_tabs(ctx);
         }
+        self.workspace(ctx, root);
         self.web.hide();
         self.browser_mode = browser;
         self.open = true;
@@ -807,10 +802,11 @@ impl Browser {
         if !self.open {
             return false;
         }
-        if self.restored.is_none() || self.root != root {
-            self.workspace(ctx, root);
-            self.poll();
+        if self.root == root {
+            self.activate_restored_tabs(ctx);
         }
+        self.workspace(ctx, root);
+        self.poll();
         let colors = theme::palette(ctx);
         let expanded = self.expanded;
         if expanded {
@@ -839,10 +835,6 @@ impl Browser {
     }
 
     fn contents(&mut self, ui: &mut egui::Ui, tables: &mut TableHeaders) {
-        if self.restored.is_some() {
-            self.restore_notice(ui);
-            return;
-        }
         let rect = ui.max_rect();
         self.pane_rect = Some(rect);
         if let Some(pos) =
@@ -1630,6 +1622,8 @@ fn search_paths(root: &Path, query: &str, cancel: &AtomicBool) -> Result<Search,
     Ok(search)
 }
 
+#[cfg(test)]
+mod auto_restore_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
 #[cfg(test)]

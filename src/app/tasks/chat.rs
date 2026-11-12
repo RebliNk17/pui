@@ -185,6 +185,20 @@ impl Pui {
             ui.menu_button("More", |ui| {
                 theme::menu_controls(ui);
                 if let Some(id) = self.tasks.selected.clone() {
+                    let blocked = self.task_attachment_blocked(&id);
+                    let attach = ui.add_enabled(
+                        blocked.is_none(),
+                        egui::Button::new("Attach to this conversation"),
+                    );
+                    let attach = if let Some(reason) = blocked {
+                        attach.on_hover_text(reason)
+                    } else {
+                        attach
+                    };
+                    if attach.clicked() {
+                        self.request_task_attachment(&id);
+                        ui.close();
+                    }
                     if ui
                         .button(RichText::new("Delete workflow history…").color(colors.red))
                         .clicked()
@@ -311,7 +325,15 @@ impl Pui {
             return;
         }
         if let Some(parent) = self.tasks.parents.get(&task.id).cloned() {
-            if self.agents.active == parent || self.agents.parked.contains_key(&parent) {
+            let matches = task.parent_session.as_ref().is_none_or(|path| {
+                self.agents
+                    .nodes
+                    .get(&parent)
+                    .and_then(|node| node.path.as_ref())
+                    .is_some_and(|candidate| sync::identity(path) == sync::identity(candidate))
+            });
+            if matches && (self.agents.active == parent || self.agents.parked.contains_key(&parent))
+            {
                 self.view_agent(&parent);
                 return;
             }

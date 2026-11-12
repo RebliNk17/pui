@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn restored_viewer_stays_unloaded_and_stacks_below_chat_in_narrow_windows() {
+fn restored_viewer_loads_automatically_and_stacks_below_chat_in_narrow_windows() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         let ctx = egui::Context::default();
         let app = tests::app(&ctx);
@@ -15,6 +15,10 @@ fn restored_viewer_stays_unloaded_and_stacks_below_chat_in_narrow_windows() {
         };
         let mut browser = Browser::default();
         browser.restore_layout(root, &saved);
+        assert!(
+            browser.tabs.is_empty(),
+            "Checkpoint hydration must not perform IO"
+        );
         for width in [620.0, 1100.0] {
             let output = ctx.run(
                 egui::RawInput {
@@ -31,30 +35,29 @@ fn restored_viewer_stays_unloaded_and_stacks_below_chat_in_narrow_windows() {
                     });
                 },
             );
-            assert!(browser.tabs.is_empty());
-            assert!(
-                browser.directories.is_empty(),
-                "Restoration must not scan a workspace"
+            assert!(browser.restored.is_none());
+            assert_eq!(browser.tabs.len(), 1);
+            assert_eq!(
+                browser.directories.len(),
+                1,
+                "Only the root directory loads initially"
             );
             assert!(browser.web_preview.is_none());
             let chat = tests::text(&output, "Chat retained");
-            let notice = tests::text(&output, "Workspace restored");
+            let tab = tests::text(&output, "README.md");
             if width < 700.0 {
-                assert!(notice.y > chat.y);
+                assert!(tab.y > chat.y);
             } else {
-                assert!(notice.x > chat.x);
+                assert!(tab.x > chat.x);
             }
         }
         browser.close();
         let closed = browser.saved_layout();
         assert!(!closed.open);
         assert_eq!(closed.paths.len(), 1);
+        browser.restore_layout(root, &closed);
+        assert!(browser.tabs.is_empty());
         browser.toggle(&ctx, root);
-        assert!(
-            browser.directories.is_empty(),
-            "Reopening must still wait for Restore tabs"
-        );
-        browser.activate_restored_tabs(&ctx);
         assert_eq!(browser.tabs.len(), 1);
         assert!(browser.restored.is_none());
     }
@@ -80,7 +83,9 @@ fn restoring_mixed_tabs_preserves_selected_pane_and_lazily_loads_folders() {
     };
     let mut browser = Browser::default();
     browser.restore_layout(root, &saved);
-    browser.activate_restored_tabs(&ctx);
+    let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        browser.show(ctx, root, &mut TableHeaders::default());
+    });
     assert!(
         browser.files_open(),
         "Loading a trailing HTML tab must not switch the selected pane"

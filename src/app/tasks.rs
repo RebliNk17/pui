@@ -5,10 +5,21 @@ use crate::tasks::{
 };
 use std::collections::BTreeMap;
 
+mod attachment;
+mod changes_preview;
 pub(super) mod chat;
 mod consent;
+pub(super) mod environment;
+pub(super) mod recovery;
+mod refresh;
 mod routing;
 mod runtime;
+#[cfg(test)]
+#[path = "tasks/save_conflict_tests.rs"]
+mod save_conflict_tests;
+#[cfg(test)]
+#[path = "tasks/store_safety_tests.rs"]
+mod store_safety_tests;
 #[cfg(test)]
 mod tests;
 mod view;
@@ -26,6 +37,7 @@ enum JobResult {
     Inspected(domain::workspace::Inspection),
     Prepared(PathBuf, bool),
     Fingerprint(FingerprintStep, String),
+    Environment(environment::Stage, environment::Report),
 }
 struct Job {
     task: String,
@@ -57,13 +69,22 @@ enum StoreCommand {
     Save(Box<Task>),
     // Observers may inspect evidence without stealing a task's writer lock.
     // Conflict is local to this revalidation, not a broken storage subsystem.
-    Claim {
-        id: String,
+    ClaimCurrent {
+        expected: Box<Task>,
         reply: mpsc::Sender<Result<(), String>>,
+    },
+    Attach {
+        expected: Box<Task>,
+        parent: PathBuf,
+        reply: mpsc::Sender<Result<Task, String>>,
+    },
+    Refresh {
+        reply: mpsc::Sender<Result<refresh::Snapshot, String>>,
     },
     Detach {
         tasks: Vec<Task>,
         reply: mpsc::Sender<Result<(), String>>,
+        projection: Option<mpsc::Sender<Result<Vec<Task>, String>>>,
     },
     Delete {
         id: String,
@@ -71,6 +92,11 @@ enum StoreCommand {
         locks: Vec<Option<std::fs::File>>,
         reply: mpsc::Sender<Result<(), String>>,
     },
+}
+struct StoreError {
+    task: String,
+    message: String,
+    conflict: bool,
 }
 #[derive(Default)]
 pub(super) struct Tasks {
@@ -89,10 +115,14 @@ pub(super) struct Tasks {
     pub(super) transcript: Transcript,
     job: Option<Job>,
     revalidate_claim: Option<(String, Receiver<Result<(), String>>)>,
+    attachment: attachment::Attachment,
+    updates: refresh::Updates,
+    local_owned: std::collections::BTreeSet<String>,
     store: Option<mpsc::Sender<StoreCommand>>,
     store_worker: Option<std::thread::JoinHandle<()>>,
     loaded: Option<Receiver<Result<Vec<Task>, String>>>,
-    errors: Option<Receiver<String>>,
+    errors: Option<Receiver<StoreError>>,
+    detached: Vec<Receiver<Result<Vec<Task>, String>>>,
     pub error: Option<String>,
     storage_failed: bool,
     pub dialog_text: String,
@@ -101,7 +131,7 @@ pub(super) struct Tasks {
     requests: BTreeMap<String, consent::Request>,
     pub revalidate_at: Option<std::time::Instant>,
     preview: Option<(String, Receiver<Result<crate::history::Preview, String>>)>,
-    watched: Option<String>,
+    watched: Option<(String, PathBuf)>,
     watcher: Option<crate::file_watch::Watcher>,
     changes: Option<Receiver<()>>,
 }
@@ -118,9 +148,12 @@ impl Tasks {
         let (tx, rx) = mpsc::channel::<StoreCommand>();
         let (errors, error_rx) = mpsc::channel();
         let (loaded_tx, loaded) = mpsc::channel();
+        let (watch_tx, watch_rx) = mpsc::channel();
+        result.updates.setup = Some(watch_rx);
         let ctx = ctx.clone();
         result.store_worker = Some(std::thread::spawn(move || {
             let _ = loaded_tx.send(domain::store::load(&home));
+            let _ = watch_tx.send(refresh::watch(home.clone(), &ctx));
             ctx.request_repaint();
             run_store(&home, rx, errors, &ctx);
         }));
@@ -225,6 +258,7 @@ impl Tasks {
             return;
         };
         t.updated = domain::now();
+        self.local_owned.insert(t.id.clone());
         if let Some(store) = &self.store {
             if store.send(StoreCommand::Save(Box::new(t.clone()))).is_err() {
                 self.error = Some("Task storage is unavailable; stop before continuing.".into());
@@ -292,7 +326,7 @@ impl Tasks {
         }
     }
     pub(super) fn prepare_detach_deleted_chat(
-        &self,
+        &mut self,
         path: &std::path::Path,
     ) -> Result<Option<Receiver<Result<(), String>>>, String> {
         let linked: Vec<_> = self
@@ -319,15 +353,25 @@ impl Tasks {
         // The store owns task locks; this command must complete before the chat
         // disappears, so another window cannot restore its old parent link.
         let (reply, rx) = mpsc::channel();
+        let (projection, projected) = mpsc::channel();
         store
             .send(StoreCommand::Detach {
                 tasks: linked,
                 reply,
+                projection: Some(projection),
             })
             .map_err(|_| "Task storage unavailable")?;
+        self.detached.push(projected);
         Ok(Some(rx))
     }
     pub(super) fn detach_deleted_chat(&mut self, path: &std::path::Path) {
+        // Production detachment is exclusively the validated store transaction.
+        // The deletion caller invokes this before its acknowledgment too; never
+        // enqueue a blind stale Save or optimistically erase a surviving link.
+        if self.store.is_some() {
+            self.updates.requested = true;
+            return;
+        }
         for task in &mut self.records {
             if task
                 .parent_session
@@ -336,14 +380,6 @@ impl Tasks {
             {
                 task.parent_session = None;
                 self.parents.remove(&task.id);
-                if let Some(store) = &self.store {
-                    if store
-                        .send(StoreCommand::Save(Box::new(task.clone())))
-                        .is_err()
-                    {
-                        self.error = Some("Cannot save detached task relationship.".into());
-                    }
-                }
             }
         }
     }
@@ -410,6 +446,37 @@ impl Tasks {
         self.job = None;
     }
     fn persist_loaded(&mut self) {
+        let mut completed = Vec::new();
+        self.detached.retain(|rx| match rx.try_recv() {
+            Ok(result) => {
+                completed.push(result);
+                false
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                completed.push(Err("Workflow detachment disconnected.".into()));
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+        });
+        for result in completed {
+            // A refresh queued before the detach acknowledgment still contains
+            // its old relationship. It must not undo the durable projection.
+            self.updates.pending = None;
+            self.updates.requested = true;
+            match result {
+                Ok(tasks) => {
+                    for task in tasks {
+                        self.parents.remove(&task.id);
+                        if let Some(record) =
+                            self.records.iter_mut().find(|record| record.id == task.id)
+                        {
+                            *record = task;
+                        }
+                    }
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
         if let Some(rx) = &self.loaded {
             match rx.try_recv() {
                 Ok(Ok(mut tasks)) => {
@@ -427,9 +494,30 @@ impl Tasks {
                 Err(_) => {}
             }
         }
-        if let Some(rx) = &self.errors {
-            for e in rx.try_iter() {
-                self.error = Some(e);
+        let errors: Vec<_> = self
+            .errors
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
+        for error in errors {
+            self.error = Some(error.message);
+            if error.conflict {
+                self.local_owned.remove(&error.task);
+                self.updates.requested = true;
+                // A rejected writer must not continue work or enqueue a final
+                // stale save. Other workflows and shared storage remain usable.
+                if self.live.as_ref() == Some(&error.task) {
+                    for process in &mut self.processes {
+                        let _ = process.client.send(protocol::command("clear_queue"));
+                        let _ = process.client.send(protocol::command("abort_bash"));
+                        let _ = process.client.send(protocol::command("abort"));
+                    }
+                    self.retire();
+                    self.live = None;
+                    self.job = None;
+                    self.revalidate_claim = None;
+                }
+            } else {
                 self.storage_failed = true;
             }
         }
@@ -455,55 +543,125 @@ impl Tasks {
 fn run_store(
     home: &std::path::Path,
     rx: Receiver<StoreCommand>,
-    errors: mpsc::Sender<String>,
+    errors: mpsc::Sender<StoreError>,
     ctx: &egui::Context,
 ) {
     let mut deleted = std::collections::BTreeSet::new();
+    let mut rejected = std::collections::BTreeSet::new();
     let mut owned = std::collections::BTreeMap::new();
     while let Ok(command) = rx.recv() {
         match command {
-            StoreCommand::Claim { id, reply } => {
-                let result = if deleted.contains(&id) {
-                    Err("This workflow was deleted; nothing was revalidated.".into())
-                } else {
-                    match owned.entry(id) {
-                        std::collections::btree_map::Entry::Occupied(_) => Ok(()),
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            domain::store::lock(home, entry.key()).map(|lock| {
-                                entry.insert(lock);
-                            })
-                        }
+            StoreCommand::Refresh { reply } => {
+                let _ = reply.send(domain::store::load(home).map(|records| refresh::Snapshot {
+                    records,
+                    owned: owned.keys().cloned().collect(),
+                }));
+            }
+            StoreCommand::ClaimCurrent { expected, reply } => {
+                let id = expected.id.clone();
+                let result = (|| {
+                    // Temporary lock is dropped on conflict; a stale observer
+                    // must not block the actual owner after a failed claim.
+                    let guard = if owned.contains_key(&id) {
+                        None
+                    } else {
+                        Some(domain::store::lock(home, &id)?)
+                    };
+                    let raw = domain::store::current_record(home, &expected)?;
+                    if raw.phase.active()
+                        && (guard.is_none() || expected.phase != Phase::Interrupted)
+                    {
+                        return Err("This workflow is active in another window.".into());
                     }
-                };
+                    // A fresh real OS lock proves a crashed writer is gone.
+                    // current_record compared the exact recovered Interrupted
+                    // view; this claim authorizes fingerprinting, never resume.
+                    if let Some(guard) = guard {
+                        owned.insert(id.clone(), guard);
+                    }
+                    rejected.remove(&id);
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
+            StoreCommand::Attach {
+                expected,
+                parent,
+                reply,
+            } => {
+                let result = (|| {
+                    let _guard = if owned.contains_key(&expected.id) {
+                        None
+                    } else {
+                        Some(domain::store::lock(home, &expected.id)?)
+                    };
+                    domain::store::attach(home, &expected, &parent)
+                })();
                 let _ = reply.send(result);
             }
             StoreCommand::Save(task) => {
                 if !deleted.contains(&task.id) {
                     let result = (|| {
+                        // A foreign owner may release its lock after our first
+                        // rejection, while stale saves are still queued. Only
+                        // a fresh, validated claim can reopen this writer.
+                        if rejected.contains(&task.id) {
+                            return Err(domain::store::LOCK_CONFLICT.into());
+                        }
                         if !owned.contains_key(&task.id) {
                             owned.insert(task.id.clone(), domain::store::lock(home, &task.id)?);
                         }
                         domain::store::save(home, &task)
                     })();
-                    if let Err(error) = result {
-                        let _ = errors.send(error);
+                    if let Err(message) = result {
+                        let conflict = message == domain::store::LOCK_CONFLICT;
+                        if conflict {
+                            rejected.insert(task.id.clone());
+                        }
+                        let _ = errors.send(StoreError {
+                            task: task.id.clone(),
+                            message,
+                            conflict,
+                        });
                     }
                 }
             }
-            StoreCommand::Detach { mut tasks, reply } => {
+            StoreCommand::Detach {
+                tasks,
+                reply,
+                projection,
+            } => {
                 let result = (|| {
+                    // Validate the entire batch while holding every writer lock,
+                    // before changing any relationship. Failed validation must
+                    // release new locks rather than monopolize foreign history.
+                    let mut acquired = BTreeMap::new();
                     for task in &tasks {
-                        if !owned.contains_key(&task.id) {
-                            owned.insert(task.id.clone(), domain::store::lock(home, &task.id)?);
+                        if !owned.contains_key(&task.id) && !acquired.contains_key(&task.id) {
+                            acquired.insert(task.id.clone(), domain::store::lock(home, &task.id)?);
                         }
                     }
-                    for task in &mut tasks {
+                    let mut authoritative = Vec::with_capacity(tasks.len());
+                    for task in &tasks {
+                        let raw = domain::store::current_record(home, task)?;
+                        if raw.phase.active() {
+                            return Err(
+                                "Stop the active workflow before deleting its conversation.".into(),
+                            );
+                        }
+                        authoritative.push(raw);
+                    }
+                    for task in &mut authoritative {
                         task.parent_session = None;
                         domain::store::save(home, task)?;
                     }
-                    Ok(())
+                    owned.extend(acquired);
+                    Ok(authoritative)
                 })();
-                let _ = reply.send(result);
+                if let Some(projection) = projection {
+                    let _ = projection.send(result.clone());
+                }
+                let _ = reply.send(result.map(|_| ()));
             }
             StoreCommand::Delete {
                 id,
@@ -595,6 +753,7 @@ impl Pui {
     }
     pub(super) fn open_task_from_board(&mut self, task: String, run: Option<String>) {
         self.tasks.activity_target = None;
+        self.tasks.updates.requested = true;
         let view = self.tasks.views.entry(task.clone()).or_default();
         view.tab = if run.is_some() {
             work_item::Tab::Activity
@@ -689,12 +848,12 @@ impl Pui {
             .current()
             .filter(|t| matches!(t.phase, Phase::Ready | Phase::Accepted))
             .and_then(|t| t.workspace.as_ref().map(|p| (t.id.clone(), p.clone())));
-        if target.as_ref().map(|(id, _)| id) == self.tasks.watched.as_ref() {
+        if target == self.tasks.watched {
             return;
         }
         self.tasks.watcher = None;
         self.tasks.changes = None;
-        self.tasks.watched = target.as_ref().map(|(id, _)| id.clone());
+        self.tasks.watched = target.clone();
         let Some((_, root)) = target else {
             return;
         };
@@ -703,16 +862,17 @@ impl Pui {
         }
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        self.tasks.watcher = Some(crate::file_watch::Watcher::new(
-            root,
-            notify::RecursiveMode::Recursive,
+        self.tasks.watcher = Some(crate::file_watch::Watcher::new_resolved(
             &self.ctx,
+            move || domain::workspace::fingerprint_root(&root),
+            notify::RecursiveMode::Recursive,
             move |event: notify::Result<notify::Event>| {
-                if let Ok(event) = event {
-                    if !matches!(event.kind, notify::EventKind::Access(_)) {
-                        let _ = tx.send(());
-                        ctx.request_repaint();
-                    }
+                // Lost/error events also require a fresh fingerprint; never
+                // interpret missing notification details as unchanged evidence.
+                if !matches!(event, Ok(ref event) if matches!(event.kind, notify::EventKind::Access(_)))
+                {
+                    let _ = tx.send(());
+                    ctx.request_repaint();
                 }
             },
         ));
@@ -731,17 +891,24 @@ impl Pui {
                 Err(_) => {
                     self.tasks.watcher = None;
                     self.tasks.changes = None;
+                    // Setup may fail after the initial fingerprint completed.
+                    // Close that gap before leaving only reopening as fallback.
+                    self.tasks.revalidate_at = Some(std::time::Instant::now());
                     self.tasks.error = Some("Source watching unavailable. Reopening this workflow recomputes its evidence fingerprint.".into());
                 }
             }
         }
         self.tasks.persist_loaded();
+        self.poll_task_updates();
+        self.poll_task_attachment();
         self.tasks
             .retiring
             .retain(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         let mut linked = Vec::new();
         for task in &mut self.tasks.records {
-            if task.parent_session.is_none() {
+            if task.parent_session.is_none()
+                && self.tasks.attachment.pending_id() != Some(task.id.as_str())
+            {
                 if let Some(path) = self
                     .tasks
                     .parents

@@ -1886,6 +1886,7 @@ impl eframe::App for Pui {
             self.agent_close_guard(ctx);
         }
         let confirming = self.section_view.confirming()
+            || self.tasks.attachment_confirming()
             || self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
@@ -2079,6 +2080,7 @@ impl eframe::App for Pui {
         self.process_open_links(ctx);
         self.deletion_dialog(ctx);
         self.sidebar_section_confirmation(ctx);
+        self.task_attachment_confirmation(ctx);
         self.spotlight(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);

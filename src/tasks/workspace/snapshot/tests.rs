@@ -129,6 +129,156 @@ fn clean_repository_and_new_source_subfolder_get_isolated_worktrees() {
         "new subfolder"
     );
 }
+#[test]
+fn subfolder_evidence_scope_is_the_retained_worktree_root() {
+    let root = repo();
+    let target = super::super::prepare(
+        &root.join("sub"),
+        "scope",
+        &super::super::tests::dir(),
+        &head(&root),
+    )
+    .unwrap()
+    .0;
+    let scope = super::super::fingerprint_root(&target).unwrap();
+    assert_eq!(scope, fs::canonicalize(target.parent().unwrap()).unwrap());
+    assert_ne!(scope, fs::canonicalize(&root).unwrap());
+    assert_eq!(
+        super::super::fingerprint(&scope).unwrap(),
+        super::super::fingerprint(&target).unwrap()
+    );
+    let before = super::super::fingerprint(&target).unwrap();
+    fs::write(scope.join("modified"), "changed outside selected subfolder").unwrap();
+    assert_ne!(before, super::super::fingerprint(&target).unwrap());
+}
+
+#[test]
+fn prepared_file_to_directory_replacement_has_stable_content_sensitive_fingerprint() {
+    let root = repo();
+    fs::remove_file(root.join("typechange")).unwrap();
+    fs::create_dir(root.join("typechange")).unwrap();
+    fs::write(root.join("typechange/child"), "replacement directory").unwrap();
+    let original_status = status(&root);
+    let original_index = fs::read(root.join(".git/index")).unwrap();
+    let (target, isolated) = prepare(&root);
+    assert!(isolated);
+    let fingerprint = super::super::fingerprint(&target)
+        .expect("prepared file-to-directory replacement must fingerprint");
+    assert_eq!(fingerprint, super::super::fingerprint(&target).unwrap());
+    assert_eq!(fingerprint, super::super::fingerprint(&root).unwrap());
+    fs::write(target.join("typechange/child"), "changed replacement").unwrap();
+    assert_ne!(fingerprint, super::super::fingerprint(&target).unwrap());
+    assert_eq!(status(&root), original_status);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), original_index);
+}
+
+#[test]
+fn prepared_directory_to_file_replacement_has_stable_content_sensitive_fingerprint() {
+    let root = repo();
+    fs::remove_file(root.join("sub/file")).unwrap();
+    fs::remove_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub"), "replacement file").unwrap();
+    let original_status = status(&root);
+    let original_index = fs::read(root.join(".git/index")).unwrap();
+    let (target, isolated) = prepare(&root);
+    assert!(isolated);
+    let fingerprint = super::super::fingerprint(&target)
+        .expect("prepared directory-to-file replacement must fingerprint");
+    assert_eq!(fingerprint, super::super::fingerprint(&target).unwrap());
+    assert_eq!(fingerprint, super::super::fingerprint(&root).unwrap());
+    fs::write(target.join("sub"), "changed replacement").unwrap();
+    assert_ne!(fingerprint, super::super::fingerprint(&target).unwrap());
+    assert_eq!(status(&root), original_status);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), original_index);
+}
+
+#[test]
+fn fingerprint_distinguishes_empty_directory_replacement_deletion_and_ignored_contents() {
+    let root = repo();
+    let original = super::super::fingerprint(&root).unwrap();
+    fs::remove_file(root.join("typechange")).unwrap();
+    let deleted = super::super::fingerprint(&root).unwrap();
+    assert_ne!(original, deleted);
+    fs::create_dir(root.join("typechange")).unwrap();
+    let directory = super::super::fingerprint(&root).unwrap();
+    assert_ne!(deleted, directory);
+    fs::write(root.join(".gitignore"), "ignored/\ntypechange/ignored\n").unwrap();
+    let ignored = super::super::fingerprint(&root).unwrap();
+    fs::write(root.join("typechange/ignored"), "excluded content").unwrap();
+    assert_eq!(ignored, super::super::fingerprint(&root).unwrap());
+    fs::write(root.join("typechange/included"), "included content").unwrap();
+    assert_ne!(ignored, super::super::fingerprint(&root).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn fingerprint_rejects_symlinked_tracked_ancestors_even_above_replacement_files() {
+    let root = repo();
+    fs::create_dir(root.join("sub/deeper")).unwrap();
+    fs::write(root.join("sub/deeper/child"), "tracked child").unwrap();
+    command(&root, &["add", "sub/deeper/child"]);
+    let outside = super::super::tests::dir();
+    fs::write(outside.join("deeper"), "outside replacement file").unwrap();
+    fs::rename(root.join("sub"), root.join("retained-sub")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+    let error = super::super::fingerprint(&root).unwrap_err();
+    assert!(error.contains("Symlinked source directory"), "{error}");
+}
+
+#[test]
+fn fingerprint_refuses_opaque_gitlink_and_embedded_repository_directories() {
+    let root = repo();
+    let (target, _) = prepare(&root);
+    // An indexed gitlink introduced after preparation must not be hashed as
+    // just a directory name, even without a .git marker in its working tree.
+    fs::create_dir(target.join("opaque-module")).unwrap();
+    fs::write(target.join("opaque-module/file"), "not enumerated by Git").unwrap();
+    command(
+        &target,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000",
+            &head(&root),
+            "opaque-module",
+        ],
+    );
+    assert!(
+        super::super::fingerprint(&target)
+            .unwrap_err()
+            .contains("Opaque source directory")
+    );
+    command(
+        &target,
+        &["update-index", "--force-remove", "opaque-module"],
+    );
+    // Untracked embedded repositories are likewise opaque to ls-files.
+    fs::create_dir(target.join("embedded")).unwrap();
+    command(&target.join("embedded"), &["init", "-b", "main"]);
+    fs::write(target.join("embedded/file"), "nested content").unwrap();
+    assert!(
+        super::super::fingerprint(&target)
+            .unwrap_err()
+            .contains("Nested repositories")
+    );
+}
+
+#[test]
+fn fingerprint_refuses_embedded_repository_in_tracked_file_replacement() {
+    let root = repo();
+    let (target, _) = prepare(&root);
+    fs::remove_file(target.join("typechange")).unwrap();
+    fs::create_dir(target.join("typechange")).unwrap();
+    command(&target.join("typechange"), &["init", "-b", "main"]);
+    fs::write(target.join("typechange/file"), "nested replacement").unwrap();
+    assert!(
+        super::super::fingerprint(&target)
+            .unwrap_err()
+            .contains("Nested repositories")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn snapshot_preserves_symlinks_executable_bits_and_file_directory_replacements() {

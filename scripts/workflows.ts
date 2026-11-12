@@ -13,15 +13,19 @@ export function installWorkflows(pi: any) {
       objective: Type.String({ minLength: 1, maxLength: 16000 }),
       constraints: Type.Optional(Type.String({ maxLength: 12000 })),
       reason: Type.String({ minLength: 1, maxLength: 240, description: "One short sentence: why is a workflow better than regular development for this change?" }),
+      policy: Type.Optional(Type.Union([Type.Literal("dynamic"), Type.Literal("pinned")], { description: "Explicit routing policy shown before consent. Default dynamic requires same-provider Haiku. Pinned uses the available current known normal-price model for every stage, without substitutions." })),
+      spend_limit: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Optional reported-usage USD stop threshold, not a hard billing cap; delayed/in-flight usage may overshoot." })),
     }),
     async execute(_id: string, args: any, signal: AbortSignal | undefined, _update: any, ctx: any) {
       if (!ctx.hasUI || ctx.mode !== "rpc") throw new Error("Workflows require the native Pui app.");
       if (process.env.PUI_AGENT_ACCESS === "read-only" || process.env.PUI_TASK_ROLE) throw new Error("This worker cannot start workflows.");
       if (typeof args.objective !== "string" || !args.objective.trim() || Buffer.byteLength(args.objective) > 16000 || typeof args.reason !== "string" || !args.reason.trim() || Buffer.byteLength(args.reason) > 240 || (args.constraints !== undefined && (typeof args.constraints !== "string" || Buffer.byteLength(args.constraints) > 12000))) throw new Error("Supply a bounded objective, constraints and a very short reason.");
+      if (args.policy !== undefined && args.policy !== "dynamic" && args.policy !== "pinned") throw new Error("Workflow policy must be dynamic or pinned; no silent fallback.");
+      if (args.spend_limit !== undefined && (typeof args.spend_limit !== "number" || !Number.isFinite(args.spend_limit) || args.spend_limit <= 0)) throw new Error("Reported spend threshold must be finite and positive, not a hard billing cap.");
       const id = crypto.randomUUID();
       try {
         signal?.throwIfAborted();
-        const value = await ctx.ui.input("Pui agent control", JSON.stringify({ version: 1, action: "workflow_request", id, objective: args.objective, constraints: args.constraints, reason: args.reason }), { signal });
+        const value = await ctx.ui.input("Pui agent control", JSON.stringify({ version: 1, action: "workflow_request", id, objective: args.objective, constraints: args.constraints, reason: args.reason, policy: args.policy, spend_limit: args.spend_limit }), { signal });
         signal?.throwIfAborted();
         if (value === undefined) return { content: [{ type: "text", text: "Workflow request cancelled. Nothing was approved; wait for the user's next instruction." }], details: { cancelled: true }, terminate: true };
         const result = JSON.parse(value);

@@ -19,6 +19,35 @@ impl Pui {
             .then_some(self.state.models.as_slice())
     }
 
+    /// Must guard every model launch, including pinned/retained workflows.
+    /// Checks are host command submission and do not launch a model.
+    pub(super) fn task_validate_model_launch(
+        &mut self,
+        role: Role,
+        selection: &routing::Selection,
+        is_router: bool,
+    ) -> bool {
+        if role == Role::Checks {
+            return true;
+        }
+        let result = self
+            .tasks
+            .live_task()
+            .ok_or_else(|| "No live workflow.".to_string())
+            .and_then(|task| {
+                let models = self
+                    .task_routing_models(task)
+                    .ok_or("The workflow owner's model catalog is unavailable.")?;
+                routing::validate_launch(task, models, selection, is_router)
+            });
+        if let Err(error) = result {
+            self.tasks.block(error);
+            false
+        } else {
+            true
+        }
+    }
+
     pub(super) fn task_budget_stop(&mut self, inflight: f64) -> bool {
         if !self
             .tasks
@@ -54,6 +83,9 @@ impl Pui {
             }
         };
         let prompt = routing::prompt(task, role, &pool);
+        if !self.task_validate_model_launch(role, &router, true) {
+            return;
+        }
         self.task_launch_selected(role, router, Some(role), Some(prompt));
     }
     pub(super) fn task_route_finished(&mut self, role: Role, answer: &str) {
@@ -79,6 +111,9 @@ impl Pui {
         self.tasks.retire();
         if selection.exceptional {
             self.tasks.block("Exceptional-price models are outside this workflow's approval. No exceptional model was launched; continue regular development or discuss a different approach.");
+            return;
+        }
+        if !self.task_validate_model_launch(role, &selection, false) {
             return;
         }
         self.task_launch_selected(role, selection, None, None);

@@ -1,4 +1,6 @@
 use super::*;
+#[path = "consent_policy_tests.rs"]
+mod policy_tests;
 
 fn app() -> Pui {
     let mut app = Pui::new(
@@ -11,7 +13,8 @@ fn app() -> Pui {
     app.demo = false;
     app.ultracode_ready = true;
     app.state.provider = "fixture-provider".into();
-    app.state.model = "fixture-model".into();
+    app.state.model = "claude-haiku-5-5".into();
+    app.state.thinking = "high".into();
     app.state.models = vec![crate::protocol::Model {
         id: "claude-haiku-5-5".into(),
         name: "Fixture Haiku".into(),
@@ -197,6 +200,8 @@ fn initial_approval_allows_dirty_source_for_an_isolated_snapshot() {
         dirty: true,
         head: "head".into(),
     })));
+    let job = app.tasks.job.take().expect("read-only prerequisite job");
+    app.task_job_result(job.rx.recv_timeout(Duration::from_secs(10)).unwrap());
     let task = app.tasks.current().unwrap();
     assert_eq!(task.phase, Phase::Proposing);
     assert!(task.dirty_source);

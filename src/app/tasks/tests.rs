@@ -1,6 +1,8 @@
 use super::*;
 #[path = "reliability_tests.rs"]
 mod reliability_tests;
+#[path = "watch_scope_tests.rs"]
+mod watch_scope_tests;
 fn app() -> Pui {
     let ctx = egui::Context::default();
     let mut app = Pui::new(
@@ -257,12 +259,18 @@ fn fixture_workflow_runs_builder_checks_and_fresh_verifier_end_to_end() {
         let job = app.tasks.job.take().expect("off-thread fingerprint job");
         let result = job.rx.recv_timeout(Duration::from_secs(30)).unwrap();
         app.task_job_result(result);
+        if let Some(job) = app.tasks.job.take() {
+            let result = job.rx.recv_timeout(Duration::from_secs(30)).unwrap();
+            app.task_job_result(result);
+        }
     }
+    app.state.models = routing_catalog();
+    app.tasks.live_mut().unwrap().model = "claude-haiku-5-5".into();
     fn init(app: &mut Pui) {
         let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
         event(
             app,
-            json!({"type":"response","command":"get_state","id":id,"success":true,"data":{"model":{"id":"fixture-model","provider":"fixture-provider"},"thinkingLevel":"high","sessionFile":"/fixture/task-session"}}),
+            json!({"type":"response","command":"get_state","id":id,"success":true,"data":{"model":{"id":"claude-haiku-5-5","provider":"fixture-provider"},"thinkingLevel":"high","sessionFile":"/fixture/task-session"}}),
         );
     }
     job(&mut app);
@@ -360,6 +368,8 @@ fn repair_is_bounded_to_initial_plus_two_attempts() {
     let mut app = app();
     live(&mut app, Phase::Verifying);
     passed_attempt(app.tasks.live_mut().unwrap());
+    app.state.models = routing_catalog();
+    app.tasks.live_mut().unwrap().model = "claude-haiku-5-5".into();
     for number in 0..=2 {
         let t = app.tasks.live_mut().unwrap();
         let a = t.attempts.last_mut().unwrap();
@@ -367,6 +377,12 @@ fn repair_is_bounded_to_initial_plus_two_attempts() {
         a.review.as_mut().unwrap().criteria[0].status = Verdict::Fail;
         app.task_finish_attempt();
         if number < 2 {
+            let job = app
+                .tasks
+                .job
+                .take()
+                .expect("read-only repair prerequisite inspection");
+            app.task_job_result(job.rx.recv_timeout(Duration::from_secs(30)).unwrap());
             assert_eq!(app.tasks.live_task().unwrap().phase, Phase::Building);
             assert_eq!(
                 app.tasks.live_task().unwrap().latest().unwrap().number,

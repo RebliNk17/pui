@@ -2,7 +2,7 @@
 use super::*;
 use std::{collections::BTreeSet, io::Write};
 #[path = "snapshot/source.rs"]
-mod source;
+pub(in crate::tasks) mod source;
 use source::{Entry, entry};
 
 fn output(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {

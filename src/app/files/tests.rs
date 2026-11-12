@@ -146,7 +146,7 @@ fn docked_tree_is_right_of_preview_and_reads_only_clicked_files_while_busy() {
 }
 
 #[test]
-fn restored_viewer_keeps_notice_and_restore_action_visible_across_redraws() {
+fn restored_viewer_loads_without_a_restore_gate_across_redraws() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for (width, expanded, zoom) in [
             (480.0, false, 1.0),
@@ -162,6 +162,7 @@ fn restored_viewer_keeps_notice_and_restore_action_visible_across_redraws() {
             app.prefs.hide_sidebar = true;
             app.files.toggle(&ctx, &app.prefs.cwd);
             app.files.expanded = expanded;
+            app.files.select(&ctx, app.prefs.cwd.join("README.md"));
             let saved = app.files.saved_layout();
             app.files.restore_layout(&app.prefs.cwd, &saved);
             for _ in 0..40 {
@@ -176,20 +177,17 @@ fn restored_viewer_keeps_notice_and_restore_action_visible_across_redraws() {
                     },
                     |ctx| eframe::App::update(&mut app, ctx, &mut native),
                 );
-                for needle in ["Workspace restored", "Restore tabs"] {
-                    let pos = text(&output, needle);
-                    assert!(ctx.screen_rect().contains(pos), "{needle}: {pos:?}");
-                }
-                assert!(app.files.directories.is_empty());
-                assert!(app.files.tabs.is_empty());
-            }
-            if width == 1134.0 && zoom == 1.0 {
-                let output = frame(&ctx, &mut app, vec![]);
-                click(&ctx, &mut app, text(&output, "Restore tabs"));
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if ["Workspace restored", "Restore tabs"].contains(&text.galley.job.text.as_str()))));
+                let pos = text(&output, "README.md");
+                assert!(
+                    ctx.screen_rect().contains(pos),
+                    "Tab must remain visible: {pos:?}"
+                );
                 assert!(app.files.restored.is_none());
-                settle(&mut app.files);
-                frame(&ctx, &mut app, vec![]);
-                text(&frame(&ctx, &mut app, vec![]), "README.md");
+                assert_eq!(app.files.tabs.len(), 1);
+                assert!(!app.terminals.running());
+                assert!(app.state.dialogs.is_empty());
             }
         }
     }

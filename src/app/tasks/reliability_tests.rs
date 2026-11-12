@@ -176,7 +176,7 @@ fn revalidation_claim_conflict_does_not_change_evidence_or_poison_storage() {
     app.task_fingerprint(FingerprintStep::Revalidate);
     assert!(app.tasks.live.is_none());
     assert!(app.tasks.job.is_none());
-    let StoreCommand::Claim { reply, .. } = commands.try_recv().unwrap() else {
+    let StoreCommand::ClaimCurrent { reply, .. } = commands.try_recv().unwrap() else {
         panic!("claim must precede source work");
     };
     reply
@@ -207,8 +207,8 @@ fn real_writer_lock_conflict_is_local_and_next_task_can_still_be_saved() {
     let (tx, rx) = mpsc::channel();
     let (errors, error_rx) = mpsc::channel();
     let (reply, claimed) = mpsc::channel();
-    tx.send(StoreCommand::Claim {
-        id: locked.id.clone(),
+    tx.send(StoreCommand::ClaimCurrent {
+        expected: Box::new(locked.clone()),
         reply,
     })
     .unwrap();

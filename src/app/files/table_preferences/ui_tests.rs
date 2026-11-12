@@ -110,7 +110,7 @@ fn remembered_external_symlink_replacement_still_fails_on_worker_reread() {
 }
 
 #[test]
-fn metadata_survives_unloaded_restore_without_reads_or_widened_privileges() {
+fn metadata_survives_automatic_restore_without_widened_privileges() {
     let ctx = egui::Context::default();
     let mut app = file_tests::app(&ctx);
     let root = app.prefs.cwd.clone();
@@ -138,17 +138,11 @@ fn metadata_survives_unloaded_restore_without_reads_or_widened_privileges() {
             },
         );
     }
-    assert!(browser.tabs.is_empty() && browser.directories.is_empty());
+    assert!(browser.restored.is_none());
+    assert_eq!(browser.tabs.len(), 1);
     assert!(!tables.header(&root, &path));
-    browser.activate_restored_tabs(&ctx);
-    let tab = &mut browser.tabs[0];
-    tab.content = Some(
-        tab.rx
-            .take()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap(),
-    );
+    file_tests::settle(&mut browser);
+    let tab = &browser.tabs[0];
     assert!(tab.external == saved.external_paths.contains(&path));
     for _ in 0..3 {
         let _ = ctx.run(

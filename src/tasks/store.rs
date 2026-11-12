@@ -119,10 +119,54 @@ pub fn delete(home: &Path, id: &str, sessions: &[PathBuf]) -> Result<(), String>
     Ok(())
 }
 
-pub fn load(home: &Path) -> Result<Vec<Task>, String> {
-    if !home.exists() {
-        return Ok(vec![]);
+/// Read a bounded record without recovery so relationship-only edits preserve evidence.
+fn read_record(home: &Path, id: &str) -> Result<Task, String> {
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid task ID")?;
+    if home.join(format!("{id}.deleted")).exists() {
+        return Err("This workflow was deleted; nothing was changed.".into());
     }
+    let path = home.join(format!("{id}.json"));
+    let meta = fs::symlink_metadata(&path).map_err(|_| "Workflow record is unavailable.")?;
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_RECORD {
+        return Err("Invalid workflow record; nothing was changed.".into());
+    }
+    let task: Task = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|_| "Invalid workflow record; nothing was changed.")?;
+    if task.id != id || task.version != 1 {
+        return Err("Invalid workflow record; nothing was changed.".into());
+    }
+    Ok(task)
+}
+
+/// Caller must hold the task's real writer lock. Compare all fields, not the
+/// second-resolution timestamp: another window can write twice in one second.
+pub fn current_record(home: &Path, expected: &Task) -> Result<Task, String> {
+    let task = read_record(home, &expected.id)?;
+    let mut visible = task.clone();
+    visible.recover();
+    if serde_json::to_value(&visible).map_err(|e| e.to_string())?
+        != serde_json::to_value(expected).map_err(|e| e.to_string())?
+    {
+        return Err(
+            "This workflow changed in another window. Refresh it before trying again.".into(),
+        );
+    }
+    Ok(task)
+}
+
+/// Relationship-only transaction. Caller holds the writer lock through save.
+pub fn attach(home: &Path, expected: &Task, parent: &Path) -> Result<Task, String> {
+    let mut task = current_record(home, expected)?;
+    if task.phase.active() {
+        return Err("Stop the active workflow before attaching it to another conversation.".into());
+    }
+    task.parent_session = Some(parent.into());
+    task.updated = super::now();
+    save(home, &task)?;
+    Ok(task)
+}
+
+pub fn load(home: &Path) -> Result<Vec<Task>, String> {
     private_dir(home)?;
     let mut tasks = Vec::new();
     for entry in fs::read_dir(home)

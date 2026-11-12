@@ -1,6 +1,6 @@
 //! Bounded source fingerprints and deliberate Git isolation. Never commit/merge/delete.
 #[path = "workspace/snapshot.rs"]
-mod snapshot;
+pub(super) mod snapshot;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -241,19 +241,71 @@ fn paths(root: &Path) -> Result<Vec<PathBuf>, String> {
     found.sort();
     Ok(found)
 }
-/// SHA-256 over path, length, and bytes. Symlinks are hashed as links, never followed.
-/// Git: tracked + nonignored untracked files; non-Git: bounded tree excluding generated directories.
-pub fn fingerprint(root: &Path) -> Result<String, String> {
-    let mut canonical = fs::canonicalize(root).map_err(|e| e.to_string())?;
-    if let Ok(output) = git(&canonical, &["rev-parse", "--show-toplevel"]) {
-        if output.status.success() {
-            canonical = PathBuf::from(
+/// Only obsolete regular-file index entries may contribute a directory marker.
+/// Git can otherwise enumerate an opaque gitlink/nested repository without its
+/// contents, so treating every directory as an empty marker would hide edits.
+fn replacement_directory(root: &Path, relative: &Path) -> Result<(), String> {
+    let name = relative.to_str().ok_or("Non-UTF-8 source path")?;
+    match fs::symlink_metadata(root.join(relative).join(".git")) {
+        Ok(_) => return Err("Nested repositories cannot be fingerprinted safely.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let output = git(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--stage",
+            "-z",
+            "--",
+            name,
+        ],
+    )?;
+    if output.status.success()
+        && output.stdout.split(|b| *b == 0).any(|entry| {
+            let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+                return false;
+            };
+            let header = &entry[..tab];
+            (header.starts_with(b"100644 ") || header.starts_with(b"100755 "))
+                && header.ends_with(b" 0")
+                && &entry[tab + 1..] == name.as_bytes()
+        })
+    {
+        Ok(())
+    } else {
+        Err("Opaque source directory cannot be fingerprinted safely.".into())
+    }
+}
+
+/// Resolve the exact evidence scope for both hashing and source watching.
+/// Call off the UI thread: canonicalization and Git may block.
+pub fn fingerprint_root(workspace: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(workspace).map_err(|e| e.to_string())?;
+    if !canonical.is_dir() {
+        return Err("Fingerprint workspace is not a directory.".into());
+    }
+    match git(&canonical, &["rev-parse", "--show-toplevel"]) {
+        Ok(output) if output.status.success() => {
+            let root = PathBuf::from(
                 String::from_utf8(output.stdout)
                     .map_err(|_| "Non-UTF-8 repository root")?
                     .trim(),
             );
+            fs::canonicalize(root).map_err(|e| e.to_string())
         }
+        _ if canonical.ancestors().any(|p| p.join(".git").exists()) => {
+            Err("Cannot resolve Git evidence scope; refusing a narrower fallback.".into())
+        }
+        _ => Ok(canonical),
     }
+}
+
+/// SHA-256 over path, length, and bytes. Symlinks are hashed as links, never followed.
+/// Git: tracked + nonignored untracked files; non-Git: bounded tree excluding generated directories.
+pub fn fingerprint(root: &Path) -> Result<String, String> {
+    let canonical = fingerprint_root(root)?;
     let root = canonical.as_path();
     let initial_paths = paths(root)?;
     let mut hash = Sha256::new();
@@ -271,14 +323,28 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
                     return Err("Symlinked source directory cannot be fingerprinted safely.".into());
                 }
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Cached descendants can sit below a directory replaced by a
+                // regular file. Still inspect every ancestor: ENOTDIR must not
+                // hide a symlink higher in the path.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
                 Err(e) => return Err(e.to_string()),
             }
             parent = p.parent();
         }
         let meta = match fs::symlink_metadata(&path) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                // The tracked descendant is absent when its old parent is now
+                // a regular file; that replacement is enumerated independently.
                 hash.update(b"missing");
                 continue;
             }
@@ -292,6 +358,14 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
                     .as_os_str()
                     .as_encoded_bytes(),
             );
+            continue;
+        }
+        if meta.is_dir() {
+            replacement_directory(root, relative)?;
+            // A cached tracked file may now be a directory. Its nonignored
+            // children are separately enumerated by Git; retain the type marker
+            // so an empty replacement is distinct from a deleted tracked file.
+            hash.update(b"directory");
             continue;
         }
         if !meta.is_file() {
@@ -350,6 +424,10 @@ mod tests {
         fs::write(root.join("app.rs"), "draft remains").unwrap();
         assert!(!inspect(&root).unwrap().git);
         assert_eq!(
+            fingerprint_root(&root).unwrap(),
+            fs::canonicalize(&root).unwrap()
+        );
+        assert_eq!(
             prepare(&root, "fixture", &root.join("unused"), "").unwrap(),
             (fs::canonicalize(&root).unwrap(), false)
         );
@@ -380,6 +458,8 @@ mod tests {
         let root = dir();
         fs::write(root.join(".git"), "gitdir: /does/not/exist").unwrap();
         assert!(inspect(&root).is_err());
+        assert!(fingerprint_root(&root).is_err());
+        assert!(fingerprint(&root).is_err());
     }
     #[cfg(unix)]
     #[test]

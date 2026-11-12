@@ -17,7 +17,19 @@ impl Watcher {
         ctx: &egui::Context,
         handler: impl notify::EventHandler,
     ) -> Self {
+        Self::new_resolved(ctx, move || Ok(path), mode, handler)
+    }
+
+    /// Resolve a watch scope on the same worker as OS registration. This keeps
+    /// Git/filesystem discovery off the UI thread as well as watcher setup.
+    pub fn new_resolved(
+        ctx: &egui::Context,
+        resolve: impl FnOnce() -> Result<PathBuf, String> + Send + 'static,
+        mode: notify::RecursiveMode,
+        handler: impl notify::EventHandler,
+    ) -> Self {
         Self::start(ctx, move || {
+            let path = resolve().map_err(|error| notify::Error::generic(&error))?;
             let mut watcher = notify::recommended_watcher(handler)?;
             watcher.watch(&path, mode)?;
             Ok(watcher)
@@ -108,6 +120,33 @@ mod tests {
             stopped.recv_timeout(Duration::from_secs(2)).unwrap(),
             worker
         );
+    }
+
+    #[test]
+    fn stalled_scope_resolution_does_not_block_creation_or_drop() {
+        let (entered, entering) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let (finished, finishing) = mpsc::channel();
+        let caller = thread::current().id();
+        let watcher = Watcher::new_resolved(
+            &egui::Context::default(),
+            move || {
+                entered.send(thread::current().id()).unwrap();
+                blocked.recv().unwrap();
+                finished.send(()).unwrap();
+                Err("resolution unavailable".into())
+            },
+            notify::RecursiveMode::Recursive,
+            |_: notify::Result<notify::Event>| {},
+        );
+        assert_ne!(
+            entering.recv_timeout(Duration::from_secs(2)).unwrap(),
+            caller
+        );
+        assert!(watcher.poll().is_none());
+        drop(watcher);
+        release.send(()).unwrap();
+        finishing.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 
     #[test]

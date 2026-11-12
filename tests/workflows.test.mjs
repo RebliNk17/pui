@@ -30,6 +30,29 @@ test('workflow is a sequential, consent-first host request, without an automatic
   assert.equal(result.details.workflow.regular_development, true);
   assert.equal(h.statuses[0][0], 'pui-workflow');
 });
+test('explicit pinned policy and reported stop threshold are forwarded for native consent', async () => {
+  const h = host();
+  await h.tool.execute('', {...args, policy: 'pinned', spend_limit: 1.25}, undefined, null, h.ctx);
+  const request = JSON.parse(h.requests[0][1]);
+  assert.equal(request.policy, 'pinned');
+  assert.equal(request.spend_limit, 1.25);
+  assert.equal(request.approved, undefined);
+  const defaultHost = host();
+  await defaultHost.tool.execute('', args, undefined, null, defaultHost.ctx);
+  const defaultRequest = JSON.parse(defaultHost.requests[0][1]);
+  assert.equal(defaultRequest.policy, undefined);
+  assert.equal(defaultRequest.spend_limit, undefined);
+});
+test('invalid policy and nonpositive or nonfinite thresholds fail before a host question', async () => {
+  const h = host();
+  for (const policy of [null, '', 'automatic', 1, {}]) {
+    await assert.rejects(h.tool.execute('', {...args, policy}, undefined, null, h.ctx), /policy/);
+  }
+  for (const spend_limit of [null, '5', 0, -1, NaN, Infinity, -Infinity]) {
+    await assert.rejects(h.tool.execute('', {...args, spend_limit}, undefined, null, h.ctx), /threshold/);
+  }
+  assert.equal(h.requests.length, 0);
+});
 test('cancellation does not grant approval or invite an automatic retry', async () => {
   const h = host();
   h.ctx.ui.input = async () => undefined;

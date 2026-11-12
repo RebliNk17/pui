@@ -1,14 +1,14 @@
 //! Descriptor-relative source reads: parent symlink swaps must never expose outside files.
 use super::*;
 
-pub(super) enum Entry {
+pub(in crate::tasks) enum Entry {
     Missing,
     Link(PathBuf),
     File(fs::File),
 }
 
 #[cfg(unix)]
-pub(super) fn entry(root: &Path, relative: &Path) -> Result<Entry, String> {
+pub(in crate::tasks) fn entry(root: &Path, relative: &Path) -> Result<Entry, String> {
     use std::{
         ffi::{CString, OsStr},
         os::{
@@ -149,6 +149,6 @@ pub(super) fn entry(root: &Path, relative: &Path) -> Result<Entry, String> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn entry(_root: &Path, _relative: &Path) -> Result<Entry, String> {
+pub(in crate::tasks) fn entry(_root: &Path, _relative: &Path) -> Result<Entry, String> {
     Err("Safe workflow snapshots are not yet supported on this platform.".into())
 }
