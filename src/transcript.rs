@@ -906,7 +906,7 @@ fn assistant(
     let mut changed = false;
     let mut pending: Vec<ActivityItem<'_>> = Vec::new();
     let mut group_index = 0;
-    for message in messages {
+    for (message_index, message) in messages.iter().enumerate() {
         if message.blocks.is_empty() {
             if !message.text.is_empty() {
                 if !pending.is_empty() {
@@ -915,7 +915,7 @@ fn assistant(
                     group_index += 1;
                 }
                 if !task_output || !crate::task_output::show(ui, &message.text) {
-                    markdown::show(ui, &message.text);
+                    markdown::show_reply(ui, &message.text, (message_index, "text"));
                 }
             }
             if !message.thinking.is_empty() {
@@ -934,7 +934,7 @@ fn assistant(
                 }
             }
         } else {
-            for block in &message.blocks {
+            for (block_index, block) in message.blocks.iter().enumerate() {
                 match block {
                     Block::Text(text) if !text.is_empty() => {
                         if !pending.is_empty() {
@@ -943,7 +943,7 @@ fn assistant(
                             group_index += 1;
                         }
                         if !task_output || !crate::task_output::show(ui, text) {
-                            markdown::show(ui, text);
+                            markdown::show_reply(ui, text, (message_index, "block", block_index));
                         }
                     }
                     Block::Thinking(text) => pending.push(ActivityItem::Thinking(text)),
@@ -982,6 +982,54 @@ fn assistant(
         .collect();
     gallery.thumbnails(ui, &images);
     if !running {
+        let files = crate::activity::turn_files(messages);
+        if !files.is_empty() {
+            let added: usize = files.iter().map(|f| f.added).sum();
+            let removed: usize = files.iter().map(|f| f.removed).sum();
+            let label = format!(
+                "{} {} recorded · +{added} −{removed}",
+                files.len(),
+                if files.len() == 1 { "file" } else { "files" }
+            );
+            let id = ui.id().with("turn-recorded-files");
+            let mut open = ui
+                .ctx()
+                .data(|data| data.get_temp::<bool>(id))
+                .unwrap_or(false);
+            if icons::labeled_button(ui, Icon::File, &label, true)
+                .on_hover_text("Successful recorded edit/write operations in this turn, not a minimal Git diff. Write counts do not infer removed lines.")
+                .clicked() {
+                open = !open;
+                changed = true;
+                ui.ctx().data_mut(|data| data.insert_temp(id, open));
+            }
+            if open {
+                egui::Frame::new()
+                    .fill(colors.surface)
+                    .corner_radius(7)
+                    .inner_margin(10)
+                    .show(ui, |ui| {
+                        for file in &files {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&file.path).size(11.0))
+                                        .truncate(),
+                                );
+                                ui.label(
+                                    RichText::new(format!("+{}", file.added))
+                                        .size(10.0)
+                                        .color(colors.green),
+                                );
+                                ui.label(
+                                    RichText::new(format!("−{}", file.removed))
+                                        .size(10.0)
+                                        .color(colors.red),
+                                );
+                            });
+                        }
+                    });
+            }
+        }
         ui.add_space(4.0);
         let last = messages.last().unwrap();
         let cost: f64 = messages.iter().map(|m| m.cost).sum();
@@ -1018,6 +1066,12 @@ fn assistant(
                         .collect::<Vec<_>>()
                         .join("\n\n"),
                 );
+            }
+            if icons::labeled_button(ui, Icon::Copy, "Quote", true)
+                .on_hover_text("Append a reply excerpt to the draft without sending it")
+                .clicked()
+            {
+                crate::app::context_capture::queue_parts(ui.ctx(), "Quoted assistant reply", messages.iter().map(|message| message.text.as_str()));
             }
             if last.role == "assistant" && last.error.is_none() && last.tools.is_empty()
                 && icons::labeled_button(ui, Icon::Branch, "Fork", actions_enabled)
@@ -1213,7 +1267,7 @@ fn activity(
                                 .show(ui, |ui| {
                                     markdown::show(ui, text);
                                 });
-                            earlier_changed |= response.clicked() || response.has_focus();
+                            earlier_changed |= response.changed();
                         }
                         ActivityItem::Tool(tool) => crate::tool_view::row(ui, tool),
                     });
@@ -2323,7 +2377,14 @@ mod tests {
                     draw(pointer(true));
                     let (_, changed) = draw(pointer(false));
                     assert!(changed, "expansion must invalidate the turn height");
-                    let (text, _) = draw(vec![]);
+                    let (text, changed) = draw(vec![]);
+                    assert!(
+                        !changed,
+                        "focused Thinking disclosure must settle without repainting"
+                    );
+                    for _ in 0..5 {
+                        assert!(!draw(vec![]).1, "idle focus must not cause a repaint loop");
+                    }
                     for expected in [
                         "Research",
                         "Gathering information",

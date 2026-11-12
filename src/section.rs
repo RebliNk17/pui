@@ -68,7 +68,7 @@ impl Section {
                     ),
                     Sense::hover(),
                 );
-                let response = ui.interact(rect, id.with("header"), Sense::click());
+                let mut response = ui.interact(rect, id.with("header"), Sense::click());
                 if response.clicked() {
                     response.request_focus();
                 }
@@ -95,6 +95,9 @@ impl Section {
                 }
                 if response.clicked() {
                     open = !open;
+                }
+                if state.is_open() != open {
+                    response.mark_changed();
                 }
                 state.set_open(open);
                 state.store(ui.ctx());

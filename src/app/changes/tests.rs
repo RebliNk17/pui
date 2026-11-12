@@ -87,7 +87,7 @@ fn changes_dock_does_not_grow_across_frames_resizes_or_long_diff_lines() {
                         std::path::Path::new("/fixture"),
                         "chat",
                         &Workspace::default(),
-                        &outputs,
+                        (&outputs, 0),
                         false,
                     );
                     panel_width = width - ctx.available_rect().width();
@@ -180,7 +180,7 @@ fn second_toolbar_button_opens_changes_and_inline_recorded_diff_in_both_themes()
         assert!(app.changes.open_rows.contains(&(false, path.clone())));
         assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.job.text.contains("updated implementation"))));
         assert!(
-            app.selected_diff.is_none(),
+            app.changes.review.is_none(),
             "Diffs must be inline, not floating windows"
         );
         click(&ctx, &mut app, position(&output, &path));
@@ -322,7 +322,7 @@ fn current_git_diff_is_inline_numbered_and_refresh_preserves_repository() {
     let output = frame(&ctx, &mut app, vec![]);
     assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t)
         if t.galley.job.text.contains("-before") && t.galley.job.text.contains("+after") && t.galley.job.text.contains("    2   +new line"))));
-    assert!(app.selected_diff.is_none());
+    assert!(app.changes.review.is_none());
     let after = Command::new("git")
         .current_dir(&root)
         .args(["status", "--porcelain"])

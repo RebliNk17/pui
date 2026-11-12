@@ -196,7 +196,7 @@ fn sidebar_places_compact_navigation_above_list_without_pui_menu() {
         .iter()
         .filter(|(_, rect)| rect.left() < 254.0)
         .collect();
-    assert!(!sidebar.iter().any(|(s, _)| s == "Pui"));
+    assert_eq!(sidebar.iter().filter(|(s, _)| s == "Pui").count(), 1);
     assert!(!sidebar.iter().any(|(s, _)| s == "New task"));
     assert!(!sidebar.iter().any(|(s, _)| s == "Search sessions"));
     let rows = ["Agents board", "Scheduled tasks", "Settings"]

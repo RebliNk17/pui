@@ -166,6 +166,11 @@ pub struct State {
     pub pending_messages: Vec<PendingMessage>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
+    /// Cached metadata is display-only until Pi refreshes it.
+    pub models_cached: bool,
+    pub model_hint: String,
+    #[serde(skip)]
+    pub model_cache_key: Option<u64>,
     pub commands: Vec<SlashCommand>,
     pub model: String,
     pub model_name: String,
@@ -195,6 +200,7 @@ pub struct State {
     pub outputs_revision: u64,
     pub error: Option<String>,
     pub notice: Option<String>,
+    pub restart_notice: String,
     pub diagnostics: Vec<String>,
     pub dialogs: std::collections::VecDeque<Value>,
 }
@@ -448,6 +454,7 @@ impl State {
                 let data = &event["data"];
                 match string(&event, "command") {
                     "get_state" => {
+                        self.model_hint.clear();
                         self.model = string(&data["model"], "id").to_owned();
                         self.model_name = string(&data["model"], "name").into();
                         self.provider = string(&data["model"], "provider").into();
@@ -499,6 +506,7 @@ impl State {
                         self.levels.clear();
                     }
                     "get_available_models" => {
+                        self.models_cached = false;
                         self.models = data["models"]
                             .as_array()
                             .map(|models| models.iter().map(Model::from_json).collect())

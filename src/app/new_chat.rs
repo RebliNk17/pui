@@ -168,7 +168,6 @@ impl Pui {
             return;
         }
         let folder = sync::identity(&folder);
-        let models = self.state.models.clone();
         if !self.demo {
             // Connecting/busy/approval/mirror chats keep their original state
             // and connection, including drafts, images and pending deliveries.
@@ -192,15 +191,11 @@ impl Pui {
         self.closed_projects.remove(&folder);
         self.workspace_rx = None;
         self.workspace = Workspace::default();
-        self.selected_diff = None;
         self.diff_rx = None;
         self.inspector_panel = false;
         self.close_model_popovers();
         self.bypass_pending = None;
-        self.state = State {
-            models,
-            ..Default::default()
-        };
+        self.state = State::default();
         self.draft.clear();
         self.draft_images.clear();
         self.recall = Default::default();

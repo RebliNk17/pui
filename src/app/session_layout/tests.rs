@@ -123,6 +123,24 @@ fn same_directory_rpc_switch_and_superseded_connection_isolate_layouts() {
 }
 
 #[test]
+fn deleted_chat_and_agent_layouts_release_browsers_without_affecting_other_chats() {
+    let mut layouts = SessionLayouts::default();
+    for key in [
+        "/fixture/deleted",
+        "/fixture/kept",
+        "agent:deleted",
+        "agent:kept",
+    ] {
+        layouts.saved.insert(key.into(), Layout::default());
+    }
+    layouts.forget_path(std::path::Path::new("/fixture/deleted"));
+    layouts.forget_agent("deleted");
+    assert_eq!(layouts.saved.len(), 2);
+    assert!(layouts.saved.contains_key("/fixture/kept"));
+    assert!(layouts.saved.contains_key("agent:kept"));
+}
+
+#[test]
 fn new_conversation_does_not_inherit_previous_browser() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

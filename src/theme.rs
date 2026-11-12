@@ -6,7 +6,9 @@ use std::sync::Arc;
 #[cfg(test)]
 mod bidi_tests;
 mod fonts;
+pub(crate) mod status;
 mod styles;
+pub(crate) use status::indicator as status_indicator;
 #[cfg(test)]
 mod tooltip_tests;
 pub use styles::{DarkStyle, LightStyle, Styles};
@@ -223,8 +225,24 @@ fn install_style(ctx: &egui::Context, mode: Theme, theme: egui::Theme, colors: &
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.interact_size.y = CONTROL_HEIGHT;
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.scroll.bar_width = 4.0;
-    style.spacing.scroll.floating = true;
+    // Transparent rail, compact resting thumb and generous hover/drag target.
+    // Built-in scrolling retains wheel, touchpad and keyboard behavior.
+    style.spacing.scroll = egui::style::ScrollStyle {
+        floating: true,
+        bar_width: 7.0,
+        floating_width: 3.0,
+        floating_allocated_width: 0.0,
+        handle_min_length: 28.0,
+        bar_inner_margin: 3.0,
+        bar_outer_margin: 0.0,
+        foreground_color: true,
+        dormant_background_opacity: 0.0,
+        active_background_opacity: 0.0,
+        interact_background_opacity: 0.0,
+        dormant_handle_opacity: 0.25,
+        active_handle_opacity: 0.45,
+        interact_handle_opacity: 0.8,
+    };
     style
         .text_styles
         .insert(TextStyle::Body, FontId::proportional(14.0));

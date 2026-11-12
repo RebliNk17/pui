@@ -246,6 +246,7 @@ impl Pui {
                 ctx.input_mut(|i| i.events.push(event));
             }
             Search => self.open_search(),
+            QuickOpen => self.open_quick_files(),
             DarkTheme | LightTheme => {
                 self.prefs.theme = if command == DarkTheme {
                     theme::Theme::Dark
@@ -302,7 +303,6 @@ impl Pui {
                 self.settings_open = false;
                 self.files.toggle_browser(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
-                self.terminals.close(ctx);
             }
             Changes => {
                 self.kanban.open = false;
@@ -354,6 +354,9 @@ impl Pui {
                     self.settings_open,
                 ),
             ] {
+                if command == Command::Automation && !self.prefs.sidebar_view.scheduled {
+                    continue;
+                }
                 let (rect, response) = ui.allocate_exact_size(
                     Vec2::new(ui.available_width(), theme::COMPACT_HEIGHT),
                     Sense::click(),
@@ -524,6 +527,24 @@ mod tests {
             app.menu_command(&ctx, Command::Updates);
             assert!(!app.updates.open);
         }
+    }
+    #[test]
+    fn quick_open_menu_uses_search_permission_gate_and_shared_accelerator() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        assert_eq!(
+            Command::QuickOpen.shortcut(),
+            Some(egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                egui::Key::P
+            ))
+        );
+        app.state.dialogs.push_back(questions::demo_dialog());
+        app.menu_command(&ctx, Command::QuickOpen);
+        assert!(!app.search_open);
+        app.state.dialogs.clear();
+        app.menu_command(&ctx, Command::QuickOpen);
+        assert!(app.search_open);
     }
     #[test]
     fn overview_menu_actions_open_views_without_interrupting_chat() {

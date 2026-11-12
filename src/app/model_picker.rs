@@ -6,6 +6,9 @@ mod safety_tests;
 mod tests;
 
 pub(super) fn model_label(state: &State) -> String {
+    if state.model.is_empty() && !state.model_hint.is_empty() {
+        return format!("{} · recent", state.model_hint);
+    }
     let current = state
         .models
         .iter()
@@ -40,6 +43,9 @@ pub(super) fn model_label(state: &State) -> String {
 // Settings still uses a combined summary; the composer has two independent controls.
 pub(super) fn selected_label(state: &State) -> String {
     let name = model_label(state);
+    if state.model.is_empty() && !state.model_hint.is_empty() {
+        return name;
+    }
     if state.thinking.is_empty() {
         name
     } else {
@@ -418,6 +424,7 @@ impl Pui {
                             .on_hover_text("Input / output prices per 1 million tokens, as reported by Pi. Zero may be a provider placeholder.");
                     });
                 });
+                if self.state.models_cached { ui.add(egui::Label::new(theme::small(ui, if self.state.error.is_some() { "Cached models · live refresh unavailable" } else { "Cached models · refreshing from Pi…" })).wrap()); }
                 if let Some(reason) = blocked { ui.add(egui::Label::new(theme::small(ui, reason)).wrap()); }
                 if let Some(error) = &self.state.error { ui.add(egui::Label::new(RichText::new(error).size(11.0).color(colors.red)).wrap()); }
                 let query = self.model_query.to_lowercase();

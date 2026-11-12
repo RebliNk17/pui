@@ -79,7 +79,7 @@ pub(crate) fn folder(output: &egui::FullOutput) -> egui::Pos2 {
         })
         .expect("Folder button")
 }
-fn settle(browser: &mut Browser) {
+pub(super) fn settle(browser: &mut Browser) {
     for directory in browser.directories.values_mut() {
         if let Some(rx) = directory.rx.take() {
             directory.listing = Some(rx.recv_timeout(Duration::from_secs(5)).unwrap());
@@ -168,7 +168,8 @@ fn file_explorer_omits_address_and_error_rows_but_keeps_tabs_and_refresh() {
                         ..Default::default()
                     },
                     |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| browser.contents(ui));
+                        egui::CentralPanel::default()
+                            .show(ctx, |ui| browser.contents(ui, &mut TableHeaders::default()));
                     },
                 );
                 text(&output, "Hello, 世界");
@@ -263,7 +264,8 @@ fn browser_chrome_has_one_address_row_and_switches_tabs_in_narrow_panels() {
                 .open_target(&ctx, &root, "https://example.com/a/very/long/path")
                 .unwrap();
             let draw = |ctx: &egui::Context, browser: &mut Browser| {
-                egui::CentralPanel::default().show(ctx, |ui| browser.contents(ui));
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| browser.contents(ui, &mut TableHeaders::default()));
             };
             let mut output = egui::FullOutput::default();
             for _ in 0..2 {
@@ -654,6 +656,60 @@ fn explicit_open_blocks_sensitive_aliases_and_handles_missing_or_binary_files() 
             "{target}"
         );
     }
+}
+
+#[test]
+fn focused_thinking_disclosure_settles_in_full_app_update() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state = State {
+        messages: vec![Message::from_json(&json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":"Reasoning fixture"},
+            {"type":"text","text":"Finished response"}
+        ]}))],
+        ..Default::default()
+    };
+    app.loading_chat = false;
+    app.new_chat = false;
+    app.focus_composer = false;
+    app.transcript.expand_activity = true;
+    app.prefs.hide_inspector = true;
+    app.prefs.hide_sidebar = true;
+    frame(&ctx, &mut app, vec![]);
+    let output = frame(&ctx, &mut app, vec![]);
+    click(&ctx, &mut app, text(&output, "Thinking"));
+    for _ in 0..6 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    let output = frame(&ctx, &mut app, vec![]);
+    assert!(
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay > Duration::ZERO,
+        "settled focused disclosure must not drive an immediate app repaint loop"
+    );
+}
+
+#[test]
+fn displayed_image_transfers_pixels_once_and_keeps_its_texture() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let path = app.prefs.cwd.join("preview.png");
+    fs::write(&path, include_bytes!("../../../assets/icon.png")).unwrap();
+    app.files
+        .open_target(&ctx, &app.prefs.cwd.clone(), &path.display().to_string())
+        .unwrap();
+    settle(&mut app.files);
+    assert!(matches!(
+        app.files.tabs[0].content,
+        Some(Ok(Content::Image(_)))
+    ));
+    frame(&ctx, &mut app, vec![]);
+    assert!(matches!(
+        app.files.tabs[0].content,
+        Some(Ok(Content::UploadedImage))
+    ));
+    let id = app.files.tabs[0].texture.as_ref().unwrap().id();
+    frame(&ctx, &mut app, vec![]);
+    assert_eq!(app.files.tabs[0].texture.as_ref().unwrap().id(), id);
 }
 
 #[test]

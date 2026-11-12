@@ -7,12 +7,14 @@ mod changes;
 mod completions;
 mod composer_history;
 mod confirmations;
+pub(crate) mod context_capture;
 mod deletion;
 mod diagnostics;
 mod diff_viewer;
 mod files;
 mod kanban;
 mod menu;
+mod model_cache;
 mod model_picker;
 mod navigation;
 mod new_chat;
@@ -26,6 +28,7 @@ mod prompt_ui;
 mod prompt_ui_tests;
 mod prompts;
 mod questions;
+mod restart;
 mod rewind;
 mod run_status;
 mod search;
@@ -34,6 +37,7 @@ mod settings;
 mod sidebar;
 mod sidebar_order;
 mod sidebar_tree;
+mod sidebar_view;
 mod sync;
 mod tasks;
 mod terminal;
@@ -79,9 +83,16 @@ struct Preferences {
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,
     projects_view: bool,
+    sidebar_view: sidebar_view::Options,
+    workspace_layouts: Vec<session_layout::Saved>,
+    table_headers: files::TableHeaders,
+    closed_projects: std::collections::BTreeSet<PathBuf>,
+    expanded_projects: std::collections::BTreeSet<PathBuf>,
     session_order: sidebar_order::Options,
     closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
+    model_catalogs: Vec<model_cache::Catalog>,
+    restart_checkpoints: Vec<restart::Checkpoint>,
 }
 
 impl Preferences {
@@ -110,6 +121,7 @@ pub struct Pui {
     completion_run: notifications::CompletionRun,
     demo: bool,
     agents: agents::Agents,
+    restart_pending: Vec<restart::Checkpoint>,
     tasks: tasks::Tasks,
     kanban: kanban::Board,
     automation: automation::Automation,
@@ -162,6 +174,7 @@ pub struct Pui {
     show_hidden: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
+    section_view: sidebar::sections::View,
     rename_chat: Option<PathBuf>,
     rename_text: String,
     usage: crate::usage::Usage,
@@ -180,8 +193,7 @@ pub struct Pui {
     session_layouts: session_layout::SessionLayouts,
     terminals: terminal::Terminals,
     changes: changes::Changes,
-    diff_rx: Option<Receiver<(String, String)>>,
-    selected_diff: Option<(String, String)>,
+    diff_rx: Option<Receiver<changes::git_files::Loaded>>,
     dialog_text: String,
     questions: questions::View,
     question_designs: Option<questions::designs::Preview>,
@@ -207,7 +219,10 @@ impl Pui {
             prefs.theme = theme;
         }
         let session = prefs.startup_session(&options);
+        let restore_blank = session.is_none() && options.cwd.is_none() && !options.demo;
         let projects = prefs.projects_view;
+        let closed_projects = prefs.closed_projects.clone();
+        let expanded_projects = prefs.expanded_projects.clone();
         prefs.cwd = options
             .cwd
             .or_else(|| {
@@ -216,6 +231,7 @@ impl Pui {
             })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         prefs.cards.normalize();
+        sidebar::sections::normalize(&mut prefs.sidebar_view);
         if prefs.agent_concurrency == 0 {
             prefs.agent_concurrency = 4;
         }
@@ -230,6 +246,7 @@ impl Pui {
             navigation: Default::default(),
             updates: Default::default(),
             completion_run: Default::default(),
+            restart_pending: prefs.restart_checkpoints.clone(),
             prefs,
             demo: options.demo,
             agents: Default::default(),
@@ -283,8 +300,9 @@ impl Pui {
             model_provider: String::new(),
             show_archived: false,
             show_hidden: false,
-            closed_projects: Default::default(),
-            expanded_projects: Default::default(),
+            closed_projects,
+            expanded_projects,
+            section_view: Default::default(),
             rename_chat: None,
             rename_text: String::new(),
             usage: if options.demo {
@@ -294,7 +312,7 @@ impl Pui {
             },
             sessions: Vec::new(),
             session_rx: None,
-            session_watch: if options.demo {
+            session_watch: if options.demo || cfg!(test) {
                 None
             } else {
                 sessions::session_root().map(|root| sessions::Watch::new(&root, &cc.egui_ctx))
@@ -312,7 +330,6 @@ impl Pui {
             terminals: Default::default(),
             changes: Default::default(),
             diff_rx: None,
-            selected_diff: None,
             dialog_text: String::new(),
             questions: Default::default(),
             question_designs: options.demo_question_designs.then(Default::default),
@@ -329,9 +346,19 @@ impl Pui {
         }
         if app.demo {
             app.load_demo();
+            if options.demo_sections {
+                app.demo_sidebar_sections();
+            }
+            if options.demo_view_menu {
+                sidebar_view::demo_menu(&app.ctx);
+            }
             if options.demo_search {
                 app.search = "context".into();
                 app.open_search();
+            }
+            if options.demo_quick_open {
+                app.open_quick_files();
+                app.search = "src/app/search.rs:42".into();
             }
             if options.demo_languages {
                 app.state.session_name = "Language glyph preview".into();
@@ -352,6 +379,16 @@ impl Pui {
                 }];
                 app.draft.clear();
                 app.prefs.hide_inspector = true;
+            }
+            if options.demo_quote_selection {
+                app.state.messages = vec![Message {
+                    role: "assistant".into(),
+                    text: context_capture::demo_rendered(&cc.egui_ctx).into(),
+                    ..Default::default()
+                }];
+                app.state.prose_revision = app.state.prose_revision.wrapping_add(1);
+                app.prefs.hide_inspector = true;
+                app.draft = "Keep this draft".into();
             }
             app.menu.about = options.demo_about;
             // Preview only: opening Updates must not start a network check.
@@ -378,6 +415,9 @@ impl Pui {
                 app.open_agents_board();
             } else if options.demo_agents {
                 app.demo_agent_tree();
+            }
+            if options.demo_sidebar_density {
+                app.demo_sidebar_density();
             }
             if options.demo_task {
                 app.demo_task();
@@ -418,12 +458,107 @@ impl Pui {
             if options.demo_terminal {
                 app.terminals.toggle(&cc.egui_ctx, &app.prefs.cwd, true);
                 app.focus_composer = false;
+                if options.demo_terminal_context {
+                    app.terminals.demo_context();
+                }
             }
             if options.demo_files {
                 app.files.toggle(&cc.egui_ctx, &app.prefs.cwd);
+                if options.demo_source_context {
+                    app.files.demo_source_context(&cc.egui_ctx);
+                }
+                if options.demo_preview_budget {
+                    app.files.demo_preview_budget(&cc.egui_ctx);
+                    app.focus_composer = false;
+                }
+                if options.demo_preview_queue {
+                    app.files.demo_preview_queue(&cc.egui_ctx);
+                    app.focus_composer = false;
+                }
+                if options.demo_table_grid {
+                    app.focus_composer = false;
+                    app.files.demo_table_grid(&cc.egui_ctx);
+                    if options.demo_table_headerless {
+                        app.prefs.table_headers.set(
+                            &app.prefs.cwd,
+                            &app.prefs.cwd.join("table-keyboard-fixture.csv"),
+                            false,
+                        );
+                    }
+                }
             }
             if options.demo_changes {
                 app.inspector_panel = true;
+            }
+            if options.demo_review_files {
+                app.outputs = activity::recorded_files(&app.state.messages);
+                app.output_revision = app.state.outputs_revision;
+                if let Some(file) = app.outputs.last() {
+                    let document = (file.path.clone(), file.diff.clone()).into();
+                    app.open_diff_review(document, true);
+                }
+                app.focus_composer = false;
+            }
+            if options.demo_git_files {
+                app.workspace = Workspace {
+                    root: app.prefs.cwd.clone(),
+                    branch: "demo · no repository read".into(),
+                    is_git: true,
+                    files: ["first.txt", "second.txt", "third.txt"]
+                        .into_iter()
+                        .map(|path| workspace::FileChange {
+                            path: path.into(),
+                            status: "??".into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                };
+                app.open_diff_review(
+                    (
+                        "first.txt".into(),
+                        "Untracked file — Git has no diff yet. Pui does not stage or modify files."
+                            .into(),
+                    )
+                        .into(),
+                    false,
+                );
+                app.focus_composer = false;
+            }
+            if options.demo_diff_context {
+                let fixture = context_capture::demo_diff(&cc.egui_ctx);
+                if let Some(message) = app.state.messages.last_mut() {
+                    message.tools.push(protocol::Tool {
+                        name: "edit".into(),
+                        path: fixture.0.clone(),
+                        diff: fixture.1.clone(),
+                        added: 1,
+                        removed: 1,
+                        finished: true,
+                        ..Default::default()
+                    });
+                    app.state.outputs_revision = app.state.outputs_revision.wrapping_add(1);
+                }
+                app.open_diff_review(fixture.into(), true);
+            }
+            if options.demo_diff_hunks {
+                let document = if options.demo_diff_wrap {
+                    diff_viewer::demo_wrap(&cc.egui_ctx)
+                } else {
+                    diff_viewer::demo_hunks(&cc.egui_ctx)
+                };
+                if let Some(message) = app.state.messages.last_mut() {
+                    message.tools.push(protocol::Tool {
+                        name: "edit".into(),
+                        path: document.0.clone(),
+                        diff: document.1.clone(),
+                        added: if options.demo_diff_wrap { 2 } else { 5 },
+                        removed: if options.demo_diff_wrap { 2 } else { 5 },
+                        finished: true,
+                        ..Default::default()
+                    });
+                    app.state.outputs_revision = app.state.outputs_revision.wrapping_add(1);
+                }
+                app.open_diff_review(document, true);
             }
             if options.demo_confirmation {
                 app.agents.close_prompt = true;
@@ -458,6 +593,10 @@ impl Pui {
             } else {
                 app.connect(&cc.egui_ctx, session);
             }
+            if restore_blank {
+                app.restore_blank_checkpoint();
+            }
+            app.restore_workspace_layout();
         }
         if let Some(target) = options.open {
             if let Err(error) = app.files.open_target(&cc.egui_ctx, &app.prefs.cwd, &target) {
@@ -492,7 +631,7 @@ impl Pui {
             .prefs
             .chats
             .iter()
-            .filter(|(_, prefs)| prefs.pinned || prefs.hidden)
+            .filter(|(_, prefs)| prefs.pinned || prefs.hidden || prefs.section.is_some())
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         std::thread::spawn(move || {
@@ -555,18 +694,25 @@ impl Pui {
         self.preview_rx = None;
         self.preview_partial = false;
         self.uncertain_deliveries();
+        let restart_notice = if session.is_some()
+            && self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref()
+        {
+            std::mem::take(&mut self.state.restart_notice)
+        } else {
+            String::new()
+        };
         let pending_messages =
             if self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref() {
                 std::mem::take(&mut self.state.pending_messages)
             } else {
                 Vec::new()
             };
-        let models = std::mem::take(&mut self.state.models);
         self.state = State {
-            models,
             pending_messages,
+            restart_notice,
             ..Default::default()
         };
+        self.seed_model_catalog();
         self.transcript.clear();
         self.pulls = Default::default();
         if let Some(path) = session.clone() {
@@ -586,6 +732,7 @@ impl Pui {
             });
         }
         self.output_revision = u64::MAX;
+        self.restore_restart_checkpoint();
         if let Some(path) = session.as_ref() {
             if !self.attach_or_claim(path) {
                 return;
@@ -609,10 +756,10 @@ impl Pui {
             self.client = Some(rpc::Client::stub());
         }
         self.send(protocol::command("get_state"));
-        self.send(protocol::command("get_entries"));
         self.send(protocol::command("get_available_models"));
-        self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_available_thinking_levels"));
+        self.send(protocol::command("get_entries"));
+        self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_session_stats"));
         self.refresh_workspace();
         #[cfg(not(test))]
@@ -694,6 +841,9 @@ impl Pui {
         self.leave_session_layout();
         self.prefs.cwd = session.cwd;
         self.workspace_rx = None;
+        self.draft.clear();
+        self.draft_images.clear();
+        self.state.restart_notice.clear();
         if reuse {
             self.loading_chat = true;
             self.pending_session = Some(path.clone());
@@ -714,15 +864,14 @@ impl Pui {
                 let _ = tx.send(crate::history::load(&preview_path));
                 ctx.request_repaint();
             });
+            self.restore_restart_checkpoint();
             self.send(json!({"type":"switch_session","sessionPath":path}));
             self.refresh_workspace();
         } else {
             self.connect(&self.ctx.clone(), Some(path));
         }
         self.enter_session_layout();
-        self.draft.clear();
         self.focus_composer = true;
-        self.draft_images.clear();
         self.pulls = Default::default();
     }
 
@@ -890,6 +1039,18 @@ impl Pui {
                         && record["message"]["role"] == "user";
                     let was_compacting = self.state.compacting;
                     self.state.apply(record);
+                    if kind == "response"
+                        && success
+                        && matches!(
+                            command.as_str(),
+                            "get_state"
+                                | "get_available_models"
+                                | "set_model"
+                                | "set_thinking_level"
+                        )
+                    {
+                        self.remember_model_catalog(&command);
+                    }
                     if user_message || (kind == "response" && command == "get_entries") {
                         self.state.reconcile_pending_messages();
                     }
@@ -1044,11 +1205,40 @@ impl Pui {
         if let Some(result) = self.workspace_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.workspace = result;
             self.workspace_rx = None;
+            self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
             self.changes.invalidate();
         }
-        if let Some(result) = self.diff_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.selected_diff = Some(result);
-            self.diff_rx = None;
+        let git_review_overlay = self.settings_open
+            || self.search_open
+            || self.kanban.open
+            || self.automation.open
+            || self.tasks.open
+            || self.question_designs.is_some()
+            || self.transcript.gallery.is_open()
+            || self.draft_images.gallery.is_open()
+            || self.terminals.layout() == (true, true)
+            || egui::Popup::is_any_open(&self.ctx)
+            || self.ctx.memory(|memory| memory.top_modal_layer().is_some());
+        if !git_review_overlay && let Some(receiver) = &self.diff_rx {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.diff_rx = None;
+                    if let Some(result) = result.finish(&self.workspace) {
+                        match result {
+                            Ok(document) => self.open_diff_review(document.into(), false),
+                            Err(error) => self.state.notice = Some(error),
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.diff_rx = None;
+                    self.state.notice = Some(
+                        "Git review worker ended without a result. Try the file action again."
+                            .into(),
+                    );
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
         }
         if self.output_revision != self.state.outputs_revision {
             self.outputs = activity::recorded_files(&self.state.messages);
@@ -1108,6 +1298,7 @@ impl Pui {
         if !self.deliver_message(message, "prompt") {
             return;
         }
+        self.state.restart_notice.clear();
         self.draft_images.clear();
         self.draft.clear();
         self.recall = Default::default();
@@ -1243,6 +1434,7 @@ impl Pui {
             });
             ui.add_space(7.0);
         }
+        self.restart_recovery(ui);
         self.history_draft_recovery(ui);
         self.recover_shared_draft(ui);
         self.waiting_messages(ui);
@@ -1437,16 +1629,30 @@ impl Pui {
         }
     }
 
-    fn dialogs(&mut self, ctx: &egui::Context) {
-        if let Some((path, diff)) = &self.selected_diff {
-            let recorded = self
-                .outputs
-                .iter()
-                .any(|file| file.path == *path && file.diff == *diff);
-            if !diff_viewer::show(ctx, path, diff, recorded) {
-                self.selected_diff = None;
-            }
+    fn open_diff_review(&mut self, document: diff_viewer::Document, recorded: bool) {
+        self.diff_rx = None; // explicit replacement wins over any earlier working-tree open
+        if recorded && self.output_revision != self.state.outputs_revision {
+            self.outputs = activity::recorded_files(&self.state.messages);
+            self.output_revision = self.state.outputs_revision;
         }
+        self.changes.open_review(
+            &self.ctx,
+            document,
+            recorded,
+            &self.prefs.cwd,
+            self.state.session_file.as_deref().unwrap_or("new"),
+        );
+        self.changes
+            .bind_review_files(&self.outputs, self.output_revision);
+        if !recorded {
+            self.changes.bind_git_files(&self.workspace);
+        }
+        self.inspector_panel = true;
+        self.files.close();
+        self.settings_open = false;
+        self.kanban.open = false;
+        self.automation.open = false;
+        self.focus_composer = false;
     }
 
     fn load_demo(&mut self) {
@@ -1616,7 +1822,7 @@ impl Pui {
 
 impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        crate::chromium::Runtime::pump();
+        crate::chromium::Runtime::pump(ctx);
         self.files.begin_frame();
         self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
@@ -1624,13 +1830,49 @@ impl eframe::App for Pui {
         self.poll();
         self.search_jump();
         self.model_picker_escape(ctx);
+        context_capture::inputs(ctx);
+        self.changes.review_inputs(
+            ctx,
+            self.inspector_panel
+                && !self.files.is_open()
+                && !self.settings_open
+                && !self.search_open
+                && !self.tasks.open
+                && !self.kanban.open
+                && !self.automation.open
+                && self.terminals.layout() != (true, true)
+                && self.question_designs.is_none()
+                && !self.transcript.gallery.is_open()
+                && !self.draft_images.gallery.is_open(),
+            &self.outputs,
+            self.output_revision,
+            &self.workspace,
+        );
+        self.files.context_inputs(
+            ctx,
+            !self.settings_open
+                && !self.search_open
+                && !self.kanban.open
+                && !self.automation.open
+                && !self.tasks.open
+                && self.terminals.layout() != (true, true)
+                && !self.transcript.gallery.is_open()
+                && !self.draft_images.gallery.is_open(),
+            !self.search_blocked(),
+        );
+        self.terminals.context_inputs(
+            ctx,
+            !self.settings_open && !self.search_open && !self.kanban.open && !self.automation.open,
+        );
+        self.sidebar_view_inputs(ctx);
         self.search_inputs(ctx);
         self.navigation_inputs(ctx);
         self.menu_commands(ctx);
         if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
         }
-        let confirming = self.agents.close_prompt
+        let confirming = self.section_view.confirming()
+            || self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
             || self.deletion.confirming()
@@ -1716,7 +1958,7 @@ impl eframe::App for Pui {
             && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
-            && self.selected_diff.is_none()
+            && !self.section_view.editing()
             && self.state.dialogs.is_empty()
             && !self.completion_active(ctx)
             && ctx.input(|i| i.key_pressed(egui::Key::Escape))
@@ -1756,14 +1998,15 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
-                self.files.show(ctx, &self.prefs.cwd)
+                self.files
+                    .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {
                 self.changes.show(
                     ctx,
                     &self.prefs.cwd,
                     self.state.session_file.as_deref().unwrap_or("new"),
                     &self.workspace,
-                    &self.outputs,
+                    (&self.outputs, self.output_revision),
                     self.workspace_rx.is_some(),
                 )
             } else {
@@ -1772,6 +2015,10 @@ impl eframe::App for Pui {
                 }
                 false
             };
+            if self.changes.take_close() {
+                self.inspector_panel = false;
+                context_capture::clear_source(ctx);
+            }
             if self.changes.take_refresh() {
                 self.refresh_workspace();
             }
@@ -1782,8 +2029,15 @@ impl eframe::App for Pui {
                     self.conversation(ctx);
                 }
             }
-            self.dialogs(ctx);
-            if !central && !self.tasks.open && !confirming && !theater {
+            if !central
+                && (!self.tasks.open
+                    || self
+                        .tasks
+                        .current()
+                        .is_some_and(|task| self.task_in_chat(task)))
+                && !confirming
+                && !theater
+            {
                 self.model_picker(ctx);
             } else {
                 self.close_model_popovers();
@@ -1799,16 +2053,18 @@ impl eframe::App for Pui {
             && !self.automation.open
             && !theater
             && !confirming
+            && !self.section_view.confirming()
             && !self.search_open
             && self.state.dialogs.is_empty()
-            && self.selected_diff.is_none()
         {
             self.files.show_web(frame, ctx);
         } else {
             self.files.hide_web();
         }
+        self.collect_context_capture();
         self.process_open_links(ctx);
         self.deletion_dialog(ctx);
+        self.sidebar_section_confirmation(ctx);
         self.spotlight(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
@@ -1838,6 +2094,8 @@ impl eframe::App for Pui {
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if !self.demo && self.screenshot.is_none() {
+            self.checkpoint_chats();
+            self.save_workspace_layouts();
             self.prefs.agent_tree = self.agent_records();
             self.prefs.projects_view = self.projects;
             self.prefs.last_session = self.pending_session.clone().or_else(|| {
@@ -1845,11 +2103,26 @@ impl eframe::App for Pui {
                     .then(|| self.state.session_file.as_ref().map(PathBuf::from))
                     .flatten()
             });
+            // An in-progress New section is a draft, not durable UI state.
+            let draft_section = self
+                .section_view
+                .creating()
+                .and_then(|id| {
+                    self.prefs
+                        .sidebar_view
+                        .sections
+                        .iter()
+                        .position(|section| section.id == id)
+                })
+                .map(|index| (index, self.prefs.sidebar_view.sections.remove(index)));
             eframe::set_value(storage, "preferences", &self.prefs);
+            if let Some((index, section)) = draft_section {
+                self.prefs.sidebar_view.sections.insert(index, section);
+            }
         }
     }
     fn auto_save_interval(&self) -> Duration {
-        Duration::from_secs(300)
+        Duration::from_secs(10)
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.agents.exiting = true;

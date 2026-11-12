@@ -464,6 +464,28 @@ fn a_file_pane_on_a_task_restores_the_task_underneath_it() {
 }
 
 #[test]
+fn workflow_tab_survives_back_forward_and_file_overlay() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.demo_task();
+    let id = app.tasks.selected.clone().unwrap();
+    app.open_work_item_tab(id.clone(), tasks::work_item::Tab::Evidence);
+    app.remember_navigation();
+    app.open_agents_board();
+    app.remember_navigation();
+    app.navigate_history(false);
+    assert_eq!(app.work_item_tab(&id), tasks::work_item::Tab::Evidence);
+    app.open_work_item_tab(id.clone(), tasks::work_item::Tab::Changes);
+    app.files.toggle(&ctx, &app.prefs.cwd);
+    app.remember_navigation();
+    app.open_agents_board();
+    app.remember_navigation();
+    app.navigate_history(false);
+    assert!(app.files.files_open());
+    assert_eq!(app.work_item_tab(&id), tasks::work_item::Tab::Changes);
+}
+
+#[test]
 fn narrow_titlebar_keeps_history_controls_inside_the_window() {
     for theme in [theme::Theme::Dark, theme::Theme::Light] {
         let ctx = egui::Context::default();

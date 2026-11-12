@@ -9,7 +9,11 @@ const MAX_HISTORY: usize = 100;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
     Chat,
-    Task { task: String, run: Option<String> },
+    Task {
+        task: String,
+        run: Option<String>,
+        tab: tasks::work_item::Tab,
+    },
     Board,
     Scheduled,
     Settings(String),
@@ -45,7 +49,7 @@ struct Location {
     chat: Chat,
     page: Page,
     terminal: Option<bool>,
-    task: Option<(String, Option<String>)>,
+    task: Option<(String, Option<String>, tasks::work_item::Tab)>,
     file_target: Option<String>,
 }
 impl Location {
@@ -106,6 +110,7 @@ impl Pui {
             self.tasks.current().map_or(Page::Chat, |task| Page::Task {
                 task: task.id.clone(),
                 run: self.tasks.selected_run.clone(),
+                tab: self.work_item_tab(&task.id),
             })
         } else {
             Page::Chat
@@ -146,9 +151,13 @@ impl Pui {
                     Page::Task { .. } | Page::Files | Page::Browser | Page::Changes
                 ))
             .then(|| {
-                self.tasks
-                    .current()
-                    .map(|task| (task.id.clone(), self.tasks.selected_run.clone()))
+                self.tasks.current().map(|task| {
+                    (
+                        task.id.clone(),
+                        self.tasks.selected_run.clone(),
+                        self.work_item_tab(&task.id),
+                    )
+                })
             })
             .flatten(),
             page,
@@ -176,6 +185,7 @@ impl Pui {
 
     fn navigation_blocked(&self) -> bool {
         self.search_open
+            || self.section_view.confirming()
             || self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
@@ -276,14 +286,18 @@ impl Pui {
         self.inspector_panel = false;
         self.close_model_popovers();
         self.terminals.close(&self.ctx);
-        if let Some((task, run)) = &location.task {
+        if let Some((task, run, tab)) = &location.task {
             if self.tasks.records.iter().any(|record| record.id == *task) {
                 self.open_task_from_board(task.clone(), run.clone());
+                self.tasks.views.entry(task.clone()).or_default().tab = *tab;
             }
         }
         match &location.page {
             Page::Chat => {}
-            Page::Task { task, run } => self.open_task_from_board(task.clone(), run.clone()),
+            Page::Task { task, run, tab } => {
+                self.open_task_from_board(task.clone(), run.clone());
+                self.tasks.views.entry(task.clone()).or_default().tab = *tab;
+            }
             Page::Board => self.open_agents_board(),
             Page::Scheduled => self.open_automation(),
             Page::Settings(page) => {
@@ -334,6 +348,11 @@ impl Pui {
                 location.page = Page::Task {
                     task: task.clone(),
                     run: run.clone(),
+                    tab: if run.is_some() {
+                        tasks::work_item::Tab::Activity
+                    } else {
+                        tasks::work_item::Tab::Overview
+                    },
                 };
             }
             sidebar_tree::Target::Agent(id) => {
