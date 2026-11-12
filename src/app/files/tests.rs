@@ -146,6 +146,56 @@ fn docked_tree_is_right_of_preview_and_reads_only_clicked_files_while_busy() {
 }
 
 #[test]
+fn restored_viewer_keeps_notice_and_restore_action_visible_across_redraws() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for (width, expanded, zoom) in [
+            (480.0, false, 1.0),
+            (1134.0, false, 1.0),
+            (1134.0, true, 1.0),
+            (480.0, false, 1.4),
+            (1134.0, true, 0.8),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_zoom_factor(zoom);
+            let mut app = app(&ctx);
+            app.prefs.theme = mode;
+            app.prefs.hide_sidebar = true;
+            app.files.toggle(&ctx, &app.prefs.cwd);
+            app.files.expanded = expanded;
+            let saved = app.files.saved_layout();
+            app.files.restore_layout(&app.prefs.cwd, &saved);
+            for _ in 0..40 {
+                let mut native = eframe::Frame::_new_kittest();
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(&mut app, ctx, &mut native),
+                );
+                for needle in ["Workspace restored", "Restore tabs"] {
+                    let pos = text(&output, needle);
+                    assert!(ctx.screen_rect().contains(pos), "{needle}: {pos:?}");
+                }
+                assert!(app.files.directories.is_empty());
+                assert!(app.files.tabs.is_empty());
+            }
+            if width == 1134.0 && zoom == 1.0 {
+                let output = frame(&ctx, &mut app, vec![]);
+                click(&ctx, &mut app, text(&output, "Restore tabs"));
+                assert!(app.files.restored.is_none());
+                settle(&mut app.files);
+                frame(&ctx, &mut app, vec![]);
+                text(&frame(&ctx, &mut app, vec![]), "README.md");
+            }
+        }
+    }
+}
+
+#[test]
 fn file_explorer_omits_address_and_error_rows_but_keeps_tabs_and_refresh() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for width in [360.0, 760.0] {

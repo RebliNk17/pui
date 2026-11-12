@@ -811,6 +811,7 @@ impl Pui {
                 return;
             }
         }
+        self.discard_empty_new_chat();
         if self.retain_chat_on_switch() {
             self.ensure_agent();
             self.publish_live();

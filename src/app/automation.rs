@@ -159,6 +159,11 @@ impl Automation {
             });
         jobs.chain(mail).chain(reconnect).min()
     }
+    pub(super) fn has_chat_jobs(&self, id: &str, path: Option<&std::path::Path>) -> bool {
+        self.jobs
+            .iter()
+            .any(|job| job.creator.id == id || path.is_some_and(|path| job.creator.path == path))
+    }
     pub(super) fn active_count(&self) -> usize {
         self.jobs
             .iter()

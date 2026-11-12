@@ -159,6 +159,14 @@ fn missing_disconnected_saved_chat_is_skipped_but_connected_chat_remains_availab
         std::env::temp_dir().join(format!("pui-missing-nav-{}.jsonl", uuid::Uuid::new_v4()));
     app.state.session_file = Some(missing_path.display().to_string());
     app.agents.nodes.get_mut(&missing).unwrap().path = Some(missing_path);
+    // This fixture represents a real conversation. Truly empty new chats are
+    // discarded when left, even if their RPC client is still connected.
+    app.state
+        .messages
+        .push(protocol::Message::from_json(&json!({
+            "role": "user", "content": "Keep this connected chat"
+        })));
+    app.new_chat = false;
     app.remember_navigation();
     let missing_location = app.navigation_location();
     app.start_chat_in(app.prefs.cwd.clone());

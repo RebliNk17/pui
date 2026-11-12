@@ -277,15 +277,19 @@ impl Browser {
     fn restore_notice(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         egui::Frame::new().inner_margin(16).show(ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(ui, Icon::Close, "Hide restored viewer").clicked() {
-                    self.close();
-                }
-                if self.expanded
-                    && icons::button(ui, Icon::Collapse, "Restore viewer panel").clicked()
-                {
-                    self.expanded = false;
-                }
+            // A bare with_layout consumes the pane's full remaining height,
+            // pushing the restore notice and action below the visible viewport.
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icons::button(ui, Icon::Close, "Hide restored viewer").clicked() {
+                        self.close();
+                    }
+                    if self.expanded
+                        && icons::button(ui, Icon::Collapse, "Restore viewer panel").clicked()
+                    {
+                        self.expanded = false;
+                    }
+                });
             });
             prompt_ui::heading(
                 ui,

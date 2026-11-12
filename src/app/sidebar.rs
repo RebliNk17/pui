@@ -40,6 +40,17 @@ impl Pui {
         let mut action = None;
         let tasks_loading = self.tasks.loading_history();
         let (mut pinned, branches) = sidebar_tree::listing(self);
+        let fresh_chat = self.new_chat.then(|| self.agents.active.clone());
+        let fresh_id = egui::Id::new("sidebar-fresh-chat");
+        let reveal_new_chat = fresh_chat.is_some()
+            && ctx.data(|data| data.get_temp::<String>(fresh_id)) != fresh_chat;
+        ctx.data_mut(|data| {
+            if let Some(id) = fresh_chat {
+                data.insert_temp(fresh_id, id);
+            } else {
+                data.remove::<String>(fresh_id);
+            }
+        });
         egui::SidePanel::left("sessions-v4")
             .default_width(254.0)
             .width_range(220.0..=480.0)
@@ -115,7 +126,7 @@ impl Pui {
                             .push(*index);
                     }
                 }
-                egui::ScrollArea::vertical()
+                session_scroll(reveal_new_chat)
                     .id_salt((
                         "session-list-v4",
                         self.projects,
@@ -1196,6 +1207,15 @@ impl Pui {
         action
     }
 }
+fn session_scroll(reveal_new_chat: bool) -> egui::ScrollArea {
+    let scroll = egui::ScrollArea::vertical();
+    if reveal_new_chat {
+        scroll.vertical_scroll_offset(0.0)
+    } else {
+        scroll
+    }
+}
+
 fn date_separator(ui: &mut egui::Ui, label: &str, first: bool) {
     ui.add_space(if first { 4.0 } else { 8.0 });
     ui.horizontal(|ui| {

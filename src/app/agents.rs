@@ -12,6 +12,7 @@ pub(super) struct Node {
     pub permission: Option<settings::PermissionMode>,
     pub status: String,
     pub last_activity: Option<std::time::SystemTime>,
+    pub created: Option<std::time::SystemTime>,
     pub children: Vec<String>,
     pub stopped: bool,
     pub reported: bool,
@@ -244,6 +245,7 @@ impl Pui {
                     },
                     status: "Saved".into(),
                     last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: true,
                     reported: true,
@@ -422,6 +424,8 @@ impl Pui {
                 permission: None,
                 status: "Connecting".into(),
                 last_activity: None,
+                // Opening saved history must not make it look newly created.
+                created: self.new_chat.then(std::time::SystemTime::now),
                 children: Vec::new(),
                 stopped: false,
                 reported: true,
@@ -456,7 +460,9 @@ impl Pui {
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
         }
-        self.leave_session_layout();
+        if !self.discard_empty_new_chat() {
+            self.leave_session_layout();
+        }
         // An empty workspace (for example after deletion) is not a chat.
         if !self.agents.active.is_empty()
             || self.client.is_some()
@@ -866,6 +872,7 @@ impl Pui {
                     }),
                     status: "Queued".into(),
                     last_activity: None,
+                    created: Some(std::time::SystemTime::now()),
                     children: Vec::new(),
                     stopped: false,
                     reported: false,
@@ -1432,6 +1439,7 @@ impl Pui {
                     permission: None,
                     status: status.into(),
                     last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: true,
@@ -1484,6 +1492,7 @@ impl Pui {
                     permission: Some(settings::PermissionMode::Plan),
                     status: status.into(),
                     last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: status == "Idle",

@@ -205,7 +205,15 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
             .and_then(|timestamp| {
                 SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(timestamp))
             });
-        row.activity = row.activity.max(node.last_activity).max(message_time);
+        row.created = row.created.or(node.created);
+        row.activity = row
+            .activity
+            .max(node.created)
+            .max(node.last_activity)
+            .max(message_time);
+        row.modified = row
+            .modified
+            .max(row.activity.unwrap_or(SystemTime::UNIX_EPOCH));
         if node.parent.is_some() {
             row.target = Target::Agent(node.id.clone());
             if row

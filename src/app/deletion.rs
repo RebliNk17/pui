@@ -25,6 +25,7 @@ pub(super) struct View {
     pub pending: Option<Target>,
     jobs: Vec<(Target, Receiver<Result<(), String>>)>,
     chats: BTreeMap<PathBuf, ChatScope>,
+    empty_chats: BTreeMap<PathBuf, Receiver<Result<(), String>>>,
 }
 impl View {
     // Task deletion retains its existing modal behavior; chats never block the workspace.
@@ -46,6 +47,7 @@ impl View {
     }
     pub fn deleting_chat(&self, path: &Path) -> bool {
         self.contains(&Target::Chat(path.into()))
+            || self.empty_chats.keys().any(|pending| same(pending, path))
             || self.chats.values().any(|scope| scope.contains(path))
     }
     pub fn deleting_agent(&self, id: &str) -> bool {
@@ -293,7 +295,48 @@ impl Pui {
         }
         None
     }
+    pub(super) fn begin_empty_chat_cleanup(&mut self, path: PathBuf) -> bool {
+        if self.deletion.deleting_chat(&path) {
+            return false;
+        }
+        let Ok(lock) = self.sync.deletion_lock(&path) else {
+            return false;
+        };
+        let client = self.client.take();
+        let (tx, rx) = mpsc::channel();
+        self.deletion.empty_chats.insert(path.clone(), rx);
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _lock = lock;
+            // Stop the only writer before checking the entire on-disk session.
+            drop(client);
+            let _ = tx.send(sessions::delete_if_empty(&path));
+            ctx.request_repaint();
+        });
+        true
+    }
     pub(super) fn poll_deletions(&mut self) {
+        let finished: Vec<_> = self
+            .deletion
+            .empty_chats
+            .iter()
+            .filter_map(|(path, rx)| match rx.try_recv() {
+                Ok(result) => Some((path.clone(), result)),
+                Err(mpsc::TryRecvError::Disconnected) => Some((
+                    path.clone(),
+                    Err("Empty chat cleanup interrupted; saved history was kept.".into()),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            })
+            .collect();
+        for (path, result) in finished {
+            self.deletion.empty_chats.remove(&path);
+            match result {
+                Ok(()) => self.forget_session(&path),
+                Err(error) => self.state.notice = Some(error),
+            }
+            self.refresh_sessions();
+        }
         let mut index = 0;
         while index < self.deletion.jobs.len() {
             let result = match self.deletion.jobs[index].1.try_recv() {
