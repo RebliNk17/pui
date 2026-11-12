@@ -4,6 +4,7 @@ mod activity;
 mod app;
 mod chromium;
 mod context;
+mod file_watch;
 mod history;
 mod icons;
 mod inspector;

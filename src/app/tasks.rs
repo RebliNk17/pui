@@ -91,7 +91,7 @@ pub(super) struct Tasks {
     pub revalidate_at: Option<std::time::Instant>,
     preview: Option<(String, Receiver<Result<crate::history::Preview, String>>)>,
     watched: Option<String>,
-    watcher: Option<notify::RecommendedWatcher>,
+    watcher: Option<crate::file_watch::Watcher>,
     changes: Option<Receiver<()>>,
 }
 impl Tasks {
@@ -635,7 +635,6 @@ impl Pui {
         self.tasks.save();
     }
     pub(super) fn task_watch_source(&mut self) {
-        use notify::Watcher;
         let target = self
             .tasks
             .current()
@@ -655,29 +654,38 @@ impl Pui {
         }
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event {
-                if !matches!(event.kind, notify::EventKind::Access(_)) {
-                    let _ = tx.send(());
-                    ctx.request_repaint();
+        self.tasks.watcher = Some(crate::file_watch::Watcher::new(
+            root,
+            notify::RecursiveMode::Recursive,
+            &self.ctx,
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event {
+                    if !matches!(event.kind, notify::EventKind::Access(_)) {
+                        let _ = tx.send(());
+                        ctx.request_repaint();
+                    }
                 }
-            }
-        })
-        .and_then(|mut watcher| {
-            watcher.watch(&root, notify::RecursiveMode::Recursive)?;
-            Ok(watcher)
-        }) {
-            Ok(watcher) => {
-                self.tasks.watcher = Some(watcher);
-                self.tasks.changes = Some(rx);
-                self.tasks.revalidate_at = Some(std::time::Instant::now());
-            }
-            Err(_) => {
-                self.tasks.error = Some("Source watching unavailable. Reopening this workflow recomputes its evidence fingerprint.".into());
-            }
-        }
+            },
+        ));
+        self.tasks.changes = Some(rx);
+        self.tasks.revalidate_at = Some(std::time::Instant::now());
     }
     pub(super) fn poll_tasks(&mut self) {
+        if let Some(status) = self
+            .tasks
+            .watcher
+            .as_ref()
+            .and_then(|watcher| watcher.poll())
+        {
+            match status {
+                Ok(()) => self.tasks.revalidate_at = Some(std::time::Instant::now()),
+                Err(_) => {
+                    self.tasks.watcher = None;
+                    self.tasks.changes = None;
+                    self.tasks.error = Some("Source watching unavailable. Reopening this workflow recomputes its evidence fingerprint.".into());
+                }
+            }
+        }
         self.tasks.persist_loaded();
         self.tasks
             .retiring

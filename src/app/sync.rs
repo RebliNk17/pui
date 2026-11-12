@@ -3,7 +3,6 @@
 //! per-window token in a user-only registry. No idle timers or filesystem polling.
 use super::*;
 use fs2::FileExt;
-use notify::Watcher;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
@@ -111,7 +110,7 @@ pub(super) struct WindowSync {
     tx: mpsc::Sender<Work>,
     rx: Receiver<ResultEvent>,
     commands: Receiver<RemoteCommand>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<crate::file_watch::Watcher>,
     _presence: Option<File>,
     worker: Option<std::thread::JoinHandle<()>>,
     listener: Option<std::thread::JoinHandle<()>>,
@@ -399,8 +398,11 @@ impl WindowSync {
                 let _ = std::fs::remove_file(metadata);
             }));
             let own_metadata = directory.join(format!("{}.json", this.id));
-            let mut watcher =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let watcher = crate::file_watch::Watcher::new(
+                directory.clone(),
+                notify::RecursiveMode::NonRecursive,
+                ctx,
+                move |event: notify::Result<notify::Event>| {
                     if let Ok(event) = event {
                         if registry_changed(&event, &own_metadata) {
                             // The scan worker wakes the UI once its result is
@@ -408,11 +410,8 @@ impl WindowSync {
                             let _ = tx.send(Work::Scan);
                         }
                     }
-                })
-                .map_err(|_| "Cannot watch other Pui windows")?;
-            watcher
-                .watch(&directory, notify::RecursiveMode::NonRecursive)
-                .map_err(|_| "Cannot watch window registry")?;
+                },
+            );
             this.directory = Some(directory);
             this._watcher = Some(watcher);
             let _ = this.tx.send(Work::Scan);
@@ -773,6 +772,20 @@ impl Pui {
         }));
     }
     pub(super) fn poll_window_sync(&mut self) {
+        if let Some(status) = self
+            .sync
+            ._watcher
+            .as_ref()
+            .and_then(|watcher| watcher.poll())
+        {
+            match status {
+                Ok(()) => {
+                    // Include publications made while registration was pending.
+                    let _ = self.sync.tx.send(Work::Scan);
+                }
+                Err(_) => self.sync.error = Some("Cannot watch other Pui windows".into()),
+            }
+        }
         let events: Vec<_> = self.sync.rx.try_iter().collect();
         for event in events {
             match event {
