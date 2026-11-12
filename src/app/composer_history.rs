@@ -15,7 +15,6 @@ pub(super) struct Recall {
 }
 impl Pui {
     pub(super) fn recall_before_edit(&mut self, ctx: &egui::Context) {
-        let colors = crate::theme::palette(ctx);
         if self.recall.session != self.state.session_file {
             self.recall = Recall {
                 session: self.state.session_file.clone(),
@@ -54,14 +53,7 @@ impl Pui {
             return;
         }
         let cursor = cursor.unwrap_or_else(|| CCursor::new(0));
-        let galley = ctx.fonts(|f| {
-            f.layout(
-                self.draft.clone(),
-                FontId::proportional(14.0),
-                colors.text,
-                self.recall_width.max(100.0),
-            )
-        });
+        let galley = composer_text::galley(ctx, &self.draft, self.recall_width.max(100.0));
         let row = galley.layout_from_cursor(cursor).row;
         if (older && row != 0) || (!older && row + 1 < galley.rows.len()) {
             return;

@@ -6,6 +6,7 @@ mod automation;
 mod changes;
 mod completions;
 mod composer_history;
+mod composer_text;
 mod confirmations;
 pub(crate) mod context_capture;
 mod deletion;
@@ -1462,27 +1463,39 @@ impl Pui {
                 let completing = self.completion_active(ctx);
                 self.completion_keys(ctx);
                 self.recall_before_edit(ctx);
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut self.draft)
-                        .id(egui::Id::new("composer"))
-                        .hint_text(
-                            RichText::new(if self.demo {
-                                "Start a real session to talk to Pi…"
-                            } else {
-                                "Message Pi… (/ commands, @ files, or drop files)"
-                            })
-                            .color(colors.dim),
-                        )
-                        .font(FontId::proportional(14.0))
-                        .frame(false)
-                        .lock_focus(completing)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(1)
-                        .return_key(egui::KeyboardShortcut::new(
-                            egui::Modifiers::SHIFT,
-                            egui::Key::Enter,
-                        )),
-                );
+                let smart_newline = ctx.input(|i| {
+                    !i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Paste(_) | egui::Event::Ime(_)))
+                });
+                let mut buffer = composer_text::Buffer {
+                    text: &mut self.draft,
+                    smart_newline,
+                };
+                let mut layouter = composer_text::layout;
+                let output = egui::TextEdit::multiline(&mut buffer)
+                    .id(egui::Id::new("composer"))
+                    .hint_text(
+                        RichText::new(if self.demo {
+                            "Start a real session to talk to Pi…"
+                        } else {
+                            "Message Pi… (/ commands, @ files, or drop files)"
+                        })
+                        .color(colors.dim),
+                    )
+                    .font(FontId::proportional(14.0))
+                    .layouter(&mut layouter)
+                    .frame(false)
+                    .lock_focus(completing)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(1)
+                    .return_key(egui::KeyboardShortcut::new(
+                        egui::Modifiers::SHIFT,
+                        egui::Key::Enter,
+                    ))
+                    .show(ui);
+                composer_text::links(ui, &output, &self.draft);
+                let response = output.response;
                 completion_anchor = Some((response.rect, ui.layer_id()));
                 if self.focus_composer {
                     response.request_focus();
