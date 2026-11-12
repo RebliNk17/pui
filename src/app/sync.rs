@@ -727,6 +727,12 @@ impl Pui {
         self.state.compaction_settings_error.hash(&mut hash);
         self.state.cost.to_bits().hash(&mut hash);
         self.state.context_tokens.map(f64::to_bits).hash(&mut hash);
+        self.state.context_window.to_bits().hash(&mut hash);
+        if let Some(parts) = &self.state.context_breakdown {
+            for value in parts.values() {
+                value.to_bits().hash(&mut hash);
+            }
+        }
         for message in queue.into_iter().flatten() {
             message.text.hash(&mut hash);
             message.mode.label().hash(&mut hash);
@@ -1388,6 +1394,45 @@ mod tests {
         owner.publish_live();
         spin(&mut owner, &mut mirror, |_, b| {
             b.state.messages[0].text == "updated live message" && !b.state.busy
+        });
+    }
+    #[test]
+    fn context_only_changes_publish_without_a_new_message_or_usage_total() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        assert!(owner.attach_or_claim(&path));
+        owner.state.context_tokens = Some(4200.0);
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_tokens == Some(4200.0)
+        });
+        owner.state.context_window = 10000.0;
+        owner.state.context_breakdown = Some(protocol::ContextBreakdown {
+            system: 100.0,
+            tool_results: 2000.0,
+            ..Default::default()
+        });
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_breakdown.is_some()
+        });
+        assert_eq!(mirror.state.context_window, 10000.0);
+        assert_eq!(
+            mirror
+                .state
+                .context_breakdown
+                .as_ref()
+                .unwrap()
+                .tool_results,
+            2000.0
+        );
+        owner.state.context_breakdown = None;
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_breakdown.is_none()
         });
     }
     #[test]

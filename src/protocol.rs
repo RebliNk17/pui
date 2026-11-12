@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod answers;
+mod context;
+pub use context::ContextBreakdown;
 #[cfg(test)]
 mod retry_tests;
 mod stream;
@@ -184,6 +186,7 @@ pub struct State {
     pub pending: bool,
     pub cost: f64,
     pub context_tokens: Option<f64>,
+    pub context_breakdown: Option<ContextBreakdown>,
     pub context_window: f64,
     pub tokens: Value,
     pub transcript_revision: u64,
@@ -415,6 +418,10 @@ impl State {
                         self.permission_cost = value["classifierCost"].as_f64().unwrap_or(0.0);
                         return;
                     }
+                    "pui-context" => {
+                        self.apply_context(&value);
+                        return;
+                    }
                     "pui-compaction" => {
                         self.compacting = value["working"] == true;
                         self.compaction_settings_error = value["error"].as_str().map(str::to_owned);
@@ -445,7 +452,11 @@ impl State {
                         }
                         self.compacting = data["isCompacting"] == true;
                         self.session_name = string(data, "sessionName").to_owned();
-                        self.session_file = data["sessionFile"].as_str().map(str::to_owned);
+                        let session_file = data["sessionFile"].as_str().map(str::to_owned);
+                        if self.session_file.is_some() && self.session_file != session_file {
+                            self.context_breakdown = None;
+                        }
+                        self.session_file = session_file;
                     }
                     "get_entries" => {
                         self.stream = None;
@@ -533,7 +544,10 @@ impl State {
                 self.busy = false;
                 self.pending = false;
             }
-            "compaction_start" => self.compacting = true,
+            "compaction_start" => {
+                self.compacting = true;
+                self.context_breakdown = None;
+            }
             "compaction_end" => {
                 self.compacting = false;
                 if let Some(error) = event["errorMessage"].as_str() {

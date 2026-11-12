@@ -698,6 +698,7 @@ impl Pui {
             self.state.messages.clear();
             self.state.cost = 0.0;
             self.state.context_tokens = None;
+            self.state.context_breakdown = None;
             self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
             self.transcript.clear();
             let (tx, rx) = mpsc::channel();
