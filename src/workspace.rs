@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -96,13 +96,36 @@ pub fn inspect(cwd: &Path) -> Workspace {
     workspace
 }
 
-pub fn diff(root: &Path, file: &FileChange) -> String {
-    if file.status == "??" {
-        return "Untracked file — Git has no diff yet. Add the file to the index outside Pui to compare it. Pui does not stage or modify files.".into();
+pub(crate) const MAX_DIFF_BYTES: usize = 200_000;
+
+pub(crate) fn valid_diff_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 4096
+        && !path.chars().any(char::is_control)
+        && Path::new(path)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+/// Read one literal working-tree path without running configured diff helpers.
+/// Bound the pipe itself, not an already-allocated `Command::output` buffer.
+/// Errors are separate from patch text in both review presentations.
+pub fn diff(root: &Path, file: &FileChange) -> Result<String, String> {
+    if !valid_diff_path(&file.path) {
+        return Err("Git review requires one regular relative file path (up to 4 KiB, no control characters).".into());
     }
-    git(
-        root,
-        &[
+    if file.status == "??" {
+        return Ok(
+            "Untracked file — Git has no diff yet. Pui does not stage or modify files.".into(),
+        );
+    }
+    use std::{io::Read, process::Stdio};
+    let mut command = Command::new("git");
+    command
+        .current_dir(root)
+        .args([
+            "--no-optional-locks",
+            "--literal-pathspecs",
             "diff",
             "HEAD",
             "--no-ext-diff",
@@ -110,19 +133,41 @@ pub fn diff(root: &Path, file: &FileChange) -> String {
             "--no-color",
             "--",
             &file.path,
-        ],
-    )
-    .map(|b| String::from_utf8_lossy(&b[..b.len().min(200_000)]).into_owned())
-    .unwrap_or_else(|| "No diff available (the repository may not have an initial commit).".into())
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|_| "Cannot start read-only Git diff.".to_owned())?;
+    let mut bytes = Vec::with_capacity(MAX_DIFF_BYTES + 1);
+    let read = child
+        .stdout
+        .take()
+        .unwrap()
+        .take((MAX_DIFF_BYTES + 1) as u64)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > MAX_DIFF_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(if read.is_err() {
+            "Cannot read Git diff. No file was modified.".into()
+        } else {
+            "Git diff exceeds the 200,000-byte review limit. No file was modified.".into()
+        });
+    }
+    let status = child
+        .wait()
+        .map_err(|_| "Cannot finish read-only Git diff.".to_owned())?;
+    if !status.success() {
+        return Err("Git diff unavailable (repository or HEAD may have changed).".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Git diff is not UTF-8.".into())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn non_repository_is_handled() {
-        let workspace = inspect(Path::new("/this-path-does-not-exist-pui"));
-        assert!(!workspace.is_git);
-        assert!(workspace.files.is_empty());
-    }
-}
+pub(crate) mod tests;

@@ -70,6 +70,7 @@ pub struct Options {
     pub demo_review_files: bool,
     pub demo_git_files: bool,
     pub demo_terminal: bool,
+    pub demo_terminal_tabs: bool,
     pub demo_terminal_context: bool,
     pub demo_notifications: bool,
     pub open: Option<String>,
@@ -169,6 +170,11 @@ fn main() -> eframe::Result {
             "--demo-send-now" => {
                 options.demo = true;
                 options.demo_send_now = true;
+            }
+            "--demo-terminal-tabs" => {
+                options.demo = true;
+                options.demo_terminal = true;
+                options.demo_terminal_tabs = true;
             }
             "--demo-terminal" => {
                 options.demo = true;

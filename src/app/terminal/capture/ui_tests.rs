@@ -29,7 +29,13 @@ fn open_context(ctx: &egui::Context, app: &mut Pui) {
 fn native_terminal_toolbar_capture_keeps_chat_shell_and_selection_and_releases_snapshot() {
     let (ctx, mut app) = setup();
     let root = app.prefs.cwd.clone();
-    let project = app.terminals.projects.get_mut(&root).unwrap();
+    let project = app
+        .terminals
+        .projects
+        .get_mut(&root)
+        .unwrap()
+        .active_mut()
+        .unwrap();
     project
         .demo
         .as_mut()
@@ -46,6 +52,8 @@ fn native_terminal_toolbar_capture_keeps_chat_shell_and_selection_and_releases_s
     app.terminals
         .projects
         .get_mut(&root)
+        .unwrap()
+        .active_mut()
         .unwrap()
         .demo
         .as_mut()
@@ -65,10 +73,16 @@ fn native_terminal_toolbar_capture_keeps_chat_shell_and_selection_and_releases_s
     assert!(app.state.busy && app.terminals.is_open());
     assert_eq!(app.state.messages.len(), messages);
     assert_eq!(
-        app.terminals.projects[&root].selection,
+        app.terminals.projects[&root].active().unwrap().selection,
         Some(((0, 0), (0, 8)))
     );
-    assert!(app.terminals.projects[&root].demo.is_some());
+    assert!(
+        app.terminals.projects[&root]
+            .active()
+            .unwrap()
+            .demo
+            .is_some()
+    );
     assert!(commands.try_recv().is_err());
     assert!(ctx.data(|data| data.get_temp::<Capture>(key()).is_none()));
     assert!(app.focus_composer || ctx.memory(|memory| memory.has_focus(egui::Id::new("composer"))));

@@ -306,6 +306,7 @@ impl Pui {
                 self.settings_open = true;
             }
             Page::Files | Page::Browser => {
+                self.diff_rx = None;
                 if let Some(target) = &location.file_target {
                     if let Err(error) = self.files.open_target(&self.ctx, &self.prefs.cwd, target) {
                         self.state.notice = Some(error);

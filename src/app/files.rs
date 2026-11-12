@@ -498,11 +498,21 @@ impl Browser {
         external: bool,
         source: bool,
     ) {
+        self.activate_restored_tabs(ctx);
+        // Quick Open may have reached this call before hidden tabs existed.
+        // Never reuse a restored external read for a workspace-only request.
+        if !external
+            && let Some(index) = self
+                .tabs
+                .iter()
+                .position(|tab| tab.path == path && tab.external)
+        {
+            self.close_tab(index);
+        }
         context_capture::clear_source(ctx);
         let mut selection = egui::text_selection::LabelSelectionState::load(ctx);
         selection.clear_selection();
         selection.store(ctx);
-        self.restored = None;
         self.browser_mode = is_html(&path) && !source;
         if !self.browser_mode {
             self.selected = Some(path.clone());
@@ -635,6 +645,7 @@ impl Browser {
             if !cfg!(target_os = "macos") {
                 return Err("Bundled Chromium is currently packaged for macOS only.".into());
             }
+            self.activate_restored_tabs(ctx);
             if !self.urls.iter().any(|url| url == target) {
                 if self.urls.len() >= MAX_TABS {
                     let old = self.urls.remove(0);
@@ -669,7 +680,6 @@ impl Browser {
             }
             self.select_file(ctx, path, true);
         }
-        self.restored = None;
         self.open = true;
         self.address = target.into();
         self.address_error = None;
@@ -1483,16 +1493,14 @@ fn read_content_budgeted(
     } else {
         within_workspace(root, path)?
     };
-    let parent = path.parent().ok_or("File has no parent folder.")?;
     let extension = path
         .extension()
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
     if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
-        let file = fs::File::open(&path).map_err(|e| format!("Cannot open image: {e}"))?;
-        let metadata = file.metadata().map_err(|e| e.to_string())?;
-        if !metadata.is_file() || metadata.len() > 16 * 1024 * 1024 {
+        let (file, metadata) = open_preview_file(&path)?;
+        if metadata.len() > 16 * 1024 * 1024 {
             return Err("Image must be a regular file under 16 MiB.".into());
         }
         let mut bytes = Vec::new();
@@ -1504,7 +1512,7 @@ fn read_content_budgeted(
         }
         return image_preview::decode(&bytes, budget, cancel).map(Content::Image);
     }
-    let source = read_preview(parent, &path)?;
+    let source = read_preview_resolved(&path)?;
     Ok(match extension.as_str() {
         "csv" => Content::Table(delimited::Preview::new(source, b',')),
         "tsv" => Content::Table(delimited::Preview::new(source, b'\t')),
@@ -1518,19 +1526,98 @@ fn is_html(path: &Path) -> bool {
     })
 }
 
-fn read_preview(root: &Path, path: &Path) -> Result<String, String> {
-    let path = within_workspace(root, path)?;
-    let metadata = fs::symlink_metadata(&path).map_err(|e| format!("Cannot read file: {e}"))?;
-    if !metadata.is_file() {
+fn open_preview_file(path: &Path) -> Result<(fs::File, fs::Metadata), String> {
+    let expected = fs::symlink_metadata(path).map_err(|e| format!("Cannot read file: {e}"))?;
+    open_preflighted_preview_file(path, &expected)
+}
+
+fn open_preflighted_preview_file(
+    path: &Path,
+    expected: &fs::Metadata,
+) -> Result<(fs::File, fs::Metadata), String> {
+    // Never open a known FIFO/device, even for images. Unix nonblocking opens
+    // also cover replacement with a FIFO after this preflight.
+    if !expected.is_file() {
         return Err("Only regular files can be previewed.".into());
     }
-    let file = fs::File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+    let file = open_preview_handle(path)?;
     let metadata = file
         .metadata()
         .map_err(|e| format!("Cannot read file: {e}"))?;
     if !metadata.is_file() {
         return Err("Only regular files can be previewed.".into());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if expected.dev() != metadata.dev() || expected.ino() != metadata.ino() {
+            return Err("File changed while opening its preview. Refresh to try again.".into());
+        }
+    }
+    Ok((file, metadata))
+}
+
+#[cfg(unix)]
+fn open_preview_handle(path: &Path) -> Result<fs::File, String> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        },
+    };
+    // Policy resolution above returns absolute, alias-resolved paths. Walk
+    // descriptors so a parent swapped for a symlink cannot bypass that policy.
+    if !path.is_absolute() {
+        return Err("Cannot safely open a relative preview path.".into());
+    }
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")
+        .map_err(|e| format!("Cannot open file: {e}"))?;
+    let mut parts = path.components().peekable();
+    while let Some(part) = parts.next() {
+        let name = match part {
+            Component::RootDir => continue,
+            Component::Normal(name) => {
+                CString::new(name.as_bytes()).map_err(|_| "Invalid preview path.".to_owned())?
+            }
+            _ => return Err("Invalid preview path.".into()),
+        };
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+        let flags = if parts.peek().is_some() {
+            flags | libc::O_DIRECTORY
+        } else {
+            flags
+        };
+        // SAFETY: name is NUL-terminated and file owns the live parent descriptor.
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(format!(
+                "Cannot safely open file: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: openat returned a new descriptor, now owned solely by File.
+        file = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_preview_handle(path: &Path) -> Result<fs::File, String> {
+    fs::File::open(path).map_err(|e| format!("Cannot open file: {e}"))
+}
+
+#[cfg(test)]
+fn read_preview(root: &Path, path: &Path) -> Result<String, String> {
+    let path = within_workspace(root, path)?;
+    read_preview_resolved(&path)
+}
+
+fn read_preview_resolved(path: &Path) -> Result<String, String> {
+    let (file, metadata) = open_preview_file(path)?;
     if metadata.len() > MAX_TEXT as u64 {
         return Err("File exceeds the 512 KiB preview limit.".into());
     }
@@ -1626,6 +1713,8 @@ fn search_paths(root: &Path, query: &str, cancel: &AtomicBool) -> Result<Search,
 mod auto_restore_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
+#[cfg(test)]
+mod read_safety_tests;
 #[cfg(test)]
 mod restore_tests;
 #[cfg(test)]

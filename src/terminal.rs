@@ -97,6 +97,14 @@ impl Session {
         Self::spawn(ctx, command, size)
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture(ctx: &egui::Context, root: &Path) -> Result<Self, String> {
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.arg("-s");
+        command.cwd(root);
+        Self::spawn(ctx, command, PtySize::default())
+    }
+
     fn spawn(ctx: &egui::Context, command: CommandBuilder, size: PtySize) -> Result<Self, String> {
         let pair = portable_pty::native_pty_system()
             .openpty(size)

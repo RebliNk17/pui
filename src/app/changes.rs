@@ -13,8 +13,8 @@ enum Source {
 }
 #[derive(Default)]
 struct Diff {
-    content: Option<String>,
-    rx: Option<Receiver<String>>,
+    content: Option<Result<String, String>>,
+    rx: Option<Receiver<Result<String, String>>>,
 }
 #[derive(Default)]
 pub(super) struct Changes {
@@ -37,7 +37,7 @@ impl Changes {
         self.diffs.insert(
             path.into(),
             Diff {
-                content: Some(content.into()),
+                content: Some(Ok(content.into())),
                 rx: None,
             },
         );
@@ -132,12 +132,7 @@ impl Changes {
         let (outputs, revision) = recorded;
         self.bind(cwd, session);
         self.poll_git_files(ctx, workspace);
-        for diff in self.diffs.values_mut() {
-            if let Some(content) = diff.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-                diff.content = Some(content);
-                diff.rx = None;
-            }
-        }
+        self.poll_inline_diffs();
         let colors = theme::palette(ctx);
         let expanded = self.expanded;
         if expanded {
@@ -362,12 +357,16 @@ impl Changes {
                                         match self
                                             .diffs
                                             .get(&file.path)
-                                            .and_then(|diff| diff.content.as_deref())
+                                            .and_then(|diff| diff.content.as_ref())
                                         {
                                             None => {
                                                 ui.label(theme::small(ui, "Loading diff…"));
                                             }
-                                            Some(content) => {
+                                            Some(Err(error)) => {
+                                                // An error is never numbered, selected or captured as patch text.
+                                                ui.label(theme::small(ui, error));
+                                            }
+                                            Some(Ok(content)) => {
                                                 ui.push_id(
                                                     (&self.identity, "working-diff", &file.path),
                                                     |ui| {
@@ -496,26 +495,38 @@ impl Changes {
         open
     }
 
+    fn poll_inline_diffs(&mut self) {
+        for diff in self.diffs.values_mut() {
+            let result = diff.rx.as_ref().and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Git diff worker ended without a result. Refresh to retry.".into(),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+            if let Some(result) = result {
+                diff.content = Some(result);
+                diff.rx = None;
+            }
+        }
+    }
+
     fn load_diff(
         &mut self,
         ctx: &egui::Context,
         root: &std::path::Path,
         file: workspace::FileChange,
     ) {
-        let root = root.to_path_buf();
-        let ctx = ctx.clone();
-        let (tx, rx) = mpsc::channel();
-        self.diffs.insert(
-            file.path.clone(),
-            Diff {
-                content: None,
-                rx: Some(rx),
-            },
-        );
-        std::thread::spawn(move || {
-            let _ = tx.send(workspace::diff(&root, &file));
-            ctx.request_repaint();
-        });
+        let path = file.path.clone();
+        if let Some(rx) = git_files::start_inline(ctx, root, file) {
+            self.diffs.insert(
+                path,
+                Diff {
+                    content: None,
+                    rx: Some(rx),
+                },
+            );
+        }
     }
 }
 

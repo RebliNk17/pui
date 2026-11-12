@@ -291,6 +291,7 @@ impl Pui {
                 self.focus_composer = !self.terminals.is_open();
             }
             Files => {
+                self.diff_rx = None;
                 self.kanban.open = false;
                 self.automation.open = false;
                 self.settings_open = false;
@@ -298,6 +299,7 @@ impl Pui {
                 self.inspector_panel = false;
             }
             Browser => {
+                self.diff_rx = None;
                 self.kanban.open = false;
                 self.automation.open = false;
                 self.settings_open = false;

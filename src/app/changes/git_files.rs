@@ -1,7 +1,7 @@
 //! Read-only, bounded Git file navigation. One requested body; no patch-list cache.
 use super::*;
 use std::{
-    path::{Component, Path},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -9,7 +9,6 @@ use std::{
 };
 const MAX_FILES: usize = 256;
 const MAX_PATH_BYTES: usize = 64 * 1024;
-const MAX_DIFF_BYTES: usize = 200_000;
 
 #[derive(Clone)]
 struct List {
@@ -65,14 +64,7 @@ impl List {
                 .all(|(old, now)| old.path == now.path && old.status == now.status)
     }
 }
-fn valid_path(path: &str) -> bool {
-    !path.is_empty()
-        && path.len() <= 4096
-        && !path.chars().any(char::is_control)
-        && Path::new(path)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-}
+use workspace::valid_diff_path as valid_path;
 
 pub(in crate::app) struct Loaded {
     root: PathBuf,
@@ -121,11 +113,6 @@ pub(in crate::app) fn start(
     workspace: &Workspace,
     file: workspace::FileChange,
 ) -> Receiver<Loaded> {
-    let gate = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<Arc<AtomicBool>>(egui::Id::new("git-review-worker"))
-            .clone()
-    });
-    let (tx, rx) = mpsc::channel();
     let loaded = Loaded {
         root: workspace.root.clone(),
         file,
@@ -134,98 +121,68 @@ pub(in crate::app) fn start(
             "Git review is busy. Try the file action again when the existing read finishes.".into(),
         ),
     };
-    if gate
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(permit) = permit(ctx) else {
+        let (tx, rx) = mpsc::channel();
         let _ = tx.send(loaded);
         ctx.request_repaint();
         return rx;
+    };
+    spawn_read(ctx, permit, move || {
+        let mut loaded = loaded;
+        loaded.result = workspace::diff(&loaded.root, &loaded.file);
+        loaded
+    })
+}
+
+// Inline expansions and full review share a single per-window read permit.
+// A busy inline row waits for the active reader's repaint, not another thread.
+struct Permit(Arc<AtomicBool>);
+impl Drop for Permit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
-    let ctx = ctx.clone();
-    let reset = gate.clone();
+}
+fn permit(ctx: &egui::Context) -> Option<Permit> {
+    let gate = ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<Arc<AtomicBool>>(egui::Id::new("git-review-worker"))
+            .clone()
+    });
+    gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .ok()
+        .map(|_| Permit(gate))
+}
+fn spawn_read<T: Send + 'static>(
+    ctx: &egui::Context,
+    permit: Permit,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    let repaint = ctx.clone();
+    // Failure drops the permit and sender; callers display disconnection.
     if std::thread::Builder::new()
         .name("pui-git-review".into())
         .spawn(move || {
-            struct Permit(Arc<AtomicBool>);
-            impl Drop for Permit {
-                fn drop(&mut self) {
-                    self.0.store(false, Ordering::Release);
-                }
-            }
-            let _permit = Permit(gate);
-            let mut loaded = loaded;
-            loaded.result = read_diff(&loaded.root, &loaded.file);
-            let _ = tx.send(loaded);
-            ctx.request_repaint();
+            let result = read();
+            drop(permit);
+            let _ = tx.send(result);
+            repaint.request_repaint();
         })
         .is_err()
     {
-        reset.store(false, Ordering::Release);
-        // Dropped sender makes disconnection a visible error, not endless loading.
+        ctx.request_repaint();
     }
     rx
 }
-
-fn read_diff(root: &Path, file: &workspace::FileChange) -> Result<String, String> {
-    if !valid_path(&file.path) {
-        return Err("Git review requires one regular relative file path (up to 4 KiB, no control characters).".into());
-    }
-    if file.status == "??" {
-        return Ok(
-            "Untracked file — Git has no diff yet. Pui does not stage or modify files.".into(),
-        );
-    }
-    use std::{
-        io::Read,
-        process::{Command, Stdio},
-    };
-    let mut command = Command::new("git");
-    command
-        .current_dir(root)
-        .args([
-            "--no-optional-locks",
-            "--literal-pathspecs",
-            "diff",
-            "HEAD",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--",
-            &file.path,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Cannot start read-only Git diff.".to_owned())?;
-    let mut bytes = Vec::with_capacity(MAX_DIFF_BYTES + 1);
-    let read = child
-        .stdout
-        .take()
-        .unwrap()
-        .take((MAX_DIFF_BYTES + 1) as u64)
-        .read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() > MAX_DIFF_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("Git diff exceeds the 200,000-byte review limit or could not be read. Previous review was kept; no file was modified.".into());
-    }
-    let status = child
-        .wait()
-        .map_err(|_| "Cannot finish read-only Git diff.".to_owned())?;
-    if !status.success() {
-        return Err(
-            "Git diff unavailable (repository or HEAD may have changed). Previous review was kept."
-                .into(),
-        );
-    }
-    String::from_utf8(bytes).map_err(|_| "Git diff is not UTF-8; previous review was kept.".into())
+pub(super) fn start_inline(
+    ctx: &egui::Context,
+    root: &Path,
+    file: workspace::FileChange,
+) -> Option<Receiver<Result<String, String>>> {
+    let permit = permit(ctx)?;
+    let root = root.to_path_buf();
+    Some(spawn_read(ctx, permit, move || {
+        workspace::diff(&root, &file)
+    }))
 }
 
 impl Changes {

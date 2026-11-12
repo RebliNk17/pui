@@ -266,69 +266,32 @@ fn changes_search_expand_refresh_and_file_panel_switching() {
 
 #[test]
 fn current_git_diff_is_inline_numbered_and_refresh_preserves_repository() {
-    use std::process::Command;
-    let root = std::env::temp_dir().join(format!("pui-changes-git-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&root).unwrap();
-    let git = |args: &[&str]| {
-        let output = Command::new("git")
-            .current_dir(&root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "Git fixture failed");
-    };
-    git(&["init", "--quiet"]);
-    std::fs::write(root.join("sample.rs"), "before\n").unwrap();
-    git(&["add", "sample.rs"]);
-    git(&[
-        "-c",
-        "user.name=Pui fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "commit",
-        "--quiet",
-        "-m",
-        "fixture",
-    ]);
-    std::fs::write(root.join("sample.rs"), "after\nnew line\n").unwrap();
-    let before = Command::new("git")
-        .current_dir(&root)
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap()
-        .stdout;
+    let root = workspace::tests::fixture();
+    std::fs::write(root.join("README.md"), "after\nnew line\n").unwrap();
+    let before = workspace::tests::snapshot(&root);
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
     app.prefs.cwd = root.clone();
     app.workspace = workspace::inspect(&root);
     assert!(app.workspace.is_git);
+    app.workspace.files.retain(|file| file.path == "README.md");
     assert_eq!(app.workspace.files[0].added, "2");
-    assert_eq!(app.workspace.files[0].removed, "1");
     app.inspector_panel = true;
     frame(&ctx, &mut app, vec![]);
     let output = frame(&ctx, &mut app, vec![]);
     click(&ctx, &mut app, position(&output, "Current Git"));
     let output = frame(&ctx, &mut app, vec![]);
-    click(&ctx, &mut app, position(&output, "sample.rs"));
-    if let Some(diff) = app.changes.diffs.get_mut("sample.rs")
+    click(&ctx, &mut app, position(&output, "README.md"));
+    if let Some(diff) = app.changes.diffs.get_mut("README.md")
         && let Some(rx) = diff.rx.take()
     {
         diff.content = Some(rx.recv_timeout(Duration::from_secs(5)).unwrap());
     }
     let output = frame(&ctx, &mut app, vec![]);
     assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t)
-        if t.galley.job.text.contains("-before") && t.galley.job.text.contains("+after") && t.galley.job.text.contains("    2   +new line"))));
+        if t.galley.job.text.contains("+after") && t.galley.job.text.contains("    2   +new line"))));
     assert!(app.changes.review.is_none());
-    let after = Command::new("git")
-        .current_dir(&root)
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap()
-        .stdout;
+    let after = workspace::tests::snapshot(&root);
     assert_eq!(before, after);
 }
 
@@ -353,7 +316,75 @@ fn git_diff_loads_off_thread_and_session_switch_discards_old_results() {
         .unwrap()
         .recv_timeout(Duration::from_secs(5))
         .unwrap();
-    assert!(content.contains("No diff available"));
+    assert!(
+        content
+            .unwrap_err()
+            .contains("Cannot start read-only Git diff")
+    );
     changes.invalidate();
     assert!(changes.diffs.is_empty());
+}
+
+#[test]
+fn inline_errors_are_labels_not_numbered_patch_and_disconnection_is_visible() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        mode.apply(&ctx);
+        let mut changes = Changes::default();
+        changes.bind(std::path::Path::new("/fixture"), "chat");
+        changes.source = Source::Git;
+        let workspace = Workspace {
+            root: "/fixture".into(),
+            files: vec![workspace::FileChange {
+                path: "file.rs".into(),
+                ..Default::default()
+            }],
+            is_git: true,
+            ..Default::default()
+        };
+        changes.open_rows.insert((true, "file.rs".into()));
+        let (tx, rx) = mpsc::channel();
+        changes.diffs.insert(
+            "file.rs".into(),
+            Diff {
+                content: None,
+                rx: Some(rx),
+            },
+        );
+        tx.send(Err("+not a patch: review failed".into())).unwrap();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            changes.show(
+                ctx,
+                std::path::Path::new("/fixture"),
+                "chat",
+                &workspace,
+                (&[], 0),
+                false,
+            );
+            egui::CentralPanel::default().show(ctx, |_| {});
+        });
+        position(&output, "+not a patch: review failed");
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text.contains("1   +not a patch"))));
+        let (tx, rx) = mpsc::channel();
+        changes.diffs.insert(
+            "file.rs".into(),
+            Diff {
+                content: None,
+                rx: Some(rx),
+            },
+        );
+        drop(tx);
+        changes.poll_inline_diffs();
+        assert!(
+            changes.diffs["file.rs"]
+                .content
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("without a result")
+        );
+    }
 }

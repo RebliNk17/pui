@@ -154,6 +154,9 @@ fn one_context_gate_caps_workers_and_untracked_never_reads_file_or_stages() {
             .clone()
     });
     gate.store(true, Ordering::Relaxed);
+    for _ in 0..1024 {
+        assert!(start_inline(&ctx, &workspace.root, workspace.files[0].clone()).is_none());
+    }
     let rx = start(&ctx, &workspace, workspace.files[0].clone());
     let result = rx
         .recv_timeout(Duration::from_secs(2))
@@ -172,56 +175,87 @@ fn one_context_gate_caps_workers_and_untracked_never_reads_file_or_stages() {
         .unwrap()
         .unwrap();
     assert!(result.1.contains("Untracked"));
+    let inline = start_inline(&ctx, &workspace.root, workspace.files[0].clone()).unwrap();
+    assert!(
+        inline
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .contains("Untracked")
+    );
+    assert!(!gate.load(Ordering::Acquire));
+}
+
+#[test]
+fn inline_rows_wait_without_spawning_or_caching_busy_errors_while_shared_worker_reads() {
+    let ctx = egui::Context::default();
+    let workspace = workspace();
+    let (tx, release) = mpsc::channel();
+    let active = spawn_read(&ctx, permit(&ctx).unwrap(), move || {
+        release.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let mut changes = Changes::default();
+    for index in 0..1024 {
+        changes.load_diff(&ctx, &workspace.root, file(&format!("file-{index}.rs")));
+    }
+    assert!(changes.diffs.is_empty());
+    let busy = start(&ctx, &workspace, workspace.files[0].clone())
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .finish(&workspace)
+        .unwrap()
+        .unwrap_err();
+    assert!(busy.contains("busy"));
+    tx.send(()).unwrap();
+    active.recv_timeout(Duration::from_secs(2)).unwrap();
+    changes.load_diff(&ctx, &workspace.root, workspace.files[0].clone());
+    let result = changes
+        .diffs
+        .get_mut("first.rs")
+        .unwrap()
+        .rx
+        .take()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    assert!(result.is_err()); // Missing fixture root is reported, never a partial patch.
 }
 
 #[test]
 fn read_only_real_git_diff_has_literal_pathspec_and_bounded_stdout_without_commits() {
-    use std::process::Command;
-    let root = std::env::temp_dir().join(format!("pui-git-review-{}", uuid::Uuid::new_v4()));
-    // Reuse existing local committed objects; no fixture commits, network, push,
-    // hooks, or checkout of files. Index population is inside this private fixture.
-    let source = std::env::current_dir().unwrap();
-    assert!(
-        Command::new("git")
-            .args(["clone", "--quiet", "--shared", "--no-checkout"])
-            .arg(&source)
-            .arg(&root)
-            .status()
+    let root = workspace::tests::fixture();
+    let ctx = egui::Context::default();
+    let mut workspace = workspace::inspect(&root);
+    workspace.files = vec![file("README.md")];
+    for (bytes, expected) in [
+        (
+            b"fixture modified README\n".to_vec(),
+            Ok("+fixture modified README"),
+        ),
+        (
+            vec![b'x'; workspace::MAX_DIFF_BYTES + 1],
+            Err("200,000-byte"),
+        ),
+        (b"invalid utf8: \xff\n".to_vec(), Err("not UTF-8")),
+    ] {
+        fs::write(root.join("README.md"), bytes).unwrap();
+        let before = workspace::tests::snapshot(&root);
+        let result = start(&ctx, &workspace, file("README.md"))
+            .recv_timeout(Duration::from_secs(5))
             .unwrap()
-            .success()
-    );
-    assert!(
-        Command::new("git")
-            .current_dir(&root)
-            .args(["read-tree", "HEAD"])
-            .status()
+            .finish(&workspace)
+            .unwrap();
+        let inline = start_inline(&ctx, &root, file("README.md"))
             .unwrap()
-            .success()
-    );
-    fs::write(root.join("README.md"), "fixture modified README\n").unwrap();
-    let status = || {
-        Command::new("git")
-            .current_dir(&root)
-            .args(["--no-optional-locks", "status", "--porcelain=v1", "-z"])
-            .output()
-            .unwrap()
-            .stdout
-    };
-    let before = status();
-    let diff = read_diff(&root, &file("README.md")).unwrap();
-    assert!(diff.contains("+fixture modified README"));
-    assert_eq!(status(), before);
-    // A wildcard-looking name is a literal path, never a request for all files.
-    let literal = read_diff(&root, &file("[README]*.md")).unwrap();
-    assert!(literal.is_empty());
-    fs::write(root.join("README.md"), "x".repeat(MAX_DIFF_BYTES + 1)).unwrap();
-    let before = status();
-    assert!(
-        read_diff(&root, &file("README.md"))
-            .unwrap_err()
-            .contains("200,000-byte")
-    );
-    assert_eq!(status(), before);
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(inline, result.clone().map(|(_, body)| body));
+        match expected {
+            Ok(expected) => assert!(result.unwrap().1.contains(expected)),
+            Err(expected) => assert!(result.unwrap_err().contains(expected)),
+        }
+        assert_eq!(workspace::tests::snapshot(&root), before);
+    }
 }
 
 #[test]

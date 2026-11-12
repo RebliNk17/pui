@@ -3,6 +3,8 @@ use super::*;
 use crate::terminal::Session;
 use std::{collections::BTreeMap, path::Path};
 mod capture;
+mod chrome;
+mod tabs;
 
 type Selection = Option<((u16, u16), (u16, u16))>;
 
@@ -13,12 +15,15 @@ pub(super) struct Terminals {
     root: PathBuf,
     projects: BTreeMap<PathBuf, Project>,
     focus: bool,
-    confirm_stop: bool,
+    confirm_stop: Option<(PathBuf, u64)>,
+    controls: Vec<egui::Id>,
     restored_roots: std::collections::BTreeSet<PathBuf>,
     demo_context: bool,
 }
 #[derive(Default)]
-struct Project {
+struct Tab {
+    id: u64,
+    label: u64,
     session: Option<Session>,
     starting: Option<Receiver<Result<Session, String>>>,
     error: Option<String>,
@@ -27,23 +32,77 @@ struct Project {
     demo: Option<vt100::Parser>,
 }
 
-fn terminal_id() -> egui::Id {
-    egui::Id::new("project-terminal-input")
+#[derive(Default)]
+struct Project {
+    tabs: Vec<Tab>,
+    selected: usize,
+    next_label: u64,
+}
+impl Project {
+    fn active(&self) -> Option<&Tab> {
+        self.tabs.get(self.selected)
+    }
+    fn active_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.selected)
+    }
+}
+impl Tab {
+    fn input_id(&self) -> egui::Id {
+        egui::Id::new(("project-terminal-input", self.id))
+    }
+    fn focus(&self, ctx: &egui::Context) {
+        ctx.memory_mut(|memory| {
+            memory.request_focus_with_filter(
+                self.input_id(),
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                },
+            )
+        });
+    }
+    fn running(&self) -> bool {
+        self.starting.is_some() || self.session.as_ref().is_some_and(Session::running)
+    }
 }
 
 impl Terminals {
     pub(super) fn is_open(&self) -> bool {
         self.open
     }
-    pub(super) fn context_inputs(&self, ctx: &egui::Context, visible: bool) {
+    pub(super) fn context_inputs(&mut self, ctx: &egui::Context, visible: bool) {
+        for tab in self
+            .projects
+            .values_mut()
+            .flat_map(|project| project.tabs.iter_mut())
+        {
+            tabs::poll_tab(tab);
+        }
         if visible && self.open {
             capture::inputs(ctx);
+            self.tab_inputs(ctx);
         } else {
             capture::clear(ctx);
         }
     }
+    pub(super) fn demo_tabs(&mut self, ctx: &egui::Context) {
+        self.start(ctx, true);
+        self.start(ctx, true);
+        if let Some(group) = self.projects.get_mut(&self.root) {
+            for tab in &mut group.tabs {
+                if let Some(parser) = &mut tab.demo {
+                    parser.process(format!("\r\nShell {} · independent demo screen\r\nNo process or provider was started.\r\n",tab.label).as_bytes());
+                }
+            }
+        }
+    }
     pub(super) fn demo_context(&mut self) {
-        if let Some(project) = self.projects.get_mut(&self.root)
+        if let Some(project) = self
+            .projects
+            .get_mut(&self.root)
+            .and_then(Project::active_mut)
             && let Some(parser) = project.demo.as_mut()
         {
             parser.process(b"\x1b[2J\x1b[HBuild complete: 42 tests passed.\r\nNo commands are sent by adding context.\r\n");
@@ -70,7 +129,7 @@ impl Terminals {
         self.close(ctx);
         self.open = open;
         self.expanded = expanded;
-        self.confirm_stop = false;
+        self.confirm_stop = None;
     }
     pub(super) fn navigation_state(&self) -> Option<bool> {
         self.open.then_some(self.expanded)
@@ -93,18 +152,18 @@ impl Terminals {
         capture::clear(ctx);
         self.open = false;
         self.focus = false;
-        ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+        self.surrender_focus(ctx);
     }
     pub(super) fn confirming_stop(&self) -> bool {
-        self.confirm_stop
+        self.confirm_stop.is_some()
     }
     pub(super) fn focused(&self, ctx: &egui::Context) -> bool {
-        self.open && ctx.memory(|m| m.has_focus(terminal_id()))
+        self.open && self.owns_focus(ctx)
     }
     pub(super) fn running(&self) -> bool {
         self.projects
             .values()
-            .any(|p| p.starting.is_some() || p.session.as_ref().is_some_and(Session::running))
+            .any(|project| project.tabs.iter().any(Tab::running))
     }
     pub(super) fn shutdown(&mut self) {
         self.projects.clear();
@@ -117,7 +176,7 @@ impl Terminals {
             self.focus = true;
         } else {
             capture::clear(ctx);
-            ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+            self.surrender_focus(ctx);
         }
     }
     fn workspace(&mut self, ctx: &egui::Context, root: &Path, demo: bool) {
@@ -125,15 +184,32 @@ impl Terminals {
             capture::clear(ctx);
             self.root = root.to_path_buf();
             self.focus = true;
-            self.confirm_stop = false;
+            self.confirm_stop = None;
         }
         if !self.projects.contains_key(root) && !self.restored_roots.contains(root) {
             self.start(ctx, demo);
         }
     }
     fn start(&mut self, ctx: &egui::Context, demo: bool) {
+        if self
+            .projects
+            .get(&self.root)
+            .is_some_and(|project| project.tabs.len() >= tabs::MAX_TABS)
+            || self.total_tabs() >= tabs::MAX_TOTAL_TABS
+        {
+            return;
+        }
         self.restored_roots.remove(&self.root);
-        let mut project = Project::default();
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let label = self
+            .projects
+            .get(&self.root)
+            .map_or(1, |project| project.next_label.saturating_add(1));
+        let mut project = Tab {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            label,
+            ..Default::default()
+        };
         if demo {
             let mut parser =
                 vt100::Parser::new(16.try_into().unwrap(), 90.try_into().unwrap(), 100);
@@ -152,7 +228,12 @@ impl Terminals {
                 ctx.request_repaint();
             });
         }
-        self.projects.insert(self.root.clone(), project);
+        let group = self.projects.entry(self.root.clone()).or_default();
+        group.next_label = label;
+        group.tabs.push(project);
+        group.selected = group.tabs.len() - 1;
+        self.focus = true;
+        capture::clear(ctx);
     }
     pub(super) fn show(&mut self, ctx: &egui::Context, root: &Path, demo: bool) -> bool {
         self.workspace(ctx, root, demo);
@@ -175,7 +256,16 @@ impl Terminals {
                 .frame(frame)
                 .show(ctx, |ui| self.content(ui, demo));
         }
-        if self.confirm_stop {
+        if let Some((root, id)) = self.confirm_stop.clone() {
+            let Some(label) = self
+                .projects
+                .get(&root)
+                .and_then(|project| project.tabs.iter().find(|tab| tab.id == id))
+                .map(|tab| tab.label)
+            else {
+                self.confirm_stop = None;
+                return expanded;
+            };
             let choice = confirmations::Dialog::new(
                 "stop-project-terminal",
                 "Stop this terminal?",
@@ -187,18 +277,19 @@ impl Terminals {
                 confirmations::note(
                     ui,
                     &format!(
-                        "Project: {}\nFiles and chat sessions will be kept.",
-                        self.root.display()
+                        "Shell {} · Project: {}\nOther shell tabs, files and chat sessions will be kept.",
+                        label,root.display()
                     ),
                 );
             });
             match choice {
-                Some(confirmations::Choice::Cancel) => self.confirm_stop = false,
+                Some(confirmations::Choice::Cancel) => self.confirm_stop = None,
                 Some(confirmations::Choice::Confirm) => {
-                    self.projects.remove(&self.root);
-                    self.confirm_stop = false;
-                    self.open = false;
-                    ctx.memory_mut(|m| m.surrender_focus(terminal_id()));
+                    self.close_tab(ctx, &root, id);
+                    self.confirm_stop = None;
+                    // The adjacent surviving PTY gets focus on the next frame,
+                    // not the confirmation's Enter event in this one.
+                    tabs::consume_activation(ctx);
                 }
                 None => {}
             }
@@ -207,6 +298,7 @@ impl Terminals {
     }
     fn content(&mut self, ui: &mut egui::Ui, demo: bool) {
         if self.restored_roots.contains(&self.root) {
+            self.controls.clear();
             prompt_ui::heading(
                 ui,
                 "Terminal restored · not running",
@@ -214,21 +306,34 @@ impl Terminals {
             );
             ui.add_space(12.0);
             ui.horizontal_wrapped(|ui| {
-                if prompt_ui::button(ui, "Start shell", prompt_ui::Button::Primary, true).clicked()
-                {
+                let start = prompt_ui::button(
+                    ui,
+                    "Start shell",
+                    prompt_ui::Button::Primary,
+                    self.total_tabs() < tabs::MAX_TOTAL_TABS,
+                )
+                .on_disabled_hover_text(
+                    "Close another terminal tab first · maximum 32 per window.",
+                );
+                self.controls.push(start.id);
+                if start.clicked() {
+                    tabs::consume_activation(ui.ctx());
                     self.start(ui.ctx(), demo);
                     self.focus = true;
                 }
-                if prompt_ui::button(ui, "Hide terminal", prompt_ui::Button::Secondary, true)
-                    .clicked()
-                {
+                let hide =
+                    prompt_ui::button(ui, "Hide terminal", prompt_ui::Button::Secondary, true);
+                self.controls.push(hide.id);
+                if hide.clicked() {
                     self.close(ui.ctx());
                 }
-                if self.expanded
-                    && prompt_ui::button(ui, "Restore chat", prompt_ui::Button::Secondary, true)
-                        .clicked()
-                {
-                    self.expanded = false;
+                if self.expanded {
+                    let restore =
+                        prompt_ui::button(ui, "Restore chat", prompt_ui::Button::Secondary, true);
+                    self.controls.push(restore.id);
+                    if restore.clicked() {
+                        self.expanded = false;
+                    }
                 }
             });
             return;
@@ -236,22 +341,46 @@ impl Terminals {
         let colors = theme::palette(ui.ctx());
         let mut restart = false;
         let mut capture_button = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Terminal").size(12.0).color(colors.text));
+        self.controls.clear();
+        let heading = ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = 26.0;
+            ui.spacing_mut().item_spacing.x = 6.0;
+            icons::inline(ui, Icon::Terminal, colors.muted);
+            ui.label(
+                RichText::new("Terminal")
+                    .size(12.0)
+                    .strong()
+                    .color(colors.text),
+            );
             let path = self.root.to_string_lossy();
-            ui.add_sized(
-                Vec2::new((ui.available_width() - 144.0).max(20.0), 28.0),
-                egui::Label::new(RichText::new(path.as_ref()).size(11.0).color(colors.muted))
-                    .truncate(),
+            let name = self
+                .root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&path);
+            let width =
+                (ui.available_width() - 4.0 * 26.0 - 4.0 * ui.spacing().item_spacing.x).max(8.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(width, 26.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_min_width(width);
+                    if width >= 72.0 {
+                        ui.label(theme::small(ui, "/"));
+                        ui.add(egui::Label::new(theme::small(ui, name)).truncate())
+                            .on_hover_text(path.as_ref());
+                    }
+                },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(ui, Icon::Close, "Hide terminal · commands keep running").clicked()
-                {
+                let hide = icons::button(ui, Icon::Close, "Hide terminal · commands keep running");
+                self.controls.push(hide.id);
+                if hide.clicked() {
                     capture::clear(ui.ctx());
                     self.open = false;
-                    ui.ctx().memory_mut(|m| m.surrender_focus(terminal_id()));
+                    self.surrender_focus(ui.ctx());
                 }
-                if icons::button(
+                let expand = icons::button(
                     ui,
                     if self.expanded {
                         Icon::Collapse
@@ -263,14 +392,15 @@ impl Terminals {
                     } else {
                         "Expand terminal"
                     },
-                )
-                .clicked()
-                {
+                );
+                self.controls.push(expand.id);
+                if expand.clicked() {
                     self.expanded = !self.expanded;
                 }
                 let available = self
                     .projects
                     .get(&self.root)
+                    .and_then(Project::active)
                     .is_some_and(|project| project.session.is_some() || project.demo.is_some());
                 capture_button = Some(
                     ui.add_enabled_ui(available, |ui| {
@@ -294,43 +424,88 @@ impl Terminals {
                     })
                     .inner,
                 );
-                let running = self.projects.get(&self.root).is_some_and(|p| {
-                    p.starting.is_some() || p.session.as_ref().is_some_and(Session::running)
-                });
+                if let Some(button) = &capture_button {
+                    self.controls.push(button.id);
+                }
+                let running = self
+                    .projects
+                    .get(&self.root)
+                    .and_then(Project::active)
+                    .is_some_and(Tab::running);
                 if running {
-                    if icons::button(ui, Icon::Stop, "Stop terminal…").clicked() {
-                        self.confirm_stop = true;
+                    let stop = icons::button(ui, Icon::Stop, "Stop terminal…");
+                    self.controls.push(stop.id);
+                    if stop.clicked() {
+                        self.confirm_stop = self
+                            .projects
+                            .get(&self.root)
+                            .and_then(Project::active)
+                            .map(|tab| (self.root.clone(), tab.id));
                     }
-                } else if icons::button(ui, Icon::Refresh, "Start a new terminal").clicked() {
-                    restart = true;
+                } else {
+                    let new = icons::button(ui, Icon::Refresh, "Start a new terminal");
+                    self.controls.push(new.id);
+                    if new.clicked() {
+                        tabs::consume_activation(ui.ctx());
+                        restart = true;
+                    }
                 }
             });
         });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("terminal-heading-bounds"),
+                heading.response.rect,
+            )
+        });
+        let _ = heading;
         ui.add_space(4.0);
         if restart {
             self.start(ui.ctx(), demo);
             self.focus = true;
         }
-        let Some(project) = self.projects.get_mut(&self.root) else {
+        let rail_width = (ui.available_width() * 0.22).clamp(104.0, 128.0);
+        let rail = egui::SidePanel::left("terminal-shell-rail")
+            .exact_width(rail_width)
+            .resizable(false)
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 4)))
+            .show_inside(ui, |ui| self.tab_rail(ui, demo));
+        let separator = rail.response.rect.right();
+        ui.painter().vline(
+            separator,
+            rail.response.rect.y_range(),
+            Stroke::new(1.0, colors.border.gamma_multiply(0.65)),
+        );
+        // Header/rail activation owns its Space text pair, never the PTY.
+        if ui.ctx().memory(|memory| {
+            memory
+                .focused()
+                .is_some_and(|id| self.controls.contains(&id))
+        }) {
+            tabs::consume_activation(ui.ctx());
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)))
+            .show_inside(ui, |ui| self.screen(ui, demo, capture_button.as_ref()));
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("terminal-shell-rail-bounds"),
+                rail.response.rect,
+            )
+        });
+    }
+    fn screen(&mut self, ui: &mut egui::Ui, demo: bool, capture_button: Option<&egui::Response>) {
+        let colors = theme::palette(ui.ctx());
+        let Some(project) = self
+            .projects
+            .get_mut(&self.root)
+            .and_then(Project::active_mut)
+        else {
             return;
         };
-        if let Some(rx) = &project.starting {
-            match rx.try_recv() {
-                Ok(result) => {
-                    match result {
-                        Ok(session) => project.session = Some(session),
-                        Err(error) => project.error = Some(error),
-                    }
-                    project.starting = None;
-                    self.focus = true;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    project.starting = None;
-                    project.error = Some("Could not start terminal.".into());
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-        }
+        tabs::poll_tab(project);
         if let Some(error) = &project.error {
             ui.label(RichText::new(error).size(11.0).color(colors.muted));
         }
@@ -350,15 +525,19 @@ impl Terminals {
         let cell = ui.fonts(|f| Vec2::new(f.glyph_width(&font, 'M'), f.row_height(&font).ceil()));
         let size = ui.available_size().max(Vec2::splat(1.0));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        let response = ui.interact(rect, terminal_id(), Sense::click_and_drag());
+        let input_id = project.input_id();
+        let response = ui.interact(rect, input_id, Sense::click_and_drag());
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("terminal-output-bounds"), rect));
         if self.focus || response.clicked() || response.drag_started() {
-            response.request_focus();
+            project.focus(ui.ctx());
             self.focus = false;
         }
         if response.has_focus() {
             ui.memory_mut(|m| {
                 m.set_focus_lock_filter(
-                    terminal_id(),
+                    input_id,
                     egui::EventFilter {
                         tab: true,
                         horizontal_arrows: true,
@@ -396,15 +575,23 @@ impl Terminals {
                 project.selection,
                 response.has_focus(),
             );
-            capture::offer(
+            capture::offer_with_tab(
                 &response,
                 parser.screen(),
                 project.selection,
                 &self.root,
                 false,
+                Some(project.label),
             );
             if let Some(button) = &capture_button {
-                capture::offer(button, parser.screen(), project.selection, &self.root, true);
+                capture::offer_with_tab(
+                    button,
+                    parser.screen(),
+                    project.selection,
+                    &self.root,
+                    true,
+                    Some(project.label),
+                );
             }
         }
         if let Some(session) = project.session.as_mut() {
@@ -428,20 +615,22 @@ impl Terminals {
                 project.selection,
                 response.has_focus(),
             );
-            capture::offer(
+            capture::offer_with_tab(
                 &response,
                 state.parser.screen(),
                 project.selection,
                 &self.root,
                 false,
+                Some(project.label),
             );
             if let Some(button) = &capture_button {
-                capture::offer(
+                capture::offer_with_tab(
                     button,
                     state.parser.screen(),
                     project.selection,
                     &self.root,
                     true,
+                    Some(project.label),
                 );
             }
             drop(state);

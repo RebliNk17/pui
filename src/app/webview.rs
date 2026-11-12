@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 pub(super) mod chrome;
 mod console;
+mod viewport;
 use console::ConsoleLine;
 #[cfg(target_os = "macos")]
 mod chromium;
@@ -79,7 +80,7 @@ impl Options {
             Device::Desktop => (1440, 900),
             Device::Tablet => (768, 1024),
             Device::Mobile => (390, 844),
-            Device::Custom => (self.width.clamp(240, 3840), self.height.clamp(240, 3840)),
+            Device::Custom => viewport::bounded_dimensions(self.width, self.height),
         };
         Some(if self.rotate { (h, w) } else { (w, h) })
     }
@@ -115,9 +116,16 @@ pub(super) struct BrowserView {
     options: BTreeMap<String, Options>,
     active: String,
     last_location: String,
+    viewport_editor: Option<viewport::Editor>,
+    unavailable: bool,
 }
 impl BrowserView {
     pub(super) fn focused(&self) -> bool {
+        // App-level Escape handling runs before browser UI: an open dimension
+        // editor owns cancellation even when the native page has lost focus.
+        if self.viewport_editor.is_some() {
+            return true;
+        }
         #[cfg(target_os = "macos")]
         return self.engine.focused();
         #[cfg(not(target_os = "macos"))]
@@ -133,11 +141,20 @@ impl BrowserView {
         self.options.clear();
         self.active.clear();
         self.last_location.clear();
+        self.viewport_editor = None;
+        self.unavailable = false;
     }
     pub(super) fn close(&mut self, key: &str) {
         #[cfg(target_os = "macos")]
         self.engine.close(key);
         self.options.remove(key);
+        if self
+            .viewport_editor
+            .as_ref()
+            .is_some_and(|editor| editor.key == key)
+        {
+            self.viewport_editor = None;
+        }
         if self.active == key {
             self.active.clear();
             self.last_location.clear();
@@ -152,19 +169,35 @@ impl BrowserView {
         device: &str,
         console: bool,
     ) -> Result<(), String> {
+        // Explicit CLI/demo presentation seed; never derives dimensions from a page.
+        let custom = device
+            .strip_prefix("custom:")
+            .map(|value| {
+                let (width, height) = value.split_once('x').ok_or_else(|| {
+                    "Custom viewport must use custom:WIDTHxHEIGHT (CSS pixels).".to_owned()
+                })?;
+                viewport::dimensions(width, height)
+            })
+            .transpose()?;
         let device = match device {
+            _ if custom.is_some() => Device::Custom,
             "responsive" => Device::Responsive,
             "desktop" => Device::Desktop,
             "tablet" => Device::Tablet,
             "mobile" => Device::Mobile,
             _ => {
                 return Err(
-                    "Browser device must be responsive, desktop, tablet, or mobile.".into(),
+                    "Browser device must be responsive, desktop, tablet, mobile, or custom:WIDTHxHEIGHT.".into(),
                 );
             }
         };
         let options = self.options.entry(key.into()).or_default();
         options.device = device;
+        if let Some((width, height)) = custom {
+            options.width = width;
+            options.height = height;
+            options.rotate = false;
+        }
         options.console = console;
         Ok(())
     }
@@ -263,53 +296,117 @@ impl BrowserView {
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, key: &str) {
         let colors = theme::palette(ui.ctx());
         let narrow = ui.available_width() < 440.0;
+        let compact = ui.available_width() < 300.0
+            || (ui.available_width() < 360.0
+                && self
+                    .options
+                    .get(key)
+                    .is_some_and(|options| options.device == Device::Custom));
+        let available = cfg!(target_os = "macos") && !self.unavailable;
+        if self
+            .viewport_editor
+            .as_ref()
+            .is_some_and(|editor| editor.key != key)
+        {
+            self.viewport_editor = None;
+        }
         let options = self.options.entry(key.into()).or_default();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
-            egui::Frame::new().fill(colors.hover.gamma_multiply(0.45)).corner_radius(7).inner_margin(0).show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 1.0;
-                    for (device, icon, label) in [(Device::Responsive, Icon::Expand, "Responsive: fill the pane"), (Device::Desktop, Icon::Desktop, "Desktop: 1440 × 900"), (Device::Tablet, Icon::Tablet, "Tablet: 768 × 1024"), (Device::Mobile, Icon::Phone, "Mobile: 390 × 844")] {
-                        if chrome::icon_button(ui, icon, label, options.device == device).clicked() { options.device = device; }
-                    }
-                });
-            });
-            chrome::divider(ui);
-            let dimensions = options.dimensions().map(|(w, h)| format!("{w} × {h}")).unwrap_or_else(|| "Auto".into());
-            let size = chrome::label_button(ui, &dimensions, false).on_hover_text("Viewport size and device settings");
-            egui::Popup::menu(&size).show(|ui| {
-                theme::menu_controls(ui);
-                ui.set_min_width(210.0);
-                ui.label(RichText::new("Viewport").size(12.0).strong());
-                ui.add_space(6.0);
-                for (device, label) in [(Device::Responsive, "Responsive · fill pane"), (Device::Desktop, "Desktop · 1440 × 900"), (Device::Tablet, "Tablet · 768 × 1024"), (Device::Mobile, "Mobile · 390 × 844"), (Device::Custom, "Custom dimensions")] {
-                    if ui.selectable_value(&mut options.device, device, label).clicked() && device != Device::Custom { ui.close(); }
-                }
-                if options.device == Device::Custom {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut options.width).range(240..=3840).suffix(" px"));
-                        ui.label("×");
-                        ui.add(egui::DragValue::new(&mut options.height).range(240..=3840).suffix(" px"));
+            if !compact {
+                egui::Frame::new()
+                    .fill(colors.hover.gamma_multiply(0.45))
+                    .corner_radius(7)
+                    .inner_margin(0)
+                    .show(ui, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            ui.spacing_mut().item_spacing.x = 1.0;
+                            for (device, icon, label) in [
+                                (
+                                    Device::Responsive,
+                                    Icon::Expand,
+                                    "Responsive: fill the pane",
+                                ),
+                                (Device::Desktop, Icon::Desktop, "Desktop: 1440 × 900"),
+                                (Device::Tablet, Icon::Tablet, "Tablet: 768 × 1024"),
+                                (Device::Mobile, Icon::Phone, "Mobile: 390 × 844"),
+                            ] {
+                                if chrome::icon_button(ui, icon, label, options.device == device)
+                                    .clicked()
+                                {
+                                    options.device = device;
+                                }
+                            }
+                        });
                     });
-                }
-                ui.separator();
-                ui.checkbox(&mut options.fit, "Fit viewport to panel");
-                ui.checkbox(&mut options.rotate, "Landscape orientation");
-                if options.mobile() { ui.add(egui::Label::new(theme::small(ui, "Touch + Android user agent. Not a real device. Reload for server-side detection.")).wrap()); }
-            });
+                chrome::divider(ui);
+            }
+            let dimensions = options
+                .dimensions()
+                .map(|(w, h)| format!("{w} × {h}"))
+                .unwrap_or_else(|| "Auto".into());
+            let size = chrome::label_button(ui, &dimensions, false)
+                .on_hover_text("Viewport size and device settings");
+            let popup = egui::Popup::from_toggle_button_response(&size)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .frame(prompt_ui::popup(ui.ctx()))
+                .width((ui.ctx().screen_rect().width() - 40.0).clamp(120.0, 270.0))
+                .show(|ui| {
+                    viewport::settings(ui, key, options, &mut self.viewport_editor, available)
+                });
+            if popup.is_none()
+                || !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&size))
+            {
+                self.viewport_editor = None;
+            }
             if !narrow {
-                if ui.add_enabled_ui(options.dimensions().is_some(), |ui| chrome::icon_button(ui, Icon::Rotate, "Rotate viewport", false)).inner.clicked() { options.rotate = !options.rotate; }
-                if chrome::label_button(ui, "Fit", options.fit).on_hover_text("Fit viewport to panel").clicked() { options.fit = !options.fit; }
+                if ui
+                    .add_enabled_ui(options.dimensions().is_some(), |ui| {
+                        chrome::icon_button(ui, Icon::Rotate, "Rotate viewport", false)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    options.rotate = !options.rotate;
+                }
+                if chrome::label_button(ui, "Fit", options.fit)
+                    .on_hover_text("Fit viewport to panel")
+                    .clicked()
+                {
+                    options.fit = !options.fit;
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let console = options.console;
-                let response = chrome::icon_button(ui, Icon::Terminal, if console { "Hide console" } else { "Show console" }, console);
-                if response.clicked() { options.console = !console; }
-                let zoom = chrome::label_button(ui, &format!("{}%", (options.zoom * 100.0) as u32), false).on_hover_text("Page zoom");
+                let response = chrome::icon_button(
+                    ui,
+                    Icon::Terminal,
+                    if console {
+                        "Hide console"
+                    } else {
+                        "Show console"
+                    },
+                    console,
+                );
+                if response.clicked() {
+                    options.console = !console;
+                }
+                let zoom =
+                    chrome::label_button(ui, &format!("{}%", (options.zoom * 100.0) as u32), false)
+                        .on_hover_text("Page zoom");
                 egui::Popup::menu(&zoom).show(|ui| {
                     theme::menu_controls(ui);
                     for value in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
-                        if ui.selectable_value(&mut options.zoom, value, format!("{}%", (value * 100.0) as u32)).clicked() { ui.close(); }
+                        if ui
+                            .selectable_value(
+                                &mut options.zoom,
+                                value,
+                                format!("{}%", (value * 100.0) as u32),
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                        }
                     }
                 });
             });
@@ -454,7 +551,7 @@ impl BrowserView {
         }
         self.active = key.into();
         #[cfg(target_os = "macos")]
-        {
+        let result = {
             self.engine.show(
                 frame,
                 rect,
@@ -464,12 +561,14 @@ impl BrowserView {
                 self.options.entry(key.into()).or_default(),
                 ctx,
             )
-        }
+        };
         #[cfg(not(target_os = "macos"))]
-        {
+        let result = {
             let _ = (frame, rect, url, html, ctx);
             Err("Bundled Chromium is currently packaged for macOS only. File/Markdown/image viewing and HTML Source remain available.".into())
-        }
+        };
+        self.unavailable = result.is_err();
+        result
     }
     pub(super) fn take_location(&mut self) -> Option<String> {
         let location = self.state(&self.active).location;

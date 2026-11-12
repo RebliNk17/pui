@@ -97,6 +97,8 @@ fn toolbar_terminal_docks_without_changing_chat_and_preserves_projects() {
             .projects
             .get_mut(&root)
             .unwrap()
+            .active_mut()
+            .unwrap()
             .demo
             .as_mut()
             .unwrap()
@@ -111,6 +113,8 @@ fn toolbar_terminal_docks_without_changing_chat_and_preserves_projects() {
         click(&ctx, &mut app, terminal_button);
         assert!(
             app.terminals.projects[&root]
+                .active()
+                .unwrap()
                 .demo
                 .as_ref()
                 .unwrap()
@@ -124,13 +128,19 @@ fn toolbar_terminal_docks_without_changing_chat_and_preserves_projects() {
         assert_eq!(app.terminals.root, other);
         assert_eq!(app.terminals.projects.len(), 2);
         assert!(
-            app.terminals.projects[&other].session.is_none(),
+            app.terminals.projects[&other]
+                .active()
+                .unwrap()
+                .session
+                .is_none(),
             "Demos never spawn real shells"
         );
         app.prefs.cwd = root.clone();
         frame(&ctx, &mut app, vec![]);
         assert!(
             app.terminals.projects[&root]
+                .active()
+                .unwrap()
                 .demo
                 .as_ref()
                 .unwrap()

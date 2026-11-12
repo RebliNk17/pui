@@ -52,7 +52,7 @@ pub(in crate::app) fn label_button(
     selected: bool,
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
-    ui.add(
+    let response = ui.add(
         egui::Button::new(RichText::new(label).size(11.0).color(if selected {
             colors.text
         } else {
@@ -70,7 +70,12 @@ pub(in crate::app) fn label_button(
         })
         .corner_radius(6)
         .min_size(Vec2::new(32.0, 26.0)),
-    )
+    );
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new(("browser-control", label)), response.rect);
+    });
+    response
 }
 
 pub(in crate::app) fn divider(ui: &mut egui::Ui) {

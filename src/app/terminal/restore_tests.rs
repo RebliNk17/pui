@@ -22,10 +22,18 @@ fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
         click(&ctx, &mut app, start);
         frame(&ctx, &mut app, vec![]);
         assert_eq!(app.terminals.projects.len(), 1);
-        assert!(app.terminals.projects[&root].demo.is_some());
+        assert!(
+            app.terminals.projects[&root]
+                .active()
+                .unwrap()
+                .demo
+                .is_some()
+        );
         app.terminals
             .projects
             .get_mut(&root)
+            .unwrap()
+            .active_mut()
             .unwrap()
             .demo
             .as_mut()
@@ -37,6 +45,8 @@ fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
         assert!(!app.terminals.restored_roots.contains(&root));
         assert!(
             app.terminals.projects[&root]
+                .active()
+                .unwrap()
                 .demo
                 .as_ref()
                 .unwrap()

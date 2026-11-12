@@ -105,10 +105,15 @@ impl Pui {
                         if response.clicked() {
                             self.kanban.open = false;
                             self.automation.open = false;
+                            self.diff_rx = None; // explicit navigation abandons the pending review open
                             self.files.toggle_browser(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                         }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(egui::Id::new("files-toolbar-button"), response.rect)
+                        });
                         if self.files.files_open() {
                             ui.painter().rect_stroke(
                                 response.rect,
@@ -120,6 +125,7 @@ impl Pui {
                         if response.clicked() {
                             self.kanban.open = false;
                             self.automation.open = false;
+                            self.diff_rx = None;
                             self.files.toggle(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                         }

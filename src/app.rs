@@ -458,6 +458,9 @@ impl Pui {
             }
             if options.demo_terminal {
                 app.terminals.toggle(&cc.egui_ctx, &app.prefs.cwd, true);
+                if options.demo_terminal_tabs {
+                    app.terminals.demo_tabs(&cc.egui_ctx);
+                }
                 app.focus_composer = false;
                 if options.demo_terminal_context {
                     app.terminals.demo_context();
@@ -1210,6 +1213,7 @@ impl Pui {
             self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
             self.changes.invalidate();
         }
+        self.cancel_git_open_for_file_navigation();
         let git_review_overlay = self.settings_open
             || self.search_open
             || self.kanban.open
@@ -1227,7 +1231,19 @@ impl Pui {
                     self.diff_rx = None;
                     if let Some(result) = result.finish(&self.workspace) {
                         match result {
-                            Ok(document) => self.open_diff_review(document.into(), false),
+                            Ok(document) => {
+                                let composer = egui::Id::new("composer");
+                                let preserve_composer = self.focus_composer
+                                    || self.ctx.memory(|memory| memory.has_focus(composer));
+                                let focus_composer = self.focus_composer;
+                                self.open_diff_review(document.into(), false);
+                                // The explicit file action normally focuses review, but a
+                                // user who resumed drafting while Git read keeps the caret.
+                                if preserve_composer {
+                                    self.focus_composer = focus_composer;
+                                    self.ctx.memory_mut(|memory| memory.request_focus(composer));
+                                }
+                            }
                             Err(error) => self.state.notice = Some(error),
                         }
                     }
@@ -1640,6 +1656,14 @@ impl Pui {
             } else {
                 self.submit(ctx);
             }
+        }
+    }
+
+    fn cancel_git_open_for_file_navigation(&mut self) {
+        if self.files.is_open() {
+            // Navigation wins permanently, not just until the pane is hidden.
+            // Covers toolbar, menus, slash commands, history, links and Pui open.
+            self.diff_rx = None;
         }
     }
 
@@ -2084,6 +2108,7 @@ impl eframe::App for Pui {
         self.spotlight(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
+        self.cancel_git_open_for_file_navigation();
         self.remember_navigation();
         self.refresh_menu(ctx);
         if self.screenshot.is_some() && self.frames == 25 {

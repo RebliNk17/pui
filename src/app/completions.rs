@@ -486,10 +486,12 @@ impl Pui {
             "compact" => self.send(json!({"type":"compact","customInstructions":args})),
             "stop" => self.stop(),
             "files" => {
+                self.diff_rx = None;
                 self.files.toggle(&self.ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }
             "browser" => {
+                self.diff_rx = None;
                 self.files.toggle_browser(&self.ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }

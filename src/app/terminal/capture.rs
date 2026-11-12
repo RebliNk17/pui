@@ -125,12 +125,23 @@ fn snapshot(screen: &vt100::Screen, selection: Selection, root: &Path) -> Snapsh
     }
 }
 
+#[cfg(test)]
 pub(super) fn offer(
     response: &egui::Response,
     screen: &vt100::Screen,
     selection: Selection,
     root: &Path,
     toolbar: bool,
+) {
+    offer_with_tab(response, screen, selection, root, toolbar, None);
+}
+pub(super) fn offer_with_tab(
+    response: &egui::Response,
+    screen: &vt100::Screen,
+    selection: Selection,
+    root: &Path,
+    toolbar: bool,
+    tab: Option<u64>,
 ) {
     let ctx = &response.ctx;
     let id = response.id.with("terminal-context");
@@ -155,7 +166,11 @@ pub(super) fn offer(
         // Refresh only on opening/reopening. Output can keep streaming underneath a menu.
         let refresh = ctx.data(|data| data.get_temp::<Capture>(key).is_none_or(|saved| saved.owner != id || saved.pass + 1 < pass))
             || (toolbar && response.clicked()) || (!toolbar && response.secondary_clicked());
-        if refresh { ctx.data_mut(|data| data.insert_temp(key, Capture { snapshot: Arc::new(snapshot(screen, selection, root)), owner: id, trigger: response.id, root: root.into(), pass })); }
+        if refresh {
+            let mut snapshot=snapshot(screen,selection,root);
+            if let Some(tab)=tab {snapshot.label.push_str(&format!(" · shell {tab}"));}
+            ctx.data_mut(|data|data.insert_temp(key,Capture {snapshot:Arc::new(snapshot),owner:id,trigger:response.id,root:root.into(),pass}));
+        }
         let captured = ctx.data_mut(|data| {
             let mut captured = data.get_temp::<Capture>(key).expect("snapshot initialized");
             captured.pass = pass;
