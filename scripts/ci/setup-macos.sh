@@ -17,7 +17,7 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3, 11)' 2>/dev/null; th
   brew install python@3.13
   export PATH="$(brew --prefix python@3.13)/libexec/bin:$PATH"
 fi
-if ! node --input-type=module -e 'import { stripTypeScriptTypes } from "node:module"; if (typeof stripTypeScriptTypes !== "function") process.exit(1)' 2>/dev/null; then
+if ! node --input-type=module -e 'import { stripTypeScriptTypes } from "node:module"; const [major,minor]=process.versions.node.split(".").map(Number); if (typeof stripTypeScriptTypes !== "function" || major < 22 || (major === 22 && minor < 19)) process.exit(1)' 2>/dev/null; then
   brew install node@22
   export PATH="$(brew --prefix node@22)/bin:$PATH"
 fi

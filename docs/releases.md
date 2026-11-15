@@ -15,7 +15,10 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
   select `vX.Y.Z`. Workflow tag filters allow only stable version tags.
 - Rust tests all remain required. The automation restart/OS-lock test runs in a
   separate Cargo invocation after the rest of the suite to avoid overlapping
-  subprocess-spawning tests; there are no failure retries or omitted tests.
+  subprocess-spawning tests; there are no failure retries or omitted Rust tests.
+- Adapter tests install `@earendil-works/pi-coding-agent@1.5.0` under
+  `target/pi-sdk` and set `PUI_PI_SDK`, rather than relying on a developer's Pi
+  installation. No provider keys are configured; fixture tests make no provider calls.
 - Download ZIP/DMG, checksums, metadata and notes from the job's **Artifacts →
   macos-arm64**. These are CI artifacts subject to CircleCI retention, **not**
   durable GitLab Releases.

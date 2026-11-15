@@ -30,5 +30,9 @@ cargo clippy --locked --all-targets -- -D warnings
 lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
 cargo test --locked -- --skip "$lock_test"
 cargo test --locked --bin pui "$lock_test" -- --exact
+# Adapter integration tests need the real Pi SDK, never a developer's home
+# installation. Install a pinned SDK locally without provider credentials.
+npm install --prefix "$PWD/target/pi-sdk" --no-audit --no-fund --no-save --package-lock=false @earendil-works/pi-coding-agent@1.5.0
+export PUI_PI_SDK="$PWD/target/pi-sdk/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
 node --test tests/*.test.mjs
 bash scripts/ci/build-macos.sh

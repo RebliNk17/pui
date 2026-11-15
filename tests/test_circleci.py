@@ -30,7 +30,7 @@ done
             git = root / "bin/git"
             git.write_text('#!/bin/bash\necho expected-revision\n')
             git.chmod(0o755)
-            for command in ("python3", "cargo", "node", "bash"):
+            for command in ("python3", "cargo", "node", "npm", "bash"):
                 path = root / "bin" / command
                 path.write_text('#!/bin/bash\nprintf "%s\\n" "$(basename "$0") $*" >> "$COMMAND_LOG"\n')
                 path.chmod(0o755)
@@ -48,6 +48,7 @@ done
             self.assertIn(f"cargo test --locked --bin pui {lock_test} -- --exact", calls)
             self.assertEqual(sum(line.startswith("cargo test ") for line in calls.splitlines()), 2)
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
+            self.assertIn("@earendil-works/pi-coding-agent@1.5.0", calls)
             self.assertNotIn("publish", calls)
             self.assertNotIn("fake-secret", calls)
 
