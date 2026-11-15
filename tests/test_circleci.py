@@ -48,6 +48,55 @@ done
             self.assertNotIn("publish", calls)
             self.assertNotIn("fake-secret", calls)
 
+    def test_setup_skips_homebrew_rustup_postinstall_and_selects_exact_toolchain(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            prefix = root / "rustup"
+            (prefix / "bin").mkdir(parents=True)
+            toolchain = root / "exact-toolchain"
+            toolchain.mkdir()
+            log = root / "commands"
+            commands = {
+                "uname": '#!/bin/bash\nif [[ "$1" == -s ]]; then echo Darwin; else echo arm64; fi\n',
+                "cmake": '#!/bin/bash\nexit 0\n',
+                "ninja": '#!/bin/bash\nexit 0\n',
+                "node": '#!/bin/bash\nexit 0\n',
+                "python3": '#!/bin/bash\nif [[ "$1" != -c ]]; then echo /fake/pinned-cef; fi\n',
+                "brew": '''#!/bin/bash
+printf '%s\\n' "$*" >> "$COMMAND_LOG"
+if [[ "$1" == --prefix ]]; then echo "$FAKE_RUSTUP_PREFIX";
+elif [[ "$*" == 'install --skip-post-install rustup' ]]; then exit 0;
+else exit 92; fi
+''',
+            }
+            for name, content in commands.items():
+                path = bin_dir / name
+                path.write_text(content)
+                path.chmod(0o755)
+            rustup = prefix / "bin/rustup"
+            rustup.write_text('''#!/bin/bash
+printf '%s\\n' "rustup $*" >> "$COMMAND_LOG"
+if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
+''')
+            rustup.chmod(0o755)
+            for name in ("cargo", "rustc"):
+                path = toolchain / name
+                path.write_text('#!/bin/bash\nexit 0\n')
+                path.chmod(0o755)
+            env = {"PATH": str(bin_dir) + ":/usr/bin:/bin", "HOME": str(root), "COMMAND_LOG": str(log),
+                   "FAKE_RUSTUP_PREFIX": str(prefix), "FAKE_TOOLCHAIN": str(toolchain),
+                   "RUST_VERSION": "1.88.0", "CARGO_TARGET_DIR": str(root / "target")}
+            result = subprocess.run(["/bin/bash", "-c", 'source "$1"; [[ "$CEF_PATH" == /fake/pinned-cef ]]; [[ "$(command -v cargo)" == "$FAKE_TOOLCHAIN/cargo" ]]',
+                                     "test", str(ROOT / "scripts/ci/setup-macos.sh")], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = log.read_text()
+            self.assertIn("install --skip-post-install rustup", calls)
+            self.assertIn("rustup toolchain install 1.88.0 --profile minimal --component rustfmt --component clippy", calls)
+            self.assertNotIn("install cmake", calls)
+            self.assertNotIn("install node", calls)
+
     def test_refuses_non_circle_environment(self):
         result = subprocess.run(["bash", str(ROOT / "scripts/ci/circle-macos.sh")], env={"PATH": "/usr/bin:/bin"}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)

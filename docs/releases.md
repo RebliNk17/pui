@@ -23,9 +23,13 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
   billing setup in this migration. Signed/publication workflows require a
   separately approved restricted-context/authentication design.
 
-Connect the GitLab repository `RebliNk17/pui` to a CircleCI project and select
-`.circleci/config.yml` from the `circleci-macos` branch for initial verification.
-Once reviewed/merged, change the config source to `master`. CircleCI's GitLab
+The CircleCI organization **Pui** and project **pui** are connected to the GitLab
+repository `RebliNk17/pui`. The pipeline uses `.circleci/config.yml` from the
+**triggering branch** (not a permanently pinned config branch). Initial
+verification runs on `circleci-macos`; merge that branch to enable the same
+workflow on `master`. The setup wizard also created `create-circleci-config`
+with a config-only commit; it is not the implementation branch and its initial
+run was canceled. CircleCI's GitLab
 OAuth integration requests account-level `api` access; authorization must be
 reviewed by the account owner. Do not put its OAuth token in repository files.
 
@@ -96,7 +100,10 @@ In **Settings → CI/CD** and **Settings → Packages and registries**:
 7. Disable duplicate Generic Package filenames if available. The publisher also
    refuses to replace existing bytes/notes; a conflicting release needs a new version.
 
-The runner installs CMake, Ninja, Node 22, Python 3.13, and rustup via Homebrew.
+Setup reuses compatible image-provided CMake, Ninja, Node (with built-in
+TypeScript stripping), Python 3.11+, and rustup. Missing tools use Homebrew
+(Node 22 / Python 3.13 fallbacks); rustup skips Homebrew's redundant default
+initialization before installing the exact requested toolchain.
 Rust is pinned to `1.88.0` (the project's current minimum) using `RUST_VERSION`.
 CEF is fetched before Cargo to reuse the existing pinned archive/hash validation.
 Only Cargo registry/git downloads are cached; no build products, keychains, or
