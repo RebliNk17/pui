@@ -35,7 +35,7 @@ open dist/Pui.app
 open dist/Pui.app --args --demo
 ```
 
-The local bundle includes an app icon and an ad-hoc signature. GitLab CI builds Apple Silicon ZIP/DMG artifacts and protected version-tag releases, with optional Developer ID signing/notarization; see [CI and release setup](docs/releases.md). Pi is a separately installed dependency. Finder launches often lack your shell PATH; Pui adds common managed-Pi, nvm, Volta, and Homebrew binary directories to the child's inherited PATH without running shell startup scripts.
+The local bundle includes an app icon and an ad-hoc signature. CircleCI builds Apple Silicon ZIP/DMG artifacts with ad-hoc signatures. The optional GitLab pipeline is disabled until hosted macOS access is available; it supports protected-tag releases and Developer ID signing/notarization. See [CI and release setup](docs/releases.md). Pi is a separately installed dependency. Finder launches often lack your shell PATH; Pui adds common managed-Pi, nvm, Volta, and Homebrew binary directories to the child's inherited PATH without running shell startup scripts.
 
 ### Pi executable
 
@@ -258,7 +258,7 @@ cargo run -- --cwd /path/to/repo --session /path/to/session.jsonl
 
 The screenshot option captures egui's framebuffer and exits; native Chromium child pixels are not included. For an opt-in live browser check, run `python3 scripts/smoke-chromium-macos.py /path/to/debug/Pui.app/Contents/MacOS/pui http://localhost:PORT/ [mobile]`. It uses demo mode with no provider calls and captures CEF's own pixels; temporary diagnostics/screenshots stay local. `PUI_BROWSER_SMOKE_REPORT` enables these bounded diagnostics only in debug builds and is inactive by default. Use `--demo` to avoid including private session titles. Tests include simulated card clicks, right-click menus and drag/drop, preference roundtrips, rail jumps/viewport culling, activity expansion, protocol lifecycles, ordered text/tool reconstruction, Unicode-safe JSONL framing, and a deterministic mock Pi subprocess. The Unix transport fixture requires Python 3. No test sends a provider request.
 
-Validated locally on **Apple Silicon macOS**. Linux and Windows have **not** been built or tested. eframe/winit, the folder picker, paths, and process boundaries are cross-platform; Linux builds will need their distribution's graphics/window-system development packages. [GitLab CI](docs/releases.md) defines Apple Silicon macOS validation/packaging, protected-tag releases, and optional signing/notarization. Hosted-runner execution and Apple notarization still require project/account setup and live validation. Other platforms remain future work.
+Validated locally on **Apple Silicon macOS**. Linux and Windows have **not** been built or tested. eframe/winit, the folder picker, paths, and process boundaries are cross-platform; Linux builds will need their distribution's graphics/window-system development packages. [CircleCI](docs/releases.md) defines Apple Silicon macOS validation and ad-hoc ZIP/DMG artifacts. The retained GitLab release/signing pipeline is opt-in because hosted macOS runner access was unavailable. CircleCI execution and optional Apple notarization require account setup and live validation. Other platforms remain future work.
 
 ## Deliberate v0.1 limits
 
