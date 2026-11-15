@@ -168,7 +168,9 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(publish["requires"], ["macos-build"])
         self.assertEqual(publish["filters"]["branches"]["ignore"], "/.*/")
         self.assertEqual(publish["filters"]["tags"], build["filters"]["tags"])
-        self.assertIn("pipeline.project.id", publish["serial-group"])
+        self.assertEqual(publish["serial-group"], "pui-gitlab-releases")
+        self.assertEqual(config["jobs"]["gitlab-release"]["environment"]["CIRCLE_PROJECT_ID"],
+                         "7a9da67d-bf7f-406f-867e-af29eb280f8e")
         steps = config["jobs"]["gitlab-release"]["steps"]
         self.assertFalse(any(key in step for step in steps if isinstance(step, dict)
                              for key in ("restore_cache", "save_cache")))

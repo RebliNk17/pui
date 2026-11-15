@@ -85,7 +85,7 @@ jobs:
       - image: cimg/python:3.13
     resource_class: small
     environment:
-      CIRCLE_PROJECT_ID: << pipeline.project.id >>
+      CIRCLE_PROJECT_ID: "7a9da67d-bf7f-406f-867e-af29eb280f8e"
       PUI_REQUIRE_SIGNING: "false"
     steps:
       - checkout
@@ -109,7 +109,7 @@ workflows:
             - macos-build
           context:
             - pui-gitlab-releases
-          serial-group: << pipeline.project.id >>/gitlab-releases
+          serial-group: pui-gitlab-releases
           filters:
             branches:
               ignore: /.*/
