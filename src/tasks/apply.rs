@@ -1,10 +1,9 @@
-//! Read-only, conflict-aware apply-back preparation. This is NOT an apply engine.
-//!
-//! A multi-file working tree cannot be replaced transactionally with ordinary
-//! rename/copy operations, and advisory locks do not exclude editors or Git.
-//! Until a recoverable transaction/rollback protocol exists, every plan is
-//! explicitly blocked from mutation. No commit, merge, stash or index writes.
+//! Explicit reviewed apply-back. Git's index is never written. Multi-file filesystem
+//! replacement is NOT atomic: a durable journal precedes writes, failures roll back
+//! conditionally, and uncertain/external edits retain evidence for explicit recovery.
+use super::workspace::snapshot::source;
 use super::{Phase, Task, workspace};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -13,34 +12,45 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
-// The same descriptor-relative, no-follow reader used by source snapshots.
-use super::workspace::snapshot::source;
+#[path = "apply_baseline.rs"]
+mod baseline;
+#[path = "apply_transaction.rs"]
+mod transaction;
+pub use baseline::{BaselineReceipt, capture_receipt};
+pub use transaction::{
+    ApplyOutcome, RecoveryAction, RecoveryStatus, TransactionStatus, apply_owned, inspect_recovery,
+    recover_owned,
+};
+
+#[cfg(test)]
+pub use transaction::apply;
 
 const MAX_FILES: usize = 10_000;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
-pub const TRANSACTIONAL_BLOCKER: &str = "Apply-back is unavailable: an all-file recoverable transaction with conflict-safe rollback has not been implemented. Preview/check never changes the original checkout. Use separately reviewed regular development; workflow approval is not permission to apply.";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+// Kept for older read-only preview callers while their UI migrates.
+pub const TRANSACTIONAL_BLOCKER: &str = "Preview is not apply permission. Applying requires a separate explicit confirmation of this exact reviewed plan. No commit, merge, stash or index update is performed.";
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     pub original: PathBuf,
     pub candidate: PathBuf,
+    pub original_scope: PathBuf,
+    pub candidate_scope: PathBuf,
     pub original_git_dir: PathBuf,
     pub candidate_git_dir: PathBuf,
     pub common_dir: PathBuf,
     pub head: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeKind {
     Add,
     Modify,
     Delete,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
     pub path: String,
     pub kind: ChangeKind,
     pub conflict: bool,
-    /// Full-file text preview, not an executable shell command or Git patch.
     pub before: Option<String>,
     pub after: Option<String>,
     pub unsupported: Option<String>,
@@ -49,7 +59,7 @@ pub struct Change {
     pub before_mode: Option<u32>,
     pub after_mode: Option<u32>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub task_id: String,
     pub identity: Identity,
@@ -58,22 +68,20 @@ pub struct Plan {
     pub candidate_fingerprint: String,
     pub checked_candidate_fingerprint: String,
     inventory: String,
-    /// SHA-256 of the exact versioned, length-framed net-change payload.
+    task_hash: String,
+    paths: BTreeSet<String>,
+    /// SHA-256 of exact versioned full-file payload; no shell/Git patch parsing.
     pub patch_hash: String,
     pub changes: Vec<Change>,
-    /// Always includes TRANSACTIONAL_BLOCKER; never present this as actionable.
     pub blockers: Vec<String>,
 }
 impl Plan {
-    /// Machine-readable, exact content addressed by patch_hash. Not `git apply`
-    /// input: full-file replacements avoid diff ambiguity/newline confusion.
-    #[cfg(test)]
     pub fn patch_payload(&self) -> String {
         payload(&self.changes)
     }
     pub fn summary(&self) -> String {
         format!(
-            "{} HEAD-relative candidate changes · {} conflicts\nPatch SHA-256: {}\nOriginal: {}\nCandidate: {}\nWorkflow: {}\nHEAD baseline SHA-256: {}\nOriginal SHA-256: {}\nCandidate SHA-256: {}\n{}",
+            "{} builder net changes · {} conflicts\nPatch SHA-256: {}\nOriginal: {}\nCandidate: {}\nWorkflow: {}\nPreparation baseline SHA-256: {}\nOriginal SHA-256: {}\nCandidate SHA-256: {}\n{}\n{}",
             self.changes.len(),
             self.changes.iter().filter(|c| c.conflict).count(),
             self.patch_hash,
@@ -83,11 +91,12 @@ impl Plan {
             self.baseline_fingerprint,
             self.original_fingerprint,
             self.candidate_fingerprint,
+            TRANSACTIONAL_BLOCKER,
             self.blockers.join("\n")
         )
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
     bytes: Vec<u8>,
     mode: u32,
@@ -99,7 +108,6 @@ struct GitEntry {
     oid: String,
 }
 type Entries = BTreeMap<String, GitEntry>;
-
 fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("git");
     cmd.arg("--no-replace-objects")
@@ -133,22 +141,44 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Cannot inspect apply-back: {e}"))?;
-    let mut bytes = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .ok_or("Git output pipe unavailable.")?
-        .take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() as u64 > MAX_BYTES {
+    // Read on a bounded worker so Git cannot hang an apply indefinitely (e.g. a
+    // corrupt repository on a remote mount). No detached process survives timeout.
+    let mut stdout = child.stdout.take().ok_or("Git output pipe unavailable")?;
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = (&mut stdout).take(MAX_BYTES + 1).read_to_end(&mut bytes);
+        let _ = send.send((result, bytes));
+    });
+    let received = receive.recv_timeout(std::time::Duration::from_secs(15));
+    if received.is_err() {
+        let _ = child.kill();
+        let _ = child.wait(); /* Reader owns only a pipe, never source state. */
+        return Err("Git inspection timed out. No apply was started.".into());
+    }
+    let (result, bytes) = received.unwrap();
+    let _ = reader.join();
+    if result.is_err() || bytes.len() as u64 > MAX_BYTES {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("Cannot read apply preview within its 32 MiB budget.".into());
+        return Err("Git inspection exceeds its 32 MiB budget.".into());
     }
-    if !child.wait().map_err(|e| e.to_string())?.success() {
-        return Err("Cannot inspect Git for apply-back. Nothing was changed.".into());
+    // stdout EOF is not proof of process exit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) if status.success() => return Ok(bytes),
+            Some(_) => return Err("Cannot inspect Git for apply-back.".into()),
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Git inspection timed out.".into());
+            }
+        }
     }
-    Ok(bytes)
 }
 fn text(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Non-UTF-8 Git metadata is unsupported.".into())
@@ -156,9 +186,7 @@ fn text(bytes: Vec<u8>) -> Result<String, String> {
 fn name(raw: &[u8]) -> Result<String, String> {
     let name = std::str::from_utf8(raw).map_err(|_| "Non-UTF-8 apply path is unsupported.")?;
     if !name.is_ascii() {
-        return Err(
-            "Unicode-normalization ambiguity is unsupported for apply preview paths.".into(),
-        );
+        return Err("Unicode-normalization ambiguity is unsupported for apply paths.".into());
     }
     if name.is_empty()
         || name.contains(['\\', '\0'])
@@ -185,6 +213,7 @@ fn name(raw: &[u8]) -> Result<String, String> {
                 | "id_ed25519"
                 | "credentials"
         ) || lower.starts_with(".env")
+            || lower.starts_with(".pui-apply-")
             || lower.ends_with(".pem")
             || lower.ends_with(".key")
         {
@@ -199,15 +228,15 @@ fn entries(raw: &[u8], index: bool) -> Result<Entries, String> {
         let tab = row
             .iter()
             .position(|b| *b == b'\t')
-            .ok_or("Invalid Git entry.")?;
-        let header = std::str::from_utf8(&row[..tab]).map_err(|_| "Invalid Git entry.")?;
+            .ok_or("Invalid Git entry")?;
+        let header = std::str::from_utf8(&row[..tab]).map_err(|_| "Invalid Git entry")?;
         let parts: Vec<_> = header.split(' ').collect();
         if parts.len() != 3 || (index && parts[2] != "0") {
-            return Err("Unmerged or ambiguous index is unsupported for apply preview.".into());
+            return Err("Unmerged or ambiguous index is unsupported.".into());
         }
         let oid = if index { parts[1] } else { parts[2] };
         if !matches!(parts[0], "100644" | "100755") {
-            return Err("Symlinks, submodules, sparse entries and special modes are unsupported for apply preview.".into());
+            return Err("Symlinks, submodules, sparse entries and special modes are unsupported for apply-back.".into());
         }
         if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Invalid Git object identity.".into());
@@ -225,7 +254,7 @@ fn entries(raw: &[u8], index: bool) -> Result<Entries, String> {
             return Err("Duplicate apply path.".into());
         }
         if result.len() > MAX_FILES {
-            return Err("Too many apply preview files.".into());
+            return Err("Too many apply files.".into());
         }
     }
     Ok(result)
@@ -234,31 +263,31 @@ fn canonical_output(root: &Path, args: &[&str]) -> Result<PathBuf, String> {
     let value = text(git(root, args)?)?;
     fs::canonicalize(root.join(value.trim_end_matches('\n'))).map_err(|e| e.to_string())
 }
-fn identity(task: &Task) -> Result<Identity, String> {
-    if !task.isolated || task.dirty_source {
-        return Err("Apply preview requires an isolated, clean-at-start Git workflow. Dirty-at-start workflows lack a durable original snapshot receipt; HEAD is not their baseline. Nothing was changed.".into());
-    }
-    let original = fs::canonicalize(&task.source).map_err(|e| e.to_string())?;
-    let candidate = fs::canonicalize(task.workspace.as_ref().ok_or("No candidate workspace.")?)
-        .map_err(|e| e.to_string())?;
+fn resolve_identity(source: &Path, candidate: &Path, head: &str) -> Result<Identity, String> {
+    let original_scope = fs::canonicalize(source).map_err(|e| e.to_string())?;
+    let candidate_scope = fs::canonicalize(candidate).map_err(|e| e.to_string())?;
+    let original = workspace::fingerprint_root(&original_scope)?;
+    let candidate = workspace::fingerprint_root(&candidate_scope)?;
     if original == candidate || original.starts_with(&candidate) || candidate.starts_with(&original)
     {
         return Err("Apply requires distinct non-nested original and candidate checkouts.".into());
     }
-    for root in [&original, &candidate] {
-        if canonical_output(root, &["rev-parse", "--show-toplevel"])? != *root {
-            return Err(
-                "Apply preview currently requires full repository roots, not subfolders.".into(),
-            );
-        }
-        if text(git(root, &["rev-parse", "--verify", "HEAD"])?)?.trim() != task.base_head {
-            return Err("Original or candidate HEAD changed. Start a new review.".into());
-        }
-    }
-    if !matches!(task.base_head.len(), 40 | 64)
-        || !task.base_head.bytes().all(|b| b.is_ascii_hexdigit())
+    if original_scope.strip_prefix(&original).ok() != candidate_scope.strip_prefix(&candidate).ok()
     {
+        return Err("Original and candidate subfolder scopes differ.".into());
+    }
+    if !matches!(head.len(), 40 | 64) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Missing baseline commit identity.".into());
+    }
+    for root in [&original, &candidate] {
+        if canonical_output(root, &["rev-parse", "--show-toplevel"])? != *root
+            || text(git(root, &["rev-parse", "--verify", "HEAD"])?)?.trim() != head
+        {
+            return Err("Original or candidate HEAD/root changed. Start a new review.".into());
+        }
+        if !git(root, &["rev-parse", "--shared-index-path"])?.is_empty() {
+            return Err("Split indexes are unsupported for apply-back.".into());
+        }
     }
     let common_dir = canonical_output(&original, &["rev-parse", "--git-common-dir"])?;
     if canonical_output(&candidate, &["rev-parse", "--git-common-dir"])? != common_dir {
@@ -272,28 +301,39 @@ fn identity(task: &Task) -> Result<Identity, String> {
     Ok(Identity {
         original,
         candidate,
+        original_scope,
+        candidate_scope,
         original_git_dir,
         candidate_git_dir,
         common_dir,
-        head: task.base_head.clone(),
+        head: head.into(),
     })
+}
+fn identity(task: &Task) -> Result<Identity, String> {
+    if !task.isolated {
+        return Err("Apply requires an isolated Git workflow.".into());
+    }
+    resolve_identity(
+        &task.source,
+        task.workspace.as_ref().ok_or("No candidate workspace")?,
+        &task.base_head,
+    )
 }
 fn read(root: &Path, relative: &str, total: &mut u64) -> Result<Option<FileState>, String> {
     match source::entry(root, Path::new(relative))? {
         source::Entry::Missing => {
             if fs::symlink_metadata(root.join(relative)).is_ok() {
-                return Err("File/directory typechanges are unsupported for apply preview.".into());
+                return Err("File/directory typechanges are unsupported for apply-back.".into());
             }
             Ok(None)
         }
-        source::Entry::Link(link) => {
-            let _ = link;
-            Err("Symlinks are unsupported for apply preview; no link was followed.".into())
+        source::Entry::Link(_) => {
+            Err("Symlinks are unsupported for apply-back; no link was followed.".into())
         }
         source::Entry::File(mut file) => {
             let meta = file.metadata().map_err(|e| e.to_string())?;
-            if meta.len() > MAX_BYTES - *total {
-                return Err("Apply preview exceeds its 32 MiB budget.".into());
+            if meta.len() > MAX_BYTES.saturating_sub(*total) {
+                return Err("Apply exceeds its 32 MiB budget.".into());
             }
             let mut bytes = Vec::new();
             (&mut file)
@@ -302,7 +342,7 @@ fn read(root: &Path, relative: &str, total: &mut u64) -> Result<Option<FileState
                 .map_err(|e| e.to_string())?;
             let after = file.metadata().map_err(|e| e.to_string())?;
             if bytes.len() as u64 != meta.len() || meta.modified().ok() != after.modified().ok() {
-                return Err("Files changed during apply preview.".into());
+                return Err("Files changed during apply capture.".into());
             }
             *total += meta.len();
             #[cfg(unix)]
@@ -323,13 +363,12 @@ fn capture(
 ) -> Result<(Tree, String), String> {
     let mut tree = Tree::new();
     let mut total = 0;
-    // Hash the raw index as well as working bytes, preserving all staged edits and flags.
     let index = read(git_dir, "index", &mut total)?;
     for path in paths {
         tree.insert(path.clone(), read(root, path, &mut total)?);
     }
     let mut hash = Sha256::new();
-    frame(&mut hash, b"apply-state-v1");
+    frame(&mut hash, b"apply-state-v2");
     hash_file(&mut hash, index.as_ref());
     for (path, file) in &tree {
         frame(&mut hash, path.as_bytes());
@@ -351,48 +390,29 @@ fn hash_file(hash: &mut Sha256, file: Option<&FileState>) {
     }
 }
 fn payload(changes: &[Change]) -> String {
-    let rows: Vec<_> = changes.iter().map(|c| serde_json::json!({"path":c.path,"kind":format!("{:?}", c.kind),"before":c.before,"after":c.after,"before_sha256":c.before_hash,"after_sha256":c.after_hash,"before_mode":c.before_mode,"after_mode":c.after_mode,"unsupported":c.unsupported})).collect();
-    serde_json::json!({"format":"pui-full-file-preview-v1","changes":rows}).to_string()
+    serde_json::json!({"format":"pui-full-file-apply-v2","changes":changes}).to_string()
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-
-/// Prepare only: no writer lock, filesystem writes, shell commands or provider calls.
-/// HEAD-relative changes are for inspection, NOT proof of which edits a builder
-/// introduced: even initially clean tasks lack a durable preparation receipt.
-/// Unrelated original paths are bound and never mutated. A changed target is a
-/// conflict even if its text would merge.
-pub fn prepare(task: &Task) -> Result<Plan, String> {
-    let attempt = task.latest().ok_or("No checked candidate.")?;
-    if task.phase != Phase::Ready || !task.approved.as_ref().is_some_and(|c| attempt.passed(c)) {
-        return Err("Apply preview needs current passing checks and independent review.".into());
-    }
-    let checked = attempt
-        .fingerprint
-        .as_ref()
-        .ok_or("Missing candidate fingerprint.")?;
-    let identity = identity(task)?;
-    let inventory = inventory(&identity)?;
-    if workspace::fingerprint(&identity.candidate)? != *checked {
-        return Err("Candidate changed after review; evidence is stale.".into());
-    }
-    let baseline_entries = entries(
+fn all_paths(identity: &Identity) -> Result<BTreeSet<String>, String> {
+    let mut paths: BTreeSet<_> = entries(
         &git(
             &identity.candidate,
             &["ls-tree", "-r", "-z", &identity.head],
         )?,
         false,
-    )?;
-    let mut paths: BTreeSet<String> = baseline_entries.keys().cloned().collect();
-    let mut indexes = Vec::new();
+    )?
+    .into_keys()
+    .collect();
     for root in [&identity.original, &identity.candidate] {
-        let index = entries(
-            &git(root, &["ls-files", "--stage", "--sparse", "-z"])?,
-            true,
-        )?;
-        paths.extend(index.keys().cloned());
-        indexes.push(index);
+        paths.extend(
+            entries(
+                &git(root, &["ls-files", "--stage", "--sparse", "-z"])?,
+                true,
+            )?
+            .into_keys(),
+        );
         for raw in git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())
@@ -401,68 +421,72 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
         }
     }
     if paths.len() > MAX_FILES {
-        return Err("Too many apply preview files.".into());
+        return Err("Too many apply files.".into());
     }
-    // Portable/case-folding ambiguity: stricter than Git, intentionally fail closed.
     let mut folded = BTreeSet::new();
     if paths.iter().any(|p| !folded.insert(p.to_lowercase())) {
         return Err("Case-ambiguous apply paths are unsupported.".into());
     }
-    let mut baseline = Tree::new();
-    let mut total = 0;
-    for path in &paths {
-        let file = baseline_entries
-            .get(path)
-            .map(|entry| -> Result<FileState, String> {
-                let bytes = git(&identity.candidate, &["cat-file", "blob", &entry.oid])?;
-                total += bytes.len() as u64;
-                if total > MAX_BYTES {
-                    return Err("Baseline exceeds the apply preview budget.".into());
-                }
-                Ok(FileState {
-                    bytes,
-                    mode: if entry.mode == "100755" { 0o755 } else { 0o644 },
-                })
-            })
-            .transpose()?;
-        baseline.insert(path.clone(), file);
+    Ok(paths)
+}
+fn inventory(identity: &Identity) -> Result<String, String> {
+    let mut hash = Sha256::new();
+    for root in [&identity.original, &identity.candidate] {
+        frame(
+            &mut hash,
+            &git(root, &["ls-files", "--stage", "--sparse", "-z"])?,
+        );
+        frame(
+            &mut hash,
+            &git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?,
+        );
     }
-    let (original, original_fingerprint) =
-        capture(&identity.original, &identity.original_git_dir, &paths)?;
-    let (candidate, candidate_fingerprint) =
-        capture(&identity.candidate, &identity.candidate_git_dir, &paths)?;
-    let mut baseline_hash = Sha256::new();
-    frame(&mut baseline_hash, identity.head.as_bytes());
+    Ok(format!("{:x}", hash.finalize()))
+}
+/// Read-only exact builder net-change plan against the durable pre-builder receipt.
+/// Later unrelated source edits are preserved; changed source target paths conflict.
+pub fn prepare(task: &Task) -> Result<Plan, String> {
+    let attempt = task.current_evidence().ok_or("No checked candidate.")?;
+    if task.phase != Phase::Ready || !task.approved.as_ref().is_some_and(|c| attempt.passed(c)) {
+        return Err("Apply needs current passing checks and independent review.".into());
+    }
+    let checked = attempt
+        .fingerprint
+        .as_ref()
+        .ok_or("Missing candidate fingerprint")?;
+    let identity = identity(task)?;
+    let baseline = baseline::load(task)?;
+    if baseline.identity != identity {
+        return Err("Preparation baseline identity differs from the current workflow.".into());
+    }
+    let mut paths = all_paths(&identity)?;
+    paths.extend(baseline.original.tree.keys().cloned());
+    let inventory = inventory(&identity)?;
+    if workspace::fingerprint(&identity.candidate)? != *checked {
+        return Err("Candidate changed after review; evidence is stale.".into());
+    }
+    let original = baseline::snapshot(&identity.original, &identity.original_git_dir, &paths)?;
+    let candidate = baseline::snapshot(&identity.candidate, &identity.candidate_git_dir, &paths)?;
+    let mut blockers = Vec::new();
+    if candidate.index != baseline.candidate.index {
+        blockers.push("Candidate index differs from the preparation baseline; staged edits/flags are unsupported. Keep builder changes unstaged.".into());
+    }
     let mut changes = Vec::new();
-    let mut blockers = vec![TRANSACTIONAL_BLOCKER.into(), "No durable preparation baseline receipt: this is a HEAD-relative preview, not a proven builder-only patch. Initial clean status alone cannot prove that source edits were not copied later.".into()];
-    if indexes[1] != baseline_entries {
-        blockers.push("Candidate index differs from the clean baseline; staged-only edits/intent-to-add are not an apply-back payload.".into());
-    }
     for path in &paths {
-        let before = baseline[path].as_ref();
-        frame(&mut baseline_hash, path.as_bytes());
-        hash_file(&mut baseline_hash, before);
-        let after = candidate[path].as_ref();
+        let before = baseline.candidate.tree.get(path).and_then(Option::as_ref);
+        let after = candidate.tree[path].as_ref();
         if before == after {
             continue;
         }
-        let conflict = original[path].as_ref() != before;
+        let conflict = original.tree[path].as_ref()
+            != baseline.original.tree.get(path).and_then(Option::as_ref);
         let kind = match (before, after) {
             (None, _) => ChangeKind::Add,
             (_, None) => ChangeKind::Delete,
             _ => ChangeKind::Modify,
         };
-        let mut unsupported = Vec::new();
-        if matches!(kind, ChangeKind::Delete) {
-            unsupported.push("Deletion requires recoverable rollback.");
-        }
-        if before.zip(after).is_some_and(|(a, b)| a.mode != b.mode)
-            || after.is_some_and(|f| !matches!(f.mode, 0o644 | 0o755))
-        {
-            unsupported.push("Mode changes are not supported for apply-back.");
-        }
-        let as_text = |file: Option<&FileState>| {
-            file.and_then(|f| {
+        let as_text = |f: Option<&FileState>| {
+            f.and_then(|f| {
                 String::from_utf8(f.bytes.clone())
                     .ok()
                     .filter(|_| !f.bytes.contains(&0))
@@ -470,17 +494,27 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
         };
         let old = as_text(before);
         let new = as_text(after);
-        if before.is_some() && old.is_none() || after.is_some() && new.is_none() {
-            unsupported.push(
-                "Binary/non-UTF-8 content is previewed by path only; applying is unsupported.",
-            );
+        let mut unsupported = Vec::new();
+        if before.zip(after).is_some_and(|(a, b)| a.mode != b.mode)
+            || before
+                .into_iter()
+                .chain(after)
+                .any(|f| !matches!(f.mode, 0o644 | 0o755))
+        {
+            unsupported.push("Mode changes and special permission modes are unsupported.");
         }
-        let unsupported = (!unsupported.is_empty()).then(|| unsupported.join(" "));
+        if before.is_some() && old.is_none() || after.is_some() && new.is_none() {
+            unsupported.push("Binary/non-UTF-8 content is unsupported.");
+        }
+        if !transaction::parent_available(&identity.original, path) {
+            unsupported.push("Additions require an existing real parent directory; new directories are unsupported.");
+        }
         if conflict {
             blockers.push(format!(
-                "Conflict: {path} differs from the workflow baseline in the original checkout."
+                "Conflict: {path} differs from the preparation snapshot in the original checkout."
             ));
         }
+        let unsupported = (!unsupported.is_empty()).then(|| unsupported.join(" "));
         if let Some(reason) = &unsupported {
             blockers.push(format!("{path}: {reason}"));
         }
@@ -498,52 +532,44 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
         });
     }
     if changes.is_empty() {
-        blockers.push("No candidate net changes.".into());
+        blockers.push("No builder net changes.".into());
     }
-    // Repeat the inventories as well as bytes: adding/deleting a path must stale the plan.
     let plan = Plan {
         task_id: task.id.clone(),
         identity,
-        inventory,
-        baseline_fingerprint: format!("{:x}", baseline_hash.finalize()),
-        original_fingerprint,
-        candidate_fingerprint,
+        baseline_fingerprint: task
+            .preparation_receipt
+            .as_ref()
+            .unwrap()
+            .manifest_hash
+            .clone(),
+        original_fingerprint: original.fingerprint,
+        candidate_fingerprint: candidate.fingerprint,
         checked_candidate_fingerprint: checked.clone(),
+        inventory,
+        task_hash: digest(&serde_json::to_vec(task).map_err(|e| e.to_string())?),
+        paths,
         patch_hash: digest(payload(&changes).as_bytes()),
         changes,
         blockers,
     };
-    verify_state(task, &plan, &paths)?;
+    verify_state(task, &plan)?;
     Ok(plan)
 }
-fn inventory(identity: &Identity) -> Result<String, String> {
-    let mut hash = Sha256::new();
-    for root in [&identity.original, &identity.candidate] {
-        frame(
-            &mut hash,
-            &git(root, &["ls-files", "--stage", "--sparse", "-z"])?,
-        );
-        frame(
-            &mut hash,
-            &git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?,
-        );
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-fn verify_state(task: &Task, plan: &Plan, paths: &BTreeSet<String>) -> Result<(), String> {
+fn verify_state(task: &Task, plan: &Plan) -> Result<(), String> {
     if identity(task)? != plan.identity
         || inventory(&plan.identity)? != plan.inventory
         || workspace::fingerprint(&plan.identity.candidate)? != plan.checked_candidate_fingerprint
         || capture(
             &plan.identity.original,
             &plan.identity.original_git_dir,
-            paths,
+            &plan.paths,
         )?
         .1 != plan.original_fingerprint
         || capture(
             &plan.identity.candidate,
             &plan.identity.candidate_git_dir,
-            paths,
+            &plan.paths,
         )?
         .1 != plan.candidate_fingerprint
     {
@@ -553,34 +579,19 @@ fn verify_state(task: &Task, plan: &Plan, paths: &BTreeSet<String>) -> Result<()
     }
     Ok(())
 }
-/// Recompute from authoritative task state. A preview is not durable approval;
-/// no eventual writer may skip these checks or reuse a confirmation after drift.
-#[cfg(test)]
+/// Recompute authoritative evidence, task, indexes, paths, bytes and exact payload.
 pub fn check(task: &Task, plan: &Plan) -> Result<(), String> {
     let current = prepare(task)?;
-    if current.task_id != plan.task_id
-        || current.identity != plan.identity
-        || current.baseline_fingerprint != plan.baseline_fingerprint
-        || current.original_fingerprint != plan.original_fingerprint
-        || current.candidate_fingerprint != plan.candidate_fingerprint
-        || current.checked_candidate_fingerprint != plan.checked_candidate_fingerprint
-        || current.inventory != plan.inventory
-        || current.patch_hash != plan.patch_hash
-        || digest(plan.patch_payload().as_bytes()) != plan.patch_hash
-    {
+    if current != *plan || digest(plan.patch_payload().as_bytes()) != plan.patch_hash {
         return Err(
-            "Apply preview is stale or altered. Review a fresh plan; nothing was changed.".into(),
+            "Apply plan is stale or altered. Review a fresh plan; nothing was changed.".into(),
         );
+    }
+    if !current.blockers.is_empty() {
+        return Err(current.blockers.join("\n"));
     }
     Ok(())
 }
-/// Test-only assertion of the blocked apply boundary; no production apply action exists.
-#[cfg(test)]
-pub fn apply(task: &Task, plan: &Plan) -> Result<(), String> {
-    check(task, plan)?;
-    Err(TRANSACTIONAL_BLOCKER.into())
-}
-
 #[cfg(test)]
 #[path = "apply_tests.rs"]
 mod tests;

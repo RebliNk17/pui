@@ -85,7 +85,9 @@ fn lists_continue_split_and_exit_without_touching_other_text() {
         ("paragraph", "paragraph\n"),
         ("*not a list", "*not a list\n"),
         ("```md\n* literal", "```md\n* literal\n"),
-        ("    * code", "    * code\n"),
+        ("    * nested", "    * nested\n    * "),
+        ("a. letter", "a. letter\nb. "),
+        ("Z) letter", "Z) letter\nA) "),
         ("---", "---\n"),
     ] {
         let (text, index) = newline(source, source.chars().count());
@@ -106,7 +108,7 @@ fn lists_continue_split_and_exit_without_touching_other_text() {
     assert_eq!(text, "* pasted\n1. exact\n");
 }
 
-fn app(ctx: &egui::Context) -> Pui {
+pub(super) fn app(ctx: &egui::Context) -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
         Options {
@@ -122,7 +124,7 @@ fn app(ctx: &egui::Context) -> Pui {
     app.client = Some(rpc::Client::stub());
     app
 }
-fn frame(
+pub(super) fn frame(
     ctx: &egui::Context,
     app: &mut Pui,
     events: Vec<egui::Event>,
@@ -150,7 +152,7 @@ fn frame(
         },
     )
 }
-fn select(ctx: &egui::Context, range: Range<usize>) {
+pub(super) fn select(ctx: &egui::Context, range: Range<usize>) {
     let id = egui::Id::new("composer");
     let mut state = egui::TextEdit::load_state(ctx, id).unwrap();
     state.cursor.set_char_range(Some(CCursorRange::two(
@@ -160,7 +162,7 @@ fn select(ctx: &egui::Context, range: Range<usize>) {
     state.store(ctx, id);
     ctx.memory_mut(|m| m.request_focus(id));
 }
-fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+pub(super) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,
         physical_key: None,
@@ -169,7 +171,7 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         modifiers,
     }
 }
-fn galley(output: &egui::FullOutput, source: &str) -> Arc<egui::Galley> {
+pub(super) fn galley(output: &egui::FullOutput, source: &str) -> Arc<egui::Galley> {
     output
         .shapes
         .iter()

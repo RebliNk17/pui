@@ -267,7 +267,10 @@ fn cell_context_actions_copy_and_quote_without_changing_file_or_sending() {
             assert!(draft_app.draft.contains("two, values"));
         }
         assert_eq!(draft_app.state.messages.len(), messages);
-        assert_eq!(preview.source, "name,note\nAlpha,\"two, values\"\n");
+        assert_eq!(
+            preview.source.as_str(),
+            "name,note\nAlpha,\"two, values\"\n"
+        );
     }
 }
 
@@ -382,8 +385,8 @@ fn source_view_is_virtualized_and_copy_preserves_exact_text() {
     let ctx = egui::Context::default();
     theme::install(&ctx);
     let source = "name,value\r\nAlpha,\"two\r\nlines\"\r\n".to_owned();
-    let preview = Preview::new(source.clone(), b',');
-    let draw = |events| {
+    let mut preview = Preview::new(source.clone(), b',');
+    let mut draw = |events| {
         ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -394,13 +397,29 @@ fn source_view_is_virtualized_and_copy_preserves_exact_text() {
                 ..Default::default()
             },
             |ctx| {
-                egui::CentralPanel::default()
-                    .show(ctx, |ui| preview.show_source(ui, Path::new("source.csv")));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    preview.show_view(ui, Path::new("source.csv"), &mut true)
+                });
             },
         )
     };
     for _ in 0..3 {
         draw(vec![]);
+    }
+    let id = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(("table-toolbar", 3usize))))
+        .unwrap();
+    let pos = ctx.read_response(id).unwrap().rect.center();
+    for pressed in [true, false] {
+        draw(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
     }
     let button = super::super::tests::text(&draw(vec![]), "Copy source");
     let mut commands = Vec::new();
@@ -476,7 +495,7 @@ fn header_can_be_disabled_without_losing_the_first_record() {
     super::super::tests::text(&output, "Column 1");
     super::super::tests::text(&output, "first");
     super::super::tests::text(&output, "second");
-    super::super::tests::text(&output, "2 data records");
+    super::super::tests::text(&output, "2 rows");
 }
 
 #[test]
@@ -484,5 +503,5 @@ fn invalid_table_keeps_full_original_source_available() {
     let source = "name,value\n\"unterminated".to_owned();
     let preview = Preview::new(source.clone(), b',');
     assert!(preview.index.is_err());
-    assert_eq!(preview.source, source);
+    assert_eq!(preview.source.as_str(), source);
 }

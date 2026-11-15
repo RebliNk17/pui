@@ -199,6 +199,11 @@ impl Pui {
                 Some("Wait for the interruption to finish. Your message was kept.".into());
             return false;
         }
+        if self.resource_reload.pending() || self.resource_reload.confirming() {
+            self.state.error =
+                Some("Finish reloading resources before sending. Your message was kept.".into());
+            return false;
+        }
         if self.history_pending.is_some() || self.restoring_code() {
             self.state.error =
                 Some("Wait for history navigation before sending. Your message was kept.".into());
@@ -373,6 +378,8 @@ impl Pui {
     }
     pub(super) fn deliver_waiting_at_window(&mut self, window: bool) {
         if self.is_mirror()
+            || self.resource_reload.pending()
+            || self.resource_reload.confirming()
             || !self.connected
             || self.loading_chat
             || self.state.compacting

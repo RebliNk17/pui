@@ -82,7 +82,10 @@ impl Pui {
             || self.deletion.in_progress()
         {
             Some("Workflow storage is not ready.")
-        } else if self.tasks.live.is_some() || !self.tasks.requests.is_empty() {
+        } else if self.tasks.live.is_some()
+            || !self.tasks.requests.is_empty()
+            || self.task_operations_busy()
+        {
             Some("Another workflow or workflow question is already active.")
         } else if objective.is_empty()
             || objective.len() > 16000
@@ -134,7 +137,7 @@ impl Pui {
         );
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
-            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block; automatic bootstrap/install and command-replay recovery are unsupported. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Original checkout is left untouched. No commit, merge or deployment."),
+            "title":"Use a workflow?", "message":format!("{reason}\n\n{objective}\n\nAgent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
             "options":["Use workflow", "Regular development"]
         }));
         true

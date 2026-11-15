@@ -5,6 +5,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+mod attention_order;
+#[cfg(test)]
+mod attention_tests;
 mod files;
 mod index;
 #[cfg(test)]
@@ -61,6 +64,7 @@ struct Hit {
     detail: String,
     kind: Kind,
     message: Option<Locator>,
+    attention: Option<attention::SearchEvent>,
 }
 #[derive(Clone)]
 struct Locator {
@@ -89,6 +93,7 @@ pub(super) struct Search {
     source_changed_at: f64,
     jump: Option<Jump>,
     pub(super) notice: Option<String>,
+    attention_order: attention_order::Order,
 }
 impl Search {
     fn cancel(&mut self) {
@@ -142,7 +147,10 @@ fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool) -> egui::Response {
             .strip_prefix("Settings · ")
             .unwrap_or("Settings")
             .to_owned(),
-        Kind::Chat => sessions::project_name(&hit.candidate.project),
+        Kind::Chat => hit.attention.map_or_else(
+            || sessions::project_name(&hit.candidate.project),
+            |event| event.label().into(),
+        ),
         Kind::File => "File".into(),
         Kind::Message => format!(
             "Message · {}",
@@ -197,7 +205,8 @@ fn result_row(ui: &mut egui::Ui, hit: &Hit, selected: bool) -> egui::Response {
         meta,
         colors.dim,
     );
-    let tooltip = format!("{}\n{}", hit.candidate.title, hit.detail);
+    let tooltip = format!("{}\n{}{}", hit.candidate.title, hit.detail,
+        hit.attention.map_or_else(String::new, |event| format!("\n{} · unread event captured when search opened, not live status. Reopen search to refresh. Highlighting is not Mark read; activation is ordinary chat navigation, never an approval.",event.label())));
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(tooltip)
@@ -214,13 +223,27 @@ pub(super) fn text_fingerprint(text: &str) -> u64 {
 }
 
 impl Pui {
+    /// Explicit in-memory preview; no real history/provider requests.
+    pub(in crate::app) fn demo_search_attention(&mut self) {
+        if !self.demo {
+            return;
+        }
+        self.demo_attention();
+        self.attention.open = false;
+        self.search.clear();
+        self.spotlight.scope = Scope::Chats;
+        self.open_search();
+    }
     pub(super) fn search_blocked(&self) -> bool {
         self.attention.open
+            || self.changes.review_comments.confirming()
             || self.agents.close_prompt
             || self.tasks.attachment_confirming()
+            || self.task_operations_confirming()
             || self.section_view.confirming()
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
+            || self.resource_reload.confirming()
             || self.deletion.confirming()
             || self.deletion.in_progress()
             || self.automation.confirming()
@@ -245,6 +268,13 @@ impl Pui {
         self.focus_composer = false;
         self.close_model_popovers();
         self.spotlight.cancel();
+        let snapshot = self.search_attention_snapshot();
+        self.spotlight.attention_order = attention_order::Order::snapshot(
+            self.search_candidates().into_iter().map(|candidate| {
+                let event = self.search_attention(&candidate, &snapshot);
+                (candidate, event)
+            }),
+        );
         self.spotlight.messages = Default::default();
         self.spotlight.selected = 0;
         self.spotlight.notice = None;
@@ -258,6 +288,7 @@ impl Pui {
         self.search.clear();
         self.spotlight.cancel();
         self.spotlight.hits.clear();
+        self.spotlight.attention_order = Default::default();
         self.spotlight.messages = Default::default();
         self.ctx
             .memory_mut(|m| m.surrender_focus(egui::Id::new("spotlight-query")));
@@ -299,12 +330,12 @@ impl Pui {
             collect(branch, &mut out);
         }
         if !out.iter().any(|c| {
-            c.path.as_ref().is_some_and(|p| {
-                self.state
-                    .session_file
-                    .as_deref()
-                    .is_some_and(|s| sync::identity(p) == sync::identity(std::path::Path::new(s)))
-            })
+            matches!(&c.target, sidebar_tree::Target::Agent(id) if id == &self.agents.active)
+                || c.path.as_ref().is_some_and(|p| {
+                    self.state.session_file.as_deref().is_some_and(|s| {
+                        sync::identity(p) == sync::identity(std::path::Path::new(s))
+                    })
+                })
         }) && (self.state.session_file.is_some() || !self.state.messages.is_empty())
             && self
                 .state
@@ -451,7 +482,21 @@ impl Pui {
         let scope = self.spotlight.scope;
         let mut hits = Vec::new();
         if matches!(scope, Scope::All | Scope::Chats) {
-            for candidate in self.search_candidates() {
+            let mut candidates = self
+                .search_candidates()
+                .into_iter()
+                .map(|candidate| {
+                    let (rank, event) = self.spotlight.attention_order.get(&candidate);
+                    (candidate, event, rank)
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(_, event, rank)| {
+                (
+                    event.map_or((3, std::cmp::Reverse(0)), |event| event.order()),
+                    *rank,
+                )
+            });
+            for (candidate, attention, _) in candidates {
                 if query.is_empty()
                     || index::matches(
                         &format!("{} {}", candidate.title, candidate.project.display()),
@@ -464,6 +509,7 @@ impl Pui {
                         detail,
                         kind: Kind::Chat,
                         message: None,
+                        attention,
                     });
                     if hits.len() >= 20 {
                         break;
@@ -490,6 +536,7 @@ impl Pui {
                         detail: format!("Settings · {}", entry.page),
                         kind: Kind::Setting,
                         message: None,
+                        attention: None,
                     });
                 }
             }
@@ -536,7 +583,7 @@ impl Pui {
                     egui::TextEdit::singleline(&mut self.search)
                         .id(egui::Id::new("spotlight-query"))
                         .hint_text(if self.spotlight.scope == Scope::Files {
-                            "Workspace path, optionally :line"
+                            "Filename or path initials, optionally :line"
                         } else {
                             "Search everything…"
                         })
@@ -633,7 +680,7 @@ impl Pui {
                 ui.add(
                     egui::Label::new(theme::small(
                         ui,
-                        "Filenames only · workspace scope · Enter opens read-only",
+                        "Ranked filename matches · workspace only · Enter opens read-only",
                     ))
                     .wrap(),
                 );

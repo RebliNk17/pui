@@ -27,6 +27,8 @@ vt100 = "0.18"
 base64 = "0.22"
 arboard = { version="3.7",default-features=false,features=["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+resvg = { version = "=0.50.0", default-features = false }
+svgtypes = "=0.16.2"
 
 [[bin]]
 name = "pui-browser-helper"
@@ -38,7 +40,7 @@ raw-window-handle = "0.6"
 dispatch2 = "0.3"
 objc2 = "0.6"
 block2 = "0.6"
-objc2-app-kit = {version="0.3",default-features=false,features=["std","NSEvent","NSPasteboard","NSSound","NSApplication","NSMenu","NSMenuItem","NSCell","NSResponder","NSWindow","NSView","block2"]}
+objc2-app-kit = {version="0.3",default-features=false,features=["std","NSEvent","NSPasteboard","NSSound","NSApplication","NSDockTile","NSMenu","NSMenuItem","NSCell","NSResponder","NSWindow","NSView","block2"]}
 objc2-foundation = {version="0.3",default-features=false,features=["std","NSObject","NSString","NSError","NSBundle","NSGeometry"]}
 objc2-user-notifications = {version="0.3",default-features=false,features=["std","block2","UNNotification","UNNotificationContent","UNNotificationRequest","UNNotificationResponse","UNNotificationTrigger","UNUserNotificationCenter"]}
 

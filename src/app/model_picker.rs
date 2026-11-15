@@ -192,7 +192,7 @@ impl Pui {
             Some("Design preview only. Start a real chat to change models.")
         } else if !self.connected || (!self.is_mirror() && self.client.is_none()) {
             Some("Connect to Pi before changing models.")
-        } else if self.loading_chat {
+        } else if self.loading_chat || self.resource_reload.pending() {
             Some("Wait for this chat to finish loading.")
         } else if self.state.compacting {
             Some("Wait for context compaction to finish before changing models.")

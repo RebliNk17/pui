@@ -44,13 +44,16 @@ impl Pui {
                 preview.pending = None;
             }
         }
-        ui.add(egui::Label::new(theme::small(ui, domain::apply::TRANSACTIONAL_BLOCKER)).wrap());
-        let allowed =
-            !self.demo && task.phase == Phase::Ready && task.isolated && !task.dirty_source;
+        ui.add(egui::Label::new(theme::small(ui, "Review the exact candidate changes before applying. Viewing or refreshing this preview never writes files. Application needs a separate confirmation and current source/candidate validation.")).wrap());
+        let allowed = !self.demo
+            && task.phase == Phase::Ready
+            && task.isolated
+            && task.preparation_receipt.is_some()
+            && !self.task_operations_busy();
         if ui
             .add_enabled(
                 allowed && preview.pending.is_none(),
-                egui::Button::new("Preview candidate against HEAD (read-only)"),
+                egui::Button::new("Review candidate changes (read-only)"),
             )
             .clicked()
         {
@@ -68,7 +71,7 @@ impl Pui {
             });
         }
         if !allowed {
-            ui.add(egui::Label::new(theme::small(ui, "Preview supports only a current Ready, isolated, clean-at-start Git candidate. Recorded edits remain below; no apply action exists.")).wrap());
+            ui.add(egui::Label::new(theme::small(ui, "Review supports a current Ready, isolated Git candidate with a durable preparation baseline. Legacy workflows without a baseline cannot be applied. Recorded edits remain below.")).wrap());
         }
         if preview.pending.is_some() {
             ui.spinner();
@@ -79,8 +82,17 @@ impl Pui {
                     ui.add(egui::Label::new(error).wrap());
                 }
                 Ok(plan) => {
-                    ui.add(egui::Label::new(theme::small(ui, "Captured read-only snapshot, not live evidence or apply approval. External edits may have occurred since preview; refresh before relying on it. HEAD-relative differences are not proof of which edits the builder introduced.")).wrap());
+                    ui.add(egui::Label::new(theme::small(ui, "Captured changes relative to the verified preparation baseline, not live evidence or apply approval. External edits may have occurred since preview; application independently validates this exact plan again.")).wrap());
                     ui.add(egui::Label::new(plan.summary()).selectable(true).wrap());
+                    if ui
+                        .add_enabled(
+                            plan.blockers.is_empty() && !self.task_operations_busy(),
+                            egui::Button::new("Review application…"),
+                        )
+                        .clicked()
+                    {
+                        self.request_apply(task, plan);
+                    }
                     for change in &plan.changes {
                         crate::section::Section::new(&change.path)
                             .id_salt((&task.id, "net-preview", &change.path))
@@ -99,7 +111,7 @@ impl Pui {
                                     ui.add(egui::Label::new(reason).wrap());
                                 }
                                 for (label, value) in [
-                                    ("HEAD baseline", &change.before),
+                                    ("Preparation baseline", &change.before),
                                     ("Candidate snapshot", &change.after),
                                 ] {
                                     ui.label(theme::caption(ui, label));

@@ -1,7 +1,9 @@
 //! Presentation-only sections. Root chats may be saved or pathless; trees/pins keep precedence.
 use super::*;
 use std::collections::BTreeSet;
+mod chat_drag;
 mod confirmation;
+mod drag;
 
 const LIMIT: usize = 64;
 const NAME_LIMIT: usize = 80;
@@ -63,6 +65,16 @@ pub(in crate::app) struct View {
     // Runtime agent identities only. Never serialize arbitrary pathless drafts.
     unsaved: BTreeMap<String, String>,
     pub(super) unsaved_popup: Option<egui::Id>,
+    drag: Option<drag::Drag>,
+    chat_drag: Option<chat_drag::Drag>,
+    chat_drag_seen: Option<(egui::Id, u64)>,
+    chat_drag_press: Option<(egui::Id, u64)>,
+    chat_drag_hit: Option<chat_drag::Hit>,
+    chat_drop: Option<String>,
+    drag_controls: Vec<(String, egui::Id)>,
+    drag_controls_pass: Option<u64>,
+    drag_keyboard_pass: Option<u64>,
+    drag_cancel_pass: Option<u64>,
 }
 impl View {
     pub(in crate::app) fn confirming(&self) -> bool {
@@ -382,6 +394,9 @@ impl Pui {
         query: &str,
     ) -> Option<Action> {
         let mut action = None;
+        let mut drop_target = None;
+        self.section_view.drag_controls.clear();
+        self.section_view.drag_controls_pass = Some(ui.ctx().cumulative_pass_nr());
         // Actions are deferred until the header menu closes; index is never a persistent identity.
         let ids: Vec<_> = self
             .prefs
@@ -435,9 +450,15 @@ impl Pui {
                 if editing {
                     Sense::hover()
                 } else {
-                    Sense::click()
+                    Sense::click_and_drag()
                 },
             );
+            if !editing {
+                self.chat_section_target(ui, &id, &heading);
+            }
+            if !editing && let Some(target) = self.section_drag_header(ui, &id, &heading) {
+                drop_target = Some(target);
+            }
             #[cfg(test)]
             ui.ctx().data_mut(|data| {
                 data.insert_temp(egui::Id::new(("section-header-id", &id)), heading.id)
@@ -539,6 +560,7 @@ impl Pui {
                 if heading.clicked() || keyboard {
                     self.prefs.sidebar_view.sections[index].collapsed = !section.collapsed;
                 }
+                heading.clone().on_hover_text("Click to collapse · drag to reorder. Section options also include Move up/down.");
                 heading.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::CollapsingHeader,
@@ -556,6 +578,9 @@ impl Pui {
                 )
                 .on_hover_text("Section options")
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if self.section_view.drag_controls.len() < LIMIT * 2 && ui.is_rect_visible(menu_rect) {
+                self.section_view.drag_controls.push((id.clone(), menu.id));
+            }
             if menu.hovered() || menu.has_focus() {
                 ui.painter().rect_filled(menu_rect, 5, colors.hover);
             }
@@ -656,6 +681,7 @@ impl Pui {
                 }
             }
         }
+        self.finish_section_drag(ui.ctx(), drop_target);
         action
     }
 }

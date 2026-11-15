@@ -18,6 +18,8 @@ mod kanban;
 mod menu;
 mod model_cache;
 mod model_picker;
+#[cfg(test)]
+mod native_escape_tests;
 mod navigation;
 mod new_chat;
 mod notifications;
@@ -30,12 +32,14 @@ mod prompt_ui;
 mod prompt_ui_tests;
 mod prompts;
 mod questions;
+mod resource_reload;
 mod restart;
 mod rewind;
 mod run_status;
 mod search;
 mod session_layout;
 mod settings;
+mod side_chat;
 mod sidebar;
 mod sidebar_order;
 mod sidebar_tree;
@@ -88,6 +92,7 @@ struct Preferences {
     sidebar_view: sidebar_view::Options,
     workspace_layouts: Vec<session_layout::Saved>,
     table_headers: files::TableHeaders,
+    diff_wrap: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
     session_order: sidebar_order::Options,
@@ -123,8 +128,10 @@ pub struct Pui {
     completion_run: notifications::CompletionRun,
     attention: attention::Attention,
     attention_observed: attention::Observed,
+    attention_dock: attention::DockWindow,
     demo: bool,
     agents: agents::Agents,
+    side_chat: side_chat::SideChat,
     restart_pending: Vec<restart::Checkpoint>,
     tasks: tasks::Tasks,
     kanban: kanban::Board,
@@ -132,6 +139,7 @@ pub struct Pui {
     deletion: deletion::View,
     ultracode: bool,
     ultracode_ready: bool,
+    resource_reload: resource_reload::Reload,
     state: State,
     client: Option<rpc::Client>,
     connected: bool,
@@ -217,6 +225,7 @@ impl Pui {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        diff_viewer::wrap_preference::init(&cc.egui_ctx, prefs.diff_wrap);
         prefs
             .color_styles
             .apply(&cc.egui_ctx, options.theme.unwrap_or(prefs.theme));
@@ -258,16 +267,19 @@ impl Pui {
                     .0,
             ),
             attention_observed: Default::default(),
+            attention_dock: attention::DockWindow::new(options.demo && options.demo_attention_dock),
             restart_pending: prefs.restart_checkpoints.clone(),
             prefs,
             demo: options.demo,
             agents: Default::default(),
+            side_chat: Default::default(),
             tasks: tasks::Tasks::new(&cc.egui_ctx, !options.demo && !cfg!(test)),
             kanban: Default::default(),
             automation: automation::Automation::new(!options.demo && !cfg!(test)),
             deletion: Default::default(),
             ultracode: false,
             ultracode_ready: false,
+            resource_reload: Default::default(),
             state: State::default(),
             client: None,
             connected: false,
@@ -357,6 +369,10 @@ impl Pui {
         if let Some(page) = options.settings_page.as_deref() {
             app.settings_view.select(page);
         }
+        // Dedicated, corruption-isolated local data; restores no review/editor/action.
+        if !app.demo {
+            app.changes.review_comments.restore_checkpoint(cc.storage);
+        }
         if app.demo {
             app.load_demo();
             if options.demo_attention {
@@ -372,9 +388,15 @@ impl Pui {
                 app.search = "context".into();
                 app.open_search();
             }
+            if options.demo_search_attention {
+                app.demo_search_attention();
+            }
             if options.demo_quick_open {
                 app.open_quick_files();
                 app.search = "src/app/search.rs:42".into();
+            }
+            if options.demo_side_chat {
+                app.demo_side_chat();
             }
             if options.demo_languages {
                 app.state.session_name = "Language glyph preview".into();
@@ -518,6 +540,9 @@ impl Pui {
                 if options.demo_table_grid {
                     app.focus_composer = false;
                     app.files.demo_table_grid(&cc.egui_ctx);
+                    if options.demo_table_projection {
+                        app.files.demo_table_projection();
+                    }
                     if options.demo_table_headerless {
                         app.prefs.table_headers.set(
                             &app.prefs.cwd,
@@ -529,6 +554,18 @@ impl Pui {
             }
             if options.demo_changes {
                 app.inspector_panel = true;
+            }
+            if options.demo_inline_review {
+                let source=(0..4).map(|n|format!("@@ -{} +{} @@ synthetic hunk {}\n-old value\n+new literal value 世界\n",n*20+1,n*20+1,n+1)).collect::<String>();
+                app.outputs = vec![RecordedFile {
+                    path: "src/synthetic-inline.rs".into(),
+                    diff: source,
+                    ..Default::default()
+                }];
+                app.output_revision = app.state.outputs_revision;
+                let owner = app.review_comment_owner();
+                app.changes.demo_inline(&app.prefs.cwd, &owner);
+                app.focus_composer = false;
             }
             if options.demo_branches {
                 app.workspace = Workspace {
@@ -544,6 +581,15 @@ impl Pui {
                     &review_owner,
                     &app.workspace,
                 );
+                if options.demo_git_history {
+                    app.changes.demo_git_history();
+                    if options.demo_history_filter {
+                        app.changes.demo_history_filter();
+                    }
+                    if options.demo_commit_detail {
+                        app.changes.demo_commit_detail(&cc.egui_ctx);
+                    }
+                }
                 app.focus_composer = false;
             }
             if options.demo_review_files || options.demo_review_comments {
@@ -557,6 +603,15 @@ impl Pui {
             }
             if options.demo_review_comments {
                 app.changes.demo_review_comments(app.output_revision);
+                if options.demo_review_note_delete {
+                    app.changes.demo_review_note_delete();
+                }
+                if options.demo_review_note_edit {
+                    app.changes.demo_review_note_edit();
+                }
+                if options.demo_review_note_files {
+                    app.demo_review_note_files();
+                }
             }
             if options.demo_git_files {
                 app.workspace = Workspace {
@@ -735,6 +790,7 @@ impl Pui {
         if session.is_some() {
             self.new_chat = false;
         }
+        self.resource_reload = Default::default();
         self.recall = Default::default();
         self.completion_run = Default::default();
         self.attention_observed = Default::default();
@@ -829,6 +885,7 @@ impl Pui {
     // Keep the RPC connection (and outstanding approvals/deliveries) parked.
     fn retain_chat_on_switch(&self) -> bool {
         self.has_tree()
+            || self.resource_reload.pending()
             || !self.draft.is_empty()
             || !self.draft_images.is_empty()
             || self.sync_live_owner()
@@ -989,6 +1046,7 @@ impl Pui {
         for event in events {
             match event {
                 rpc::Event::History(messages) => {
+                    self.resource_reload_history();
                     self.preview_rx = None;
                     self.preview_partial = false;
                     self.transcript
@@ -1002,10 +1060,11 @@ impl Pui {
                     self.state.prose_revision = self.state.prose_revision.wrapping_add(1);
                     self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
                     self.connected = true;
-                    self.loading_chat = false;
+                    self.loading_chat = self.resource_reload.pending();
                     self.pending_session = None;
                 }
                 rpc::Event::Record(record) => {
+                    self.resource_reload_record(&record);
                     self.completion_event(&record);
                     self.agent_event(&record);
                     if record["type"] == "extension_ui_request"
@@ -1069,7 +1128,9 @@ impl Pui {
                     {
                         self.context_chips.clear();
                         self.draft = protocol::string(&record, "text").into();
-                        self.focus_composer = true;
+                        if !self.agents.background {
+                            self.focus_composer = true;
+                        }
                     }
                     if kind == "response" {
                         let mut mail_record = record.clone();
@@ -1208,6 +1269,7 @@ impl Pui {
                 }
             }
         }
+        self.poll_resource_reload();
         self.promote_attention();
         self.update_session_title();
     }
@@ -1349,6 +1411,9 @@ impl Pui {
 
     fn submit_mode(&mut self, ctx: &egui::Context, mode: settings::DeliveryMode) {
         if self.deletion.confirming() {
+            return;
+        }
+        if self.resource_reload.confirming() || self.resource_reload.pending() {
             return;
         }
         if self.submit_command() {
@@ -1558,6 +1623,15 @@ impl Pui {
                 let completing = self.completion_active(ctx);
                 self.completion_keys(ctx);
                 self.recall_before_edit(ctx);
+                if self.composer_formatting_available(ctx) {
+                    let events_before = ctx.input(|input| input.events.len());
+                    composer_text::keys(ctx, &mut self.draft);
+                    if ctx.input(|input| input.events.len()) < events_before {
+                        self.context_chips.clear();
+                    }
+                }
+                let decorations = ui.painter().add(egui::Shape::Noop);
+                let list_focus = composer_text::list_at_cursor(ctx, &self.draft);
                 let smart_newline = ctx.input(|i| {
                     !i.events
                         .iter()
@@ -1581,7 +1655,7 @@ impl Pui {
                     .font(FontId::proportional(14.0))
                     .layouter(&mut layouter)
                     .frame(false)
-                    .lock_focus(completing)
+                    .lock_focus(completing || list_focus)
                     .desired_width(f32::INFINITY)
                     .desired_rows(1)
                     .return_key(egui::KeyboardShortcut::new(
@@ -1589,6 +1663,7 @@ impl Pui {
                         egui::Key::Enter,
                     ))
                     .show(ui);
+                composer_text::decorate(ui, decorations, &output, &self.draft);
                 composer_text::links(ui, &output, &self.draft);
                 let response = output.response;
                 if response.changed() {
@@ -1949,6 +2024,8 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.remember_navigation();
         self.poll();
+        self.chat_section_drag_inputs(ctx);
+        self.section_drag_inputs(ctx);
         self.attention_inputs(ctx);
         let attention_was_open = self.attention.open;
         self.attention_panel(ctx);
@@ -1956,6 +2033,9 @@ impl eframe::App for Pui {
         self.model_picker_escape(ctx);
         context_capture::inputs(ctx);
         self.context_chip_inputs(ctx);
+        let review_owner = self.review_comment_owner();
+        self.changes
+            .bind_inline_owner(ctx, &self.prefs.cwd, &review_owner);
         self.changes.review_inputs(
             ctx,
             self.inspector_panel
@@ -1998,13 +2078,16 @@ impl eframe::App for Pui {
         if self.screenshot.is_none() || self.agents.close_prompt {
             self.agent_close_guard(ctx);
         }
-        let confirming = self.section_view.confirming()
+        let confirming = self.changes.review_comments.confirming()
+            || self.section_view.confirming()
             || self.tasks.attachment_confirming()
+            || self.task_operations_confirming()
             || self.agents.close_prompt
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
             || self.deletion.confirming()
             || self.menu.about
+            || self.resource_reload.confirming()
             || self.updates.open
             || self.search_open
             || self.attention.open;
@@ -2043,8 +2126,10 @@ impl eframe::App for Pui {
             self.settings_open = !self.settings_open;
             self.close_model_popovers();
         }
+        let composer_formatting = self.composer_formatting_available(ctx);
         if !self.attention.open
             && !self.settings_open
+            && !composer_formatting
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B))
         {
@@ -2052,6 +2137,7 @@ impl eframe::App for Pui {
         }
         if !self.attention.open
             && !self.settings_open
+            && !composer_formatting
             && (!terminal_input || cfg!(target_os = "macos"))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I))
         {
@@ -2115,6 +2201,7 @@ impl eframe::App for Pui {
                 self.sidebar(ctx);
             }
             self.top_bar(ctx);
+            self.side_chat_bar(ctx);
             if !attention_was_open {
                 self.attention_panel(ctx);
             }
@@ -2134,6 +2221,8 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
+                let capture_owner = self.review_comment_owner();
+                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {
@@ -2203,12 +2292,14 @@ impl eframe::App for Pui {
         self.deletion_dialog(ctx);
         self.sidebar_section_confirmation(ctx);
         self.task_attachment_confirmation(ctx);
+        self.task_operation_confirmation(ctx);
         self.spotlight(ctx);
         self.task_watch_source();
         self.menu_windows(ctx);
         self.cancel_git_open_for_file_navigation();
         self.remember_navigation();
         self.refresh_menu(ctx);
+        self.update_attention_dock();
         if self.screenshot.is_some() && self.frames == 25 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -2235,6 +2326,10 @@ impl eframe::App for Pui {
         if !self.demo && self.screenshot.is_none() {
             self.checkpoint_chats();
             self.save_workspace_layouts();
+            self.changes.review_comments.save_checkpoint(storage);
+            if let Some(wrap) = diff_viewer::wrap_preference::get(&self.ctx) {
+                self.prefs.diff_wrap = wrap;
+            }
             eframe::set_value(
                 storage,
                 "attention-v1",
@@ -2269,6 +2364,7 @@ impl eframe::App for Pui {
         Duration::from_secs(10)
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.attention_dock.release();
         self.workspace_rx = None;
         self.diff_rx = None;
         self.changes.cancel_git_read();

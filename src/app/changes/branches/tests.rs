@@ -64,6 +64,57 @@ fn text(output: &egui::FullOutput, needle: &str) -> bool {
     output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text.contains(needle)))
 }
 #[test]
+fn closed_native_trigger_does_not_capture_a_foreign_popup_or_modal() {
+    let ctx = egui::Context::default();
+    let mut changes = Changes::default();
+    changes.bind(Path::new("/branch-fixture"), "chat");
+    for modal in [false, true] {
+        let foreign = egui::Id::new("branch-foreign-owner");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.interact(ui.max_rect(), trigger_id(), Sense::click());
+            });
+            if modal {
+                prompt_ui::modal(ctx, foreign, 280.0, |ui| {
+                    prompt_ui::heading(ui, "Information", "Foreign owner");
+                });
+            }
+        });
+        if !modal {
+            egui::Popup::open_id(&ctx, foreign);
+        }
+        ctx.memory_mut(|memory| {
+            memory.request_focus_with_filter(
+                trigger_id(),
+                egui::EventFilter {
+                    escape: true,
+                    ..Default::default()
+                },
+            )
+        });
+        let events = vec![
+            key(egui::Key::Enter, egui::Modifiers::COMMAND),
+            key(egui::Key::Escape, egui::Modifiers::NONE),
+        ];
+        let _ = ctx.run(
+            egui::RawInput {
+                events: events.clone(),
+                ..Default::default()
+            },
+            |ctx| {
+                let before = ctx.input(|input| input.events.clone());
+                changes.branch_inputs(ctx, true, &workspace());
+                assert_eq!(ctx.input(|input| input.events.clone()), before);
+                assert_eq!(ctx.memory(|memory| memory.focused()), Some(trigger_id()));
+                if !modal {
+                    assert!(egui::Popup::is_id_open(ctx, foreign));
+                }
+            },
+        );
+        egui::Popup::close_all(&ctx);
+    }
+}
+#[test]
 fn explicit_demo_uses_actual_popup_with_synthetic_notice_and_no_git_worker() {
     use crate::app::files::tests::frame;
     let ctx = egui::Context::default();

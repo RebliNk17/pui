@@ -2,6 +2,7 @@
 use super::*;
 mod chrome;
 mod navigation;
+pub(super) mod wrap_preference;
 pub(super) use chrome::FileNavigation;
 pub(super) use navigation::{Document, Navigation, demo as demo_hunks, demo_wrap};
 
@@ -34,7 +35,7 @@ pub(super) fn contents_with_review(
     ui: &mut egui::Ui,
     document: &mut Document,
     files: Option<&FileNavigation>,
-    comments: Option<&mut changes::review_comments::Comments>,
+    mut comments: Option<&mut changes::review_comments::Comments>,
 ) -> chrome::Action {
     let Document(path, diff, navigation, recorded) = document;
     let ctx = ui.ctx().clone();
@@ -155,7 +156,7 @@ pub(super) fn contents_with_review(
             if let Some(warning) = files.and_then(|files| files.warning.as_ref()) {
                 ui.add(egui::Label::new(theme::small(ui, warning)).wrap());
             }
-            if let Some(comments) = comments {
+            if let Some(comments) = comments.as_deref_mut() {
                 comments.show(ui, path, diff, *recorded, navigation);
             }
         });
@@ -174,6 +175,7 @@ pub(super) fn contents_with_review(
             egui::ScrollArea::vertical().id_salt(("diff-review-lines",path.as_str())).auto_shrink([false,false]).show(ui,|ui| {
                 navigation.layout_width(ui.available_width());
                 if empty {
+                    if let Some(comments)=comments.as_deref_mut(){comments.clear_markers();}
                     egui::Frame::new().inner_margin(egui::Margin::symmetric(16,24)).show(ui,|ui| {
                         ui.set_max_width(340.0_f32.min(ui.available_width()));
                         ui.horizontal(|ui| {
@@ -186,7 +188,11 @@ pub(super) fn contents_with_review(
 
                     });
                 } else {
-                    let id=changes::numbered_diff_target(ui,path,diff,*recorded,navigation.take_target(),navigation.wrap());
+                    let target=navigation.take_target();
+                    let wrap=navigation.wrap();
+                    let id=changes::numbered_diff_annotated(ui,path,diff,*recorded,target,wrap,|ui,response,galley| {
+                        if let Some(comments)=comments.as_deref_mut() {comments.show_markers(ui,response,galley,path,*recorded,navigation);}
+                    });
                     navigation.register(5,id);
                 }
             });

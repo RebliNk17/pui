@@ -385,6 +385,7 @@ impl Pui {
                             self.show_archived = !self.show_archived;
                         }
                     });
+                self.finish_chat_section_drag(ctx);
             });
         if let Some(action) = action {
             match action {
@@ -500,6 +501,7 @@ impl Pui {
         }
         let colors = theme::palette(ui.ctx());
         let selected = branch.active(self);
+        let unread = self.sidebar_unread(branch);
         let deleting = branch
             .path
             .as_deref()
@@ -577,8 +579,13 @@ impl Pui {
                     target => {
                         let (row, response) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), row_height),
-                            Sense::click(),
+                            if depth==0 && matches!(target,sidebar_tree::Target::Agent(_)){Sense::click_and_drag()}else{Sense::click()},
                         );
+                        let response = if unread {
+                            response.on_hover_text("Unread observed update · this chat only. Viewing the sidebar does not mark it read.")
+                        } else {
+                            response
+                        };
                         if selected || response.hovered() || task_row {
                             ui.painter().rect_filled(
                                 row,
@@ -622,11 +629,12 @@ impl Pui {
                             ui.interact(icon_rect, ui.id().with("branch-status"), Sense::hover())
                                 .on_hover_text(&branch.status);
                         }
+                        attention::paint_unread(ui, row, title_y, unread);
                         let title_elided = paint_text(
                             ui,
                             &branch.title,
-                            row.min + egui::vec2(21.0, title_y),
-                            (row.width() - 96.0).max(1.0),
+                            row.min + egui::vec2(32.0, title_y),
+                            (row.width() - 107.0).max(1.0),
                             FontId::proportional(if compact { 11.5 } else { 12.0 }),
                             colors.text,
                         );
@@ -646,8 +654,8 @@ impl Pui {
                                 } else {
                                     &branch.status
                                 },
-                                row.min + egui::vec2(21.0, 30.0),
-                                row.width() - 32.0,
+                                row.min + egui::vec2(32.0, 30.0),
+                                row.width() - 43.0,
                                 FontId::proportional(10.0),
                                 colors.dim,
                             );
@@ -657,7 +665,7 @@ impl Pui {
                                 egui::WidgetType::SelectableLabel,
                                 true,
                                 selected,
-                                format!("{} · {}", branch.title, branch.status),
+                                format!("{} · {}{}", branch.title, branch.status, if unread { " · Unread observed update" } else { "" }),
                             )
                         });
                         if deleting {
@@ -795,6 +803,7 @@ impl Pui {
                             egui::Popup::menu(menu).show(&mut contents);
                             response.context_menu(&mut contents);
                         }
+                        if let Some(id)=&unsaved_root{self.runtime_chat_section_source(ui,id,&response,menu_rect,toggle_rect);}
                         let keyboard = response.has_focus()
                             && ui.input_mut(|i| {
                                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -803,8 +812,8 @@ impl Pui {
                         if title_elided {
                             ui.interact(
                                 egui::Rect::from_min_max(
-                                    row.min + egui::vec2(28.0, 0.0),
-                                    egui::pos2(row.right() - 28.0, row.bottom()),
+                                    row.min + egui::vec2(32.0, 0.0),
+                                    egui::pos2(row.right() - 75.0, row.bottom()),
                                 ),
                                 ui.id().with("branch-title"),
                                 Sense::hover(),
@@ -980,6 +989,7 @@ impl Pui {
         let colors = crate::theme::palette(ui.ctx());
         let s = &self.sessions[index];
         let path = s.path.clone();
+        let unread = self.saved_unread(&path);
         let deleting = self.deletion.deleting_chat(&path);
         let selected = !self.kanban.open
             && !self.automation.open
@@ -1030,13 +1040,18 @@ impl Pui {
             if editing || deleting {
                 Sense::hover()
             } else {
-                Sense::click()
+                Sense::click_and_drag()
             },
         );
         let response = if deleting {
             response.on_hover_text("Deleting chat… You can keep working in other chats.")
         } else {
             response.on_hover_cursor(egui::CursorIcon::PointingHand)
+        };
+        let response = if unread {
+            response.on_hover_text("Unread observed update · this chat only. Viewing the sidebar does not mark it read.")
+        } else {
+            response
         };
         if selected || response.hovered() {
             ui.painter().rect_filled(
@@ -1065,6 +1080,7 @@ impl Pui {
             )
             .on_hover_text(status);
         }
+        attention::paint_unread(ui, rect, indicator.y - rect.top(), unread);
         if editing {
             let id = egui::Id::new(("chat-rename", &path));
             let focused = ui.memory(|m| m.has_focus(id));
@@ -1075,8 +1091,8 @@ impl Pui {
                 focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             let edit = ui.put(
                 egui::Rect::from_min_size(
-                    rect.min + egui::vec2(22.0, 3.0),
-                    egui::vec2((rect.width() - 52.0).max(20.0), 24.0),
+                    rect.min + egui::vec2(32.0, 3.0),
+                    egui::vec2((rect.width() - 62.0).max(20.0), 24.0),
                 ),
                 egui::TextEdit::singleline(&mut self.rename_text)
                     .id(id)
@@ -1102,16 +1118,16 @@ impl Pui {
             let elided = paint_text(
                 ui,
                 &title,
-                rect.min + egui::vec2(21.0, if compact { rect.height() / 2.0 } else { 15.0 }),
-                (rect.width() - 96.0).max(1.0),
+                rect.min + egui::vec2(32.0, if compact { rect.height() / 2.0 } else { 15.0 }),
+                (rect.width() - 107.0).max(1.0),
                 FontId::proportional(12.0),
                 colors.text,
             );
             if elided && !deleting {
                 ui.interact(
                     egui::Rect::from_min_max(
-                        rect.min + egui::vec2(24.0, 0.0),
-                        egui::pos2(rect.right() - 30.0, rect.bottom()),
+                        rect.min + egui::vec2(32.0, 0.0),
+                        egui::pos2(rect.right() - 75.0, rect.bottom()),
                     ),
                     ui.make_persistent_id(("chat-title", &path)),
                     Sense::hover(),
@@ -1141,8 +1157,8 @@ impl Pui {
                         format!("Saved · {}", sessions::age(s.modified))
                     }
                 ),
-                rect.min + egui::vec2(24.0, 33.0),
-                rect.width() - 36.0,
+                rect.min + egui::vec2(32.0, 33.0),
+                rect.width() - 44.0,
                 FontId::proportional(10.5),
                 colors.dim,
             );
@@ -1254,6 +1270,14 @@ impl Pui {
             ),
             Vec2::splat(20.0),
         );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(("chat-section-source", &path)),
+                response.interact_rect,
+            )
+        });
+        self.chat_section_source(ui, &path, &response, menu_rect, disclosure_rect);
         if response.clicked()
             && !(disclosure.is_some()
                 && disclosure_rect

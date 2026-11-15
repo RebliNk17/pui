@@ -81,7 +81,7 @@ fn delimited_source_selected_characters_keep_exact_line_origin_and_skip_row_numb
         "Kept\n\n[Context: selected.csv:2–2 · selected source]\nchosen\n[/Context]"
     );
     assert_eq!(
-        preview.source,
+        preview.source.as_str(),
         "first,row\r\nAlpha,\"chosen\"\r\nlast,row\r\n"
     );
 }

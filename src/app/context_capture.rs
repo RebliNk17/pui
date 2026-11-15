@@ -30,6 +30,27 @@ struct Snippet {
 }
 const MAX_BYTES: usize = 24 * 1024;
 
+/// Bind file-render captures to the exact chat before any later conversation input.
+pub(in crate::app) fn bind_file_owner(ctx: &egui::Context, root: &std::path::Path, session: &str) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("pui-file-capture-owner"),
+            (root.to_path_buf(), session.to_owned(), pass),
+        )
+    });
+}
+pub(in crate::app) fn queue_file_selection(ctx: &egui::Context, label: &str, source: &str) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    let owner = ctx.data(|data| {
+        data.get_temp::<(PathBuf, String, u64)>(egui::Id::new("pui-file-capture-owner"))
+    });
+    let Some((root, session, _)) = owner.filter(|(_, _, bound)| *bound == pass) else {
+        return false;
+    };
+    queue_review(ctx, &root, &session, label, source);
+    true
+}
 pub(crate) fn queue(ctx: &egui::Context, label: &str, source: &str) {
     queue_parts(ctx, label, std::iter::once(source));
 }

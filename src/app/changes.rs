@@ -3,6 +3,7 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 mod branches;
 pub(super) mod git_files;
+mod inline_review;
 pub(super) mod lines;
 pub(super) mod review_comments;
 mod review_files;
@@ -25,6 +26,7 @@ pub(super) struct Changes {
     query: String,
     identity: (PathBuf, String),
     open_rows: BTreeSet<(bool, String)>,
+    inline: inline_review::Inline,
     diffs: BTreeMap<String, Diff>,
     refresh: bool,
     pub(super) review: Option<diff_viewer::Document>,
@@ -84,6 +86,14 @@ impl Changes {
         workspace: &Workspace,
     ) {
         self.branch_inputs(ctx, visible, workspace);
+        if visible {
+            self.inline_inputs(ctx, outputs, revision, workspace);
+        }
+        if !visible || self.review.is_none() {
+            self.review_comments.clear_markers();
+            self.review_comments.clear_recorded_targets();
+            self.review_comments.cancel_confirmation();
+        }
         if self
             .review_comments
             .bind(&self.identity.0, &self.identity.1, revision)
@@ -123,6 +133,7 @@ impl Changes {
         if self.identity.0 != cwd || session_changed {
             self.identity = (cwd.to_path_buf(), session.to_owned());
             self.open_rows.clear();
+            self.inline = Default::default();
             self.diffs.clear();
             self.query.clear();
             self.review = None;
@@ -147,6 +158,7 @@ impl Changes {
 
     pub(super) fn invalidate(&mut self) {
         self.stale_review_comments();
+        self.inline.clear();
         self.diffs.clear();
         self.git_files.stale = true;
         self.cancel_git_read();
@@ -172,6 +184,8 @@ impl Changes {
         {
             document.2.stale_comments();
         }
+        self.bind_inline_revision(ctx, outputs, revision);
+        self.bind_inline_git(workspace);
         self.poll_git_files(ctx, workspace);
         self.poll_inline_diffs();
         self.poll_branches(workspace);
@@ -276,6 +290,12 @@ impl Changes {
                 self.review_comments.stale(Some(recorded));
                 self.review_comments.source_root = source_root.cloned();
             }
+            self.review_comments.prepare_recorded_targets(
+                outputs,
+                revision,
+                self.review.as_ref().unwrap(),
+                self.review_files.available(revision),
+            );
             let action = diff_viewer::contents_with_review(
                 ui,
                 self.review.as_mut().unwrap(),
@@ -285,7 +305,21 @@ impl Changes {
             if action.back {
                 self.review = None;
                 self.git_files = Default::default();
+                self.review_comments.clear_recorded_targets();
                 context_capture::clear_source(ui.ctx());
+            } else if recorded
+                && self.review_files.available(revision)
+                && let Some((position, document)) = self.review_comments.take_recorded_open(
+                    ui.ctx(),
+                    outputs,
+                    revision,
+                    self.review.as_ref().unwrap(),
+                )
+            {
+                self.cancel_git_read();
+                self.review_files.set_position(position);
+                self.review = Some(document);
+                ui.ctx().request_repaint();
             } else if let Some(next) = action.next {
                 if recorded {
                     self.step_recorded_file(ui.ctx(), outputs, revision, next);
@@ -295,6 +329,7 @@ impl Changes {
             }
             return;
         }
+        self.review_comments.clear_recorded_targets();
         egui::TopBottomPanel::top("changes-controls")
             .frame(egui::Frame::new().inner_margin(16))
             .show_inside(ui, |ui| {
@@ -372,6 +407,7 @@ impl Changes {
                                 },
                             ));
                         });
+                        self.inline_capacity(ui);
                         let query = self.query.trim().to_lowercase();
                         let mut count = 0;
                         match self.source {
@@ -393,7 +429,7 @@ impl Changes {
                                         ui.push_id(
                                             (&self.identity, "recorded-diff", &file.path),
                                             |ui| {
-                                                numbered_diff(ui, &file.path, &file.diff, true);
+                                                Self::inline_diff(ui, &mut self.inline, &self.identity, &file.path, &file.diff, true);
                                             },
                                         );
                                     }
@@ -408,6 +444,13 @@ impl Changes {
                                     count += 1;
                                     if self.header(ui, &file.path, &file.added, &file.removed, true)
                                     {
+                                        if file.status == "??" {
+                                            egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                                                ui.label(theme::small(ui, "Untracked file"));
+                                                ui.add(egui::Label::new(theme::small(ui, "This file isn’t tracked by Git, so there’s no diff to show.")).wrap());
+                                            });
+                                            continue;
+                                        }
                                         if !self.diffs.contains_key(&file.path) {
                                             self.load_diff(ui.ctx(), &workspace.root, file.clone());
                                         }
@@ -427,9 +470,11 @@ impl Changes {
                                                 ui.push_id(
                                                     (&self.identity, "working-diff", &file.path),
                                                     |ui| {
-                                                        numbered_diff(
-                                                            ui, &file.path, content, false,
-                                                        );
+                                                        if content.trim().is_empty() {
+                                                            ui.label(theme::small(ui, "No changes to display."));
+                                                        } else {
+                                                            Self::inline_diff(ui, &mut self.inline, &self.identity, &file.path, content, false);
+                                                        }
                                                     },
                                                 );
                                             }
@@ -460,6 +505,7 @@ impl Changes {
                         }
                     });
             });
+        self.finish_inline_inputs(ui.ctx());
     }
 
     fn header(
@@ -474,19 +520,33 @@ impl Changes {
         let key = (git, path.to_owned());
         let mut open = self.open_rows.contains(&key);
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), 42.0));
+        let allowed = (open || self.can_expand_inline(path))
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.ctx().memory(|memory| memory.top_modal_layer().is_none());
         let response = ui
-            .interact(
-                rect,
-                ui.make_persistent_id(("change-row", &key)),
-                Sense::click(),
-            )
+            .add_enabled_ui(allowed, |ui| {
+                ui.interact(rect, self.inline_header_id(git, path), Sense::click())
+            })
+            .inner
             .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if !open && !self.can_expand_inline(path) {
+            response
+                .clone()
+                .on_disabled_hover_text(if path.len() > 4096 {
+                    "Inline review unavailable above the 4 KiB path limit."
+                } else {
+                    "Close another expanded file (32 max)."
+                });
+        }
+        self.inline_header_input(ui.ctx(), &response);
         if response.clicked() {
             open = !open;
             if open {
                 self.open_rows.insert(key);
             } else {
                 self.open_rows.remove(&key);
+                self.inline.close(&key);
+                inline_review::Inline::clear_selection(ui.ctx());
                 if git {
                     self.diffs.remove(path); // dropping pending delivery cancels the child
                 }
@@ -581,6 +641,7 @@ impl Changes {
     ) {
         let path = file.path.clone();
         if let Some(rx) = git_files::start_inline(ctx, root, file) {
+            self.inline.reset_git(&path);
             self.diffs.insert(
                 path,
                 Diff {
@@ -593,6 +654,7 @@ impl Changes {
 }
 
 /// Selectable source with quiet line numbers and full-width addition/deletion backgrounds.
+#[cfg(test)]
 pub(super) fn numbered_diff(ui: &mut egui::Ui, path: &str, source: &str, recorded: bool) {
     let _ = numbered_diff_target(ui, path, source, recorded, None, false);
 }
@@ -604,6 +666,18 @@ pub(super) fn numbered_diff_target(
     recorded: bool,
     target: Option<usize>,
     wrap: bool,
+) -> egui::Id {
+    numbered_diff_annotated(ui, path, source, recorded, target, wrap, |_, _, _| {})
+}
+
+pub(super) fn numbered_diff_annotated(
+    ui: &mut egui::Ui,
+    path: &str,
+    source: &str,
+    recorded: bool,
+    target: Option<usize>,
+    wrap: bool,
+    mut annotate: impl FnMut(&mut egui::Ui, &egui::Response, &egui::Galley),
 ) -> egui::Id {
     let colors = theme::palette(ui.ctx());
     ui.push_id(("numbered-diff", path, recorded), |ui| {
@@ -710,6 +784,7 @@ pub(super) fn numbered_diff_target(
                 });
             }
             ui.painter().set(background, egui::Shape::Vec(shapes));
+            annotate(ui, &response, &galley);
         });
         // The inner horizontal area consumes both scroll targets. Issue the
         // vertical reveal only after leaving it so the enclosing area receives it.

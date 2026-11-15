@@ -56,6 +56,7 @@ impl Pui {
             || self.tasks.job.is_some()
             || self.tasks.revalidate_claim.is_some()
             || self.tasks.attachment.pending.is_some()
+            || self.task_operations_busy()
             || self
                 .tasks
                 .retiring

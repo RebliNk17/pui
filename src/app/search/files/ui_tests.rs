@@ -10,11 +10,13 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         repeat: false,
     }
 }
-fn frame(app: &mut Pui, size: Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
+pub(super) fn frame(app: &mut Pui, size: Vec2, events: Vec<egui::Event>) -> egui::FullOutput {
     let ctx = app.ctx.clone();
     let mut native = eframe::Frame::_new_kittest();
+    let time = ctx.input(|input| input.time) + 0.016;
     ctx.run(
         egui::RawInput {
+            time: Some(time),
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             events,
             ..Default::default()

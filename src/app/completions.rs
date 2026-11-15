@@ -11,9 +11,18 @@ use std::sync::{
 
 const LOCAL: &[(&str, &str)] = &[
     ("new", "Start a new chat"),
+    ("btw", "Independent side chat; optional question draft"),
+    (
+        "main",
+        "Return from a side chat to its originating conversation",
+    ),
     ("model", "Choose model and thinking effort"),
     ("settings", "Open Pui settings"),
     ("compact", "Compact context; optional instructions"),
+    (
+        "reload",
+        "Reload resources in this chat; keeps history and draft",
+    ),
     ("stop", "Stop the agent and clear waiting messages"),
     ("files", "Toggle workspace files"),
     ("browser", "Toggle Chromium browser"),
@@ -160,6 +169,9 @@ impl Drop for View {
     }
 }
 impl View {
+    pub(super) fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
     fn reset_search(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -357,6 +369,7 @@ impl Pui {
             .clamp(180.0, if file { 480.0 } else { 440.0 })
             .min((ctx.screen_rect().width() - 16.0).max(0.0));
         let mut chosen = None;
+        let mut reload = false;
         let mut open = true;
         let popup = egui::Popup::new(
             egui::Id::new("composer-completions"),
@@ -406,6 +419,22 @@ impl Pui {
                 ));
             }
             ui.separator();
+            if !file
+                && self
+                    .completions
+                    .token
+                    .as_ref()
+                    .is_some_and(|t| t.query.starts_with("ski"))
+                && prompt_ui::button(
+                    ui,
+                    "Reload chat resources…",
+                    prompt_ui::Button::Secondary,
+                    !self.resource_reload.pending(),
+                )
+                .clicked()
+            {
+                reload = true;
+            }
             ui.add(
                 egui::Label::new(theme::small(
                     ui,
@@ -422,6 +451,9 @@ impl Pui {
         if !open {
             self.completions.dismissed = true;
         }
+        if reload {
+            self.request_resource_reload();
+        }
     }
     /// TUI built-ins do not execute over RPC. Handle supported equivalents here;
     /// leave extension commands, prompt templates and skills to Pi.
@@ -437,6 +469,15 @@ impl Pui {
             return false;
         }
         let args = args.trim().to_owned();
+        if name == "reload" {
+            if !args.is_empty() {
+                self.state.error =
+                    Some("/reload does not take arguments. Your draft was kept.".into());
+            } else {
+                self.request_resource_reload();
+            }
+            return true;
+        }
         if !LOCAL.iter().any(|(n, _)| *n == name) {
             if self.state.commands.iter().any(|c| c.name == name) || name.starts_with("pui-") {
                 return false;
@@ -461,10 +502,18 @@ impl Pui {
             self.state.error = Some("Wait for the current operation to finish before running this command. Your draft was kept.".into());
             return true;
         }
+        if name == "btw" {
+            self.start_side_chat(&args);
+            return true;
+        }
         if name != "compact" && !args.is_empty() {
             self.state.error = Some(format!(
                 "/{name} does not take arguments. Your draft was kept."
             ));
+            return true;
+        }
+        if name == "main" {
+            self.return_side_chat();
             return true;
         }
         let name = name.to_owned();

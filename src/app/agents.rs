@@ -82,6 +82,7 @@ pub(super) struct Chat {
     transcript: Transcript,
     ultra: bool,
     ready: bool,
+    resource_reload: resource_reload::Reload,
     dialog_text: String,
     questions: questions::View,
     current_dialog: String,
@@ -96,6 +97,8 @@ impl Chat {
     }
     pub(super) fn deletion_busy(&self) -> bool {
         self.loading
+            || self.resource_reload.pending()
+            || self.resource_reload.confirming()
             || self.history_pending.is_some()
             || self.interrupt.is_some()
             || !self.deliveries.is_empty()
@@ -374,6 +377,7 @@ impl Pui {
             transcript: std::mem::take(&mut self.transcript),
             ultra: std::mem::take(&mut self.ultracode),
             ready: std::mem::take(&mut self.ultracode_ready),
+            resource_reload: std::mem::take(&mut self.resource_reload),
             dialog_text: std::mem::take(&mut self.dialog_text),
             questions: std::mem::take(&mut self.questions),
             current_dialog: std::mem::take(&mut self.current_dialog),
@@ -404,6 +408,7 @@ impl Pui {
         self.transcript = chat.transcript;
         self.ultracode = chat.ultra;
         self.ultracode_ready = chat.ready;
+        self.resource_reload = chat.resource_reload;
         self.dialog_text = chat.dialog_text;
         self.questions = chat.questions;
         self.current_dialog = chat.current_dialog;
@@ -485,7 +490,10 @@ impl Pui {
         self.put_chat(next);
         self.prefs.cwd = self.agents.nodes[id].cwd.clone();
         self.enter_session_layout();
-        if self.client.is_none() && self.agents.nodes[id].path.is_some() {
+        if self.client.is_none()
+            && !self.resource_reload.pending()
+            && self.agents.nodes[id].path.is_some()
+        {
             if self.agents.nodes[id].parent.is_some() {
                 self.resume_agent();
             } else {
@@ -501,6 +509,15 @@ impl Pui {
     }
     /// Reconnect a persisted automation owner without navigating or sending a prompt.
     pub(super) fn reconnect_job_owner(&mut self, id: &str) -> Result<(), String> {
+        if (id == self.agents.active && self.resource_reload.pending())
+            || self
+                .agents
+                .parked
+                .get(id)
+                .is_some_and(|c| c.resource_reload.pending())
+        {
+            return Err("Creator resources are reloading; delivery remains pending.".into());
+        }
         if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
             return Err("Creator access is changing; wait for its workspace to be ready.".into());
         }
@@ -565,6 +582,9 @@ impl Pui {
         Ok(())
     }
     pub(super) fn resume_agent(&mut self) -> bool {
+        if self.resource_reload.pending() {
+            return true;
+        }
         if self
             .agents
             .permission_changes
@@ -1001,6 +1021,15 @@ impl Pui {
         self.agents.mail.values().any(|(target, _)| target == id)
     }
     pub(super) fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
+        if (id == self.agents.active && self.resource_reload.pending())
+            || self
+                .agents
+                .parked
+                .get(id)
+                .is_some_and(|c| c.resource_reload.pending())
+        {
+            return Err("Target resources are reloading; retry when ready.".into());
+        }
         if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
             return Err("Target agent is exiting or changing access; retry when ready.".into());
         }

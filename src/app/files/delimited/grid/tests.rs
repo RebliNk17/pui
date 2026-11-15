@@ -1,7 +1,10 @@
 use super::*;
 
 const PATH: &str = "keyboard.csv";
-pub(super) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+pub(in crate::app::files::delimited) fn key(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> egui::Event {
     egui::Event::Key {
         key,
         modifiers,
@@ -10,7 +13,7 @@ pub(super) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         physical_key: None,
     }
 }
-pub(super) fn frame(
+pub(in crate::app::files::delimited) fn frame(
     ctx: &egui::Context,
     preview: &mut Preview,
     size: Vec2,
@@ -32,7 +35,10 @@ pub(super) fn frame(
         },
     )
 }
-pub(super) fn setup(source: String, header: bool) -> (egui::Context, Preview) {
+pub(in crate::app::files::delimited) fn setup(
+    source: String,
+    header: bool,
+) -> (egui::Context, Preview) {
     let ctx = egui::Context::default();
     theme::install(&ctx);
     let mut preview = Preview::new(source, b',');
@@ -104,7 +110,7 @@ fn arrows_repeat_and_home_end_navigate_original_records_without_editing_values()
                 key(egui::Key::Delete, egui::Modifiers::NONE),
             ],
         );
-        assert_eq!(preview.source, source);
+        assert_eq!(preview.source.as_str(), source);
     }
 }
 #[test]
@@ -256,6 +262,27 @@ fn keyboard_focus_can_enter_by_tab_or_button_and_escape_or_tab_leaves_without_tr
     );
     assert!(!ctx.memory(|memory| memory.has_focus(preview.grid.id(Path::new(PATH)))));
     assert!(output.platform_output.commands.is_empty());
+    frame(&ctx, &mut preview, size, vec![]);
+    let id = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(("table-toolbar", 4usize))))
+        .unwrap();
+    let pos = ctx.read_response(id).unwrap().rect.center();
+    for pressed in [true, false] {
+        frame(
+            &ctx,
+            &mut preview,
+            size,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
     let output = frame(&ctx, &mut preview, size, vec![]);
     let pos = crate::app::files::tests::text(&output, "Navigate cells");
     for pressed in [true, false] {

@@ -33,6 +33,11 @@ fn header(app: &Pui) -> bool {
 }
 fn toggle(app: &mut Pui) {
     let ctx = app.ctx.clone();
+    let id = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(("table-toolbar", 4usize))))
+        .unwrap();
+    let pos = ctx.read_response(id).unwrap().rect.center();
+    file_tests::click(&ctx, app, pos);
     let out = file_tests::frame(&ctx, app, vec![]);
     let pos = file_tests::text(&out, "First record is header");
     file_tests::click(&ctx, app, pos);
@@ -244,10 +249,26 @@ fn narrow_theme_zoom_toggle_keeps_first_record_visible_and_settles_with_metadata
                     },
                 )
             };
-            let mut out = draw(vec![]);
+            draw(vec![]);
             for _ in 0..4 {
-                out = draw(vec![]);
+                draw(vec![]);
             }
+            let id = ctx
+                .data(|data| data.get_temp::<egui::Id>(egui::Id::new(("table-toolbar", 4usize))))
+                .unwrap();
+            let pos = ctx.read_response(id).unwrap().rect.center();
+            for pressed in [true, false] {
+                draw(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            let mut out = draw(vec![]);
             let pos = file_tests::text(&out, "First record is header");
             for pressed in [true, false] {
                 draw(vec![

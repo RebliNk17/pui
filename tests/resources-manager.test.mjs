@@ -3,11 +3,32 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 import { manage } from '../scripts/resources.mjs';
 let sdkPath = process.env.PUI_PI_SDK;
 if (!sdkPath) { const agent = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), '.pi/agent'); try { sdkPath = path.join(agent, 'install/releases', fs.readFileSync(path.join(agent, 'install/current-version'), 'utf8').trim(), 'node_modules/@earendil-works/pi-coding-agent/dist/index.js'); } catch {} }
 const available = sdkPath && fs.existsSync(sdkPath);
+const engineering = fileURLToPath(new URL('../assets/pui-engineering/', import.meta.url));
+const engineeringNames = ['clarify', 'define', 'tdd', 'debug', 'code-review'];
+
+test('Pui Engineering ships only original explicit-invocation skill files, with no executable package content', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(engineering, 'package.json')));
+  assert.equal(manifest.name, 'pui-engineering');
+  assert.deepEqual(manifest.pi, { skills: ['skills'], extensions: [], prompts: [], themes: [] });
+  assert.equal(manifest.dependencies, undefined);
+  assert.equal(manifest.scripts, undefined);
+  assert.deepEqual(fs.readdirSync(path.join(engineering, 'skills')).sort(), [...engineeringNames].sort());
+  for (const name of engineeringNames) {
+    const dir = path.join(engineering, 'skills', name);
+    assert.deepEqual(fs.readdirSync(dir), ['SKILL.md']);
+    const content = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
+    assert.ok(content.startsWith(`---\nname: ${name}\ndescription: `));
+    assert.match(content, /disable-model-invocation: true/);
+    assert.ok(Buffer.byteLength(content) < 65536);
+    assert.doesNotMatch(content, /Call the Skill tool|mattpocock|aihero\.dev/);
+  }
+});
 async function fixture() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pui-resource-manager-')));
   const agentDir = path.join(root, 'agent'), cwd = path.join(root, 'project');
@@ -23,6 +44,68 @@ async function fixture() {
   const apply = (catalog, operations, review) => manage({ action: 'apply', revision: catalog.revision, operations, token: review.token }, env);
   return { root, agentDir, cwd, env, list, preview, apply };
 }
+
+test('Pui Engineering previews do not enable skills; reviewed registration, explicit loading and disable use real Pi', { skip: !available }, async () => {
+  const f = await fixture();
+  const sdk = f.env.sdk;
+  const parsed = sdk.loadSkillsFromDir({ dir: path.join(engineering, 'skills'), source: 'pui' });
+  assert.deepEqual(parsed.diagnostics, []);
+  assert.deepEqual(parsed.skills.map(s => s.name).sort(), [...engineeringNames].sort());
+  assert.ok(parsed.skills.every(s => s.disableModelInvocation));
+  assert.equal(sdk.formatSkillsForPrompt(parsed.skills), '');
+  let catalog = await f.list();
+  assert.ok(!catalog.items.some(i => engineeringNames.includes(i.name)));
+  const operations = engineeringNames.map(name => {
+    const source = path.join(engineering, 'skills', name, 'SKILL.md');
+    return { action: 'register', kind: 'skills', scope: 'project', source, contentHash: createHash('sha256').update(fs.readFileSync(source)).digest('hex') };
+  });
+  const review = await f.preview(catalog, operations);
+  assert.equal(review.steps.length, 5);
+  assert.ok(!fs.existsSync(path.join(f.cwd, '.pi/settings.json')));
+  assert.equal((await f.apply(catalog, operations, review)).complete, true);
+  catalog = await f.list();
+  assert.equal(catalog.items.filter(i => engineeringNames.includes(i.name) && i.enabled).length, 5);
+  const load = async () => {
+    const settingsManager = sdk.SettingsManager.create(f.cwd, f.agentDir, { projectTrusted: true });
+    const loader = new sdk.DefaultResourceLoader({ cwd: f.cwd, agentDir: f.agentDir, settingsManager, noExtensions: true, noContextFiles: true, noThemes: true, noPromptTemplates: true });
+    await loader.reload();
+    return loader.getSkills();
+  };
+  const loaded = await load();
+  assert.deepEqual(loaded.diagnostics, []);
+  assert.equal(loaded.skills.filter(s => engineeringNames.includes(s.name)).length, 5);
+  const tdd = catalog.items.find(i => i.name === 'tdd');
+  const off = [{ action: 'select', id: tdd.id, scope: 'project', state: 'off' }];
+  assert.equal((await f.apply(catalog, off, await f.preview(catalog, off))).complete, true);
+  assert.equal((await f.list()).items.find(i => i.name === 'tdd').enabled, false);
+  assert.ok(!(await load()).skills.some(s => s.name === 'tdd'));
+  assert.ok(fs.existsSync(tdd.path));
+});
+
+test('bundled content checks reject changed files, invalid hashes and untrusted scope without activation', { skip: !available }, async () => {
+  const f = await fixture();
+  const source = path.join(f.root, 'tdd', 'SKILL.md');
+  fs.mkdirSync(path.dirname(source));
+  fs.copyFileSync(path.join(engineering, 'skills/tdd/SKILL.md'), source);
+  const contentHash = createHash('sha256').update(fs.readFileSync(source)).digest('hex');
+  const operations = [{ action: 'register', kind: 'skills', scope: 'user', source, contentHash }];
+  let catalog = await f.list();
+  const review = await f.preview(catalog, operations);
+  fs.appendFileSync(source, '\nChanged after review.\n');
+  await assert.rejects(f.apply(catalog, operations, review), /Skill contents changed/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'settings.json'))).skills, undefined);
+  operations[0].contentHash = 'invalid';
+  await assert.rejects(f.preview(catalog, operations), /Invalid resource content hash/);
+  fs.unlinkSync(source);
+  fs.symlinkSync(path.join(engineering, 'skills/tdd/SKILL.md'), source);
+  operations[0].contentHash = contentHash;
+  await assert.rejects(f.preview(catalog, operations), /symlink/);
+  new f.env.sdk.ProjectTrustStore(f.agentDir).set(f.cwd, false);
+  catalog = await f.list();
+  operations[0] = { action: 'register', kind: 'skills', scope: 'project', source: path.join(engineering, 'skills/tdd/SKILL.md'), contentHash };
+  await assert.rejects(f.preview(catalog, operations), /not trusted/);
+  assert.ok(!fs.existsSync(path.join(f.cwd, '.pi/settings.json')));
+});
 
 test('native project inheritance, personal defaults, review tokens and reset are real Pi filters', { skip: !available }, async () => {
   const f = await fixture(); let catalog = await f.list(); let item = catalog.items.find(r => r.name === 'example');

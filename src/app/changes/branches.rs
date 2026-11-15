@@ -5,9 +5,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use workspace::branches::{Current, Snapshot};
+mod history;
 
 fn popup_id() -> egui::Id {
     egui::Id::new("changes-local-branches")
+}
+fn history_filter_id() -> egui::Id {
+    popup_id().with("history-filter")
 }
 fn search_id() -> egui::Id {
     popup_id().with("search")
@@ -73,6 +77,9 @@ pub(super) struct Branches {
     rows: Vec<egui::Id>,
     focus_search: bool,
     keys: Vec<egui::Event>,
+    history: history::History,
+    tabs: [Option<egui::Id>; 2],
+    tab_key: Option<bool>, // false branches, true history
     #[cfg(test)]
     requests: usize,
 }
@@ -102,6 +109,7 @@ impl Branches {
             self.requests += 1;
         }
         self.pending = None;
+        self.history = Default::default();
         self.owner = Some(owner.clone());
         self.snapshot = None;
         self.hits.clear();
@@ -135,6 +143,7 @@ impl Branches {
         }
     }
     fn poll(&mut self, owner: Option<Owner>) {
+        self.history.poll(owner.clone());
         if self.owner != owner && self.open {
             self.pending = None;
             self.snapshot = None;
@@ -264,16 +273,18 @@ impl Changes {
             self.branches.close(ctx, false);
             // A closed, keyboard-focused trigger owns modified activation too;
             // native clickable widgets otherwise synthesize Cmd-Enter clicks.
-            if ctx.memory(|memory| memory.focused()) == Some(trigger_id())
-                || self.branches.trigger_rect.is_some_and(|rect| {
-                    ctx.input(|input| {
-                        input.pointer.any_click()
-                            && input
-                                .pointer
-                                .interact_pos()
-                                .is_some_and(|pos| rect.contains(pos))
-                    })
-                })
+            if !egui::Popup::is_any_open(ctx)
+                && ctx.memory(|memory| memory.top_modal_layer().is_none())
+                && (ctx.memory(|memory| memory.focused()) == Some(trigger_id())
+                    || self.branches.trigger_rect.is_some_and(|rect| {
+                        ctx.input(|input| {
+                            input.pointer.any_click()
+                                && input
+                                    .pointer
+                                    .interact_pos()
+                                    .is_some_and(|pos| rect.contains(pos))
+                        })
+                    }))
             {
                 guard_trigger(ctx);
             }
@@ -288,7 +299,12 @@ impl Changes {
         let focused = ctx.memory(|memory| memory.focused());
         let row_focus =
             focused.and_then(|focused| branch.rows.iter().position(|id| *id == focused));
-        if focused != Some(search_id()) && focused != branch.refresh_id && row_focus.is_none() {
+        if !branch.history.active
+            && focused != Some(search_id())
+            && focused != branch.refresh_id
+            && row_focus.is_none()
+            && !branch.tabs.contains(&focused)
+        {
             branch.focus_search = true;
             ctx.memory_mut(|memory| memory.request_focus(search_id()));
         }
@@ -315,12 +331,21 @@ impl Changes {
                     }
                     egui::Key::Enter => {
                         if *pressed && !repeat && *modifiers == egui::Modifiers::NONE {
+                            branch.history.filter_key(focused);
+                            branch.history.detail_inputs(focused, *key);
+                            if let Some(tab) = focused.and_then(|focused| {
+                                branch.tabs.iter().position(|id| *id == Some(focused))
+                            }) {
+                                branch.tab_key = Some(tab == 1);
+                            }
                             branch.refresh_key |=
                                 branch.refresh_id.is_some() && focused == branch.refresh_id;
                             if let Some(position) = row_focus {
                                 branch.selected = position;
                             } else {
-                                branch.focus_search |= focused != branch.refresh_id;
+                                branch.focus_search |= !branch.history.active
+                                    && focused != branch.refresh_id
+                                    && !branch.tabs.contains(&focused);
                             }
                         }
                         false
@@ -333,8 +358,17 @@ impl Changes {
                         false
                     }
                     egui::Key::ArrowLeft | egui::Key::ArrowRight if modifiers.alt => false,
-                    egui::Key::Space if focused != Some(search_id()) => {
+                    egui::Key::Space
+                        if focused != Some(search_id()) && focused != Some(history_filter_id()) =>
+                    {
                         if *pressed && !repeat && *modifiers == egui::Modifiers::NONE {
+                            branch.history.filter_key(focused);
+                            branch.history.detail_inputs(focused, *key);
+                            if let Some(tab) = focused.and_then(|focused| {
+                                branch.tabs.iter().position(|id| *id == Some(focused))
+                            }) {
+                                branch.tab_key = Some(tab == 1);
+                            }
                             if let Some(position) = row_focus {
                                 branch.selected = position;
                             }
@@ -347,7 +381,7 @@ impl Changes {
                 }
             })
         });
-        if focused != Some(search_id()) {
+        if focused != Some(search_id()) && focused != Some(history_filter_id()) {
             ctx.input_mut(|input| {
                 input
                     .events
@@ -367,7 +401,7 @@ impl Changes {
                 }
             })
         });
-        if delta != 0 && !branch.hits.is_empty() {
+        if !branch.history.active && delta != 0 && !branch.hits.is_empty() {
             branch.selected = branch
                 .selected
                 .saturating_add_signed(delta)
@@ -497,8 +531,24 @@ impl Changes {
                 ui.set_width((width - 20.0).max(1.0));
                 prompt_ui::style(ui);
                 egui::ScrollArea::vertical().animated(false).max_height((ctx.screen_rect().height() - 100.0).clamp(80.0, 440.0)).show(ui, |ui| {
-                    prompt_ui::heading(ui, "Local branches", "Read-only · switching branches not implemented");
+                    prompt_ui::heading(ui, if branch.history.active {"Recent history"}else{"Local branches"}, if branch.history.active {"Read-only · pinned local HEAD"}else{"Read-only · switching branches not implemented"});
+                    ui.horizontal(|ui| {
+                        let branches=ui.add(egui::Button::selectable(!branch.history.active,"Branches"));
+                        let history=ui.add(egui::Button::selectable(branch.history.active,"History"));
+                        branch.tabs=[Some(branches.id),Some(history.id)];
+                        let tab_key=branch.tab_key.take();
+                        #[cfg(test)] ctx.data_mut(|data|data.insert_temp(popup_id().with("history-tab"),(history.id,history.rect)));
+                        if branches.clicked() || tab_key==Some(false) {branch.history.active=false;branch.history.cancel_read();branch.focus=true;}
+                        if history.clicked() || tab_key==Some(true) {
+                            branch.history.active=true;branch.pending=None;branch.rows.clear();
+                            if !branch.history.loaded && !branch.demo && !branch.stale && let Some(owner)=owner.clone(){branch.history.request(&ctx,owner);}
+                        }
+                    });
                     if branch.demo { ui.add(egui::Label::new(theme::small(ui, "Demo fixture · synthetic local/current names · no repository read")).wrap()); }
+                    if branch.history.active {
+                        branch.rows.clear();
+                        branch.history.show(ui,branch.stale,branch.demo);
+                    } else {
                     ui.add(egui::Label::new(theme::small(ui, "Snapshot only · highlight to inspect. Changes still compares the working tree with HEAD.")).wrap());
                     let search = ui.add(egui::TextEdit::singleline(&mut branch.query).id(search_id()).char_limit(128).desired_width(ui.available_width()).hint_text("Filter local branches…"));
                     if std::mem::take(&mut branch.focus) || std::mem::take(&mut branch.focus_search) { search.request_focus(); }
@@ -528,14 +578,20 @@ impl Changes {
                             ui.add(egui::Label::new(theme::small(ui, format!("Highlighted local: {name} · {}", if snapshot.current == Current::Local(name.clone()) { "current" } else { "not current" }))).wrap());
                         }
                     }
+                    }
                     let mut refresh = std::mem::take(&mut branch.refresh_key);
+                    if !branch.history.has_detail() {
                     prompt_ui::footer(ui, |ui| {
-                        let response = ui.push_id("branch-refresh", |ui| prompt_ui::button(ui, "Refresh", prompt_ui::Button::Secondary, !branch.demo && branch.pending.is_none() && owner.is_some())).inner;
+                        let response = ui.push_id("branch-refresh", |ui| prompt_ui::button(ui, "Refresh", prompt_ui::Button::Secondary, !branch.demo && branch.pending.is_none() && !branch.history.pending() && !branch.history.has_detail() && owner.is_some())).inner;
                         branch.refresh_id = Some(response.id);
                         refresh |= response.clicked();
                         #[cfg(test)] ctx.data_mut(|data| data.insert_temp(popup_id().with("refresh-response"), (response.id, response.rect)));
                     });
-                    if refresh && !branch.demo && branch.pending.is_none() && let Some(owner) = owner.clone() { branch.request(&ctx, owner); }
+                    } else {branch.refresh_id=None;}
+                    if refresh && !branch.demo && branch.pending.is_none() && !branch.history.pending() && !branch.history.has_detail() && let Some(owner) = owner.clone() {
+                        if branch.history.active {branch.stale=false;branch.owner=Some(owner.clone());branch.history.request(&ctx,owner);}
+                        else {branch.request(&ctx, owner);}
+                    }
                 });
                 // Agent input/select questions render after Changes and must not
                 // receive this popup's editing/preset keys, even after focus theft.

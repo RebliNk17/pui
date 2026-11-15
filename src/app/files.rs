@@ -5,6 +5,8 @@ mod delimited;
 mod image_preview;
 mod line_target;
 mod loader;
+mod quick_paths;
+mod svg;
 mod table_preferences;
 use super::*;
 use std::{
@@ -44,6 +46,7 @@ struct Directory {
 enum Content {
     Text(String),
     Table(delimited::Preview),
+    Svg(Box<svg::Preview>),
     Image(egui::ColorImage),
     UploadedImage,
 }
@@ -124,6 +127,7 @@ pub(super) struct Browser {
     open: bool,
     expanded: bool,
     browser_mode: bool,
+    tree_open: bool,
     focus_address: bool,
     input_focus: bool,
     pane_rect: Option<egui::Rect>,
@@ -174,6 +178,13 @@ impl Browser {
         });
     }
 
+    pub(super) fn demo_table_projection(&mut self) {
+        if let Some(tab) = self.tabs.last_mut()
+            && let Some(Ok(Content::Table(preview))) = &mut tab.content
+        {
+            preview.demo_projection();
+        }
+    }
     pub(super) fn demo_source_context(&mut self, ctx: &egui::Context) {
         let path = self.root.join("source-context-fixture.rs");
         self.selected = Some(path.clone());
@@ -698,10 +709,14 @@ impl Browser {
         self.web.configure(key, device, console)
     }
 
+    pub(super) fn clear_path_menu(&self, ctx: &egui::Context) {
+        path_menu::clear(ctx);
+    }
     pub(super) fn context_inputs(&mut self, ctx: &egui::Context, visible: bool, enabled: bool) {
         let showing = visible && self.open && !self.browser_mode && self.restored.is_none();
+        path_menu::inputs(ctx, &self.root, showing);
         for tab in &mut self.tabs {
-            if (!showing || tab.source || Some(&tab.path) != self.selected.as_ref())
+            if (!showing || Some(&tab.path) != self.selected.as_ref())
                 && let Some(Ok(Content::Table(preview))) = &mut tab.content
             {
                 preview.clear_grid_menu(ctx);
@@ -714,13 +729,39 @@ impl Browser {
             .tabs
             .iter_mut()
             .find(|tab| Some(&tab.path) == self.selected.as_ref())
-            && !tab.source
+            && let Some(Ok(Content::Svg(preview))) = &mut tab.content
+        {
+            preview.inputs(ctx, enabled, tab.source);
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| Some(&tab.path) == self.selected.as_ref())
             && let Some(Ok(Content::Table(preview))) = &mut tab.content
         {
-            preview.grid_inputs(ctx, &tab.path, enabled);
+            if tab.source {
+                preview.clear_source_grid_menu(ctx);
+                preview.toolbar_inputs(ctx, enabled);
+            } else {
+                preview.grid_inputs(ctx, &tab.path, enabled);
+            }
         }
     }
 
+    pub(super) fn table_export_owns_keyboard(&self, ctx: &egui::Context) -> bool {
+        if path_menu::owns(ctx) {
+            return true;
+        }
+        self.open
+            && !self.browser_mode
+            && self.tabs.iter().any(|tab| {
+                Some(&tab.path) == self.selected.as_ref()
+                    && matches!(&tab.content, Some(Ok(Content::Table(preview))) if preview.export_owns_keyboard(ctx))
+            })
+    }
+    pub(super) fn svg_owns_keyboard(&self, ctx: &egui::Context) -> bool {
+        self.open && !self.browser_mode && self.tabs.iter().any(|tab| Some(&tab.path)==self.selected.as_ref() && matches!(&tab.content,Some(Ok(Content::Svg(preview))) if preview.owns_keyboard(ctx)))
+    }
     pub(super) fn begin_frame(&mut self) {
         self.web_preview = None;
     }
@@ -860,7 +901,7 @@ impl Browser {
         let ctx = ui.ctx().clone();
         self.chrome(ui);
         let tree_width = (ui.available_width() * 0.38).clamp(170.0, 300.0);
-        if !self.browser_mode {
+        if !self.browser_mode && (self.selected.is_none() || self.tree_open) {
             egui::SidePanel::right("files-tree")
                 .default_width(tree_width)
                 .width_range(150.0..=(ui.available_width() * 0.65).max(150.0))
@@ -972,7 +1013,7 @@ impl Browser {
         let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width().max(120.0), 30.0));
         let response = ui.interact(
             rect,
-            ui.make_persistent_id(("workspace-file", &entry.path)),
+            ui.make_persistent_id(("workspace-file", &self.root, &entry.path)),
             Sense::click(),
         );
         if !ui.is_rect_visible(rect) {
@@ -1043,6 +1084,14 @@ impl Browser {
                 .map(str::to_owned)
                 .unwrap_or_else(|| entry.path.display().to_string()),
         );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(("path-menu-test-row", &entry.path)),
+                response.interact_rect,
+            )
+        });
+        self.path_context_menu(&response, &entry.path);
         if entry.blocked.is_none()
             && response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1120,168 +1169,176 @@ impl Browser {
             });
             return;
         };
-        egui::Frame::new().inner_margin(16).show(ui, |ui| {
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    tab.path
-                        .strip_prefix(&self.root)
-                        .unwrap_or(&tab.path)
-                        .display()
-                        .to_string(),
-                ))
-                .selectable(true)
-                .truncate(),
-            );
-            let extension = tab
-                .path
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_ascii_lowercase();
-            let markdown = matches!(extension.as_str(), "md" | "markdown" | "mdown");
-            let html = matches!(extension.as_str(), "html" | "htm");
-            let table = matches!(extension.as_str(), "csv" | "tsv");
-            if markdown || html || table {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut tab.source,
-                        false,
-                        if table { "Table" } else { "Preview" },
-                    );
-                    ui.selectable_value(&mut tab.source, true, "Source");
-                    if html {
-                        ui.label(theme::small(
-                            ui,
-                            "Isolated preview · scripts enabled · network disabled",
-                        ));
-                    }
-                });
-            }
-            if let Some(notice) = &tab.line_notice {
-                ui.label(theme::small(ui, notice));
-            }
-            ui.add_space(12.0);
-            // Transfer decoded pixels once; don't retain a second CPU copy for
-            // every open image after egui has accepted the texture upload.
-            if matches!(tab.content, Some(Ok(Content::Image(_)))) {
-                if let Some(Ok(Content::Image(image))) = tab.content.take() {
-                    tab.texture = Some(ui.ctx().load_texture(
-                        tab.path.display().to_string(),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    tab.content = Some(Ok(Content::UploadedImage));
-                }
-            }
-            match &mut tab.content {
-                Some(Ok(Content::Table(preview))) => {
-                    let remember = tables.supports(&self.root, &tab.path);
-                    if remember {
-                        preview.set_header(tables.header(&self.root, &tab.path));
-                    }
-                    let header = preview.header();
-                    if tab.source {
-                        if let Some(line) = tab.line_target.take() {
-                            let shown = preview.target_line(line);
-                            tab.line_notice = Some(if shown == line {
-                                format!("Line {line}")
-                            } else {
-                                format!("Requested line {line}; showing last line {shown}.")
-                            });
+        let table = tab
+            .path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("tsv"));
+        egui::Frame::new()
+            .inner_margin(if table { 10 } else { 16 })
+            .show(ui, |ui| {
+                let extension = tab
+                    .path
+                    .extension()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                let markdown = matches!(extension.as_str(), "md" | "markdown" | "mdown");
+                let html = matches!(extension.as_str(), "html" | "htm");
+                let table = matches!(extension.as_str(), "csv" | "tsv");
+                let svg = extension == "svg";
+                if markdown || html || svg {
+                    ui.horizontal(|ui| {
+                        let preview_response = ui.selectable_value(
+                            &mut tab.source,
+                            false,
+                            if table { "Table" } else { "Preview" },
+                        );
+                        let source_response = ui.selectable_value(&mut tab.source, true, "Source");
+                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                            preview.remember(0, &preview_response);
+                            preview.remember(1, &source_response);
                         }
-                        preview.show_source(ui, &tab.path);
-                    } else {
-                        preview.show(ui, &tab.path);
+                        if html {
+                            ui.label(theme::small(
+                                ui,
+                                "Isolated preview · scripts enabled · network disabled",
+                            ));
+                        }
+                    });
+                }
+                if let Some(notice) = &tab.line_notice {
+                    ui.label(theme::small(ui, notice));
+                }
+                // Transfer decoded pixels once; don't retain a second CPU copy for
+                // every open image after egui has accepted the texture upload.
+                if matches!(tab.content, Some(Ok(Content::Image(_)))) {
+                    if let Some(Ok(Content::Image(image))) = tab.content.take() {
+                        tab.texture = Some(ui.ctx().load_texture(
+                            tab.path.display().to_string(),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        tab.content = Some(Ok(Content::UploadedImage));
+                    }
+                }
+                match &mut tab.content {
+                    Some(Ok(Content::Svg(preview))) => {
+                        preview.show(
+                            ui,
+                            &tab.path,
+                            tab.source,
+                            &mut tab.texture,
+                            &mut tab.line_target,
+                            &mut tab.line_notice,
+                        );
+                        preview.finish_inputs(ui.ctx());
+                    }
+                    Some(Ok(Content::Table(preview))) => {
+                        preview.attach_projection_budget(&tab._budget);
+                        let remember = tables.supports(&self.root, &tab.path);
+                        if remember {
+                            preview.set_header(tables.header(&self.root, &tab.path));
+                        }
+                        let header = preview.header();
+                        if tab.source {
+                            if let Some(line) = tab.line_target.take() {
+                                let shown = preview.target_line(line);
+                                tab.line_notice = Some(if shown == line {
+                                    format!("Line {line}")
+                                } else {
+                                    format!("Requested line {line}; showing last line {shown}.")
+                                });
+                            }
+                        }
+                        preview.show_view(ui, &tab.path, &mut tab.source);
                         if remember && preview.header() != header {
                             tables.set(&self.root, &tab.path, preview.header());
                         }
                     }
-                }
-                None => {
-                    ui.label(theme::small(ui, "Loading file…"));
-                }
-                Some(Err(error)) => {
-                    ui.add(egui::Label::new(theme::small(ui, error.as_str())).wrap());
-                }
-                Some(Ok(Content::Text(content))) if html && !tab.source => {
-                    self.web_preview = Some(WebPreview {
-                        rect: self.web.viewport(ui, &tab.path.display().to_string()),
-                        key: tab.path.display().to_string(),
-                        url: None,
-                        html: Some(content.clone()),
-                    });
-                }
-                Some(Ok(Content::Text(content))) => {
-                    egui::ScrollArea::both()
-                        .id_salt(("file-content", &tab.path, tab.source))
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            if markdown && !tab.source {
-                                ui.set_max_width(ui.available_width().min(840.0));
-                                markdown::show_file(ui, content, &tab.path);
-                            } else {
-                                ui.push_id(("source-text", &tab.path), |ui| {
-                                    ui.horizontal_top(|ui| {
-                                        let numbers = (1..=content.lines().count().max(1))
-                                            .map(|n| n.to_string())
-                                            .collect::<Vec<_>>()
-                                            .join("\n");
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(numbers)
-                                                    .monospace()
-                                                    .size(12.0)
-                                                    .color(colors.dim),
-                                            )
-                                            .extend(),
-                                        );
-                                        let galley = ui.fonts(|fonts| {
-                                            fonts.layout_no_wrap(
-                                                content.clone(),
-                                                FontId::monospace(12.0),
-                                                colors.text,
-                                            )
-                                        });
-                                        let response = ui.add(
-                                            egui::Label::new(galley.clone())
-                                                .extend()
-                                                .selectable(true),
-                                        );
-                                        line_target::reveal(
-                                            ui,
-                                            &response,
-                                            &galley,
-                                            &mut tab.line_target,
-                                            &mut tab.line_notice,
-                                        );
-                                        context_capture::offer_source_selection(
-                                            &response, &tab.path, content, 1,
-                                        );
-                                    });
-                                });
-                            }
-                        });
-                }
-                Some(Ok(Content::Image(_))) => unreachable!("image pixels transferred above"),
-                Some(Ok(Content::UploadedImage)) => {
-                    if let Some(line) = tab.line_target.take() {
-                        tab.line_notice =
-                            Some(format!("Line {line} is unavailable for an image preview."));
+                    None => {
+                        ui.label(theme::small(ui, "Loading file…"));
                     }
-                    let texture = tab.texture.as_ref().expect("uploaded image texture");
-                    egui::ScrollArea::both()
-                        .id_salt(("file-image", &tab.path))
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Image::new(texture)
-                                    .max_width(ui.available_width())
-                                    .shrink_to_fit(),
-                            );
+                    Some(Err(error)) => {
+                        ui.add(egui::Label::new(theme::small(ui, error.as_str())).wrap());
+                    }
+                    Some(Ok(Content::Text(content))) if html && !tab.source => {
+                        self.web_preview = Some(WebPreview {
+                            rect: self.web.viewport(ui, &tab.path.display().to_string()),
+                            key: tab.path.display().to_string(),
+                            url: None,
+                            html: Some(content.clone()),
                         });
+                    }
+                    Some(Ok(Content::Text(content))) => {
+                        egui::ScrollArea::both()
+                            .id_salt(("file-content", &tab.path, tab.source))
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if markdown && !tab.source {
+                                    ui.set_max_width(ui.available_width().min(840.0));
+                                    markdown::show_file(ui, content, &tab.path);
+                                } else {
+                                    ui.push_id(("source-text", &tab.path), |ui| {
+                                        ui.horizontal_top(|ui| {
+                                            let numbers = (1..=content.lines().count().max(1))
+                                                .map(|n| n.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(numbers)
+                                                        .monospace()
+                                                        .size(12.0)
+                                                        .color(colors.dim),
+                                                )
+                                                .extend(),
+                                            );
+                                            let galley = ui.fonts(|fonts| {
+                                                fonts.layout_no_wrap(
+                                                    content.clone(),
+                                                    FontId::monospace(12.0),
+                                                    colors.text,
+                                                )
+                                            });
+                                            let response = ui.add(
+                                                egui::Label::new(galley.clone())
+                                                    .extend()
+                                                    .selectable(true),
+                                            );
+                                            line_target::reveal(
+                                                ui,
+                                                &response,
+                                                &galley,
+                                                &mut tab.line_target,
+                                                &mut tab.line_notice,
+                                            );
+                                            context_capture::offer_source_selection(
+                                                &response, &tab.path, content, 1,
+                                            );
+                                        });
+                                    });
+                                }
+                            });
+                    }
+                    Some(Ok(Content::Image(_))) => unreachable!("image pixels transferred above"),
+                    Some(Ok(Content::UploadedImage)) => {
+                        if let Some(line) = tab.line_target.take() {
+                            tab.line_notice =
+                                Some(format!("Line {line} is unavailable for an image preview."));
+                        }
+                        let texture = tab.texture.as_ref().expect("uploaded image texture");
+                        egui::ScrollArea::both()
+                            .id_salt(("file-image", &tab.path))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Image::new(texture)
+                                        .max_width(ui.available_width())
+                                        .shrink_to_fit(),
+                                );
+                            });
+                    }
                 }
-            }
-        });
+            });
     }
 }
 
@@ -1516,6 +1573,7 @@ fn read_content_budgeted(
     Ok(match extension.as_str() {
         "csv" => Content::Table(delimited::Preview::new(source, b',')),
         "tsv" => Content::Table(delimited::Preview::new(source, b'\t')),
+        "svg" => Content::Svg(Box::new(svg::Preview::load(source, budget, cancel))),
         _ => Content::Text(source),
     })
 }
@@ -1638,6 +1696,14 @@ fn read_preview_resolved(path: &Path) -> Result<String, String> {
         .map_err(|_| "Binary or non-UTF-8 file — no text preview available.".into())
 }
 
+pub(super) fn quick_paths(
+    root: &Path,
+    query: &str,
+    cancel: &AtomicBool,
+) -> Result<(Vec<PathBuf>, bool), String> {
+    quick_paths::discover(root, query, cancel)
+}
+
 /// Filename-only discovery for composer mentions; never opens file contents.
 pub(super) fn mention_paths(
     root: &Path,
@@ -1713,6 +1779,7 @@ fn search_paths(root: &Path, query: &str, cancel: &AtomicBool) -> Result<Search,
 mod auto_restore_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
+mod path_menu;
 #[cfg(test)]
 mod read_safety_tests;
 #[cfg(test)]

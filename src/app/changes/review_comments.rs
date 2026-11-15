@@ -1,8 +1,20 @@
-//! Bounded, local-window review notes. Not chat messages, persisted records or remote reviews.
+//! Bounded local review notes. Saved-chat checkpoints are inert, never remote reviews.
 use super::*;
 use std::path::Path;
 mod anchor;
+mod cross_file;
+mod deletion;
 mod demo;
+mod editing;
+#[cfg(test)]
+mod filter_tests;
+mod jump;
+mod markers;
+mod persistence;
+#[cfg(test)]
+mod search_tests;
+#[cfg(test)]
+mod single_tests;
 mod ui;
 use anchor::Selection;
 
@@ -13,7 +25,7 @@ const MAX_TOTAL: usize = 256 * 1024;
 const MAX_METADATA: usize = 8192;
 const MAX_BATCH: usize = 24 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Owner {
     root: PathBuf,
     session: String,
@@ -29,7 +41,7 @@ impl Owner {
         self.root.capacity() + self.session.capacity()
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Anchor {
     owner: Owner,
     path: String,
@@ -52,12 +64,14 @@ impl Anchor {
     }
 }
 struct Comment {
+    id: u64, // window-store identity; never a positional index or reused after Clear
     anchor: Anchor,
     text: String,
     resolved: bool,
     stale: bool,
 }
 struct Editor {
+    editing: Option<u64>, // Some updates the exact saved note; never creates/reanchors
     anchor: Anchor,
     text: String,
     first: bool,
@@ -71,16 +85,29 @@ pub(in crate::app) struct Comments {
     owner: Option<Owner>,
     revision: Option<u64>,
     expanded: bool,
+    unresolved_only: bool, // window-local presentation; never checkpointed
+    query: String,         // ≤128 Unicode characters, presentation only
     clear_requested: bool,
+    delete_requested: Option<u64>,
+    next_id: u64,
+    confirmation_pass: Option<u64>,
     error: Option<&'static str>,
+    storage_notice: Option<&'static str>,
+    storage_loaded: bool,
+    storage_dirty: bool,
     request_add: bool,
     controls: Vec<egui::Id>,
     editor_controls: [Option<egui::Id>; 3],
-    reverse_focus: Option<egui::Id>,
     after_editor: Option<egui::Id>,
     control_keyboard_pass: Option<u64>,
     pub(super) source_root: Option<PathBuf>,
     bound_document: Option<egui::Id>,
+    marker_controls: Vec<(u64, egui::Id)>,
+    marker_document: Option<egui::Id>,
+    reveal_note: Option<(u64, egui::Id, u64)>,
+    recorded_targets: Vec<(u64, usize)>,
+    recorded_binding: Option<(egui::Id, u64)>,
+    recorded_open: Option<cross_file::Open>,
 }
 impl Comments {
     #[cfg(test)]
@@ -113,11 +140,18 @@ impl Comments {
             .is_none_or(|owner| owner.root != root || owner.session != session)
         {
             self.stale(None);
+            self.cancel_confirmation();
             self.owner = Owner::new(root, session);
             self.revision = Some(revision);
             self.expanded = false;
+            self.unresolved_only = false;
+            self.query = String::new();
             self.request_add = false;
             self.controls.clear();
+            self.marker_controls.clear();
+            self.marker_document = None;
+            self.reveal_note = None;
+            self.clear_recorded_targets();
         } else if self.revision != Some(revision) {
             self.stale(Some(true));
             self.revision = Some(revision);
@@ -126,6 +160,7 @@ impl Comments {
         false
     }
     pub(super) fn stale(&mut self, recorded: Option<bool>) {
+        self.clear_recorded_targets();
         for comment in &mut self.items {
             if recorded.is_none_or(|source| comment.anchor.recorded == source) {
                 comment.stale = true;
@@ -227,6 +262,7 @@ impl Comments {
             return false;
         }
         self.editor = Some(Editor {
+            editing: None,
             anchor,
             text: String::new(),
             first: true,
@@ -237,24 +273,77 @@ impl Comments {
         true
     }
     fn save(&mut self) -> bool {
+        if let Some(editor) = self.editor.as_mut()
+            && editor.text.capacity() > MAX_TEXT
+        {
+            editor.text.shrink_to_fit();
+        }
         let Some(editor) = self.editor.as_ref() else {
             return false;
         };
-        if editor.text.trim().is_empty()
-            || editor.text.len() > MAX_TEXT
-            || self.items.len() >= MAX_COMMENTS
-            || self.bytes() > MAX_TOTAL
+        if editor.text.trim().is_empty() || editor.text.len() > MAX_TEXT || self.bytes() > MAX_TOTAL
         {
             return false;
         }
+        if let Some(id) = editor.editing {
+            return self.save_edit(id);
+        }
+        if self.items.len() >= MAX_COMMENTS {
+            return false;
+        }
+        let Some(id) = self.next_id.checked_add(1) else {
+            self.error = Some("Local note identity limit reached. Existing notes are unchanged.");
+            return false;
+        };
+        self.next_id = id;
+        self.storage_dirty = true;
         let editor = self.editor.take().unwrap();
         self.items.push(Comment {
+            id,
             anchor: editor.anchor,
             text: editor.text,
             resolved: false,
             stale: editor.stale,
         });
         true
+    }
+    fn one_note(&self, id: u64) -> Result<String, &'static str> {
+        let item = self
+            .items
+            .iter()
+            .find(|item| item.id == id && Some(&item.anchor.owner) == self.owner.as_ref())
+            .ok_or("Local note is unavailable for this repository/session.")?;
+        let text = Self::format_note(item);
+        if text.len() > MAX_BATCH {
+            return Err("Note exceeds 24 KiB; nothing added.");
+        }
+        Ok(text)
+    }
+    fn format_note(item: &Comment) -> String {
+        let anchor = &item.anchor;
+        let digest = anchor
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!(
+            "{} · {} · {}{}{}\nRoot: {}\nSession: {}\nSHA-256: {digest}\nSelected display characters: {}–{} · hunk {}\n{}\n\n",
+            anchor.path,
+            anchor.source(),
+            anchor.selection.label(),
+            if item.stale {
+                " · STALE (original snapshot; not retargeted)"
+            } else {
+                " · original snapshot"
+            },
+            if item.resolved { " · RESOLVED" } else { "" },
+            anchor.root.display(),
+            anchor.owner.session,
+            anchor.selection.chars.start,
+            anchor.selection.chars.end,
+            anchor.selection.hunk,
+            item.text
+        )
     }
     fn batch(&self) -> Result<String, &'static str> {
         let Some(owner) = self.owner.as_ref() else {
@@ -266,29 +355,7 @@ impl Comments {
             .iter()
             .filter(|item| &item.anchor.owner == owner && !item.resolved)
         {
-            let anchor = &item.anchor;
-            let digest = anchor
-                .digest
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            let entry = format!(
-                "{} · {} · {}{}\nRoot: {}\nSession: {}\nSHA-256: {digest}\nSelected display characters: {}–{} · hunk {}\n{}\n\n",
-                anchor.path,
-                anchor.source(),
-                anchor.selection.label(),
-                if item.stale {
-                    " · STALE (original snapshot; not retargeted)"
-                } else {
-                    " · original snapshot"
-                },
-                anchor.root.display(),
-                anchor.owner.session,
-                anchor.selection.chars.start,
-                anchor.selection.chars.end,
-                anchor.selection.hunk,
-                item.text
-            );
+            let entry = Self::format_note(item);
             if text.len() + entry.len() > MAX_BATCH {
                 return Err(
                     "Unresolved batch exceeds 24 KiB. Resolve some notes before adding a complete batch.",
@@ -305,10 +372,15 @@ impl Comments {
 }
 
 impl Changes {
+    /// Compatibility name for the agent-question gate: includes this pass's
+    /// actual inline Changes controls/source owner, not hidden rows or menus.
     pub(in crate::app) fn local_comment_editor_owns_keyboard(&self, ctx: &egui::Context) -> bool {
-        self.review.is_some()
-            && (self.review_comments.editor_owns_keyboard(ctx)
-                || self.review_comments.control_keyboard_pass == Some(ctx.cumulative_pass_nr()))
+        self.inline.owns_keyboard(ctx)
+            || self.review.is_some()
+                && (self.review_comments.editor_owns_keyboard(ctx)
+                    || self.review_comments.confirming()
+                    || self.review_comments.confirmation_pass == Some(ctx.cumulative_pass_nr())
+                    || self.review_comments.control_keyboard_pass == Some(ctx.cumulative_pass_nr()))
     }
     /// Shared freshness hook. Git read freshness/HEAD observations can conservatively call this.
     pub(in crate::app) fn stale_review_comments(&mut self) {

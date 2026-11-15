@@ -128,7 +128,7 @@ fn environment_blocker_before_implementation_or_repair_does_not_consume_attempt(
     )
     .unwrap();
     let mut app = app(&root, Phase::Preparing);
-    app.task_job_result(Ok(JobResult::Prepared(root.clone(), true)));
+    app.task_job_result(Ok(JobResult::Prepared(root.clone(), false, None, None)));
     finish_job(&mut app);
     let task = app.tasks.current().unwrap();
     assert_eq!(task.phase, Phase::Blocked);
@@ -156,7 +156,7 @@ fn environment_blocker_before_implementation_or_repair_does_not_consume_attempt(
 fn cancel_during_preflight_cannot_launch_a_provider_or_create_an_attempt() {
     let root = fixture();
     let mut app = app(&root, Phase::Preparing);
-    app.task_job_result(Ok(JobResult::Prepared(root, true)));
+    app.task_job_result(Ok(JobResult::Prepared(root, false, None, None)));
     let job = app.tasks.job.take().unwrap();
     app.tasks.stop();
     app.task_job_result(job.rx.recv_timeout(Duration::from_secs(10)).unwrap());

@@ -284,3 +284,37 @@ fn successful_detach_changes_only_parent_and_preserves_evidence_spend_and_contra
         serde_json::to_value(unchanged).unwrap()
     );
 }
+
+#[test]
+fn released_reconciliation_rejects_queued_stale_save_until_fresh_validated_claim() {
+    let home = home();
+    let original = task(&home);
+    let mut stale = original.clone();
+    stale.note = "must never replace authoritative evidence".into();
+    let (commands, rx) = mpsc::channel();
+    let (errors, error_rx) = mpsc::channel();
+    let (claim, claimed) = mpsc::channel();
+    commands
+        .send(StoreCommand::ClaimCurrent {
+            expected: Box::new(original.clone()),
+            reply: claim,
+        })
+        .unwrap();
+    let (reply, released) = mpsc::channel();
+    commands
+        .send(StoreCommand::ReleaseCurrent {
+            id: original.id.clone(),
+            reply,
+        })
+        .unwrap();
+    commands.send(StoreCommand::Save(Box::new(stale))).unwrap();
+    drop(commands);
+    run_store(&home, rx, errors, &egui::Context::default());
+    assert!(claimed.recv().unwrap().is_ok());
+    let snapshot = released.recv().unwrap().unwrap();
+    assert!(!snapshot.owned.contains(&original.id));
+    assert!(error_rx.recv().unwrap().conflict);
+    let actual = domain::store::load(&home).unwrap();
+    assert_eq!(actual[0].note, original.note);
+    let _released_lock = domain::store::lock(&home, &original.id).unwrap();
+}

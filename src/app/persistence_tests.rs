@@ -565,9 +565,78 @@ fn table_header_overrides_save_reopen_without_loading_any_files_or_replaying_wor
 }
 
 #[test]
+fn diff_wrap_saves_actual_toggle_reopens_as_one_bool_and_never_restores_review_or_work() {
+    let (cwd, _) = fixture();
+    let mut storage = MemoryStorage::default();
+    let mut app = reopen(
+        &storage,
+        Options {
+            demo: true,
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        },
+    );
+    let ctx = app.ctx.clone();
+    app.prefs.hide_sidebar = true;
+    let source = "@@ -1 +1 @@\n-old\n+new\n";
+    app.open_diff_review(("wrap.rs".into(), source.into()).into(), true);
+    for _ in 0..4 {
+        files::tests::frame(&ctx, &mut app, vec![]);
+    }
+    let pos = ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-wrap-lines")))
+        .unwrap()
+        .center();
+    files::tests::click(&ctx, &mut app, pos);
+    assert_eq!(diff_viewer::wrap_preference::get(&ctx), Some(true));
+    let (client, _, commands) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    app.demo = false;
+    eframe::App::save(&mut app, &mut storage);
+    assert!(commands.try_recv().is_err());
+    let saved: Preferences = eframe::get_value(&storage, "preferences").unwrap();
+    assert!(saved.diff_wrap);
+    let mut restored = reopen(
+        &storage,
+        Options {
+            demo: true,
+            cwd: Some(cwd),
+            ..Default::default()
+        },
+    );
+    assert_eq!(diff_viewer::wrap_preference::get(&restored.ctx), Some(true));
+    assert!(restored.changes.review.is_none());
+    assert!(restored.client.is_none());
+    assert!(restored.state.dialogs.is_empty());
+    assert!(restored.workspace_rx.is_none() && restored.diff_rx.is_none());
+    restored.open_diff_review(("next.rs".into(), source.into()).into(), true);
+    let ctx = restored.ctx.clone();
+    for _ in 0..4 {
+        files::tests::frame(&ctx, &mut restored, vec![]);
+    }
+    assert!(restored.changes.review.as_ref().unwrap().2.wrap());
+    let pos = ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("diff-wrap-lines")))
+        .unwrap()
+        .center();
+    files::tests::click(&ctx, &mut restored, pos);
+    restored.demo = false;
+    eframe::App::save(&mut restored, &mut storage);
+    let reset = reopen(
+        &storage,
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(diff_viewer::wrap_preference::get(&reset.ctx), Some(false));
+}
+
+#[test]
 fn older_preferences_default_to_recent_and_a_blank_chat() {
     let prefs: Preferences = serde_json::from_str("{}").unwrap();
     assert!(!prefs.projects_view);
+    assert!(!prefs.diff_wrap);
     assert!(prefs.last_session.is_none());
     assert!(prefs.startup_session(&Options::default()).is_none());
 }

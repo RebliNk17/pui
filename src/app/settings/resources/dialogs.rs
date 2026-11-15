@@ -48,7 +48,7 @@ impl Resources {
                         ui.add_enabled_ui(trusted,|ui|{if theme::choice(ui,self.form.scope=="project","Project").clicked(){self.form.scope="project".into();}});
                     });
                     ui.add_space(10.0);
-                    egui::ComboBox::from_id_salt("add-resource-type").selected_text(["Pi package","Skill path","MCP server","Extension path","Prompt path","CLI theme path"][self.form.kind]).show_ui(ui,|ui|{for(i,label)in["Pi package","Skill path","MCP server","Extension path","Prompt path","CLI theme path"].iter().enumerate(){ui.selectable_value(&mut self.form.kind,i,*label);}});
+                    egui::ComboBox::from_id_salt("add-resource-type").selected_text(["Pi package","Skill path","MCP server","Extension path","Prompt path","CLI theme path","Pui Engineering skills"][self.form.kind]).show_ui(ui,|ui|{for(i,label)in["Pi package","Skill path","MCP server","Extension path","Prompt path","CLI theme path","Pui Engineering skills"].iter().enumerate(){ui.selectable_value(&mut self.form.kind,i,*label);}});
                 });
                 ui.add_space(12.0);
                 if self.form.kind==2 {
@@ -67,6 +67,19 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
                     ui.label(theme::caption(ui,"TOOL EXPOSURE"));egui::ComboBox::from_id_salt("mcp-exposure").selected_text(EXPOSURES[self.form.exposure]).show_ui(ui,|ui|{for(i,label)in EXPOSURES.iter().enumerate(){ui.selectable_value(&mut self.form.exposure,i,*label);}});
                     crate::section::Section::new("Advanced JSON patch").summary("Optional server configuration fields").icon(Icon::Code).show(ui,|ui|{ui.add(egui::TextEdit::multiline(&mut self.form.advanced).code_editor().desired_width(f32::INFINITY).desired_rows(4).hint_text("{\"headers\":{\"Authorization\":\"Bearer ${DOCS_TOKEN}\"}}"));});
                     ui.add(egui::Label::new(theme::small(ui,"Omitted fields, including credentials, are preserved. Enter environment references rather than literal secrets. Open config to inspect or remove existing fields.")).wrap());
+                }else if self.form.kind==6 {
+                    ui.add(egui::Label::new(theme::small(ui,"Original Pui skills · opt-in · no dependencies or installer scripts. Used only when explicitly invoked.")).wrap());
+                    egui::ComboBox::from_id_salt("engineering-skill-selection").selected_text(if self.form.engineering_selection==0 {"All five skills"} else {engineering::SKILLS[self.form.engineering_selection-1].title}).show_ui(ui,|ui|{
+                        ui.selectable_value(&mut self.form.engineering_selection,0,"All five skills");
+                        for (index,skill) in engineering::SKILLS.iter().enumerate(){ui.selectable_value(&mut self.form.engineering_selection,index+1,skill.title);}
+                    });
+                    for (_,skill) in engineering::SKILLS.iter().enumerate().filter(|(index,_)|self.form.engineering_selection==0 || self.form.engineering_selection==index+1) {
+                        crate::section::Section::new(skill.title).summary(skill.description()).icon(Icon::Spark).show(ui,|ui|{
+                            ui.label(theme::small(ui,format!("/skill:{}",skill.name)));
+                            markdown::show(ui,skill.content);
+                        });
+                    }
+                    ui.add(egui::Label::new(theme::small(ui,"Registers bundled files in Pi settings. Use /reload in each existing idle chat to load them; other chats are unchanged. Existing same-name skills can take precedence. You can disable these later in Resources.")).wrap());
                 }else{
                     ui.label(theme::caption(ui,if self.form.kind==0{"PACKAGE SOURCE"}else{"LOCAL PATH"}));
                     ui.add(theme::text_field(&mut self.form.source,if self.form.kind==0{"npm:@scope/name@version, git:… or /local/package"}else{"Absolute or workspace-relative file / directory"}).desired_width(ui.available_width()));
@@ -81,7 +94,7 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
                 "Cancel",
                 "Stage & review →",
                 false,
-                self.job.is_none(),
+                self.job.is_none() && self.catalog.is_some(),
                 false,
             ) {
                 Some(confirmations::Choice::Cancel) => cancel = true,
@@ -92,7 +105,32 @@ if theme::choice(ui,self.form.transport==1,"stdio").clicked(){self.form.transpor
         if cancel || response.should_close() {
             self.form.open = false;
         }
-        if stage {
+        if stage && self.form.kind == 6 {
+            let requests = if demo {
+                Ok(engineering::SKILLS.iter().enumerate()
+                    .filter(|(index, _)| self.form.engineering_selection == 0 || self.form.engineering_selection == index + 1)
+                    .map(|(_, skill)| json!({"action":"register","kind":"skills","scope":self.form.scope,"source":format!("/demo/pui-engineering/skills/{}/SKILL.md",skill.name)}))
+                    .collect::<Vec<_>>())
+            } else {
+                engineering::requests(&self.form.scope, self.form.engineering_selection)
+            };
+            match requests {
+                Ok(requests) if self.drafts.len() + requests.len() <= 32 => {
+                    for request in requests {
+                        let source = request["source"].as_str().unwrap_or_default().to_owned();
+                        let key = format!("engineering:{}:{source}", self.form.scope);
+                        self.stage(key, "Pui Engineering skill".into(), request);
+                    }
+                    self.form.open = false;
+                    self.request_review(ctx, demo);
+                }
+                Ok(_) => {
+                    self.form.error =
+                        Some("Apply or discard drafts before adding more than 32 changes.".into())
+                }
+                Err(error) => self.form.error = Some(error),
+            }
+        } else if stage {
             match self.form_request() {
                 Ok(request) => {
                     let title = if self.form.kind == 2 {

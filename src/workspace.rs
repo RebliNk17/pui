@@ -5,6 +5,7 @@ use std::{
 };
 
 pub(crate) mod branches;
+pub(crate) mod history;
 pub(crate) mod read_only;
 use read_only::DEADLINE;
 

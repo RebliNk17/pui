@@ -141,6 +141,43 @@ impl Client {
         }
     }
 
+    /// Real process transport for UI lifecycle tests, with no environment override/provider.
+    #[cfg(all(test, unix))]
+    pub(crate) fn process_fixture(ctx: eframe::egui::Context) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let (control, control_rx) = mpsc::channel();
+        let writer_tx = tx.clone();
+        let worker_control = control.clone();
+        let worker = thread::spawn(move || {
+            if let Err(error) = run(
+                Path::new(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/pi-side-chat.py"
+                )),
+                &Launch::default(),
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                None,
+                rx,
+                writer_tx,
+                control_rx,
+                worker_control,
+                events_tx.clone(),
+                ctx,
+            ) {
+                let _ = events_tx.send(Event::Error(error));
+            }
+            let _ = events_tx.send(Event::Exited);
+        });
+        Self {
+            tx,
+            control,
+            events,
+            next_id: 0,
+            worker: Some(worker),
+        }
+    }
+
     /// Session changes must never join a child/extension shutdown on the UI thread.
     pub fn retire(self) {
         thread::spawn(move || drop(self));

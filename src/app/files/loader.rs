@@ -27,6 +27,8 @@ struct Job {
     cancelled: Arc<AtomicBool>,
     #[cfg(test)]
     before_read: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    svg_helper: Option<String>,
 }
 
 /// Owned by a tab, not by the worker. Dropping a tab/refresh cancels only that
@@ -74,6 +76,8 @@ pub(super) fn start(
         cancelled: cancelled.clone(),
         #[cfg(test)]
         before_read: None,
+        #[cfg(test)]
+        svg_helper: crate::svg_preview::test_support::current(),
     };
     match pool.submit(job) {
         Ok(()) => (
@@ -132,14 +136,21 @@ impl Pool {
                 if job.cancelled.load(Ordering::Relaxed) {
                     return None;
                 }
-                let result = read_content_budgeted(
-                    &job.root,
-                    &job.path,
-                    job.external,
-                    Some(&job.budget),
-                    Some(&job.cancelled),
-                );
-                // A started read/decode is not interruptible. A closed/replaced
+                let read = || {
+                    read_content_budgeted(
+                        &job.root,
+                        &job.path,
+                        job.external,
+                        Some(&job.budget),
+                        Some(&job.cancelled),
+                    )
+                };
+                #[cfg(test)]
+                let result = crate::svg_preview::test_support::with(job.svg_helper.clone(), read);
+                #[cfg(not(test))]
+                let result = read();
+                // Filesystem/image reads are not interruptible; SVG's owned
+                // helper is supervised/cancellable. A closed/replaced
                 // tab must still discard it before retention/admission/upload.
                 if job.cancelled.load(Ordering::Relaxed) {
                     return None;
@@ -207,6 +218,8 @@ impl Browser {
     }
 }
 
+#[cfg(all(test, unix))]
+mod svg_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

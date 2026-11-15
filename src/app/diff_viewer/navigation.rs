@@ -17,6 +17,7 @@ pub(in crate::app) struct Navigation {
     rows: Vec<u32>,
     selected: Option<usize>,
     target: Option<u32>,
+    comment_target: Option<u32>,
     limited: bool,
     header: String,
     wrap: bool,
@@ -35,6 +36,7 @@ impl Default for Navigation {
             rows: Vec::new(),
             selected: None,
             target: None,
+            comment_target: None,
             limited: false,
             header: String::new(),
             wrap: false,
@@ -120,18 +122,34 @@ impl Navigation {
     }
 
     pub fn new(source: &str) -> Self {
+        Self::build(source, None)
+    }
+    /// Inline rows share navigation/rendering, but do not support local comments.
+    /// Their owner is the exact repository/session, source and path, not global focus.
+    pub(in crate::app) fn inline(source: &str, owner: egui::Id) -> Self {
+        Self::build(source, Some(owner))
+    }
+    pub(in crate::app) fn control_ids(&self) -> impl Iterator<Item = egui::Id> + '_ {
+        self.controls[..3].iter().flatten().copied()
+    }
+    fn build(source: &str, inline_owner: Option<egui::Id>) -> Self {
         let mut nav = Self {
             wrap_available: source.len() <= WRAP_MAX_BYTES
                 && source.lines().take(WRAP_MAX_ROWS + 1).count() <= WRAP_MAX_ROWS,
             ..Default::default()
         };
+        if let Some(owner) = inline_owner {
+            nav.focus = owner;
+        }
         if source.len() > MAX_BYTES {
             nav.limited = true;
             return nav;
         }
         // Bound once, not in the render/idle loop. No second source body is retained.
-        use sha2::Digest;
-        nav.comment_digest = Some(sha2::Sha256::digest(source.as_bytes()).into());
+        if inline_owner.is_none() {
+            use sha2::Digest;
+            nav.comment_digest = Some(sha2::Sha256::digest(source.as_bytes()).into());
+        }
         for row in changes::lines::rows(source).filter(|row| row.header && row.located) {
             if nav.rows.len() == MAX_HUNKS {
                 nav.rows.clear();
@@ -147,6 +165,7 @@ impl Navigation {
             return;
         };
         self.selected = Some(next);
+        self.comment_target = None;
         self.target = Some(row);
         self.header = source
             .lines()
@@ -222,6 +241,21 @@ impl Navigation {
         }
     }
     pub fn show(&mut self, ui: &mut egui::Ui, source: &str) {
+        if let Some(preferred) = wrap_preference::get(ui.ctx()) {
+            let wrap = preferred && self.wrap_available;
+            if self.wrap != wrap {
+                self.wrap = wrap;
+                context_capture::clear_source(ui.ctx());
+                let mut selection = egui::text_selection::LabelSelectionState::load(ui.ctx());
+                selection.clear_selection();
+                selection.store(ui.ctx());
+                self.target = self.comment_target.or_else(|| {
+                    self.selected
+                        .and_then(|index| self.rows.get(index))
+                        .copied()
+                });
+            }
+        }
         if prompt_ui::keyboard_available(ui) && self.owns_focus(ui.ctx()) {
             self.inputs(ui.ctx(), source);
         }
@@ -244,15 +278,19 @@ impl Navigation {
                 self.choose(index, source, ui.ctx());
             }
             let wrap = ui.add_enabled(self.wrap_available && !egui::Popup::is_any_open(ui.ctx()), egui::Button::new(theme::small(ui,"Wrap")).frame(false).selected(self.wrap))
-                .on_hover_text(if self.wrap_available { "Wrap lines · display only. Source, Copy and selection provenance stay unchanged. This open review only." } else { "Wrapping unavailable above 64 KiB or 4,096 diff rows. Unwrapped read-only view remains available." });
+                .on_hover_text("Wrap lines · remembered for file reviews and expanded Changes rows in this window and after restart. Source and Copy stay unchanged. Large diffs keep the unwrapped fallback.")
+                .on_disabled_hover_text(if self.wrap_available { "Close the open menu to change wrapping." } else { "Wrapping unavailable above 64 KiB or 4,096 diff rows. Unwrapped read-only view remains available." });
             wrap.widget_info(||egui::WidgetInfo::selected(egui::WidgetType::Button,wrap.enabled(),self.wrap,"Wrap lines"));
             self.register(2, wrap.id);
             if wrap.clicked() {
                 self.wrap = !self.wrap;
+                if wrap_preference::get(ui.ctx()).is_some() {
+                    wrap_preference::init(ui.ctx(), self.wrap);
+                }
                 context_capture::clear_source(ui.ctx());
                 let mut selection = egui::text_selection::LabelSelectionState::load(ui.ctx());
                 selection.clear_selection(); selection.store(ui.ctx());
-                self.target = self.selected.and_then(|index| self.rows.get(index)).copied();
+                self.target = self.comment_target.or_else(|| self.selected.and_then(|index| self.rows.get(index)).copied());
                 self.focus(ui.ctx());
             }
             #[cfg(test)]
@@ -279,13 +317,29 @@ impl Navigation {
         self.wrap
     }
     pub fn layout_width(&mut self, width: f32) {
-        if self.wrap && (self.layout_width - width).abs() > 1.0 {
-            self.target = self
-                .selected
-                .and_then(|index| self.rows.get(index))
-                .copied();
+        if self.wrap && self.target.is_none() && (self.layout_width - width).abs() > 1.0 {
+            self.target = self.comment_target.or_else(|| {
+                self.selected
+                    .and_then(|index| self.rows.get(index))
+                    .copied()
+            });
         }
         self.layout_width = width;
+    }
+    /// Saved-note reveal in this exact immutable document, independent of a
+    /// hunk-navigation choice. No lookup, file open, selection or note mutation.
+    pub(in crate::app) fn reveal_comment(&mut self, ctx: &egui::Context, row: usize) -> bool {
+        if self.comment_digest().is_none() || self.untracked || row > MAX_BYTES {
+            return false;
+        }
+        context_capture::clear_source(ctx);
+        let mut selection = egui::text_selection::LabelSelectionState::load(ctx);
+        selection.clear_selection();
+        selection.store(ctx);
+        self.comment_target = Some(row as u32);
+        self.target = self.comment_target;
+        self.focus(ctx);
+        true
     }
     pub fn take_target(&mut self) -> Option<usize> {
         self.target.take().map(|row| row as usize)
@@ -293,6 +347,8 @@ impl Navigation {
 }
 
 pub(in crate::app) fn demo_wrap(ctx: &egui::Context) -> Document {
+    // Explicit provider-free fixture; demo apps never save preferences.
+    wrap_preference::init(ctx, true);
     let source = format!(
         "@@ -1,2 +1,2 @@\n-{}\n+{}\n context unchanged\n@@ -50 +50 @@\n-old second\n+new second\n",
         "Long original value with literal Unicode 世界 · ".repeat(12),

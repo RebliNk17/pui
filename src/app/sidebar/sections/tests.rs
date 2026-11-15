@@ -102,10 +102,10 @@ fn header_toggle_and_menu_reorder_use_stable_ids_without_opening_chats() {
         .sections
         .push(Section::new("Later".into()));
     app.draft = "unchanged".into();
-    let active = app.agents.active.clone();
     for _ in 0..3 {
         render(&mut app, vec![]);
     }
+    let active = app.agents.active.clone();
     let (heading, more) = header(&app, &id);
     assert!(heading.right() < more.left());
     click(&mut app, heading.center());

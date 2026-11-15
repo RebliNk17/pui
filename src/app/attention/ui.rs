@@ -25,7 +25,9 @@ impl Pui {
             || self.question_designs.is_some()
             || self.search_open
             || self.agents.close_prompt
+            || self.changes.review_comments.confirming()
             || self.tasks.attachment_confirming()
+            || self.task_operations_confirming()
             || self.section_view.confirming()
             || self.terminals.confirming_stop()
             || self.history_view.is_open()
@@ -125,7 +127,14 @@ impl Pui {
     }
     pub(in crate::app) fn attention_button(&mut self, ui: &mut egui::Ui) {
         let count = self.attention.unread();
-        let response = icons::button(ui, Icon::Clock, &format!("Catch up · {count} unread"));
+        let response = icons::button(
+            ui,
+            Icon::Clock,
+            &format!(
+                "Catch up · {count} unread · this window\n{}",
+                self.attention_dock_hint()
+            ),
+        );
         self.attention.last_button = Some(response.id);
         if self.attention.restore_focus == Some(response.id) {
             ui.ctx().memory_mut(|m| {

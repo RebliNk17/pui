@@ -12,7 +12,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -94,7 +94,8 @@ enum Work {
     Stop,
 }
 enum ResultEvent {
-    Registry(Vec<Endpoint>),
+    Registry(Vec<Endpoint>, bool, u64),
+    PresenceUnknown,
     Snapshot(PathBuf, u64, Box<Snapshot>),
     Action(PathBuf, Box<Reply>, Option<run_status::WaitingMessage>),
     Failure(PathBuf, String),
@@ -126,6 +127,11 @@ pub(super) struct WindowSync {
     unsent: Vec<run_status::WaitingMessage>,
     // Reuse identities already resolved by claim; attention never probes disk.
     attention_aliases: std::collections::VecDeque<(PathBuf, PathBuf)>,
+    // False until an event-driven scan proves no other registered window exists.
+    dock_single_window: bool,
+    dock_watch_ready: bool,
+    presence_epoch: Arc<AtomicU64>,
+    dock_epoch_accepted: Option<u64>,
 }
 fn key(path: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -211,11 +217,12 @@ fn write_endpoint(directory: &Path, endpoint: &Endpoint) -> std::io::Result<()> 
     std::fs::rename(temp, directory.join(format!("{}.json", endpoint.id)))
 }
 fn registry_changed(event: &notify::Event, own: &Path) -> bool {
-    (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
-        && event
-            .paths
-            .iter()
-            .any(|p| p != own && p.extension().is_some_and(|e| e == "json"))
+    event.need_rescan()
+        || (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
+            && event.paths.iter().any(|p| {
+                p.file_stem() != own.file_stem()
+                    && p.extension().is_some_and(|e| e == "json" || e == "owner")
+            })
 }
 fn queue_scan(tx: &mpsc::Sender<Work>, pending: &AtomicBool) {
     // Bound watcher bursts to one queued scan without coalescing explicit actions.
@@ -235,24 +242,51 @@ fn index_endpoint(endpoints: &mut BTreeMap<PathBuf, Arc<Endpoint>>, endpoint: En
     }
 }
 fn registry(directory: &Path, own: &str) -> Vec<Endpoint> {
-    std::fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()?.to_str()? != "json" || path.file_stem()?.to_str()? == own {
-                return None;
-            }
-            let id = path.file_stem()?.to_str()?;
-            let presence = File::open(directory.join(format!("{id}.owner"))).ok()?;
-            if presence.try_lock_exclusive().is_ok() {
-                return None;
-            }
-            let file = File::open(path).ok()?;
-            serde_json::from_reader(file.take(1024 * 1024)).ok()
-        })
-        .collect()
+    registry_with_presence(directory, own).0
+}
+fn registry_with_presence(directory: &Path, own: &str) -> (Vec<Endpoint>, bool) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return (Vec::new(), false);
+    };
+    let mut endpoints = Vec::new();
+    let mut single = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            single = false;
+            continue;
+        };
+        let path = entry.path();
+        let extension = path.extension().and_then(|e| e.to_str());
+        if !matches!(extension, Some("json" | "owner"))
+            || path.file_stem().and_then(|s| s.to_str()) == Some(own)
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            single = false;
+            continue;
+        };
+        let Ok(presence) = File::open(directory.join(format!("{id}.owner"))) else {
+            single = false;
+            continue;
+        };
+        if presence.try_lock_exclusive().is_ok() {
+            continue;
+        }
+        // Count presence before decoding/indexing: empty-path, malformed and
+        // unreadable peer metadata cannot authorize a misleading local Dock total.
+        single = false;
+        if extension != Some("json") {
+            continue;
+        }
+        if let Some(endpoint) = File::open(path)
+            .ok()
+            .and_then(|file| serde_json::from_reader(file.take(1024 * 1024)).ok())
+        {
+            endpoints.push(endpoint);
+        }
+    }
+    (endpoints, single)
 }
 impl WindowSync {
     pub fn new(ctx: &egui::Context, disabled: bool) -> Self {
@@ -283,6 +317,10 @@ impl WindowSync {
             mirror: None,
             unsent: Vec::new(),
             attention_aliases: Default::default(),
+            dock_single_window: false,
+            dock_watch_ready: false,
+            presence_epoch: Arc::new(AtomicU64::new(1)),
+            dock_epoch_accepted: None,
         };
         if disabled {
             return this;
@@ -317,6 +355,10 @@ impl WindowSync {
                 token: uuid::Uuid::new_v4().to_string(),
                 paths: Vec::new(),
             };
+            // Publish even a blank window: Dock eligibility must not mistake a
+            // live pathless window for absence. Existing watcher handles changes.
+            write_endpoint(&directory, &endpoint)
+                .map_err(|_| "Cannot publish live window presence")?;
             let token = endpoint.token.clone();
             let stopped = this.stopped.clone();
             let repaint = ctx.clone();
@@ -360,6 +402,8 @@ impl WindowSync {
             let repaint = ctx.clone();
             let scan_pending = Arc::new(AtomicBool::new(false));
             let worker_scan_pending = Arc::clone(&scan_pending);
+            let watcher_results = results.clone();
+            let scan_epoch = this.presence_epoch.clone();
             this.worker = Some(std::thread::spawn(move || {
                 let metadata = dir.join(format!("{id}.json"));
                 while let Ok(job) = work.recv() {
@@ -378,9 +422,13 @@ impl WindowSync {
                             continue;
                         }
                         Work::Scan => {
-                            let endpoints =
-                                run_scan(&worker_scan_pending, || registry(&dir, &endpoint.id));
-                            let _ = results.send(ResultEvent::Registry(endpoints));
+                            let (endpoints, single, epoch) = run_scan(&worker_scan_pending, || {
+                                let epoch = scan_epoch.load(Ordering::Acquire);
+                                let (endpoints, single) =
+                                    registry_with_presence(&dir, &endpoint.id);
+                                (endpoints, single, epoch)
+                            });
+                            let _ = results.send(ResultEvent::Registry(endpoints, single, epoch));
                         }
                         Work::Fetch(path, peer, revision) => {
                             let event = match call(&peer, &path, revision, None) {
@@ -427,23 +475,35 @@ impl WindowSync {
             }));
             let own_metadata = directory.join(format!("{}.json", this.id));
             let watcher_scan_pending = Arc::clone(&scan_pending);
+            let watcher_ctx = ctx.clone();
+            let watcher_epoch = this.presence_epoch.clone();
             let watcher = crate::file_watch::Watcher::new(
                 directory.clone(),
                 notify::RecursiveMode::NonRecursive,
                 ctx,
                 move |event: notify::Result<notify::Event>| {
-                    if let Ok(event) = event {
-                        if registry_changed(&event, &own_metadata) {
-                            // The scan worker wakes the UI once its result is
-                            // ready. Never scan/repaint for our own publications.
+                    match event {
+                        Ok(event) if registry_changed(&event, &own_metadata) => {
+                            // Invalidate immediately, even when the scan is
+                            // queued behind a slow peer request. Old scans may
+                            // update session metadata, never authorize Dock.
+                            watcher_epoch.fetch_add(1, Ordering::AcqRel);
+                            watcher_ctx.request_repaint();
                             queue_scan(&tx, &watcher_scan_pending);
                         }
+                        Err(_) => {
+                            watcher_epoch.fetch_add(1, Ordering::AcqRel);
+                            let _ = watcher_results.send(ResultEvent::PresenceUnknown);
+                            watcher_ctx.request_repaint();
+                        }
+                        _ => {}
                     }
                 },
             );
             this.directory = Some(directory);
             this._watcher = Some(watcher);
-            queue_scan(&this.tx, &scan_pending);
+            // Registration completion requests the first scan in poll_window_sync.
+            // Do not authorize Dock from a pre-watch snapshot with a presence gap.
             Ok(())
         })();
         if let Err(error) = result {
@@ -453,6 +513,12 @@ impl WindowSync {
     }
     pub fn enabled(&self) -> bool {
         self.directory.is_some()
+    }
+    pub(super) fn dock_single_window(&self) -> bool {
+        self.dock_single_window
+            && self.dock_watch_ready
+            && self.error.is_none()
+            && self.dock_epoch_accepted == Some(self.presence_epoch.load(Ordering::Acquire))
     }
     /// Reuse an owned lock or acquire a temporary lock. Never delete another
     /// window's live transcript, even if its cached status says Idle.
@@ -611,6 +677,12 @@ impl Drop for WindowSync {
         }
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
+        }
+        self._presence.take();
+        if let Some(directory) = &self.directory {
+            // Unlock alone produces no watcher event. Removing our released
+            // lease lets peers recompute single-window eligibility after close.
+            let _ = std::fs::remove_file(directory.join(format!("{}.owner", self.id)));
         }
     }
 }
@@ -832,16 +904,27 @@ impl Pui {
         {
             match status {
                 Ok(()) => {
+                    self.sync.dock_watch_ready = true;
                     // Include publications made while registration was pending.
                     let _ = self.sync.tx.send(Work::Scan);
                 }
-                Err(_) => self.sync.error = Some("Cannot watch other Pui windows".into()),
+                Err(_) => {
+                    self.sync.dock_single_window = false;
+                    self.sync.dock_watch_ready = false;
+                    self.sync.error = Some("Cannot watch other Pui windows".into());
+                }
             }
         }
         let events: Vec<_> = self.sync.rx.try_iter().collect();
         for event in events {
             match event {
-                ResultEvent::Registry(endpoints) => {
+                ResultEvent::PresenceUnknown => {
+                    self.sync.dock_single_window = false;
+                    self.sync.dock_watch_ready = false;
+                }
+                ResultEvent::Registry(endpoints, single, epoch) => {
+                    self.sync.dock_single_window = single;
+                    self.sync.dock_epoch_accepted = Some(epoch);
                     let before: BTreeSet<_> = self.sync.endpoints.keys().cloned().collect();
                     self.sync.endpoints.clear();
                     for endpoint in endpoints {
@@ -1102,7 +1185,7 @@ impl Pui {
         if self.deletion.in_progress() || self.deletion.deleting_chat(path) {
             return Err("Deletion is in progress for this chat in the owning window.".into());
         }
-        if self.loading_chat {
+        if self.loading_chat || self.resource_reload.pending() {
             return Err("Owning window is connecting; try again when ready.".into());
         }
         if self.history_pending.is_some() || self.restoring_code() {
@@ -1237,6 +1320,11 @@ impl Pui {
     }
 }
 
+#[cfg(test)]
+#[path = "sync/dock_epoch_tests.rs"]
+mod dock_epoch_tests;
+#[cfg(test)]
+mod dock_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1559,6 +1647,14 @@ mod tests {
                 &event.clone().add_path(peer.clone()),
                 &own
             ));
+            assert!(!registry_changed(
+                &event.clone().add_path(root.join("own.owner")),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.clone().add_path(root.join("peer.owner")),
+                &own
+            ));
             assert!(registry_changed(
                 &event.add_path(own.clone()).add_path(peer.clone()),
                 &own
@@ -1722,13 +1818,9 @@ mod tests {
     }
     #[test]
     fn alert_settings_change_while_busy_and_only_owner_notifies() {
-        eprintln!("sync diagnostic: location");
         let (directory, path) = location();
-        eprintln!("sync diagnostic: owner");
         let mut owner = app(&directory, &path);
-        eprintln!("sync diagnostic: mirror");
         let mut mirror = app(&directory, &path);
-        eprintln!("sync diagnostic: claim");
         owner.client = Some(rpc::Client::stub());
         assert!(owner.attach_or_claim(&path));
         owner.state.busy = true;
@@ -1743,9 +1835,7 @@ mod tests {
         };
         let before = mirror.prefs.notifications;
         mirror.prefs.notifications = settings;
-        eprintln!("sync diagnostic: notify");
         mirror.propagate_notifications(&mirror.ctx.clone(), before);
-        eprintln!("sync diagnostic: spin");
         spin(&mut owner, &mut mirror, |a, b| {
             a.prefs.notifications == settings && b.prefs.notifications == settings
         });
@@ -1757,11 +1847,6 @@ mod tests {
         assert!(!owner.notifications.sent[0].sound);
         assert!(owner.notifications.sent[0].desktop);
         assert!(mirror.notifications.sent.is_empty());
-        eprintln!("sync diagnostic: assertions complete, dropping mirror");
-        drop(mirror);
-        eprintln!("sync diagnostic: dropping owner");
-        drop(owner);
-        eprintln!("sync diagnostic: complete");
     }
     #[test]
     fn mirrored_compaction_never_promotes_a_manual_worker_to_the_window_default() {

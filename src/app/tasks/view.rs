@@ -59,6 +59,9 @@ impl Pui {
         }
     }
     pub(super) fn task_dialog(&mut self, ui: &mut egui::Ui) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
         // Approval belongs to the displayed workflow, never to an unrelated
         // history page that happens to be open while another workflow runs.
         if !self.tasks.open

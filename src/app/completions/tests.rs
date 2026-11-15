@@ -77,6 +77,38 @@ fn tokens_are_cursor_aware_unicode_safe_and_ignore_email_and_prose_slashes() {
     assert_eq!(token("/model args", 11), None);
 }
 #[test]
+fn btw_and_main_execute_via_composer_completion_without_forwarding_commands() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let main = app.ensure_agent();
+    let (client, _, commands) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    focus(&ctx, &mut app, "/bt");
+    frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+    assert_eq!(app.draft, "/btw ");
+    assert_eq!(app.agents.active, main);
+    frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+    let side = app.agents.active.clone();
+    assert_ne!(side, main);
+    assert!(app.draft.is_empty());
+    assert!(app.agents.parked[&main].client.is_some());
+    app.loading_chat = false;
+    app.connected = true;
+    app.ultracode_ready = true;
+    app.new_chat = false;
+    focus(&ctx, &mut app, "/mai");
+    frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+    assert_eq!(app.draft, "/main ");
+    assert_eq!(app.agents.active, side);
+    frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+    assert_eq!(app.agents.active, main);
+    assert!(app.draft.is_empty());
+    for command in commands.try_iter() {
+        assert_ne!(command["type"], "prompt");
+        assert_ne!(command["type"], "abort");
+    }
+}
+#[test]
 fn enter_completes_without_sending_then_enter_executes_local_action() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);
@@ -340,6 +372,44 @@ fn completion_and_pending_picker_stay_with_their_chat() {
     assert_eq!(app.completions.selected, 1);
     assert!(app.image_picker_rx.is_some());
 }
+#[test]
+fn reload_is_local_and_skill_popup_offers_it_without_replacing_the_draft() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.ensure_agent();
+    focus(&ctx, &mut app, "/ski");
+    for _ in 0..4 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    let output = frame(&ctx, &mut app, vec![]);
+    let pos = files::tests::text(&output, "Reload chat resources…");
+    for pressed in [true, false] {
+        frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+    }
+    assert!(app.resource_reload.confirming());
+    assert_eq!(app.draft, "/ski");
+    assert!(app.deliveries.is_empty());
+    app.resource_reload = Default::default();
+    app.draft = "/reload".into();
+    assert!(app.submit_command());
+    assert!(app.resource_reload.confirming());
+    assert_eq!(app.draft, "/reload");
+    assert!(app.client.is_some()); // Confirmation, not an immediate reconnect.
+    assert!(app.deliveries.is_empty());
+}
+
 #[test]
 fn unknown_command_is_not_sent_as_an_agent_prompt() {
     let ctx = egui::Context::default();

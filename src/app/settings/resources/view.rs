@@ -32,6 +32,7 @@ impl Resources {
                 {
                     self.form = Form {
                         open: true,
+                        kind: 6,
                         scope: if self.catalog.as_ref().is_some_and(|c| c.trusted) {
                             "project"
                         } else {

@@ -1,7 +1,7 @@
 //! Quiet inline review chrome; all mutations are explicit and local.
 use super::*;
 
-fn keyboard_event(event: &egui::Event) -> bool {
+pub(super) fn keyboard_event(event: &egui::Event) -> bool {
     matches!(
         event,
         egui::Event::Key { .. }
@@ -32,21 +32,39 @@ impl Comments {
         {
             return false;
         }
-        let reverse_focus = self.reverse_focus.take();
-        let focused = ctx.memory(|memory| memory.focused());
-        if focused == self.after_editor
-            && focused.is_some()
-            && ctx.input(|input| {
-                input.events.iter().any(|event| {
-                    matches!(event,
-                egui::Event::Key {key:egui::Key::Tab,pressed:true,modifiers,..}
-                    if modifiers.shift && !modifiers.ctrl && !modifiers.command && !modifiers.alt)
-                })
-            })
-        {
-            self.reverse_focus = self.editor_controls[2];
+        if self.confirming() {
+            return true;
+        }
+        if self.marker_inputs(ctx, document) {
+            return true;
         }
         let escape = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        let pointer = ctx.input(|input| {
+            (input.pointer.button_pressed(egui::PointerButton::Primary)
+                || input.pointer.button_released(egui::PointerButton::Primary))
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+        });
+        let pointer_layer = pointer.and_then(|pos| ctx.layer_id_at(pos));
+        let editor_pointer = self.editor_controls.iter().flatten().any(|id| {
+            ctx.read_response(*id).is_some_and(|response| {
+                response.enabled()
+                    && pointer.is_some_and(|pos| {
+                        response.interact_rect.contains(pos)
+                            && pointer_layer == Some(response.layer_id)
+                    })
+            })
+        });
+        if editor_pointer {
+            ctx.input_mut(|input| {
+                input.events.retain(|event| !matches!(event,
+                    egui::Event::Key { key:egui::Key::Enter|egui::Key::Backspace,modifiers,..} if modifiers.command || modifiers.ctrl
+                ) && !matches!(event,
+                    egui::Event::Key {key:egui::Key::Enter|egui::Key::Space,..} | egui::Event::Text(_) | egui::Event::Paste(_)
+                ));
+            });
+            self.control_keyboard_pass = Some(ctx.cumulative_pass_nr());
+        }
         let owns_editor = self
             .editor
             .as_ref()
@@ -58,7 +76,7 @@ impl Comments {
                         memory.has_focus(*id)
                             || memory.focused().is_none()
                                 && escape
-                                && (memory.had_focus_last_frame(*id) || reverse_focus == Some(*id))
+                                && memory.focus_lost_by_escape(*id)
                     })
             });
         if owns_editor {
@@ -79,15 +97,16 @@ impl Comments {
                 .is_some_and(|response| response.enabled())
                 && ctx.memory(|memory| {
                     memory.has_focus(*id)
-                        || memory.focused().is_none() && escape && memory.had_focus_last_frame(*id)
+                        || memory.focused().is_none() && escape && memory.focus_lost_by_escape(*id)
                 })
         });
         // Interaction is computed from the previous live widget geometry before
         // globals run. Scope chord suppression to actual primary activation,
         // including pointer release while the composer still owns keyboard focus.
-        let (primary_pressed, pointer_pos) = ctx.input(|input| {
+        let (primary_activation, pointer_pos) = ctx.input(|input| {
             (
-                input.pointer.button_pressed(egui::PointerButton::Primary),
+                input.pointer.button_pressed(egui::PointerButton::Primary)
+                    || input.pointer.button_released(egui::PointerButton::Primary),
                 input.pointer.interact_pos(),
             )
         });
@@ -102,7 +121,7 @@ impl Comments {
                         && response.sense.senses_click()
                         && (response.is_pointer_button_down_on()
                             || response.clicked_by(egui::PointerButton::Primary)
-                            || primary_pressed
+                            || primary_activation
                                 && pointer_pos.is_some_and(|pos| {
                                     response.interact_rect.contains(pos)
                                         && pointer_layer == Some(response.layer_id)
@@ -116,7 +135,19 @@ impl Comments {
                 owns_controls && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
             });
             if close {
-                self.expanded = false;
+                if self
+                    .editor
+                    .as_ref()
+                    .is_some_and(|editor| Some(&editor.anchor.owner) == self.owner.as_ref())
+                {
+                    // Reverse Tab from the editor may land on a preceding local
+                    // control. Escape dismisses that visible unfinished edit,
+                    // never a guessed departure widget or the underlying run.
+                    self.editor = None;
+                    self.editor_controls = [None; 3];
+                } else {
+                    self.expanded = false;
+                }
                 document.2.focus(ctx);
                 return true;
             }
@@ -158,7 +189,8 @@ impl Comments {
             .and_then(|_| navigation.comment_digest());
         self.bind_document(path, recorded, navigation);
         let ctx = ui.ctx().clone();
-        let enabled = prompt_ui::keyboard_available(ui)
+        let enabled = !self.confirming()
+            && prompt_ui::keyboard_available(ui)
             && !egui::Popup::is_any_open(&ctx)
             && ctx.memory(|memory| memory.top_modal_layer().is_none());
         let owned = self
@@ -207,33 +239,122 @@ impl Comments {
         if let Some(error) = self.error {
             ui.add(egui::Label::new(theme::small(ui, error)).wrap());
         }
+        if let Some(notice) = self.storage_notice {
+            ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
+        }
         if self.expanded {
             prompt_ui::inline(&ctx).inner_margin(10).show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.add(egui::Label::new(theme::small(ui, "Local review · this window only · closing the app loses notes. Other sessions remain separate. No automatic reattachment.")).wrap());
+                ui.add(egui::Label::new(theme::small(ui, "Local checkpoint · saved chats only · restored anchors stay stale.")).wrap()).on_hover_text("Saved notes use this device’s normal app storage at the next app save/clean exit. Unfinished edits and pathless-chat notes are excluded. No automatic file reopening or reattachment; other windows are not synchronized.");
+                ui.horizontal_wrapped(|ui| {
+                    for (only,label) in [(false,"All"),(true,"Unresolved")] {
+                        let response=ui.add_enabled(enabled,egui::Button::selectable(self.unresolved_only==only,theme::small(ui,label)));
+                        self.controls.push(response.id);
+                        if response.clicked(){self.unresolved_only=only;}
+                        #[cfg(test)]ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-note-filter",only)),(response.id,response.rect)));
+                    }
+                    let unresolved=self.items.iter().filter(|item|Some(&item.anchor.owner)==self.owner.as_ref() && !item.resolved).count();
+                    ui.label(theme::small(ui,format!("{unresolved} unresolved · {owned} total")));
+                });
+                if owned>0 {
+                    let search=ui.add_enabled(enabled,egui::TextEdit::singleline(&mut self.query).id(navigation.focus_id().with("local-note-search")).char_limit(128).desired_width(ui.available_width()).hint_text("Filter note text or original path…"));
+                    self.controls.push(search.id);
+                    if search.changed(){self.query=self.query.chars().take(128).collect();self.query.shrink_to_fit();}
+                    #[cfg(test)]ctx.data_mut(|data|data.insert_temp(egui::Id::new("review-note-search"),(search.id,search.rect)));
+                }
                 let editor_visible = self.editor.as_ref().is_some_and(|editor| Some(&editor.anchor.owner) == self.owner.as_ref());
-                if editor_visible { self.editor_ui(ui, navigation); }
+                if editor_visible { ui.add_enabled_ui(enabled, |ui| self.editor_ui(ui, navigation)); }
                 else if self.editor.is_some() {
                     ui.add(egui::Label::new(theme::small(ui, "An unfinished note belongs to another repository/session. Return there to finish it, or explicitly Clear all.")).wrap());
                 }
+                let mut delete = None;
+                let mut edit = None;
+                let mut jump = None;
+                let reveal_note = if enabled {
+                    self.marker_reveal(navigation,path,recorded,ctx.cumulative_pass_nr())
+                } else {
+                    self.reveal_note=None;
+                    None
+                };
+                if reveal_note.is_some_and(|id| self.items.iter().any(|item|item.id==id && item.resolved)){self.unresolved_only=false;}
+                if reveal_note.is_some(){self.query.clear();}
+                let unresolved_only=self.unresolved_only;
+                let query=self.query.trim();
+                let mut visible=0usize;
+                let source_root = self.source_root.as_ref();
+                let mut open_recorded = None;
+                let mut add_note=None;
                 egui::ScrollArea::vertical().id_salt("local-review-notes").max_height(140.0).show(ui, |ui| {
-                    for (index, item) in self.items.iter_mut().enumerate().filter(|(_, item)| Some(&item.anchor.owner) == self.owner.as_ref()) {
-                        ui.push_id(index, |ui| {
+                    for (_index, item) in self.items.iter_mut().enumerate().filter(|(_, item)| Some(&item.anchor.owner) == self.owner.as_ref() && (!unresolved_only || !item.resolved) && (query.is_empty() || item.text.contains(query) || item.anchor.path.contains(query))) {
+                        visible+=1;
+                        let note_row=ui.push_id(item.id, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 let current = item.anchor.path == path && item.anchor.recorded == recorded && Some(item.anchor.digest) == digest;
                                 let label = format!("{}{}{}", if current { String::new() } else { format!("{} · ", item.anchor.path) }, item.anchor.selection.label(), if item.stale { " · STALE" } else { "" });
-                                ui.add(egui::Label::new(theme::small(ui, label)).wrap()).on_hover_text(format!("{}\n{}\nOriginal immutable snapshot; never retargeted.", item.anchor.source(), item.anchor.root.display()));
+                                let can_jump = !item.stale && current && source_root == Some(&item.anchor.root);
+                                let reveal = ui.add_enabled(enabled && can_jump, egui::Button::new(RichText::new(label).size(11.0).color(if can_jump {theme::palette(&ctx).accent} else {theme::palette(&ctx).dim})).frame(false).wrap())
+                                    .on_hover_text(format!("Jump to start of original range · {}\n{}\nExact open diff only; does not select text or change the note.",item.anchor.source(),item.anchor.root.display()))
+                                    .on_disabled_hover_text("Open the matching original diff snapshot. Stale notes never jump or reattach to similar text.");
+                                self.controls.push(reveal.id);
+                                if reveal.clicked() { jump = Some(item.id); }
+                                if self.recorded_targets.iter().any(|(note,_)|*note==item.id) {
+                                    let open=ui.push_id(("recorded-note-open",navigation.focus_id()),|ui|ui.add_enabled(enabled,egui::Button::new(theme::small(ui,"Open")).frame(false))).inner
+                                        .on_hover_text("Open this note’s exact current recorded snapshot and reveal its original range. No disk read, reattachment or send; stale/restored notes are unavailable.");
+                                    self.controls.push(open.id);
+                                    if open.clicked() {open_recorded=Some(item.id);}
+                                    #[cfg(test)]
+                                    ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-note-open-recorded",item.id)),(open.id,open.rect)));
+                                }
+                                if reveal_note==Some(item.id) {ctx.memory_mut(|memory|memory.request_focus_with_filter(reveal.id,egui::EventFilter{escape:true,..Default::default()}));}
+                                #[cfg(test)]
+                                ctx.data_mut(|data| data.insert_temp(egui::Id::new(("review-comment-jump", item.id)), (reveal.id,reveal.rect)));
                                 let action = ui.add_enabled(enabled, egui::Button::new(theme::small(ui, if item.resolved { "Reopen" } else { "Resolve" })).frame(false));
                                 self.controls.push(action.id);
                                 if self.after_editor.is_none() && action.enabled() { self.after_editor = Some(action.id); }
-                                if action.clicked() { item.resolved = !item.resolved; }
+                                if action.clicked() { item.resolved = !item.resolved; self.storage_dirty = true; }
+                                let quote=ui.push_id(("add-single-note",navigation.focus_id()),|ui|ui.add_enabled(enabled,egui::Button::new(theme::small(ui,"Add to draft")).frame(false))).inner.on_hover_text("Append only this committed note with original snapshot provenance and stale/resolved status. Never sends or changes the note; unfinished edits are excluded.");
+                                self.controls.push(quote.id);
+                                if quote.clicked(){add_note=Some(item.id);}
+                                #[cfg(test)]ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-note-add-draft",item.id)),(quote.id,quote.rect)));
+                                let modify = ui.add_enabled(enabled && self.editor.is_none(), egui::Button::new(theme::small(ui,"Edit")).frame(false))
+                                    .on_hover_text("Edit this local note's text only. Original anchor and status stay unchanged until Save.");
+                                self.controls.push(modify.id);
+                                if modify.clicked() {edit=Some(item.id);}
                                 #[cfg(test)]
-                                ctx.data_mut(|data| data.insert_temp(egui::Id::new(("review-comment-resolve", index)), action.rect));
+                                ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-comment-edit",_index)),modify.rect));
+                                let remove = ui.add_enabled(enabled, egui::Button::new(theme::small(ui,"Delete")).frame(false))
+                                    .on_hover_text("Delete only this local note after confirmation. Draft context is unchanged.");
+                                self.controls.push(remove.id);
+                                if remove.clicked() {delete=Some(item.id);}
+                                #[cfg(test)]
+                                ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-comment-delete",_index)),remove.rect));
+                                #[cfg(test)]
+                                ctx.data_mut(|data| data.insert_temp(egui::Id::new(("review-comment-resolve", _index)), action.rect));
                             });
-                            ui.add(egui::Label::new(RichText::new(&item.text).size(12.0).color(if item.resolved { theme::palette(&ctx).dim } else { theme::palette(&ctx).text })).wrap());
+                            let text=ui.add(egui::Label::new(RichText::new(&item.text).size(12.0).color(if item.resolved { theme::palette(&ctx).dim } else { theme::palette(&ctx).text })).wrap());
+                            #[cfg(test)]
+                            ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-note-body",item.id)),(text.rect,ui.clip_rect())));
+                            let _=text;
                         });
+                        if reveal_note==Some(item.id) {
+                            note_row.response.scroll_to_me(Some(Align::Center));
+                        }
                     }
                 });
+                if !query.is_empty(){ui.label(theme::small(ui,format!("{visible} matching notes · literal, case-sensitive")));}
+                if self.unresolved_only && !self.items.iter().any(|item|Some(&item.anchor.owner)==self.owner.as_ref() && !item.resolved) {
+                    ui.label(theme::small(ui,"No unresolved notes. Resolved notes remain in All."));
+                }
+                if let Some(id)=add_note {
+                    match self.one_note(id){
+                        Ok(text)=>if let Some(owner)=&self.owner {context_capture::queue_review(&ctx,&owner.root,&owner.session,"Local review note (original snapshot)",&text);},
+                        Err(error)=>self.error=Some(error),
+                    }
+                }
+                if let Some(id)=open_recorded {self.request_recorded_open(id,navigation.focus_id(),ctx.cumulative_pass_nr());}
+                if let Some(id)=delete {self.request_delete(id);}
+                if let Some(id)=edit {self.begin_edit(id);}
+                if let Some(id)=jump {self.jump(id,&ctx,path,diff,recorded,navigation);}
                 ui.horizontal_wrapped(|ui| {
                     let available = self.items.iter().any(|item| !item.resolved && Some(&item.anchor.owner) == self.owner.as_ref());
                     let add = prompt_ui::button(ui, "Add unresolved to draft", prompt_ui::Button::Secondary, enabled && available)
@@ -249,10 +370,10 @@ impl Comments {
                             Err(error) => self.error = Some(error),
                         }
                     }
-                    let clear = ui.add_enabled(enabled && (!self.items.is_empty() || self.editor.is_some()), egui::Button::new(theme::small(ui, "Clear all")).frame(false));
+                    let clear = ui.add_enabled(enabled && !self.confirming() && (!self.items.is_empty() || self.editor.is_some()), egui::Button::new(theme::small(ui, "Clear all")).frame(false));
                     self.controls.push(clear.id);
                     if self.after_editor.is_none() && clear.enabled() { self.after_editor = Some(clear.id); }
-                    if clear.clicked() { self.clear_requested = true; }
+                    if clear.clicked() && !self.confirming() { self.clear_requested = true; }
                     #[cfg(test)]
                     ctx.data_mut(|data| data.insert_temp(egui::Id::new("review-comment-clear"), clear.rect));
                     #[cfg(test)]
@@ -266,9 +387,10 @@ impl Comments {
             self.control_keyboard_pass = Some(ctx.cumulative_pass_nr());
             ui.input_mut(|input| input.events.retain(|event| !keyboard_event(event)));
         }
+        self.deletion_dialog(&ctx, navigation);
         if self.clear_requested {
-            match confirmations::Dialog::new("clear-local-review-comments", "Clear local review comments?", "Removes all local notes and unfinished comment text in this window, including notes owned by other sessions. Draft context already added is unchanged.", "Cancel", "Clear all").show(&ctx, |_| {}) {
-                Some(confirmations::Choice::Confirm) => { self.items.clear(); self.editor = None; self.editor_controls = [None;3]; self.error = None; self.clear_requested = false; }
+            match confirmations::Dialog::new("clear-local-review-comments", "Clear local review comments?", "Removes all local notes and unfinished comment text in this window, including other sessions. The next normal app save updates the local app checkpoint. Other windows are not synchronized. Draft context already added is unchanged.", "Cancel", "Clear all").show(&ctx, |_| {}) {
+                Some(confirmations::Choice::Confirm) => { self.items.clear(); self.editor = None; self.editor_controls = [None;3]; self.error = None; self.clear_requested = false; self.storage_dirty = true; }
                 Some(confirmations::Choice::Cancel) => self.clear_requested = false,
                 None => {}
             }
@@ -281,7 +403,11 @@ impl Comments {
         prompt_ui::style(ui);
         prompt_ui::heading(
             ui,
-            "Local comment",
+            if editor.editing.is_some() {
+                "Edit local comment"
+            } else {
+                "Local comment"
+            },
             &format!(
                 "{} · {}{}",
                 editor.anchor.source(),
@@ -315,10 +441,17 @@ impl Comments {
             self.error =
                 Some("Comment text limited to 2 KiB UTF-8; excess input was not retained.");
         }
+        if editor.text.capacity() > MAX_TEXT {
+            editor.text.shrink_to_fit();
+        }
         prompt_ui::footer(ui, |ui| {
             let add = prompt_ui::button(
                 ui,
-                "Add comment",
+                if editor.editing.is_some() {
+                    "Save changes"
+                } else {
+                    "Add comment"
+                },
                 prompt_ui::Button::Primary,
                 !editor.text.trim().is_empty(),
             );
@@ -338,7 +471,7 @@ impl Comments {
             && self.editor_controls.contains(&Some(id))
         {
             ui.ctx().memory_mut(|memory| {
-                memory.request_focus_with_filter(
+                memory.set_focus_lock_filter_current(
                     id,
                     egui::EventFilter {
                         escape: true,

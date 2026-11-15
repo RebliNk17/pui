@@ -1,21 +1,27 @@
 //! Bounded CSV/TSV indexing/decoding on the file worker; UI lays out visible cells only.
 use super::*;
 use std::{borrow::Cow, ops::Range};
+mod export;
 mod grid;
+mod projection;
+mod toolbar;
 
 const MAX_RECORDS: usize = 10_000;
 const MAX_COLUMNS: usize = 128;
 const MAX_CELLS: usize = 100_000;
-const ROW_HEIGHT: f32 = 30.0;
+const ROW_HEIGHT: f32 = 28.0;
 const COLUMN_WIDTH: f32 = 170.0;
 const NUMBER_WIDTH: f32 = 54.0;
 
 pub(super) struct Preview {
-    pub source: String,
-    index: Result<Index, String>,
+    pub source: Arc<String>,
+    index: Result<Arc<Index>, String>,
+    projection: Box<projection::Projection>,
+    export: export::Export,
+    toolbar: Box<toolbar::Toolbar>,
     line_starts: Vec<u32>,
     header: bool,
-    grid: grid::Grid,
+    grid: Box<grid::Grid>, // fixed-size keyboard state, keep Content enum compact
     target_line: std::cell::Cell<Option<usize>>,
 }
 #[derive(Debug)]
@@ -40,7 +46,7 @@ impl Cell {
 
 impl Preview {
     pub(super) fn new(source: String, delimiter: u8) -> Self {
-        let index = parse(&source, delimiter);
+        let index = parse(&source, delimiter).map(Arc::new);
         // The file reader already enforces MAX_TEXT; offsets need only 32 bits.
         let line_starts = std::iter::once(0)
             .chain(
@@ -52,8 +58,11 @@ impl Preview {
             )
             .collect();
         Self {
-            source,
+            source: Arc::new(source),
             index,
+            projection: Default::default(),
+            export: Default::default(),
+            toolbar: Default::default(),
             line_starts,
             header: true,
             grid: Default::default(),
@@ -61,13 +70,18 @@ impl Preview {
         }
     }
 
+    pub(super) fn demo_projection(&mut self) {
+        self.projection.demo();
+    }
     pub(super) fn retained_bytes(&self) -> usize {
         let source =
             self.source.capacity() + self.line_starts.capacity() * std::mem::size_of::<u32>();
         source
             + match &self.index {
                 Ok(index) => {
-                    index.records.capacity() * std::mem::size_of::<Range<usize>>()
+                    projection::Projection::reserved_bytes()
+                        + 1024 // bounded table chrome, popup identity and copy status
+                        + index.records.capacity() * std::mem::size_of::<Range<usize>>()
                         + index.cells.capacity() * std::mem::size_of::<Cell>()
                         + index
                             .cells
@@ -80,6 +94,9 @@ impl Preview {
             }
     }
 
+    pub(super) fn export_owns_keyboard(&self, ctx: &egui::Context) -> bool {
+        self.export.owns_keyboard(ctx) || self.toolbar.owns_keyboard(ctx)
+    }
     pub(super) fn header(&self) -> bool {
         self.header
     }
@@ -90,6 +107,10 @@ impl Preview {
         }
     }
 
+    pub(super) fn attach_projection_budget(&mut self, lease: &Arc<budget::Lease>) {
+        self.projection.attach_budget(lease);
+    }
+
     pub(super) fn target_line(&self, line: usize) -> usize {
         let count = self.line_starts.len() - usize::from(self.source.ends_with('\n'));
         let line = line.clamp(1, count.max(1));
@@ -98,21 +119,6 @@ impl Preview {
     }
 
     pub(super) fn show_source(&self, ui: &mut egui::Ui, path: &Path) {
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .button("Copy source")
-                .on_hover_text(
-                    "Copy the exact original UTF-8 text, including quotes and line endings",
-                )
-                .clicked()
-            {
-                ui.ctx().copy_text(self.source.clone());
-            }
-            ui.label(theme::small(
-                ui,
-                "Read-only · long lines are shortened visually; Copy source keeps the full text.",
-            ));
-        });
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace).max(18.0);
         let mut scroll = egui::ScrollArea::both()
             .id_salt(("delimited-source", path))
@@ -157,9 +163,14 @@ impl Preview {
         });
     }
 
+    #[cfg(test)]
     pub(super) fn show(&mut self, ui: &mut egui::Ui, path: &Path) {
+        self.show_view(ui, path, &mut false);
+    }
+
+    fn show_table(&mut self, ui: &mut egui::Ui, path: &Path) {
         let index = match &self.index {
-            Ok(index) => index,
+            Ok(index) => index.clone(),
             Err(error) => {
                 ui.add(
                     egui::Label::new(theme::small(ui, format!("Table unavailable: {error}")))
@@ -176,42 +187,36 @@ impl Preview {
             ui.label(theme::small(ui, "Empty file · no records to preview."));
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            if ui.checkbox(&mut self.header, "First record is header")
-                .on_hover_text("Remembered for this file in this workspace (up to 256 headerless overrides). No file data is changed.")
-                .changed() { self.grid.header_changed(); }
-            if ui.button("Navigate cells").on_hover_text("Focus the table. Arrows move; Home/End choose a column; Ctrl/⌘ Home/End choose first/last cell; Page Up/Down move a page; Tab leaves.").clicked() {
-                self.grid.focus(ui.ctx(), path);
-            }
-            if ui.button("Copy current cell").on_hover_text("Copy the complete current cell value, not its shortened display").clicked() {
-                ui.ctx().copy_text(index.value(&self.source, self.grid.active.0, self.grid.active.1).into());
-            }
-            let count = index.records.len() - usize::from(self.header);
+        self.projection.reconcile_header(
+            ui.ctx(),
+            &mut self.grid,
+            index.records.len(),
+            self.header,
+        );
+        self.projection
+            .poll(ui.ctx(), &mut self.grid, index.records.len(), self.header);
+        self.projection
+            .toolbar(ui, &self.source, &index, &mut self.grid, self.header);
+        let rows = self.projection.rows(index.records.len(), self.header);
+        if rows.len() <= usize::from(self.header) && self.projection.is_applied() {
             ui.label(theme::small(
                 ui,
-                format!("{count} data records · {} columns", index.columns),
+                "No matching rows. Adjust the filter or Reset view.",
             ));
-        });
-        if index.ragged {
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    "Record lengths differ. Missing cells are blank; no values were discarded.",
-                ))
-                .wrap(),
-            );
         }
-        ui.add(egui::Label::new(theme::small(ui, "Arrows move · Home/End · Page Up/Down · ⌘/Ctrl+C copy · Tab leaves")).wrap())
-            .on_hover_text("Read-only. Navigate cells or click a cell to focus the table. Copy keeps the complete cell value, or a pointer-selected substring. Ctrl/⌘ Home/End reaches first/last cell. Right-click a cell to copy or quote it.");
-        let description = self.grid.description(index, &self.source, self.header);
-        ui.add(egui::Label::new(theme::small(ui, &description)).truncate())
-            .on_hover_text(description);
-        ui.add_space(6.0);
         let colors = theme::palette(ui.ctx());
         let first = usize::from(self.header);
-        let count = index.records.len() - first;
+        let count = rows.len() - first;
         let width = NUMBER_WIDTH + index.columns as f32 * COLUMN_WIDTH;
         let height = (count + 1) as f32 * ROW_HEIGHT;
+        egui::TopBottomPanel::bottom(id_for_footer(path, self.grid.id(path)))
+            .exact_height(24.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::palette(ui.ctx()).bg)
+                    .inner_margin(egui::Margin::symmetric(4, 2)),
+            )
+            .show_inside(ui, |ui| self.footer(ui, &index));
         let mut painted = 0_usize;
         let scroll = egui::ScrollArea::both()
             .id_salt(("delimited-table", path, self.header))
@@ -234,7 +239,8 @@ impl Preview {
                     ui.new_child(egui::UiBuilder::new().id_salt("table-body").max_rect(rect));
                 body.set_clip_rect(data_clip);
                 for row in start..end {
-                    let record = row + first;
+                    let position = row + first;
+                    let record = rows.record(position).unwrap();
                     let y = rect.top() + (row + 1) as f32 * ROW_HEIGHT;
                     let row_rect = egui::Rect::from_min_size(
                         egui::pos2(rect.left(), y),
@@ -244,7 +250,11 @@ impl Preview {
                         continue;
                     }
                     if row % 2 == 1 {
-                        body.painter().rect_filled(row_rect, 0, colors.surface);
+                        body.painter().rect_filled(
+                            row_rect,
+                            0,
+                            colors.surface.gamma_multiply(0.28),
+                        );
                     }
                     number(&mut body, row_rect, record + 1);
                     for column in visible_columns.clone() {
@@ -258,6 +268,7 @@ impl Preview {
                             path,
                             record + 1,
                             column + 1,
+                            position,
                             &mut self.grid,
                         );
                         painted += 1;
@@ -265,7 +276,7 @@ impl Preview {
                     body.painter().hline(
                         row_rect.x_range(),
                         row_rect.bottom(),
-                        Stroke::new(1.0, colors.border),
+                        Stroke::new(1.0, colors.border.gamma_multiply(0.45)),
                     );
                 }
                 let header_rect = egui::Rect::from_min_size(
@@ -288,6 +299,7 @@ impl Preview {
                         path,
                         usize::from(self.header),
                         column + 1,
+                        0,
                         &mut self.grid,
                     );
                     painted += 1;
@@ -303,15 +315,21 @@ impl Preview {
             path,
             output.inner_rect,
             output.state.offset,
-            index,
+            &index,
             &self.source,
             self.header,
+            rows,
         );
+        self.projection.remember_scrollbars(ui.ctx(), output.id);
         #[cfg(test)]
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::new("delimited-painted-cells"), painted));
         let _ = painted;
     }
+}
+
+fn id_for_footer(path: &Path, id: egui::Id) -> egui::Id {
+    id.with(("table-footer", path))
 }
 
 impl Index {
@@ -355,12 +373,16 @@ fn cell(
     path: &Path,
     record: usize,
     column: usize,
+    position: usize,
     grid: &mut grid::Grid,
 ) {
     if !ui.is_rect_visible(rect) {
         return;
     }
     let colors = theme::palette(ui.ctx());
+    if record > 0 {
+        grid.paint_selection(ui, rect, position, column - 1);
+    }
     // Bound glyph layout even if a single field occupies the entire 512 KiB file.
     let mut display: String = value
         .chars()
@@ -400,7 +422,30 @@ fn cell(
     );
     if record > 0 {
         if response.clicked_by(egui::PointerButton::Primary) {
-            grid.select(ui.ctx(), path, record - 1, column - 1);
+            if ui.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        if let egui::Event::PointerButton {
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers,
+                            ..
+                        } = event
+                        {
+                            Some(modifiers.shift)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(input.modifiers.shift)
+            }) {
+                grid.extend_to(ui.ctx(), path, record - 1, column - 1, position);
+            } else {
+                grid.select(ui.ctx(), path, record - 1, column - 1, position);
+            }
         }
         grid.paint(ui, path, rect, record - 1, column - 1);
     }
@@ -423,27 +468,31 @@ fn cell(
             ));
         }
     });
-    response.context_menu(|ui| {
-        theme::menu_controls(ui);
-        if ui.button("Copy cell").clicked() {
-            ui.ctx().copy_text(value.to_owned());
-            ui.close();
-        }
-        if ui.button("Add cell to chat").clicked() {
-            context_capture::queue(
-                ui.ctx(),
-                &format!("{} · record {record}, column {column}", path.display()),
-                value,
-            );
-            ui.close();
-        }
-    });
-    grid.menu(&response);
-    ui.painter().vline(
-        rect.right(),
-        rect.y_range(),
-        Stroke::new(1.0, colors.border),
-    );
+    if record > 0 {
+        response.context_menu(|ui| {
+            theme::menu_controls(ui);
+            if ui.button("Copy cell").clicked() {
+                ui.ctx().copy_text(value.to_owned());
+                ui.close();
+            }
+            if ui.button("Add cell to chat").clicked() {
+                context_capture::queue(
+                    ui.ctx(),
+                    &format!("{} · record {record}, column {column}", path.display()),
+                    value,
+                );
+                ui.close();
+            }
+        });
+        grid.menu(&response);
+    }
+    if header {
+        ui.painter().vline(
+            rect.right(),
+            rect.y_range(),
+            Stroke::new(1.0, colors.border.gamma_multiply(0.55)),
+        );
+    }
 }
 
 /// Strict RFC-style quoting, comma/tab dialect only; never infer numeric/formula types.

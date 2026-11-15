@@ -13,6 +13,9 @@ struct Style {
     link: bool,
     hidden: bool,
     bullet: bool,
+    underline: bool,
+    block: bool,
+    line_break: bool,
 }
 struct Link {
     range: Range<usize>,
@@ -21,6 +24,8 @@ struct Link {
 struct Presentation {
     styles: Vec<Style>,
     links: Vec<Link>,
+    blocks: Vec<Range<usize>>,
+    lists: Vec<Range<usize>>,
 }
 
 fn editing(range: &Range<usize>, selection: Option<Range<usize>>) -> bool {
@@ -42,8 +47,11 @@ impl Presentation {
         let mut result = Self {
             styles: vec![Style::default(); source.len()],
             links: Vec::new(),
+            blocks: Vec::new(),
+            lists: Vec::new(),
         };
-        let events: Vec<_> = Parser::new(source).into_offset_iter().collect();
+        let parsed = parse_source(source);
+        let events: Vec<_> = Parser::new(&parsed).into_offset_iter().collect();
         let inline_literals: Vec<_> = events
             .iter()
             .filter_map(|(event, range)| {
@@ -56,7 +64,11 @@ impl Presentation {
             match event {
                 Event::Start(Tag::CodeBlock(_)) => {
                     literal.push(range.clone());
-                    result.apply(range, |s| s.code = true);
+                    result.blocks.push(range.clone());
+                    result.apply(range, |s| {
+                        s.code = true;
+                        s.block = true;
+                    });
                     in_code = true;
                 }
                 Event::End(TagEnd::CodeBlock) => in_code = false,
@@ -77,6 +89,19 @@ impl Presentation {
                         .take_while(|b| *b == b'`')
                         .count();
                     result.delimiters(source, range.clone(), ticks, selection.clone());
+                    if ticks >= 3 {
+                        result.apply(range.clone(), |s| s.block = true);
+                        result.blocks.push(range.clone());
+                        // A one-line triple-backtick snippet still occupies its own
+                        // visual block. One display character per source character
+                        // keeps copy/undo and cursor indices in the original draft.
+                        if range.start > 0 && !source[..range.start].ends_with('\n') {
+                            result.styles[range.start].line_break = true;
+                        }
+                        if range.end < source.len() && !source[range.end..].starts_with('\n') {
+                            result.styles[range.end - 1].line_break = true;
+                        }
+                    }
                     literal.push(range);
                 }
                 Event::Start(Tag::Link {
@@ -129,17 +154,26 @@ impl Presentation {
                 _ => {}
             }
         }
+        for range in commands::underline_ranges(source) {
+            result.apply(range.clone(), |s| s.underline = true);
+            if !editing(&range, selection.clone()) {
+                result.hide(range.start..range.start + 3);
+                result.hide(range.end - 4..range.end);
+            }
+        }
         // Recognize a marker as soon as its following space is typed, even if
         // CommonMark has not yet emitted a nonempty list item.
         let mut offset = 0;
         for line in source.split_inclusive('\n') {
             if let Some(prefix) = ListPrefix::parse(line) {
-                if prefix.number.is_none()
-                    && !literal
-                        .iter()
-                        .any(|r| r.contains(&(offset + prefix.indent.len())))
+                if !literal
+                    .iter()
+                    .any(|r| r.contains(&(offset + prefix.indent.len())))
                 {
-                    result.styles[offset + prefix.indent.len()].bullet = true;
+                    result.lists.push(offset..offset + line.len());
+                    if prefix.number.is_none() && prefix.letter.is_none() {
+                        result.styles[offset + prefix.indent.len()].bullet = true;
+                    }
                 }
             }
             offset += line.len();
@@ -213,7 +247,12 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
     let presentation = Presentation::new(source, selection(ctx, source));
     let colors = theme::palette(ctx);
     let mut display = LayoutJob::default();
-    display.wrap.max_width = width;
+    let inset = if presentation.lists.is_empty() && presentation.blocks.is_empty() {
+        0.0
+    } else {
+        12.0
+    };
+    display.wrap.max_width = (width - inset * 2.0).max(24.0);
     display.align_baseline = true;
     let mut original = display.clone();
     // Keep exactly one display character per source character. Invisible syntax
@@ -242,13 +281,16 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
             } else {
                 colors.text
             },
-            background: if style.code && !style.hidden {
+            line_height: style.block.then_some(28.0),
+            background: if style.code && !style.block && !style.hidden {
                 colors.code_bg
             } else {
                 Color32::TRANSPARENT
             },
             italics: style.italic,
-            underline: if style.link && !style.hidden {
+            underline: if style.underline {
+                Stroke::new(1.0, colors.text)
+            } else if style.link && !style.hidden {
                 Stroke::new(0.5, colors.accent)
             } else {
                 Stroke::NONE
@@ -260,7 +302,9 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
         let visible: String = value
             .chars()
             .map(|c| {
-                if style.hidden && c != '\n' {
+                if style.line_break {
+                    '\n'
+                } else if style.hidden && c != '\n' {
                     '\u{200b}'
                 } else if style.bullet {
                     '•'
@@ -275,8 +319,98 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
     let mut galley = ctx.fonts(|f| f.layout_job(display));
     // Geometry uses presentation glyphs; word navigation/accessibility must see
     // the original text and its byte ranges. Section counts/formats are identical.
-    Arc::make_mut(&mut galley).job = Arc::new(original);
+    let galley_mut = Arc::make_mut(&mut galley);
+    galley_mut.job = Arc::new(original);
+    let mut index = 0;
+    for row in &mut galley_mut.rows {
+        let start = byte_index(source, index);
+        let end = byte_index(source, index + row.char_count_excluding_newline());
+        if presentation
+            .blocks
+            .iter()
+            .any(|r| r.start < end && start < r.end)
+            || presentation
+                .lists
+                .iter()
+                .any(|r| r.start <= start && start < r.end)
+        {
+            row.pos.x += inset;
+        }
+        index += row.char_count_including_newline();
+    }
+    galley_mut.rect.max.x += inset;
+    galley_mut.mesh_bounds.max.x += inset;
     galley
+}
+
+pub(super) fn list_at_cursor(ctx: &egui::Context, source: &str) -> bool {
+    let Some(selection) = selection(ctx, source) else {
+        return false;
+    };
+    let start = source[..selection.start].rfind('\n').map_or(0, |i| i + 1);
+    Presentation::new(source, None)
+        .lists
+        .iter()
+        .any(|r| r.contains(&start))
+}
+
+pub(super) fn decorate(
+    ui: &egui::Ui,
+    placeholder: egui::layers::ShapeIdx,
+    output: &TextEditOutput,
+    source: &str,
+) {
+    let presentation = Presentation::new(source, None);
+    let colors = theme::palette(ui.ctx());
+    let mut shapes = Vec::new();
+    for block in &presentation.blocks {
+        let start = source[..block.start].chars().count();
+        let end = source[..block.end].chars().count();
+        let mut offset = 0;
+        let mut rect = egui::Rect::NOTHING;
+        for row in &output.galley.rows {
+            let next = offset + row.char_count_including_newline();
+            let visible_end = offset + row.char_count_excluding_newline();
+            if offset < end && visible_end > start {
+                rect = rect.union(row.rect());
+            }
+            offset = next;
+        }
+        if rect.is_finite() {
+            rect.min.x = 4.0;
+            rect.max.x = output.response.rect.width() - 4.0;
+            let rect = rect.translate(output.galley_pos.to_vec2());
+            shapes.push(egui::Shape::rect_filled(rect, 6, colors.code_bg));
+            shapes.push(egui::Shape::rect_stroke(
+                rect,
+                6,
+                Stroke::new(1.0, colors.border),
+                egui::StrokeKind::Inside,
+            ));
+        }
+    }
+    ui.painter().set(placeholder, egui::Shape::Vec(shapes));
+}
+
+impl Pui {
+    pub(super) fn composer_formatting_available(&self, ctx: &egui::Context) -> bool {
+        ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+            && !self.settings_open
+            && !self.kanban.open
+            && !self.automation.open
+            && !self.search_open
+            && !self.model_picker_open
+            && !self.effort_picker_open
+            && !self.menu.about
+            && !self.updates.open
+            && !self.agents.close_prompt
+            && !self.deletion.confirming()
+            && !self.section_view.confirming()
+            && !self.history_view.is_open()
+            && self.state.dialogs.is_empty()
+            && !self.transcript.gallery.is_open()
+            && !self.draft_images.gallery.is_open()
+    }
 }
 
 pub(super) fn links(ui: &egui::Ui, output: &TextEditOutput, source: &str) {
@@ -314,13 +448,22 @@ struct ListPrefix<'a> {
     marker: &'a str,
     end: usize,
     number: Option<u64>,
+    letter: Option<u8>,
 }
 impl<'a> ListPrefix<'a> {
     fn parse(line: &'a str) -> Option<Self> {
         let trimmed = line.trim_start_matches([' ', '\t']);
         let indent = &line[..line.len() - trimmed.len()];
         let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-        let (marker_len, number) = if digits > 0 && digits <= 9 {
+        let letter = (trimmed
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && matches!(trimmed.as_bytes().get(1), Some(b'.' | b')')))
+        .then(|| trimmed.as_bytes()[0]);
+        let (marker_len, number) = if letter.is_some() {
+            (2, None)
+        } else if digits > 0 && digits <= 9 {
             if !matches!(trimmed.as_bytes().get(digits), Some(b'.' | b')')) {
                 return None;
             }
@@ -339,6 +482,7 @@ impl<'a> ListPrefix<'a> {
             marker: &trimmed[..marker_len],
             end,
             number,
+            letter,
         })
     }
     fn next(&self) -> String {
@@ -349,10 +493,59 @@ impl<'a> ListPrefix<'a> {
                 number + 1,
                 self.marker.chars().last().unwrap()
             )
+        } else if let Some(letter) = self.letter {
+            let base = if letter.is_ascii_uppercase() {
+                b'A'
+            } else {
+                b'a'
+            };
+            let next = (base + (letter - base + 1) % 26) as char;
+            format!(
+                "{}{next}{} ",
+                self.indent,
+                self.marker.chars().last().unwrap()
+            )
         } else {
             format!("{}{} ", self.indent, self.marker)
         }
     }
+}
+
+// CommonMark has no lettered lists. Substitute an equal-length numeric marker
+// for parsing only; every stored/displayed/copied character remains untouched.
+fn parse_source(source: &str) -> std::borrow::Cow<'_, str> {
+    let mut parsed = std::borrow::Cow::Borrowed(source);
+    let fenced: Vec<_> = Parser::new(source)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            matches!(
+                event,
+                Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(_)))
+            )
+            .then_some(range)
+        })
+        .collect();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        if let Some(prefix) =
+            ListPrefix::parse(line).filter(|_| !fenced.iter().any(|r| r.contains(&offset)))
+        {
+            // A nested item remains a list while editing even before a parent
+            // exists. Quotes preserve byte offsets without CommonMark mistaking
+            // four-space list indentation for an indented code block.
+            for index in 0..prefix.indent.len() {
+                parsed
+                    .to_mut()
+                    .replace_range(offset + index..offset + index + 1, ">");
+            }
+            if prefix.letter.is_some() {
+                let start = offset + prefix.indent.len();
+                parsed.to_mut().replace_range(start..start + 1, "1");
+            }
+        }
+        offset += line.len();
+    }
+    parsed
 }
 
 /// Let egui own each edit (including auto-continuation) so undo/redo remains
@@ -387,7 +580,8 @@ impl TextBuffer for Buffer<'_> {
             let end = self.text[byte..]
                 .find('\n')
                 .map_or(self.text.len(), |i| byte + i);
-            let literal = Parser::new(self.text).into_offset_iter().any(|(e, r)| {
+            let parsed = parse_source(self.text);
+            let literal = Parser::new(&parsed).into_offset_iter().any(|(e, r)| {
                 r.start <= byte
                     && match e {
                         // Unclosed fenced/indented blocks also include a caret at EOF.
@@ -416,5 +610,10 @@ impl TextBuffer for Buffer<'_> {
     }
 }
 
+mod commands;
+pub(super) use commands::{Format, format, keys};
+
+#[cfg(test)]
+mod editing_tests;
 #[cfg(test)]
 mod tests;

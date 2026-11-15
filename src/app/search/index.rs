@@ -131,6 +131,7 @@ pub(super) fn search(sources: Vec<Source>, query: &str, cancel: &Arc<AtomicBool>
                         timestamp: message.timestamp,
                         fingerprint: text_fingerprint(&message.text),
                     }),
+                    attention: None,
                 });
                 if found.hits.len() >= MAX_HITS {
                     found.limited = true;

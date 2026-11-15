@@ -34,7 +34,9 @@ impl Browser {
                             .color(colors.muted),
                         );
                     } else {
-                        let tabs_width = (ui.available_width() - 96.0).max(90.0);
+                        let tabs_width = (ui.available_width()
+                            - if self.browser_mode { 96.0 } else { 128.0 })
+                        .max(90.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("viewer-tabs-scroll")
                             .max_width(tabs_width)
@@ -129,6 +131,16 @@ impl Browser {
                             self.expanded = !self.expanded;
                         }
                         if !self.browser_mode {
+                            if chrome::icon_button(
+                                ui,
+                                Icon::Folder,
+                                "Toggle file explorer",
+                                self.tree_open,
+                            )
+                            .clicked()
+                            {
+                                self.tree_open = !self.tree_open;
+                            }
                             let refresh = chrome::icon_button(
                                 ui,
                                 Icon::Refresh,

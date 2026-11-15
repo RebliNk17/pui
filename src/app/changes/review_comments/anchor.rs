@@ -2,7 +2,7 @@
 use super::*;
 use std::ops::Range;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Selection {
     pub chars: Range<usize>,
     pub rows: (usize, usize),

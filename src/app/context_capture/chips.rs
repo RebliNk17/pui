@@ -276,6 +276,8 @@ impl Pui {
 }
 
 #[cfg(test)]
+mod composer_integration_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

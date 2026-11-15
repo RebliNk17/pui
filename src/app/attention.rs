@@ -7,8 +7,14 @@ use std::{
 };
 
 mod decoder;
+mod dock;
+mod search;
+mod sidebar;
 mod ui;
 pub(super) use decoder::Stored;
+pub(super) use dock::Window as DockWindow;
+pub(super) use search::SearchEvent;
+pub(super) use sidebar::paint_unread;
 
 #[cfg(test)]
 mod tests;
@@ -61,7 +67,7 @@ impl Metadata {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Owner {
     Saved(PathBuf),
     Runtime(String),
@@ -70,6 +76,13 @@ enum Owner {
 struct Entry {
     owner: Owner,
     metadata: Metadata,
+}
+impl Entry {
+    fn unread_at(&self, time: u64) -> bool {
+        !self.metadata.read
+            && self.metadata.at <= time
+            && time.saturating_sub(self.metadata.at) <= MAX_AGE_SECONDS
+    }
 }
 #[derive(Default)]
 pub(super) struct Attention {
@@ -223,10 +236,14 @@ impl Attention {
         self.entries
             .retain(|e| !matches!(&e.owner, Owner::Runtime(id) if ids.contains(id)));
     }
-    fn mark_read(&mut self, owner: &Owner) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| &e.owner == owner) {
+    fn mark_read(&mut self, owner: &Owner) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|e| &e.owner == owner)
+            && !entry.metadata.read
+        {
             entry.metadata.read = true;
+            return true;
         }
+        false
     }
     fn mark_all_read(&mut self) {
         for entry in &mut self.entries {
@@ -235,14 +252,7 @@ impl Attention {
     }
     pub(super) fn unread(&self) -> usize {
         let time = now();
-        self.entries
-            .iter()
-            .filter(|e| {
-                !e.metadata.read
-                    && e.metadata.at <= time
-                    && time.saturating_sub(e.metadata.at) <= MAX_AGE_SECONDS
-            })
-            .count()
+        self.entries.iter().filter(|e| e.unread_at(time)).count()
     }
 }
 
@@ -425,8 +435,10 @@ impl Pui {
             && !self.automation.open
             && !self.tasks.open
             && self.question_designs.is_none()
+            && !self.changes.review_comments.confirming()
             && !self.section_view.confirming()
             && !self.tasks.attachment_confirming()
+            && !self.task_operations_confirming()
             && !self.agents.close_prompt
             && !self.terminals.confirming_stop()
             && !self.history_view.is_open()
@@ -445,8 +457,11 @@ impl Pui {
             && !egui::Popup::is_any_open(ctx)
             && ctx.input(|i| i.focused)
             && let Some(owner) = self.attention_owner()
+            && self.attention.mark_read(&owner)
         {
-            self.attention.mark_read(&owner);
+            // The sidebar/header painted earlier in this pass. Refresh once
+            // for a real read transition, never continuously for visible chat.
+            ctx.request_repaint();
         }
     }
 }

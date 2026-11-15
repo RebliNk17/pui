@@ -42,6 +42,7 @@ fn job(
             budget: budget::Lease::new(ctx),
             cancelled: cancelled.clone(),
             before_read: None,
+            svg_helper: None,
         },
         rx,
         Ticket {

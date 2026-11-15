@@ -25,7 +25,7 @@ impl Report {
         parts.extend(self.evidence.iter().cloned());
         parts.extend(self.blockers.iter().cloned());
         if !self.blockers.is_empty() {
-            parts.push("Automatic dependency/bootstrap setup is not supported. Inspect the retained workspace and arrange project-specific setup separately through normal exact-command shell permission approval; no install, network access, credential copying, or symlink copying was authorized. Request a new workflow with fresh consent after setup. Revalidation only compares existing candidate evidence; it does not rerun commands or resume implementation.".into());
+            parts.push("Automatic dependency/bootstrap setup is not supported. A separate user-reviewed setup plan can propose supported frozen-lockfile commands or accept explicit project-specific commands for this retained isolated workspace. Reviewing a plan runs nothing. Setup requires separate task/workspace/fingerprint-bound confirmation and normal exact-command shell permission approval; no install, network access, lifecycle script, credential/environment copying, or dependency symlink is authorized by workflow consent. Setup never silently resumes implementation or checks; use an explicit recovery action after refreshing prerequisite evidence. Revalidation only compares existing candidate evidence; it does not rerun commands.".into());
         }
         parts.join("\n")
     }
@@ -216,5 +216,5 @@ pub(super) fn failed_requirement(check: &Check) -> Option<String> {
     let missing_linker = text.lines().any(|line| {
         line.trim_start().starts_with("error: linker `") && line.trim_end().ends_with("` not found")
     });
-    (recognized.iter().any(|s| text.contains(s)) || cargo_offline_cache || missing_linker).then(|| format!("Check {} reported an unavailable module, tool, package, or network prerequisite. Inspect its exact retained command/output; environment health is unknown. No verifier or automatic repair was started. Automatic setup is unsupported; use separately approved project-specific setup and fresh workflow consent, not shell replay.", check.criterion))
+    (recognized.iter().any(|s| text.contains(s)) || cargo_offline_cache || missing_linker).then(|| format!("Check {} reported an unavailable module, tool, package, or network prerequisite. Inspect its exact retained command/output; environment health is unknown. No verifier or automatic repair was started. Automatic setup is unsupported; inspect a separate user-reviewed setup plan with exact-command permission, then explicitly choose recovery. Never replay uncertain shell effects.", check.criterion))
 }

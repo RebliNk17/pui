@@ -1,3 +1,10 @@
+# Validation cadence
+
+- During implementation, run focused tests for the changed feature; batch related changes.
+- Defer further suite/application profiling until development is finished (user direction).
+- Run the full suite at feature completion/before integration or packaging, not after every minor edit.
+- Use `scripts/test-rust.sh` for complete Rust validation: bounded parallel bulk tests plus serial contention-sensitive groups, with no omitted groups or failure retries. See `docs/test-execution.md`.
+
 # UI conventions
 
 ## Prompts and confirmations

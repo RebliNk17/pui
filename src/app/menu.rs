@@ -55,7 +55,7 @@ fn menu_items(
                 if let Some(checked) = state.checked(*action) {
                     button = button.selected(checked);
                 }
-                if let Some(shortcut) = action.shortcut() {
+                if let Some(shortcut) = action.contextual_shortcut(state.composer_focused) {
                     button = button.shortcut_text(ui.ctx().format_shortcut(&shortcut));
                 }
                 if ui.add_enabled(state.enabled(*action), button).clicked() {
@@ -123,6 +123,7 @@ impl Pui {
             terminal: self.terminals.is_open(),
             terminal_focused: !self.settings_open && self.terminals.focused(ctx),
             text_focused: text.is_some(),
+            composer_focused: self.composer_formatting_available(ctx),
             text_selected: text
                 .as_ref()
                 .and_then(|s| s.cursor.char_range())
@@ -273,6 +274,15 @@ impl Pui {
                     settings::DeliveryMode::Queue
                 };
                 self.propagate_settings(&before);
+            }
+            Bold | Italic | Underline => {
+                let format = match command {
+                    Bold => composer_text::Format::Bold,
+                    Italic => composer_text::Format::Italic,
+                    _ => composer_text::Format::Underline,
+                };
+                self.context_chips.clear();
+                composer_text::format(ctx, &mut self.draft, format);
             }
             Sidebar => self.prefs.hide_sidebar = !self.prefs.hide_sidebar,
             Inspector => {
@@ -462,6 +472,7 @@ impl Pui {
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
         self.updates.show(ctx);
         about::show(ctx, &mut self.menu.about);
+        self.resource_reload_dialog(ctx);
     }
 }
 
@@ -729,6 +740,68 @@ mod tests {
                 assert!(app.prefs.hide_inspector);
             },
         );
+    }
+    #[test]
+    fn native_formatting_commands_and_accelerators_are_composer_scoped() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let frame = |app: &mut Pui| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 650.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.composer(ui, ctx));
+                },
+            )
+        };
+        frame(&mut app);
+        app.draft = "hello".into();
+        let id = egui::Id::new("composer");
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(5),
+            )));
+        state.store(&ctx, id);
+        assert!(app.menu_state(&ctx).composer_focused);
+        assert!(Command::Sidebar.contextual_shortcut(true).is_none());
+        assert!(Command::Inspector.contextual_shortcut(true).is_none());
+        assert_eq!(
+            Command::Bold.contextual_shortcut(true),
+            Command::Sidebar.shortcut()
+        );
+        assert_eq!(
+            Command::Italic.contextual_shortcut(true),
+            Command::Inspector.shortcut()
+        );
+        for (command, expected) in [
+            (Command::Bold, "**hello**"),
+            (Command::Italic, "*hello*"),
+            (Command::Underline, "<u>hello</u>"),
+        ] {
+            app.menu_command(&ctx, command);
+            assert_eq!(app.draft, expected);
+            app.menu_command(&ctx, command);
+            assert_eq!(app.draft, "hello");
+        }
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        app.menu_command(&ctx, Command::Bold);
+        assert_eq!(app.draft, "hello");
+        assert!(Command::Bold.contextual_shortcut(false).is_none());
+        assert!(Command::Sidebar.contextual_shortcut(false).is_some());
+        ctx.memory_mut(|m| m.request_focus(id));
+        app.settings_open = true;
+        assert!(!app.composer_formatting_available(&ctx));
+        app.menu_command(&ctx, Command::Underline);
+        assert_eq!(app.draft, "hello");
     }
     #[test]
     fn native_edit_commands_reach_the_focused_composer() {

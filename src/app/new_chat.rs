@@ -28,6 +28,7 @@ impl Pui {
             || self.image_picker_rx.is_some()
             || !self.deliveries.is_empty()
             || self.interrupt.is_some()
+            || self.resource_reload.pending()
             || self.history_pending.is_some()
             || self.is_mirror()
             || self.pending_session.is_some()
@@ -242,6 +243,13 @@ impl Pui {
         self.draft_images = images;
     }
     pub(super) fn start_chat_in(&mut self, folder: PathBuf) {
+        self.start_chat_with_permission(folder, None);
+    }
+    pub(super) fn start_chat_with_permission(
+        &mut self,
+        folder: PathBuf,
+        permission: Option<settings::PermissionMode>,
+    ) {
         if self.deletion.in_progress() {
             return;
         }
@@ -289,8 +297,9 @@ impl Pui {
         self.context_chips.clear();
         self.draft_images.clear();
         self.recall = Default::default();
-        self.connect(&self.ctx.clone(), None);
         let id = self.ensure_agent();
+        self.agents.nodes.get_mut(&id).unwrap().permission = permission;
+        self.connect(&self.ctx.clone(), None);
         self.agents.nodes.get_mut(&id).unwrap().name = "New conversation".into();
         self.enter_session_layout();
         self.focus_composer = true;

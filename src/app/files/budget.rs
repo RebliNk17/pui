@@ -63,6 +63,7 @@ impl Content {
         match self {
             Self::Text(text) => text.capacity(),
             Self::Table(preview) => preview.retained_bytes(),
+            Self::Svg(preview) => preview.retained_bytes(),
             // Conservatively reserve both decoded pixels and one matching GPU
             // copy. Keep this charge after uploading/dropping the CPU image;
             // it also covers upload overlap, not backend/driver overhead.

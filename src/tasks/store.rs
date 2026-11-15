@@ -142,11 +142,14 @@ fn read_record(home: &Path, id: &str) -> Result<Task, String> {
 /// second-resolution timestamp: another window can write twice in one second.
 pub fn current_record(home: &Path, expected: &Task) -> Result<Task, String> {
     let task = read_record(home, &expected.id)?;
+    let expected = serde_json::to_value(expected).map_err(|e| e.to_string())?;
+    // An owning live writer compares the raw durable record. Observers see the
+    // recovered presentation after a crash; accept that exact projection too,
+    // while the caller's real writer claim still governs whether it may act.
+    let raw = serde_json::to_value(&task).map_err(|e| e.to_string())?;
     let mut visible = task.clone();
     visible.recover();
-    if serde_json::to_value(&visible).map_err(|e| e.to_string())?
-        != serde_json::to_value(expected).map_err(|e| e.to_string())?
-    {
+    if raw != expected && serde_json::to_value(&visible).map_err(|e| e.to_string())? != expected {
         return Err(
             "This workflow changed in another window. Refresh it before trying again.".into(),
         );

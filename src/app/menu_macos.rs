@@ -56,8 +56,8 @@ fn submenu(mtm: MainThreadMarker, parent: &NSMenu, title: &str) -> Retained<NSMe
     parent.addItem(&item);
     menu
 }
-fn accelerator(command: Command) -> (String, Flags) {
-    let Some(shortcut) = command.shortcut() else {
+fn accelerator(command: Command, composer: bool) -> (String, Flags) {
+    let Some(shortcut) = command.contextual_shortcut(composer) else {
         return (String::new(), Flags::empty());
     };
     let key = match shortcut.logical_key {
@@ -153,7 +153,7 @@ impl Native {
             }
             match entry {
                 Entry::Action(title, command) => {
-                    let (key, flags) = accelerator(*command);
+                    let (key, flags) = accelerator(*command, false);
                     // Selector signature matches Target::command; retained Target
                     // outlives the menu and is detached before it is released.
                     let item = unsafe {
@@ -186,6 +186,9 @@ impl Native {
             return;
         }
         for (command, item) in &self.items {
+            let (key, flags) = accelerator(*command, state.composer_focused);
+            item.setKeyEquivalent(&NSString::from_str(&key));
+            item.setKeyEquivalentModifierMask(flags);
             item.setState(if state.checked(*command) == Some(true) {
                 1
             } else {

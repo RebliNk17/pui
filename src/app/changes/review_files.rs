@@ -32,8 +32,11 @@ impl Files {
                 .position(|file| file.path == document.0 && file.diff == document.1);
         }
     }
-    fn available(&self, revision: u64) -> bool {
+    pub(super) fn available(&self, revision: u64) -> bool {
         !self.limited && self.revision == Some(revision) && self.position.is_some()
+    }
+    pub(super) fn set_position(&mut self, position: usize) {
+        self.position = Some(position);
     }
     fn previous(&self, revision: u64) -> Option<usize> {
         self.available(revision)

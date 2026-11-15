@@ -29,9 +29,17 @@ fn app() -> Pui {
     for _ in 0..4 {
         file_tests::frame(&ctx, &mut app, vec![]);
     }
+    let id = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(("table-toolbar", 4usize))))
+        .unwrap();
+    let pos = ctx.read_response(id).unwrap().rect.center();
+    file_tests::click(&ctx, &mut app, pos);
     let out = file_tests::frame(&ctx, &mut app, vec![]);
     let pos = file_tests::text(&out, "Navigate cells");
     file_tests::click(&ctx, &mut app, pos);
+    for _ in 0..3 {
+        file_tests::frame(&ctx, &mut app, vec![]);
+    }
     app
 }
 fn active(app: &Pui) -> (usize, usize) {

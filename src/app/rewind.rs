@@ -69,6 +69,8 @@ impl Pui {
             && self.ultracode_ready
             && self.state.ready()
             && !self.loading_chat
+            && !self.resource_reload.pending()
+            && !self.resource_reload.confirming()
             && self.state.dialogs.is_empty()
             && self.deliveries.is_empty()
             && self.interrupt.is_none()

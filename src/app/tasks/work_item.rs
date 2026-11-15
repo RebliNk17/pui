@@ -100,6 +100,7 @@ impl Pui {
                 if matches!(task.phase, Phase::Blocked | Phase::Interrupted | Phase::Failed | Phase::Stale | Phase::Cancelled) {
                     self.work_item_recovery(ui, &task);
                 }
+                self.task_operation_actions(ui, &task);
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add(egui::Label::new(theme::small(ui, format!("{} · tool permissions stay separate", task.latest().map(|a| format!("Attempt {} of at most 3", a.number + 1)).unwrap_or_else(|| "No implementation attempt yet".into())))).wrap());
@@ -645,6 +646,32 @@ fn evidence(ui: &mut egui::Ui, task: &Task) {
     if task.attempts.is_empty() {
         ui.add(egui::Label::new(theme::small(ui, "No executed check or independent review yet. Proposed commands are not execution results.")).wrap());
     }
+    for setup in task.setup.iter().rev() {
+        crate::section::Section::new(format!("Environment setup · {:?}", setup.status))
+            .id_salt((&task.id, &setup.id, "setup-evidence"))
+            .summary("Separate setup evidence · not acceptance checks")
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(&setup.note).wrap());
+                for result in &setup.results {
+                    approval_view::arguments(ui, &json!({"command": result.command, "exit": result.exit_code, "cancelled": result.cancelled, "output": result.output, "error": result.error}));
+                }
+            });
+    }
+    for recovery in task.recoveries.iter().rev() {
+        crate::section::Section::new(format!("Explicit check rerun · {:?}", recovery.state))
+            .id_salt((&task.id, &recovery.id, "recovery-evidence"))
+            .summary(format!("Candidate attempt {} · original history retained", recovery.candidate_attempt + 1))
+            .default_open(true).show(ui, |ui| {
+                ui.add(egui::Label::new(&recovery.note).wrap());
+                for check in &recovery.checks {
+                    crate::section::Section::new(format!("{} · {}", check.criterion, if check.passed() { "Passed" } else { "Failed / incomplete" }))
+                        .id_salt((&task.id, &recovery.id, &check.criterion))
+                        .summary(format!("Exit {:?} · {} ms", check.exit_code, check.duration_ms))
+                        .show(ui, |ui| { approval_view::arguments(ui, &json!({"command": check.command, "output": check.output, "cancelled": check.cancelled, "truncated": check.truncated})); });
+                }
+                if let Some(review) = &recovery.review { ui.add(egui::Label::new(&review.summary).wrap()); for finding in &review.criteria { ui.add(egui::Label::new(format!("{} · {:?}: {}", finding.id, finding.status, finding.evidence)).wrap()); } }
+            });
+    }
     for attempt in task.attempts.iter().rev() {
         ui.add_space(12.0);
         ui.label(
@@ -736,7 +763,7 @@ fn evidence(ui: &mut egui::Ui, task: &Task) {
 
 fn changes(ui: &mut egui::Ui, task: &Task) {
     ui.label(RichText::new("Recorded candidate changes").strong());
-    ui.add(egui::Label::new(theme::small(ui, if task.isolated { "Retained in the isolated workspace. These edits have not been applied to the original checkout." } else { "Non-Git execution works in place: edits may already be present. No commit or deployment was performed." })).wrap());
+    ui.add(egui::Label::new(theme::small(ui, if task.isolated { "Retained in the isolated workspace. Workflow completion does not apply edits automatically. Review application outcomes or inspect retained transactions to establish whether a separate application occurred." } else { "Non-Git execution works in place: edits may already be present. No commit or deployment was performed." })).wrap());
     if task.attempts.iter().all(|a| a.changes.is_empty()) {
         ui.add(egui::Label::new(theme::small(ui, "No file-tool edits were recorded. This is not a claim that the workspace is unchanged.")).wrap());
     }

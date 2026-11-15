@@ -10,6 +10,7 @@ mod changes_preview;
 pub(super) mod chat;
 mod consent;
 pub(super) mod environment;
+mod operations;
 pub(super) mod recovery;
 mod refresh;
 mod routing;
@@ -17,6 +18,7 @@ mod runtime;
 #[cfg(test)]
 #[path = "tasks/save_conflict_tests.rs"]
 mod save_conflict_tests;
+mod setup;
 #[cfg(test)]
 #[path = "tasks/store_safety_tests.rs"]
 mod store_safety_tests;
@@ -32,10 +34,19 @@ pub(super) enum FingerprintStep {
     AfterChecks,
     AfterReview,
     Revalidate,
+    RecoveryBeforeChecks,
+    RecoveryAfterChecks,
+    RecoveryAfterReview,
+    InitialResumeBeforeBuilder,
 }
 enum JobResult {
     Inspected(domain::workspace::Inspection),
-    Prepared(PathBuf, bool),
+    Prepared(
+        PathBuf,
+        bool,
+        Option<domain::apply::BaselineReceipt>,
+        Option<String>,
+    ),
     Fingerprint(FingerprintStep, String),
     Environment(environment::Stage, environment::Report),
 }
@@ -67,11 +78,30 @@ struct Process {
 }
 enum StoreCommand {
     Save(Box<Task>),
+    SaveAcknowledged {
+        expected: Box<Task>,
+        task: Box<Task>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    Apply {
+        expected: Box<Task>,
+        plan: Box<domain::apply::Plan>,
+        reply: mpsc::Sender<Result<domain::apply::ApplyOutcome, String>>,
+    },
+    RollBack {
+        expected: Box<Task>,
+        transaction: String,
+        reply: mpsc::Sender<Result<domain::apply::ApplyOutcome, String>>,
+    },
     // Observers may inspect evidence without stealing a task's writer lock.
     // Conflict is local to this revalidation, not a broken storage subsystem.
     ClaimCurrent {
         expected: Box<Task>,
         reply: mpsc::Sender<Result<(), String>>,
+    },
+    ReleaseCurrent {
+        id: String,
+        reply: mpsc::Sender<Result<refresh::Snapshot, String>>,
     },
     Attach {
         expected: Box<Task>,
@@ -116,6 +146,9 @@ pub(super) struct Tasks {
     job: Option<Job>,
     revalidate_claim: Option<(String, Receiver<Result<(), String>>)>,
     attachment: attachment::Attachment,
+    recovery: recovery::State,
+    operations: operations::State,
+    setup: Option<setup::Process>,
     updates: refresh::Updates,
     local_owned: std::collections::BTreeSet<String>,
     store: Option<mpsc::Sender<StoreCommand>>,
@@ -387,6 +420,10 @@ impl Tasks {
         self.live_task().is_some_and(|t| t.phase.active())
     }
     pub fn stop(&mut self) {
+        self.recovery.cancel_pending();
+        if let Some(process) = &mut self.setup {
+            process.cancel();
+        }
         if self.live.is_none() {
             return;
         }
@@ -399,6 +436,7 @@ impl Tasks {
             t.phase = Phase::Cancelled;
             t.note = "Stopped by you. No commands were replayed; files and sessions are retained."
                 .into();
+            recovery::finish_interrupted(t);
         }
         self.revalidate_claim = None;
         if self.job.take().is_some() {
@@ -439,6 +477,7 @@ impl Tasks {
             }
             t.phase = Phase::Blocked;
             t.note = reason;
+            recovery::finish_interrupted(t);
         }
         self.save();
         self.retire();
@@ -523,10 +562,15 @@ impl Tasks {
         }
     }
     pub fn shutdown(&mut self) {
+        self.recovery.cancel_pending();
+        if let Some(process) = &mut self.setup {
+            process.cancel();
+        }
         if self.live.is_some() {
             if let Some(t) = self.live_mut().filter(|t| t.phase.active()) {
                 t.phase = Phase::Interrupted;
                 t.note = "Pui closed during execution. No automatic replay.".into();
+                recovery::finish_interrupted(t);
             }
             self.save();
         }
@@ -552,6 +596,14 @@ fn run_store(
     while let Ok(command) = rx.recv() {
         match command {
             StoreCommand::Refresh { reply } => {
+                let _ = reply.send(domain::store::load(home).map(|records| refresh::Snapshot {
+                    records,
+                    owned: owned.keys().cloned().collect(),
+                }));
+            }
+            StoreCommand::ReleaseCurrent { id, reply } => {
+                owned.remove(&id);
+                rejected.insert(id.clone());
                 let _ = reply.send(domain::store::load(home).map(|records| refresh::Snapshot {
                     records,
                     owned: owned.keys().cloned().collect(),
@@ -596,6 +648,65 @@ fn run_store(
                         Some(domain::store::lock(home, &expected.id)?)
                     };
                     domain::store::attach(home, &expected, &parent)
+                })();
+                let _ = reply.send(result);
+            }
+            StoreCommand::SaveAcknowledged {
+                expected,
+                task,
+                reply,
+            } => {
+                let result = (|| {
+                    if deleted.contains(&task.id) || expected.id != task.id {
+                        return Err(
+                            "Workflow changed or was deleted; command was not authorized.".into(),
+                        );
+                    }
+                    if !owned.contains_key(&task.id) {
+                        owned.insert(task.id.clone(), domain::store::lock(home, &task.id)?);
+                    }
+                    domain::store::current_record(home, &expected)?;
+                    domain::store::save(home, &task)?;
+                    rejected.remove(&task.id);
+                    Ok(())
+                })();
+                let _ = reply.send(result);
+            }
+            StoreCommand::Apply {
+                expected,
+                plan,
+                reply,
+            } => {
+                let result = (|| {
+                    if !owned.contains_key(&expected.id) {
+                        owned.insert(
+                            expected.id.clone(),
+                            domain::store::lock(home, &expected.id)?,
+                        );
+                    }
+                    domain::apply::apply_owned(home, &owned[&expected.id], &expected, &plan)
+                })();
+                let _ = reply.send(result);
+            }
+            StoreCommand::RollBack {
+                expected,
+                transaction,
+                reply,
+            } => {
+                let result = (|| {
+                    if !owned.contains_key(&expected.id) {
+                        owned.insert(
+                            expected.id.clone(),
+                            domain::store::lock(home, &expected.id)?,
+                        );
+                    }
+                    domain::apply::recover_owned(
+                        home,
+                        &owned[&expected.id],
+                        &expected,
+                        &transaction,
+                        domain::apply::RecoveryAction::RollBack,
+                    )
                 })();
                 let _ = reply.send(result);
             }
@@ -753,6 +864,7 @@ impl Pui {
     }
     pub(super) fn open_task_from_board(&mut self, task: String, run: Option<String>) {
         self.tasks.activity_target = None;
+        self.task_retry_recovery_reconciliation(&task);
         self.tasks.updates.requested = true;
         let view = self.tasks.views.entry(task.clone()).or_default();
         view.tab = if run.is_some() {
@@ -899,6 +1011,8 @@ impl Pui {
             }
         }
         self.tasks.persist_loaded();
+        self.poll_task_operations();
+        self.task_poll_recovery();
         self.poll_task_updates();
         self.poll_task_attachment();
         self.tasks
@@ -907,6 +1021,7 @@ impl Pui {
         let mut linked = Vec::new();
         for task in &mut self.tasks.records {
             if task.parent_session.is_none()
+                && !self.tasks.operations.quarantined.contains(&task.id)
                 && self.tasks.attachment.pending_id() != Some(task.id.as_str())
             {
                 if let Some(path) = self

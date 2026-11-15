@@ -55,6 +55,7 @@ impl Pui {
     pub(super) fn leave_session_layout(&mut self) {
         self.close_model_popovers();
         context_capture::clear_source(&self.ctx);
+        self.files.clear_path_menu(&self.ctx);
         let mut selection = egui::text_selection::LabelSelectionState::load(&self.ctx);
         selection.clear_selection();
         selection.store(&self.ctx);
@@ -71,6 +72,8 @@ impl Pui {
             .iter()
             .map(|name| PanelState::load(&self.ctx, egui::Id::new(name)))
             .collect();
+        // Intent to delete/clear is not presentation state and never parks.
+        self.changes.review_comments.cancel_confirmation();
         // Review notes are bounded per window, not per parked session layout.
         let review_comments = std::mem::take(&mut self.changes.review_comments);
         let layout = Layout {

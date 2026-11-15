@@ -28,7 +28,7 @@ impl Files {
     }
     pub fn note(&self) -> Option<&str> {
         self.error.as_deref().or(self.limited.then_some(
-            "File discovery reached a limit or skipped generated folders. Refine the path.",
+            "Showing the best matches found within discovery limits; some folders or paths were skipped. Refine the path.",
         ))
     }
 }
@@ -92,21 +92,7 @@ impl Pui {
                 let (tx, rx) = mpsc::channel();
                 files.rx = Some(rx);
                 std::thread::spawn(move || {
-                    let found = crate::app::files::mention_paths(&root, &path, &cancel).map(
-                        |(mut paths, limited)| {
-                            // Prefer the exact workspace-relative path over an
-                            // identically named file in a nested checkout.
-                            paths.sort_by_cached_key(|candidate| {
-                                let relative = candidate
-                                    .strip_prefix(&root)
-                                    .unwrap_or(candidate)
-                                    .to_string_lossy()
-                                    .to_lowercase();
-                                (relative != path, relative)
-                            });
-                            (paths, limited)
-                        },
-                    );
+                    let found = crate::app::files::quick_paths(&root, &path, &cancel);
                     if !cancel.load(Ordering::Relaxed) {
                         let _ = tx.send(found);
                         ctx.request_repaint();
@@ -172,6 +158,7 @@ impl Pui {
                     ),
                     kind: Kind::File,
                     message: None,
+                    attention: None,
                 }
             })
             .collect();
@@ -239,6 +226,8 @@ impl Pui {
     }
 }
 
+#[cfg(test)]
+mod ranking_tests;
 #[cfg(test)]
 mod resource_tests;
 #[cfg(test)]
