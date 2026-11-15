@@ -27,6 +27,9 @@ for key in CI_JOB_TOKEN PUI_SIGN_IDENTITY PUI_SIGN_KEYCHAIN PUI_NOTARY_PROFILE P
 done
 ''')
             log = root / "commands"
+            git = root / "bin/git"
+            git.write_text('#!/bin/bash\necho expected-revision\n')
+            git.chmod(0o755)
             for command in ("python3", "cargo", "node", "bash"):
                 path = root / "bin" / command
                 path.write_text('#!/bin/bash\nprintf "%s\\n" "$(basename "$0") $*" >> "$COMMAND_LOG"\n')

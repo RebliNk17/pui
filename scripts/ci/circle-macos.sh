@@ -10,6 +10,7 @@ export CI_PROJECT_DIR="$PWD"
 export CARGO_HOME="$PWD/.cargo-ci"
 export CARGO_TARGET_DIR="$PWD/target"
 export CI_COMMIT_SHA="${CIRCLE_SHA1:?Missing CircleCI revision}"
+[[ "$(git rev-parse HEAD)" == "$CI_COMMIT_SHA" ]] || { echo "Checkout does not match the CircleCI revision." >&2; exit 1; }
 export CI_COMMIT_TAG="${CIRCLE_TAG:-}"
 export CI_PIPELINE_IID="${CIRCLE_BUILD_NUM:?Missing CircleCI build number}"
 export CI_COMMIT_REF_PROTECTED=false
