@@ -37,8 +37,8 @@ jobs:
           keys:
             - compiled-v1-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}-{{ checksum ".circleci-cache/day" }}
             - compiled-v1-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}-
-      # No secret context: these cached executables are only used in ad-hoc jobs.
-      # A future signed release job must use a separate, trusted cache namespace.
+      # No secret context: cached executables stay in this ad-hoc build job.
+      # Publication runs separately without these caches or Apple credentials.
       - run:
           name: Validate and package Apple Silicon app
           command: bash scripts/ci/circle-macos.sh
@@ -69,11 +69,49 @@ jobs:
       - store_artifacts:
           path: dist/releases
           destination: macos-arm64
+      - when:
+          condition:
+            matches:
+              pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+              value: << pipeline.git.tag >>
+          steps:
+            - persist_to_workspace:
+                root: .
+                paths:
+                  - dist/releases
+
+  gitlab-release:
+    docker:
+      - image: cimg/python:3.13
+    resource_class: small
+    environment:
+      CIRCLE_PROJECT_ID: << pipeline.project.id >>
+      PUI_REQUIRE_SIGNING: "false"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      # Never execute the macOS payload or restore build/download caches here.
+      - run:
+          name: Verify protected GitLab tag and publish immutable release
+          command: python3 -I scripts/ci/publish-gitlab.py
+          no_output_timeout: 20m
 
 workflows:
   macos:
     jobs:
       - macos-build:
           filters:
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      - gitlab-release:
+          requires:
+            - macos-build
+          context:
+            - pui-gitlab-releases
+          serial-group: << pipeline.project.id >>/gitlab-releases
+          filters:
+            branches:
+              ignore: /.*/
             tags:
               only: /^v[0-9]+\.[0-9]+\.[0-9]+$/

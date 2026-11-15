@@ -1,11 +1,11 @@
 #!/bin/bash
-# CircleCI currently builds artifacts only, with no signing/publishing secrets.
+# Credential-free CircleCI builder; publication uses a separate restricted job.
 set -euo pipefail
 set +x
 cd "$(dirname "$0")/../.."
 [[ "${CIRCLECI:-}" == true ]] || { echo "This entry point requires CircleCI." >&2; exit 1; }
-# Never infer GitLab protection from a CircleCI branch/tag name. A future signed
-# release workflow needs restricted contexts and server-side tag verification.
+# Never infer GitLab protection from a CircleCI branch/tag name. Publication
+# checks GitLab server-side in an uncached job; this builder stays ad-hoc.
 export CI_PROJECT_DIR="$PWD"
 export CARGO_HOME="$PWD/.cargo-ci"
 export CARGO_TARGET_DIR="$PWD/target"
@@ -16,6 +16,7 @@ export CI_PIPELINE_IID="${CIRCLE_BUILD_NUM:?Missing CircleCI build number}"
 export CI_COMMIT_REF_PROTECTED=false
 export PUI_REQUIRE_SIGNING=false
 unset PUI_PI_BIN PUI_PI_SDK
+unset PUI_GITLAB_RELEASE_TOKEN
 unset CI_JOB_TOKEN PUI_SIGN_IDENTITY PUI_SIGN_KEYCHAIN PUI_NOTARY_PROFILE PUI_SIGN_P12 PUI_SIGN_P12_BASE64 PUI_SIGN_PASSWORD PUI_APPLE_ID PUI_APPLE_TEAM_ID PUI_APPLE_APP_PASSWORD
 source scripts/ci/setup-macos.sh
 python3 scripts/release.py check
