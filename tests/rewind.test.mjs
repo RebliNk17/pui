@@ -55,7 +55,7 @@ test('multi-message restore preflights every file and detects gaps between check
  await assert.rejects(restoreCheckpoints(h.cwd,[c1,c2],h.directory),/outside tracked/);assert.equal(await readFile(join(h.cwd,'a'),'utf8'),'end');
 });
 test('native Pi SessionManager fork includes selected assistant response and preserves source bytes/images',async()=>{
- const root=process.env.HOME+'/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+ const root=process.env.PUI_PI_SDK || process.env.HOME+'/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
  const {SessionManager}=await import(root);const h=await host();const sessions=join(h.cwd,'sessions');await mkdir(sessions);
  const manager=SessionManager.create(h.cwd,sessions);manager.appendModelChange('fixture','test');const first=manager.appendMessage({role:'user',content:[{type:'text',text:'first'},{type:'image',data:'AA==',mimeType:'image/png'}],timestamp:1});const response=manager.appendMessage({role:'assistant',content:[{type:'text',text:'answer'}],timestamp:2,stopReason:'stop'});const second=manager.appendMessage({role:'user',content:'second',timestamp:3});
  const source=manager.getSessionFile();const before=await readFile(source,'utf8');const entries=manager.getEntries();

@@ -7,11 +7,38 @@ set -euo pipefail
 if [[ -z "${CI_COMMIT_TAG:-}" || "${CI_COMMIT_REF_PROTECTED:-false}" != true ]]; then
   unset PUI_SIGN_IDENTITY PUI_SIGN_P12 PUI_SIGN_P12_BASE64 PUI_SIGN_PASSWORD PUI_APPLE_ID PUI_APPLE_TEAM_ID PUI_APPLE_APP_PASSWORD
 fi
-brew install cmake ninja node@22 python@3.13 rustup
-export PATH="$(brew --prefix node@22)/bin:$(brew --prefix python@3.13)/libexec/bin:$(brew --prefix rustup)/bin:$HOME/.cargo/bin:$PATH"
-# rustup is provided by Homebrew; no curl-pipe-shell bootstrap.
-rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+# Prefer image-provided tools: reinstalling Python/Node can trigger unrelated
+# Homebrew post-install failures on an otherwise usable immutable CI image.
+echo "Checking macOS build prerequisites..."
+for tool in cmake ninja; do
+  if ! command -v "$tool" >/dev/null; then brew install "$tool"; fi
+done
+if ! python3 -c 'import sys; assert sys.version_info >= (3, 11)' 2>/dev/null; then
+  brew install python@3.13
+  export PATH="$(brew --prefix python@3.13)/libexec/bin:$PATH"
+fi
+if ! node --input-type=module -e 'import { stripTypeScriptTypes } from "node:module"; const [major,minor]=process.versions.node.split(".").map(Number); if (typeof stripTypeScriptTypes !== "function" || major < 22 || (major === 22 && minor < 19)) process.exit(1)' 2>/dev/null; then
+  brew install node@22
+  export PATH="$(brew --prefix node@22)/bin:$PATH"
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
+# An exact cached toolchain works without bootstrapping rustup on every VM.
+toolchain="$HOME/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin/bin"
+if [[ -x "$toolchain/cargo" && -x "$toolchain/rustfmt" && -x "$toolchain/cargo-clippy" ]]; then
+  echo "Reusing cached Rust $RUST_VERSION."
+else
+  # CircleCI images may already contain rustup. Otherwise use Homebrew rather
+  # than curl-pipe-shell, without its redundant default-toolchain postinstall.
+  if ! command -v rustup >/dev/null; then
+    brew install --skip-post-install rustup
+    export PATH="$(brew --prefix rustup)/bin:$PATH"
+  fi
+  echo "Installing Rust $RUST_VERSION..."
+  rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+  toolchain=$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)")
+fi
 export RUSTUP_TOOLCHAIN="$RUST_VERSION"
+export PATH="$toolchain:$PATH"
 # Do not let a global CARGO_BUILD_TARGET produce binaries the native bundler cannot find.
 unset CARGO_BUILD_TARGET
 export MACOSX_DEPLOYMENT_TARGET=12.0

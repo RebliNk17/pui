@@ -1,5 +1,6 @@
 /target/
 /dist/
 /.cargo-ci/
+/.circleci-cache/
 __pycache__/
 .DS_Store
