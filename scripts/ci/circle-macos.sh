@@ -25,6 +25,10 @@ python3 -m unittest discover -s tests -p 'test_release.py' -v
 python3 -m unittest discover -s tests -p 'test_circleci.py' -v
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+# This restart/OS-lock test must not overlap tests that spawn subprocesses.
+# Both invocations are required and fail-fast; no test is omitted or retried.
+lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
+cargo test --locked -- --skip "$lock_test"
+cargo test --locked --bin pui "$lock_test" -- --exact
 node --test tests/*.test.mjs
 bash scripts/ci/build-macos.sh

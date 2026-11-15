@@ -13,6 +13,9 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
 - Push/MR triggers are configured in CircleCI's GitLab integration. Configure
   **Build Push and Merge Requests** initially; custom tag triggers may also
   select `vX.Y.Z`. Workflow tag filters allow only stable version tags.
+- Rust tests all remain required. The automation restart/OS-lock test runs in a
+  separate Cargo invocation after the rest of the suite to avoid overlapping
+  subprocess-spawning tests; there are no failure retries or omitted tests.
 - Download ZIP/DMG, checksums, metadata and notes from the job's **Artifacts →
   macos-arm64**. These are CI artifacts subject to CircleCI retention, **not**
   durable GitLab Releases.

@@ -43,7 +43,10 @@ done
             result = subprocess.run(["/bin/bash", str(root / "scripts/ci/circle-macos.sh")], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = log.read_text()
-            self.assertIn("cargo test --locked", calls)
+            lock_test = "app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery"
+            self.assertIn(f"cargo test --locked -- --skip {lock_test}", calls)
+            self.assertIn(f"cargo test --locked --bin pui {lock_test} -- --exact", calls)
+            self.assertEqual(sum(line.startswith("cargo test ") for line in calls.splitlines()), 2)
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
             self.assertNotIn("publish", calls)
             self.assertNotIn("fake-secret", calls)
