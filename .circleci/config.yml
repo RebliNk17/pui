@@ -1,0 +1,44 @@
+version: 2.1
+
+parameters:
+  xcode-version:
+    type: string
+    default: "26.4.1"
+
+jobs:
+  macos-build:
+    macos:
+      xcode: << pipeline.parameters.xcode-version >>
+    resource_class: m4pro.medium
+    environment:
+      RUST_VERSION: "1.88.0"
+      CARGO_TERM_COLOR: "always"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - cargo-macos-arm64-v1-{{ checksum "Cargo.lock" }}
+      # One VM/job avoids downloading CEF and installing tools twice. No secret
+      # context is attached; this workflow only produces ad-hoc build artifacts.
+      - run:
+          name: Validate and package Apple Silicon app
+          command: bash scripts/ci/circle-macos.sh
+          no_output_timeout: 20m
+      - save_cache:
+          key: cargo-macos-arm64-v1-{{ checksum "Cargo.lock" }}
+          paths:
+            - .cargo-ci/registry
+            - .cargo-ci/git
+      - store_artifacts:
+          path: dist/releases
+          destination: macos-arm64
+
+workflows:
+  macos:
+    jobs:
+      - macos-build:
+          filters:
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/

@@ -7,11 +7,17 @@ set -euo pipefail
 if [[ -z "${CI_COMMIT_TAG:-}" || "${CI_COMMIT_REF_PROTECTED:-false}" != true ]]; then
   unset PUI_SIGN_IDENTITY PUI_SIGN_P12 PUI_SIGN_P12_BASE64 PUI_SIGN_PASSWORD PUI_APPLE_ID PUI_APPLE_TEAM_ID PUI_APPLE_APP_PASSWORD
 fi
-brew install cmake ninja node@22 python@3.13 rustup
-export PATH="$(brew --prefix node@22)/bin:$(brew --prefix python@3.13)/libexec/bin:$(brew --prefix rustup)/bin:$HOME/.cargo/bin:$PATH"
-# rustup is provided by Homebrew; no curl-pipe-shell bootstrap.
+brew install cmake ninja node@22 python@3.13
+export PATH="$(brew --prefix node@22)/bin:$(brew --prefix python@3.13)/libexec/bin:$HOME/.cargo/bin:$PATH"
+# CircleCI images may already contain rustup. Otherwise use Homebrew rather
+# than curl-pipe-shell, keeping Rust proxies ahead of an unrelated system Rust.
+if ! command -v rustup >/dev/null; then
+  brew install rustup
+  export PATH="$(brew --prefix rustup)/bin:$PATH"
+fi
 rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
 export RUSTUP_TOOLCHAIN="$RUST_VERSION"
+export PATH="$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)"):$PATH"
 # Do not let a global CARGO_BUILD_TARGET produce binaries the native bundler cannot find.
 unset CARGO_BUILD_TARGET
 export MACOSX_DEPLOYMENT_TARGET=12.0

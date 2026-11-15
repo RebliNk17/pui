@@ -1,6 +1,50 @@
-# macOS CI and releases (GitLab)
+# macOS CI and releases
 
-## Pipeline
+## Active builder: CircleCI
+
+GitLab-hosted macOS was unavailable for this project's namespace. CircleCI now
+provides the active Apple Silicon build via `.circleci/config.yml`:
+
+- Native `m4pro.medium`, pinned Xcode `26.4.1` (override the `xcode-version`
+  pipeline parameter when CircleCI retires the image).
+- One macOS VM performs validation and release-profile packaging, avoiding two
+  CEF/toolchain setup downloads. Cargo registry/git downloads are cached, not
+  executables or credential files.
+- Push/MR triggers are configured in CircleCI's GitLab integration. Configure
+  **Build Push and Merge Requests** initially; custom tag triggers may also
+  select `vX.Y.Z`. Workflow tag filters allow only stable version tags.
+- Download ZIP/DMG, checksums, metadata and notes from the job's **Artifacts →
+  macos-arm64**. These are CI artifacts subject to CircleCI retention, **not**
+  durable GitLab Releases.
+- **Ad-hoc only:** no secret context is attached, signing/notary variables are
+  removed, and CircleCI is never treated as a protected GitLab ref. Do not add
+  Apple or publication credentials to project-level variables.
+- There is no GitLab publishing token, automatic release upload, paid plan or
+  billing setup in this migration. Signed/publication workflows require a
+  separately approved restricted-context/authentication design.
+
+Connect the GitLab repository `RebliNk17/pui` to a CircleCI project and select
+`.circleci/config.yml` from the `circleci-macos` branch for initial verification.
+Once reviewed/merged, change the config source to `master`. CircleCI's GitLab
+OAuth integration requests account-level `api` access; authorization must be
+reviewed by the account owner. Do not put its OAuth token in repository files.
+
+Free-plan macOS access and credits must be confirmed in the CircleCI account.
+At the published M4 Pro Medium rate of 200 credits/minute, 30,000 monthly free
+credits would cover at most 150 macOS minutes if nothing else consumed credits;
+other jobs/storage reduce that allowance. No automatic paid top-ups are enabled
+by this repository configuration.
+
+## Optional GitLab pipeline
+
+The retained GitLab pipeline is **disabled by default** to avoid the immediate
+“no matching runner” failures. Set project CI variable
+`PUI_ENABLE_GITLAB_MACOS=true` only after eligible GitLab-hosted macOS runners
+are available. The sections below describe this optional pipeline, including
+its protected-tag publication and Apple credential setup; they do not apply
+to the artifact-only CircleCI job.
+
+## GitLab pipeline
 
 `.gitlab-ci.yml` runs on merge requests, branches, and tags, suppressing duplicate
 branch pipelines when an MR is open. Native Apple Silicon jobs use GitLab-hosted
