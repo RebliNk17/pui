@@ -10,27 +10,61 @@ jobs:
     macos:
       xcode: << pipeline.parameters.xcode-version >>
     resource_class: m4pro.medium
+    # Keep large compiled caches bounded instead of retaining one per commit.
+    retention:
+      caches: "3d"
     environment:
       RUST_VERSION: "1.88.0"
       CARGO_TERM_COLOR: "always"
+      CARGO_INCREMENTAL: "0"
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - checkout
+      - run:
+          name: Compute cache fingerprints
+          command: /usr/bin/python3 scripts/ci/cache-key.py
       - restore_cache:
+          name: Restore Rust toolchain
           keys:
-            - cargo-macos-arm64-v1-{{ checksum "Cargo.lock" }}
-      # One VM/job avoids downloading CEF and installing tools twice. No secret
-      # context is attached; this workflow only produces ad-hoc build artifacts.
+            - rust-toolchain-v1-{{ arch }}-{{ checksum ".circleci-cache/toolchain" }}
+      - restore_cache:
+          name: Restore downloads and verified CEF archive
+          keys:
+            - downloads-v2-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}
+      - restore_cache:
+          name: Restore compiled Rust and CEF outputs
+          keys:
+            - compiled-v1-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}-{{ checksum ".circleci-cache/day" }}
+            - compiled-v1-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}-
+      # No secret context: these cached executables are only used in ad-hoc jobs.
+      # A future signed release job must use a separate, trusted cache namespace.
       - run:
           name: Validate and package Apple Silicon app
           command: bash scripts/ci/circle-macos.sh
           no_output_timeout: 20m
       - save_cache:
-          key: cargo-macos-arm64-v1-{{ checksum "Cargo.lock" }}
+          name: Save Rust toolchain even if checks fail
+          when: always
+          key: rust-toolchain-v1-{{ arch }}-{{ checksum ".circleci-cache/toolchain" }}
+          paths:
+            - ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
+      - save_cache:
+          name: Save downloads even if checks fail
+          when: always
+          key: downloads-v2-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}
           paths:
             - .cargo-ci/registry
             - .cargo-ci/git
+            - ~/.npm/_cacache
+            - target/cef-runtime
+      - save_cache:
+          name: Save compiled outputs (at most one snapshot per day)
+          when: always
+          key: compiled-v1-{{ arch }}-{{ .Branch }}-{{ checksum ".circleci-cache/dependencies" }}-{{ checksum ".circleci-cache/day" }}
+          paths:
+            - target/debug
+            - target/release
       - store_artifacts:
           path: dist/releases
           destination: macos-arm64

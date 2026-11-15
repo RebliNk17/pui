@@ -8,8 +8,19 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
 - Native `m4pro.medium`, pinned Xcode `26.4.1` (override the `xcode-version`
   pipeline parameter when CircleCI retires the image).
 - One macOS VM performs validation and release-profile packaging, avoiding two
-  CEF/toolchain setup downloads. Cargo registry/git downloads are cached, not
-  executables or credential files.
+  CEF/toolchain setup downloads. Three cache layers restore the exact Rust
+  toolchain, Cargo/npm downloads plus pinned CEF runtime, and compiled Rust/CEF
+  debug/release output. Final ZIP/DMG files and credentials are never cached.
+- Cache keys include architecture, Xcode build, macOS version, Rust pin, Cargo
+  lock/manifest, CEF pin, CI scripts and vendored Rust. Dependency/build caches
+  are branch-isolated; Cargo still checks source fingerprints before reuse.
+  App-source changes can reuse compatible compiled dependencies.
+- Caches save **even after validation failures**, so repairs do not rebuild
+  everything. Compiled snapshots are capped at **one per branch/environment per
+  UTC day** with a compatible fallback; caches expire after **3 days**. This
+  trades some incremental freshness for lower cache storage/upload cost. Bump
+  key prefixes to invalidate caches. Signed release jobs must use a separate
+  trusted namespace—these executable caches are for ad-hoc builds only.
 - Push/MR triggers are configured in CircleCI's GitLab integration. Configure
   **Build Push and Merge Requests** initially; custom tag triggers may also
   select `vX.Y.Z`. Workflow tag filters allow only stable version tags.

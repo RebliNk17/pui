@@ -101,6 +101,50 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
             self.assertNotIn("install cmake", calls)
             self.assertNotIn("install node", calls)
 
+    def test_cache_keys_invalidate_tooling_dependencies_but_not_app_edits(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cache_key", ROOT / "scripts/ci/cache-key.py")
+        cache = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cache)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "scripts/ci").mkdir(parents=True)
+            (root / ".circleci").mkdir()
+            (root / "src").mkdir()
+            (root / "vendor/egui").mkdir(parents=True)
+            for name in ("Cargo.toml", "Cargo.lock", ".circleci/config.yml", "scripts/ci/setup-macos.sh",
+                         "scripts/fetch-chromium-macos.py", "vendor/egui/lib.rs"):
+                (root / name).write_text("original")
+            baseline = cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3")
+            (root / "src/main.rs").write_text("app edit")
+            self.assertEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3"), baseline)
+            for name in ("Cargo.lock", "scripts/ci/setup-macos.sh", "scripts/fetch-chromium-macos.py", "vendor/egui/lib.rs"):
+                path = root / name
+                path.write_text("changed")
+                self.assertNotEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3")[1], baseline[1])
+                path.write_text("original")
+            self.assertNotEqual(cache.fingerprints(root, "new-xcode+r1.88", "arm64", "26.3"), baseline)
+            self.assertNotEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.4"), baseline)
+
+    def test_config_caches_compilers_cef_downloads_and_outputs_on_failure_with_limits(self):
+        import json
+        parsed = subprocess.check_output(["ruby", "-rjson", "-ryaml", "-e",
+            'puts JSON.generate(YAML.load_file(ARGV[0]))', str(ROOT / ".circleci/config.yml")], text=True)
+        job = json.loads(parsed)["jobs"]["macos-build"]
+        self.assertEqual(job["retention"]["caches"], "3d")
+        saves = [step["save_cache"] for step in job["steps"] if isinstance(step, dict) and "save_cache" in step]
+        self.assertEqual(len(saves), 3)
+        self.assertTrue(all(step["when"] == "always" for step in saves))
+        paths = {path for step in saves for path in step["paths"]}
+        self.assertTrue({"target/debug", "target/release", "target/cef-runtime", "~/.npm/_cacache"} <= paths)
+        self.assertNotIn("dist", paths)
+        self.assertNotIn("~/.ssh", paths)
+        self.assertNotIn("~/.npmrc", paths)
+        compiled = next(step for step in saves if "target/debug" in step["paths"])
+        self.assertIn('.circleci-cache/day', compiled["key"])
+        self.assertIn('{{ .Branch }}', compiled["key"])
+        self.assertNotIn('{{ .Revision }}', compiled["key"])
+
     def test_refuses_non_circle_environment(self):
         result = subprocess.run(["bash", str(ROOT / "scripts/ci/circle-macos.sh")], env={"PATH": "/usr/bin:/bin"}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)

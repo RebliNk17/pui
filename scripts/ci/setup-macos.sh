@@ -22,18 +22,23 @@ if ! node --input-type=module -e 'import { stripTypeScriptTypes } from "node:mod
   export PATH="$(brew --prefix node@22)/bin:$PATH"
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
-# CircleCI images may already contain rustup. Otherwise use Homebrew rather
-# than curl-pipe-shell, keeping Rust proxies ahead of an unrelated system Rust.
-if ! command -v rustup >/dev/null; then
-  # We install the exact toolchain below; Homebrew's post-install tries to
-  # initialize another default toolchain and fails on this CircleCI image.
-  brew install --skip-post-install rustup
-  export PATH="$(brew --prefix rustup)/bin:$PATH"
+# An exact cached toolchain works without bootstrapping rustup on every VM.
+toolchain="$HOME/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin/bin"
+if [[ -x "$toolchain/cargo" && -x "$toolchain/rustfmt" && -x "$toolchain/cargo-clippy" ]]; then
+  echo "Reusing cached Rust $RUST_VERSION."
+else
+  # CircleCI images may already contain rustup. Otherwise use Homebrew rather
+  # than curl-pipe-shell, without its redundant default-toolchain postinstall.
+  if ! command -v rustup >/dev/null; then
+    brew install --skip-post-install rustup
+    export PATH="$(brew --prefix rustup)/bin:$PATH"
+  fi
+  echo "Installing Rust $RUST_VERSION..."
+  rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+  toolchain=$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)")
 fi
-echo "Installing Rust $RUST_VERSION..."
-rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
 export RUSTUP_TOOLCHAIN="$RUST_VERSION"
-export PATH="$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)"):$PATH"
+export PATH="$toolchain:$PATH"
 # Do not let a global CARGO_BUILD_TARGET produce binaries the native bundler cannot find.
 unset CARGO_BUILD_TARGET
 export MACOSX_DEPLOYMENT_TARGET=12.0
