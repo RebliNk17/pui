@@ -25,7 +25,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # CircleCI images may already contain rustup. Otherwise use Homebrew rather
 # than curl-pipe-shell, keeping Rust proxies ahead of an unrelated system Rust.
 if ! command -v rustup >/dev/null; then
-  brew install rustup
+  # We install the exact toolchain below; Homebrew's post-install tries to
+  # initialize another default toolchain and fails on this CircleCI image.
+  brew install --skip-post-install rustup
   export PATH="$(brew --prefix rustup)/bin:$PATH"
 fi
 echo "Installing Rust $RUST_VERSION..."
