@@ -15,6 +15,7 @@ export CI_COMMIT_TAG="${CIRCLE_TAG:-}"
 export CI_PIPELINE_IID="${CIRCLE_BUILD_NUM:?Missing CircleCI build number}"
 export CI_COMMIT_REF_PROTECTED=false
 export PUI_REQUIRE_SIGNING=false
+unset PUI_PI_BIN PUI_PI_SDK
 unset CI_JOB_TOKEN PUI_SIGN_IDENTITY PUI_SIGN_KEYCHAIN PUI_NOTARY_PROFILE PUI_SIGN_P12 PUI_SIGN_P12_BASE64 PUI_SIGN_PASSWORD PUI_APPLE_ID PUI_APPLE_TEAM_ID PUI_APPLE_APP_PASSWORD
 source scripts/ci/setup-macos.sh
 python3 scripts/release.py check
@@ -23,6 +24,7 @@ for script in scripts/bundle-macos.sh scripts/package-macos.sh scripts/notarize-
 done
 python3 -m unittest discover -s tests -p 'test_release.py' -v
 python3 -m unittest discover -s tests -p 'test_circleci.py' -v
+python3 -m unittest discover -s tests -p 'test_runtime_bundle.py' -v
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 # This restart/OS-lock test must not overlap tests that spawn subprocesses.
@@ -32,7 +34,9 @@ cargo test --locked -- --skip "$lock_test"
 cargo test --locked --bin pui "$lock_test" -- --exact
 # Adapter integration tests need the real Pi SDK, never a developer's home
 # installation. Install a pinned SDK locally without provider credentials.
-npm install --prefix "$PWD/target/pi-sdk" --no-audit --no-fund --no-save --package-lock=false --prefer-offline @earendil-works/pi-coding-agent@1.5.0
+mkdir -p "$PWD/target/pi-sdk"
+cp packaging/runtime/package.json packaging/runtime/package-lock.json "$PWD/target/pi-sdk/"
+npm ci --prefix "$PWD/target/pi-sdk" --omit=dev --ignore-scripts --no-audit --no-fund --prefer-offline
 export PUI_PI_SDK="$PWD/target/pi-sdk/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
 node --test tests/*.test.mjs
 bash scripts/ci/build-macos.sh

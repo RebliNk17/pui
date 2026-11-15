@@ -19,6 +19,7 @@ app="$PWD/dist/Pui.app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" == "$version" ]] || { echo "Bundle version mismatch." >&2; exit 1; }
 [[ "$(lipo -archs "$app/Contents/MacOS/pui")" == arm64 ]] || { echo "Expected an arm64 app." >&2; exit 1; }
 codesign --verify --deep --strict "$app"
+[[ -f "$app/Contents/Resources/runtime/manifest.json" ]] || { echo "Bundled Pi/Node runtime is missing." >&2; exit 1; }
 output="$PWD/dist/releases"
 mkdir -p "$output"
 # Avoid shipping stale release artifacts from a previous local run.

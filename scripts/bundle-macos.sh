@@ -41,6 +41,7 @@ done
 iconutil -c icns "$iconset" -o "$resources/Pui.icns"
 cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts scripts/workflows.ts "$resources/"
 python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
+python3 scripts/bundle-runtime-macos.py "$app" "${CARGO_TARGET_DIR:-target}"
 cp packaging/Info.plist "$app/Contents/Info.plist"
 # Cargo is the release-version source of truth.
 version=$(cargo pkgid --offline | awk -F# '{print $NF}' | awk -F@ '{print $NF}')

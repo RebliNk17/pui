@@ -50,7 +50,7 @@ validate:macos:
   script:
     - python3 scripts/release.py check
     - for script in scripts/bundle-macos.sh scripts/package-macos.sh scripts/notarize-macos.sh scripts/ci/*.sh; do bash -n "$script" || exit; done
-    - python3 -m unittest discover -s tests -p 'test_release.py' -v
+    - python3 -m unittest discover -s tests -p 'test_*.py' -v
     - cargo fmt --check
     - cargo clippy --locked --all-targets -- -D warnings
     - cargo test --locked

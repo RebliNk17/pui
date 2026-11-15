@@ -67,15 +67,18 @@ def prepare(root=ROOT):
     files = {f"{name}.{ext}": digest(directory / f"{name}.{ext}") for ext in ("zip", "dmg")}
     commit = os.environ.get("CI_COMMIT_SHA") or subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    runtime = root / "dist/Pui.app/Contents/Resources/runtime/manifest.json"
+    runtime_data = json.loads(runtime.read_text())
     manifest = {"version": value, "tag": f"v{value}", "commit": commit,
-                "architecture": "arm64", "signing": signing, "files": files}
+                "architecture": "arm64", "signing": signing, "files": files,
+                "runtime": runtime_data}
     (directory / "release.json").write_text(json.dumps(manifest, indent=2) + "\n")
     body = notes(root, value)
     if signing == "ad-hoc":
         body += "\n**Ad-hoc build:** not Developer ID signed or notarized. macOS Gatekeeper may block opening it.\n"
     else:
         body += "\nDeveloper ID signed and Apple-notarized Apple Silicon build.\n"
-    body += "\nRequires a separately installed Pi and Node.js. Intel Macs are not supported by these assets.\n"
+    body += "\nIncludes Pi and Node.js; no separate runtime installation is required. Configure a model provider to begin. Intel Macs are not supported by these assets.\n"
     (directory / "CHANGELOG.md").write_text(body)
     for filename in ("release.json", "CHANGELOG.md"):
         files[filename] = digest(directory / filename)

@@ -60,7 +60,7 @@ fn check(repo: &str) -> Result<Release, String> {
     if !validate_repository(repo) {
         return Err("Invalid GitHub release repository.".into());
     }
-    // Node is an existing Pi prerequisite; fetch is bounded and receives no Pi
+    // Use the bundled Node when packaged; fetch is bounded and receives no Pi
     // config, auth or tokens. No new HTTP runtime or idle worker is required.
     let script = r#"
 const response = await fetch(process.argv.at(-1), {headers:{Accept:'application/vnd.github+json','User-Agent':'Pui-release-check'},redirect:'error',signal:AbortSignal.timeout(12000)});
@@ -69,7 +69,7 @@ const reader=response.body.getReader();const chunks=[];let bytes=0;
 while(true){const {value,done}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>1048576){await reader.cancel();throw Error('response too large');}chunks.push(value);}
 process.stdout.write(Buffer.concat(chunks).toString('utf8'));
 "#;
-    let mut command = std::process::Command::new("node");
+    let mut command = std::process::Command::new(crate::runtime::node_binary());
     command
         .args(["--input-type=module", "--eval", script])
         .arg(format!(
@@ -78,12 +78,10 @@ process.stdout.write(Buffer.concat(chunks).toString('utf8'));
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    if let Some(path) = rpc::child_path() {
-        command.env("PATH", path);
-    }
+    crate::runtime::configure(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|_| "Cannot start the release checker. Install the Node runtime used by Pi.")?;
+        .map_err(|_| "Cannot start the release checker. Reinstall Pui or check the Node runtime for this development build.")?;
     let mut stdout = child
         .stdout
         .take()

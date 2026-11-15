@@ -346,29 +346,13 @@ fn ring(ui: &egui::Ui, center: egui::Pos2, radius: f32, ratio: Option<f32>) {
     );
 }
 pub(crate) fn sdk() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("PUI_PI_SDK") {
-        return Some(path.into());
-    }
-    let agent = std::env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|p| p.join(".pi/agent")))?;
-    let version = std::fs::read_to_string(agent.join("install/current-version")).ok()?;
-    let version = version.trim();
-    if version.is_empty() || version.contains(['/', '\\']) || version == ".." {
-        return None;
-    }
-    Some(
-        agent
-            .join("install/releases")
-            .join(version)
-            .join("node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
-    )
+    crate::runtime::sdk()
 }
 fn fetch() -> Result<AccountUsage, String> {
     let sdk = sdk()
         .filter(|p| p.is_file())
         .ok_or("Pi SDK not found. Set PUI_PI_SDK to its dist/index.js.")?;
-    let mut command = Command::new("node");
+    let mut command = Command::new(crate::runtime::node_binary());
     command
         .args([
             "--input-type=module",
@@ -379,9 +363,7 @@ fn fetch() -> Result<AccountUsage, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(path) = crate::rpc::child_path() {
-        command.env("PATH", path);
-    }
+    crate::runtime::configure(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

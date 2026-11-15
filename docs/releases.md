@@ -12,7 +12,7 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
   toolchain, Cargo/npm downloads plus pinned CEF runtime, and compiled Rust/CEF
   debug/release output. Final ZIP/DMG files and credentials are never cached.
 - Cache keys include architecture, Xcode build, macOS version, Rust pin, Cargo
-  lock/manifest, CEF pin, CI scripts and vendored Rust. Dependency/build caches
+  lock/manifest, CEF pin, runtime pins/npm lock/notices, CI scripts and vendored Rust. Dependency/build caches
   are branch-isolated; Cargo still checks source fingerprints before reuse.
   App-source changes can reuse compatible compiled dependencies.
 - Caches save **even after validation failures**, so repairs do not rebuild
@@ -27,9 +27,11 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
 - Rust tests all remain required. The automation restart/OS-lock test runs in a
   separate Cargo invocation after the rest of the suite to avoid overlapping
   subprocess-spawning tests; there are no failure retries or omitted Rust tests.
-- Adapter tests install `@earendil-works/pi-coding-agent@1.5.0` under
-  `target/pi-sdk` and set `PUI_PI_SDK`, rather than relying on a developer's Pi
-  installation. No provider keys are configured; fixture tests make no provider calls.
+- Adapter tests install the checked-in `packaging/runtime` npm lock (Pi 1.5.2)
+  under `target/pi-sdk` with lifecycle scripts disabled and set `PUI_PI_SDK`.
+  No developer Pi installation or provider key is used. A post-bundle smoke
+  checks Node/npm, RPC, SDK, core search and Settings resources offline using
+  a fresh HOME and relocated runtime; the payload must remain unchanged.
 - Download ZIP/DMG, checksums, metadata and notes from the job's **Artifacts →
   macos-arm64**. These are CI artifacts subject to CircleCI retention, **not**
   durable GitLab Releases.
@@ -42,9 +44,8 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
 
 The CircleCI organization **Pui** and project **pui** are connected to the GitLab
 repository `RebliNk17/pui`. The pipeline uses `.circleci/config.yml` from the
-**triggering branch** (not a permanently pinned config branch). Initial
-verification runs on `circleci-macos`; merge that branch to enable the same
-workflow on `master`. The setup wizard also created `create-circleci-config`
+**triggering branch** (not a permanently pinned config branch). The initial
+`circleci-macos` implementation was merged into `master` through MR !1. The setup wizard also created `create-circleci-config`
 with a config-only commit; it is not the implementation branch and its initial
 run was canceled. CircleCI's GitLab
 OAuth integration requests account-level `api` access; authorization must be
@@ -91,8 +92,11 @@ Release assets:
   archive hashes), and `CHANGELOG.md` (release notes).
 
 The ZIP contains `Pui.app`; the DMG contains it plus an Applications shortcut.
-Pi and Node.js remain separate prerequisites. Intel/universal builds, Linux and
-Windows packaging, installing Pi, and in-app update installation are out of scope.
+The app includes Pi 1.5.2, Node.js 22.23.5/npm, and pinned fd/ripgrep, with
+licenses and an integrity manifest. No separate Pi/Node/Homebrew installation is
+needed by the packaged app; provider authentication is still required. See
+[bundled runtime](bundled-runtime.md). Intel/universal builds, Linux/Windows
+packaging and automatic in-app update installation remain out of scope.
 The existing GitHub update checker is not configured by this pipeline. GitLab
 update checking and in-app changelog viewing are the next phase.
 
@@ -124,7 +128,9 @@ initialization before installing the exact requested toolchain.
 Rust is pinned to `1.88.0` (the project's current minimum) using `RUST_VERSION`.
 CEF is fetched before Cargo to reuse the existing pinned archive/hash validation.
 Only Cargo registry/git downloads are cached; no build products, keychains, or
-credential files are cached or included in artifacts. CEF is fetched afresh per job.
+credential files are cached or included in artifacts. CEF is fetched afresh per GitLab job. CircleCI additionally caches verified
+Node/search-tool archives under `target/agent-runtime-cache`; npm dependency
+integrity is rechecked by locked `npm ci` into every fresh staged bundle.
 
 The `.cargo-ci` cache and `target` directory are local to the CI workspace. Rustup
 uses the disposable hosted runner's normal home directory. Builds are native only;
@@ -172,9 +178,12 @@ variable itself is managed/cleaned up by GitLab Runner, not committed or archive
 Passwords are supplied to Apple's local CLI with tracing off; isolate the runner
 because privileged/local processes may observe command arguments.
 
-Signing runs inside-out: nested CEF dylibs, CEF framework, helpers, then Pui. It
-uses hardened runtime + secure timestamps; `--deep` is verification-only. Only
-helpers receive `com.apple.security.cs.allow-jit` for V8. CEF's process sandbox
+Signing runs inside-out: runtime Mach-O executables/native addons (including
+Node with its dedicated runtime entitlements), nested CEF dylibs, CEF framework,
+helpers, then Pui. It
+uses hardened runtime + secure timestamps; `--deep` is verification-only. CEF
+helpers and the separate Node runtime receive `com.apple.security.cs.allow-jit`
+for V8; Node alone has its dedicated additional runtime grants. CEF's process sandbox
 remains enabled; this is not App Sandbox packaging. App notarization/stapling and
 Gatekeeper assessment happen before making the final ZIP. The DMG is independently
 signed/notarized/stapled and verified. Signing/notarization must still be exercised

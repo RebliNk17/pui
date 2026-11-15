@@ -1,0 +1,12 @@
+{
+  "name": "pui-bundled-agent-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned Pi runtime distributed inside Pui.app",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2"
+  },
+  "overrides": {
+    "protobufjs": "7.6.6"
+  }
+}

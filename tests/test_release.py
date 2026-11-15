@@ -44,6 +44,9 @@ class ReleaseTests(unittest.TestCase):
         suffix = "-adhoc" if signing == "ad-hoc" else ""
         for ext in ("zip", "dmg"):
             (directory / f"Pui-1.2.3-macos-arm64{suffix}.{ext}").write_bytes(b"fake app")
+        runtime = self.root / "dist/Pui.app/Contents/Resources/runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / "manifest.json").write_text(json.dumps({"schema": 1, "node": "22.23.5", "pi": "1.5.2", "platform": "darwin-arm64"}))
         with patch.dict(os.environ, {"PUI_SIGNING_STATUS": signing}):
             release.prepare(self.root)
         return directory
@@ -72,6 +75,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(manifest["commit"], "a" * 40)
         self.assertEqual(manifest["signing"], "ad-hoc")
         self.assertEqual(manifest["architecture"], "arm64")
+        self.assertEqual(manifest["runtime"]["pi"], "1.5.2")
+        self.assertEqual(manifest["runtime"]["node"], "22.23.5")
         self.assertTrue(all("-adhoc." in name for name in manifest["files"]))
         notes = (directory / "CHANGELOG.md").read_text()
         self.assertIn("not Developer ID signed or notarized", notes)

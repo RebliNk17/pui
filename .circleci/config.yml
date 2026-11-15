@@ -58,6 +58,7 @@ jobs:
             - .cargo-ci/git
             - ~/.npm/_cacache
             - target/cef-runtime
+            - target/agent-runtime-cache
       - save_cache:
           name: Save compiled outputs (at most one snapshot per day)
           when: always

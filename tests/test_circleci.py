@@ -16,6 +16,9 @@ class CircleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "scripts/ci").mkdir(parents=True)
+            (root / "packaging/runtime").mkdir(parents=True)
+            for name in ("package.json", "package-lock.json"):
+                (root / "packaging/runtime" / name).write_text("{}")
             (root / "bin").mkdir()
             (root / "scripts/ci/circle-macos.sh").write_text((ROOT / "scripts/ci/circle-macos.sh").read_text())
             (root / "scripts/ci/setup-macos.sh").write_text('''
@@ -48,7 +51,8 @@ done
             self.assertIn(f"cargo test --locked --bin pui {lock_test} -- --exact", calls)
             self.assertEqual(sum(line.startswith("cargo test ") for line in calls.splitlines()), 2)
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
-            self.assertIn("@earendil-works/pi-coding-agent@1.5.0", calls)
+            self.assertIn("npm ci --prefix", calls)
+            self.assertIn("--ignore-scripts", calls)
             self.assertNotIn("publish", calls)
             self.assertNotIn("fake-secret", calls)
 
@@ -112,13 +116,17 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
             (root / ".circleci").mkdir()
             (root / "src").mkdir()
             (root / "vendor/egui").mkdir(parents=True)
+            (root / "packaging/runtime").mkdir(parents=True)
             for name in ("Cargo.toml", "Cargo.lock", ".circleci/config.yml", "scripts/ci/setup-macos.sh",
-                         "scripts/fetch-chromium-macos.py", "vendor/egui/lib.rs"):
+                         "scripts/fetch-chromium-macos.py", "scripts/bundle-runtime-macos.py", "packaging/runtime/pins.json",
+                         "packaging/runtime/package-lock.json", "packaging/runtime/pi", "vendor/egui/lib.rs"):
                 (root / name).write_text("original")
             baseline = cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3")
             (root / "src/main.rs").write_text("app edit")
             self.assertEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3"), baseline)
-            for name in ("Cargo.lock", "scripts/ci/setup-macos.sh", "scripts/fetch-chromium-macos.py", "vendor/egui/lib.rs"):
+            for name in ("Cargo.lock", "scripts/ci/setup-macos.sh", "scripts/fetch-chromium-macos.py",
+                         "scripts/bundle-runtime-macos.py", "packaging/runtime/pins.json", "packaging/runtime/package-lock.json",
+                         "packaging/runtime/pi", "vendor/egui/lib.rs"):
                 path = root / name
                 path.write_text("changed")
                 self.assertNotEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.3")[1], baseline[1])
@@ -136,7 +144,7 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(len(saves), 3)
         self.assertTrue(all(step["when"] == "always" for step in saves))
         paths = {path for step in saves for path in step["paths"]}
-        self.assertTrue({"target/debug", "target/release", "target/cef-runtime", "~/.npm/_cacache"} <= paths)
+        self.assertTrue({"target/debug", "target/release", "target/cef-runtime", "target/agent-runtime-cache", "~/.npm/_cacache"} <= paths)
         self.assertNotIn("dist", paths)
         self.assertNotIn("~/.ssh", paths)
         self.assertNotIn("~/.npmrc", paths)

@@ -16,6 +16,23 @@ def sign(app):
         args += ["--options", "runtime", "--timestamp"]
         if os.environ.get("PUI_SIGN_KEYCHAIN"):
             args += ["--keychain", os.environ["PUI_SIGN_KEYCHAIN"]]
+    runtime = app / "Contents/Resources/runtime"
+    if runtime.exists():
+        # Match file magic, not suffix: QuickJS .so extensions are WASM, while
+        # native npm addons and extensionless rg/fd/Node are Mach-O code.
+        macho = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
+        node = runtime / "node/bin/node"
+        for binary in sorted(runtime.rglob("*")):
+            if binary.is_symlink() or not binary.is_file():
+                continue
+            with binary.open("rb") as source:
+                header = source.read(4)
+            if header not in macho:
+                continue
+            extra = []
+            if binary == node:
+                extra = ["--entitlements", str(Path(__file__).resolve().parent.parent / "packaging/node-entitlements.plist")]
+            subprocess.run(args + extra + [str(binary)], check=True)
     framework = app / "Contents/Frameworks/Chromium Embedded Framework.framework"
     # CEF has nested Vulkan/sandbox dynamic libraries; signing just the framework
     # leaves those ad-hoc signed and fails notarization.
