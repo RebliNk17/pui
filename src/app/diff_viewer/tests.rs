@@ -218,10 +218,7 @@ fn copy_preserves_diff_and_both_close_actions_work() {
                     ],
                 ),
                 |ctx| {
-                    assert_eq!(
-                        show(ctx, "src/file.rs", diff, false),
-                        !(closing && !pressed)
-                    );
+                    assert_eq!(show(ctx, "src/file.rs", diff, false), !closing || pressed);
                 },
             );
             if !closing && !pressed {
