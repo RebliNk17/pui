@@ -16,6 +16,7 @@ pub(super) struct Push {
     snapshot: Option<workspace::push::Snapshot>,
     notice: Option<String>,
     confirm: bool,
+    hooks: bool,
     upstream: upstream::Upstream,
     create: create::Form,
     create_root: Option<PathBuf>,
@@ -45,7 +46,10 @@ impl Changes {
         }) {
             self.push.pending = None;
             match result {
-                Ok(s) => self.push.snapshot = Some(s),
+                Ok(s) => {
+                    self.push.snapshot = Some(s);
+                    self.push.hooks = false;
+                }
                 Err(e) => self.push.notice = Some(e),
             }
         }
@@ -340,7 +344,7 @@ impl Changes {
         {
             self.push.applying = None;
             self.push.snapshot = None;
-            self.push.notice=Some(match result{Ok(workspace::push::Outcome::Updated)=>"Push updated the reviewed branch. No tags or force. Pre-push hooks were bypassed.".into(),Ok(workspace::push::Outcome::UpToDate)=>"Reviewed remote branch is already up to date. No tags or force. Pre-push hooks were bypassed.".into(),Err(e)=>e});
+            self.push.notice=Some(match result{Ok(workspace::push::Outcome::Updated)=>"Push updated the reviewed branch. No tags or force. Hook mode was explicitly selected at confirmation.".into(),Ok(workspace::push::Outcome::UpToDate)=>"Reviewed remote branch is already up to date. No tags or force. Hook mode was explicitly selected at confirmation.".into(),Err(e)=>e});
             self.refresh = true;
         }
         let focus = ctx.memory(|m| m.focused());
@@ -399,11 +403,45 @@ impl Changes {
             self.push.confirm = false;
             return;
         };
-        let choice=confirmations::Dialog::new("push-reviewed-confirm","Push reviewed commit?","Contacts this endpoint and publishes the exact reviewed commit to one branch. No force or tags. Pre-push hooks and push signing are bypassed. Existing credentials/SSH agent may be used; interactive login and unknown SSH hosts refuse. Remote completion can be uncertain after cancellation or timeout.","Cancel","Push without hooks").show(ctx,|ui|{ui.add(egui::Label::new(theme::small(ui,format!("{}\n{} → {}\n{}",snapshot.endpoint,snapshot.head,snapshot.destination,snapshot.branch))).wrap());});
+        self.push.controls.truncate(4);
+        let description = if self.push.hooks {
+            "Pushes reviewed commit with configured pre-push hooks. Hooks execute local code with your OS permissions; they may modify files/contact services. Hook failure stops Push, no bypass fallback. No force/tags/push signing. Credentials may be used; remote completion can be uncertain."
+        } else {
+            "Pushes reviewed commit without pre-push hooks or push signing. No force/tags. Existing credentials may be used; interactive login and unknown SSH hosts refuse. Remote completion can be uncertain."
+        };
+        let choice = confirmations::Dialog::new(
+            "push-reviewed-confirm",
+            "Push reviewed commit?",
+            description,
+            "Cancel",
+            if self.push.hooks {
+                "Push with hooks"
+            } else {
+                "Push without hooks"
+            },
+        )
+        .show(ctx, |ui| {
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    format!(
+                        "{}\n{} → {}\n{}",
+                        snapshot.endpoint, snapshot.head, snapshot.destination, snapshot.branch
+                    ),
+                ))
+                .wrap(),
+            );
+            let response = ui.checkbox(
+                &mut self.push.hooks,
+                "Run configured pre-push hooks (local code execution)",
+            );
+            self.push.controls.push(response.id);
+        });
         if let Some(choice) = choice {
             self.push.confirm = false;
             if choice == confirmations::Choice::Confirm {
                 let snapshot = self.push.snapshot.take().unwrap();
+                let hooks = self.push.hooks;
                 let Some(permit) = branches::permit(ctx) else {
                     self.push.notice = Some("Git busy; inspect again.".into());
                     return;
@@ -415,7 +453,11 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-confirmed-push".into())
                     .spawn(move || {
-                        let result = workspace::push::apply(snapshot, &cancel);
+                        let result = if hooks {
+                            workspace::push::apply_with_hooks(snapshot, true, &cancel)
+                        } else {
+                            workspace::push::apply(snapshot, &cancel)
+                        };
                         drop(permit);
                         let _ = tx.send(result);
                         ctx.request_repaint();

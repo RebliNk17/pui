@@ -194,6 +194,13 @@ fn outcome(bytes: &[u8], success: bool) -> Result<Outcome, String> {
     match(flag,success){(Some(b'='),true)=>Ok(Outcome::UpToDate),(Some(b' '|b'*'),true)=>Ok(Outcome::Updated),(Some(b'!'),_)=>Err("Push rejected for the reviewed branch. Remote was not updated by this refspec. Remote details are hidden; inspect its state and policy before retrying. No automatic retry.".into()),_=>Err("Push failed or response unavailable. Authentication/connection or remote policy may be responsible; inspect remote state before retrying. Remote details hidden; no automatic retry.".into())}
 }
 pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, String> {
+    apply_with_hooks(snapshot, false, cancel)
+}
+pub(crate) fn apply_with_hooks(
+    snapshot: Snapshot,
+    hooks: bool,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
     let target = snapshot
         .explicit_target
         .then_some((snapshot.remote.as_str(), snapshot.destination.as_str()));
@@ -201,9 +208,10 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, 
         return Err("Push source or destination changed; inspect again.".into());
     }
     let mut command = network_command(&snapshot.root);
+    if !hooks {
+        command.args(["-c", "core.hooksPath=/dev/null"]);
+    }
     command.args([
-        "-c",
-        "core.hooksPath=/dev/null",
         "-c",
         "push.followTags=false",
         "-c",
@@ -212,9 +220,13 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, 
         "push.gpgSign=false",
         "push",
         "--porcelain",
-        "--no-verify",
         "--no-follow-tags",
         "--recurse-submodules=no",
+    ]);
+    if !hooks {
+        command.arg("--no-verify");
+    }
+    command.args([
         "--",
         &snapshot.endpoint,
         &format!("{}:{}", snapshot.head, snapshot.destination),

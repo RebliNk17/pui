@@ -326,6 +326,38 @@ fn local_comparison_equal_ahead_behind_diverged_and_missing_without_fetch() {
     }
 }
 #[test]
+fn opted_in_pre_push_hook_failure_stops_remote_update_without_bypass() {
+    let root = fixture();
+    let remote = root.with_extension("prepush-bare");
+    std::fs::create_dir(&remote).unwrap();
+    super::super::tests::git(&remote, &["init", "--bare"]);
+    super::super::tests::git(
+        &root,
+        &["config", "remote.origin.url", remote.to_str().unwrap()],
+    );
+    let hook = root.join(".git/hooks/pre-push");
+    let marker = root.join(".git/hook-ran");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\ncat >/dev/null\ntouch .git/hook-ran\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cancel = AtomicBool::new(false);
+    assert!(apply_with_hooks(prepare(&root, &cancel).unwrap(), true, &cancel).is_err());
+    assert!(marker.exists());
+    assert!(!remote.join("refs/heads/master").exists());
+    std::fs::write(&hook, "#!/bin/sh\ncat >/dev/null\nexit 0\n").unwrap();
+    assert_eq!(
+        apply_with_hooks(prepare(&root, &cancel).unwrap(), true, &cancel).unwrap(),
+        Outcome::Updated
+    );
+}
+#[test]
 fn transport_policy_refuses_helpers_queries_and_passwords() {
     for bad in [
         "ext::touch marker",
