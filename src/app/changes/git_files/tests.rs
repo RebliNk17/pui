@@ -156,7 +156,15 @@ fn one_context_gate_caps_workers_and_untracked_never_reads_file_or_stages() {
     });
     gate.store(true, Ordering::Relaxed);
     for _ in 0..1024 {
-        assert!(start_inline(&ctx, &workspace.root, workspace.files[0].clone()).is_none());
+        assert!(
+            start_inline(
+                &ctx,
+                &workspace.root,
+                workspace.files[0].clone(),
+                workspace::DiffMode::Combined
+            )
+            .is_none()
+        );
     }
     let rx = start(&ctx, &workspace, workspace.files[0].clone());
     let result = rx
@@ -176,7 +184,13 @@ fn one_context_gate_caps_workers_and_untracked_never_reads_file_or_stages() {
         .unwrap()
         .unwrap();
     assert!(result.1.contains("Untracked"));
-    let inline = start_inline(&ctx, &workspace.root, workspace.files[0].clone()).unwrap();
+    let inline = start_inline(
+        &ctx,
+        &workspace.root,
+        workspace.files[0].clone(),
+        workspace::DiffMode::Combined,
+    )
+    .unwrap();
     assert!(
         inline
             .recv_timeout(Duration::from_secs(2))
@@ -246,10 +260,15 @@ fn read_only_real_git_diff_has_literal_pathspec_and_bounded_stdout_without_commi
             .unwrap()
             .finish(&workspace)
             .unwrap();
-        let inline = start_inline(&ctx, &root, file("README.md"))
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap();
+        let inline = start_inline(
+            &ctx,
+            &root,
+            file("README.md"),
+            workspace::DiffMode::Combined,
+        )
+        .unwrap()
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
         assert_eq!(inline, result.clone().map(|(_, body)| body));
         match expected {
             Ok(expected) => assert!(result.unwrap().1.contains(expected)),

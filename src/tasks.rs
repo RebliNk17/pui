@@ -7,6 +7,7 @@ pub mod apply;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[path = "tasks/apply_unsupported.rs"]
 pub mod apply;
+pub mod checkpoints;
 #[cfg(test)]
 pub mod proposal;
 pub mod recovery;
@@ -255,6 +256,8 @@ pub struct Task {
     pub approved: Option<Contract>,
     pub phase: Phase,
     pub note: String,
+    #[serde(default)]
+    pub checkpoints: Vec<checkpoints::Checkpoint>,
     pub dirty_source: bool,
     #[serde(default)]
     pub base_head: String,
@@ -299,6 +302,7 @@ impl Task {
             approved: None,
             phase: Phase::Draft,
             note: String::new(),
+            checkpoints: Vec::new(),
             dirty_source: false,
             base_head: String::new(),
             preparation_receipt: None,

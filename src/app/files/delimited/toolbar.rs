@@ -248,7 +248,7 @@ impl Preview {
             ui.label(theme::small(ui, format!("· {} columns", index.columns)));
             if let Some((first,last))=self.grid.selection(){ui.label(theme::small(ui,format!("· {}×{} selected",last.0-first.0+1,last.1-first.1+1))).on_hover_text("Shift+arrows/Home/End/Page extends a rectangle in the applied view. Copy exports TSV up to 512 KiB; oversize leaves clipboard unchanged. Missing cells become empty fields; formulas unchanged and may evaluate in spreadsheets. Escape clears selection. Sort/filter/header or pointer selection clears the range.");}
             if let Some(notice) = self.grid.range_notice.or(self.export.notice()) {
-                let label = if notice.starts_with("Copied ") {
+                let label = if notice.starts_with("Exported ") { "· exported" } else if notice.starts_with("Writing ") { "· exporting" } else if notice.starts_with("Copied ") {
                     "· copied"
                 } else {
                     "· not copied"

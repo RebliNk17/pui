@@ -22,8 +22,7 @@ impl Comments {
         self.recorded_open = None;
     }
     fn recorded_note(&self, item: &Comment) -> bool {
-        !item.stale
-            && item.anchor.recorded
+        item.anchor.recorded
             && Some(&item.anchor.owner) == self.owner.as_ref()
             && self.source_root.as_ref() == Some(&item.anchor.root)
             && item.anchor.root == item.anchor.owner.root

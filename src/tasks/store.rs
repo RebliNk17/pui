@@ -55,6 +55,7 @@ pub fn lock(home: &Path, id: &str) -> Result<fs::File, String> {
     Ok(file)
 }
 pub fn save(home: &Path, task: &Task) -> Result<(), String> {
+    task.validate_checkpoints()?;
     uuid::Uuid::parse_str(&task.id).map_err(|_| "Invalid task ID")?;
     private_dir(home)?;
     if home.join(format!("{}.deleted", task.id)).exists() {
@@ -132,6 +133,7 @@ fn read_record(home: &Path, id: &str) -> Result<Task, String> {
     }
     let task: Task = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|_| "Invalid workflow record; nothing was changed.")?;
+    task.validate_checkpoints()?;
     if task.id != id || task.version != 1 {
         return Err("Invalid workflow record; nothing was changed.".into());
     }
@@ -191,6 +193,7 @@ pub fn load(home: &Path) -> Result<Vec<Task>, String> {
         }
         let mut t: Task = serde_json::from_slice(&fs::read(e.path()).map_err(|e| e.to_string())?)
             .map_err(|_| "Invalid task record; no work was resumed")?;
+        t.validate_checkpoints()?;
         if t.version != 1
             || uuid::Uuid::parse_str(&t.id).is_err()
             || e.file_name().to_string_lossy() != format!("{}.json", t.id)

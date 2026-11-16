@@ -67,6 +67,7 @@ impl Pui {
         self.diff_rx = None; // abandoned Git worker cannot select a file in another chat
         self.changes.cancel_git_read();
         self.changes.cancel_inline_reads();
+        self.changes.cancel_index_intent();
         self.changes.close_branches(&self.ctx);
         let panels = PANELS
             .iter()

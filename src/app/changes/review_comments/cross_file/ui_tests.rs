@@ -88,6 +88,25 @@ fn real_open_click_reveals_exact_other_recorded_file_preserving_editor_draft_and
     assert!(app.changes.expanded());
 }
 #[test]
+fn stale_note_pointer_inspects_other_exact_file_without_marking_fresh_or_sending() {
+    let (ctx, mut app, id) = fixture();
+    app.changes.review_comments.items[0].stale = true;
+    let (client, _, commands) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    for _ in 0..3 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    let pos = control(&ctx, id).1.center();
+    for pressed in [true, false] {
+        frame(&ctx, &mut app, pointer(pos, pressed));
+    }
+    assert_eq!(app.changes.review.as_ref().unwrap().0, "target.rs");
+    assert!(app.changes.review_comments.items[0].stale);
+    assert_eq!(app.draft, "Kept draft");
+    assert!(commands.try_recv().is_err());
+    assert!(app.workspace_rx.is_none() && app.diff_rx.is_none());
+}
+#[test]
 fn actual_native_tab_activation_pointer_chords_and_new_question_keep_permission_scope() {
     for activation in [egui::Key::Enter, egui::Key::Space] {
         let (ctx, mut app, id) = fixture();
@@ -281,7 +300,8 @@ fn light_dark_narrow_zoom_foreign_popup_stale_and_list_change_refuse_old_action(
                 vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
             );
             assert_eq!(app.changes.review.as_ref().unwrap().0, "current.rs");
-            assert!(app.changes.review_comments.recorded_targets.is_empty());
+            assert_eq!(app.changes.review_comments.recorded_targets.len(), 1);
+            assert!(app.changes.review_comments.items[0].stale);
         }
     }
     let (ctx, mut app, id) = fixture();
@@ -295,4 +315,5 @@ fn light_dark_narrow_zoom_foreign_popup_stale_and_list_change_refuse_old_action(
     );
     assert_eq!(app.changes.review.as_ref().unwrap().0, "current.rs");
     assert!(app.changes.review_comments.recorded_targets.is_empty());
+    assert!(app.changes.review_comments.items[0].stale);
 }

@@ -132,6 +132,23 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     );
 }
 #[test]
+fn retained_commit_parent_reads_local_object_outside_snapshot_without_mutation() {
+    let root = crate::workspace::tests::fixture();
+    let cancel = AtomicBool::new(false);
+    let mut snapshot = super::super::read(&root, &cancel).unwrap();
+    // Retain one real commit: do not depend on the source checkout having 101 ancestors.
+    snapshot.commits.truncate(1);
+    let before = crate::workspace::tests::snapshot(&root);
+    let oldest = read(&root, &snapshot.commits.last().unwrap().oid, &cancel).unwrap();
+    let parent = oldest.parents.first().expect("fixture HEAD has a parent");
+    assert!(!snapshot.commits.iter().any(|commit| &commit.oid == parent));
+    let outside = read(&root, parent, &cancel).unwrap();
+    assert_eq!(&outside.oid, parent);
+    assert!(read(&root, parent, &AtomicBool::new(true)).is_err());
+    assert!(read(&root, &"0".repeat(40), &cancel).is_err());
+    assert_eq!(before, crate::workspace::tests::snapshot(&root));
+}
+#[test]
 fn real_existing_commit_detail_and_missing_object_cancel_leave_index_head_and_worktree_unchanged() {
     let root = crate::workspace::tests::fixture();
     let cancel = AtomicBool::new(false);

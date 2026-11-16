@@ -298,8 +298,8 @@ impl Comments {
                                 self.controls.push(reveal.id);
                                 if reveal.clicked() { jump = Some(item.id); }
                                 if self.recorded_targets.iter().any(|(note,_)|*note==item.id) {
-                                    let open=ui.push_id(("recorded-note-open",navigation.focus_id()),|ui|ui.add_enabled(enabled,egui::Button::new(theme::small(ui,"Open")).frame(false))).inner
-                                        .on_hover_text("Open this note’s exact current recorded snapshot and reveal its original range. No disk read, reattachment or send; stale/restored notes are unavailable.");
+                                    let open=ui.push_id(("recorded-note-open",navigation.focus_id(),item.stale),|ui|ui.add_enabled(enabled,egui::Button::new(theme::small(ui,if item.stale{"Inspect original"}else{"Open"})).frame(false))).inner
+                                        .on_hover_text("Inspect this note’s exact recorded snapshot and original range. Stale/restored notes stay STALE until separate Re-review confirmation. No disk read, fuzzy reattachment or send.");
                                     self.controls.push(open.id);
                                     if open.clicked() {open_recorded=Some(item.id);}
                                     #[cfg(test)]
@@ -316,6 +316,12 @@ impl Comments {
                                 self.controls.push(quote.id);
                                 if quote.clicked(){add_note=Some(item.id);}
                                 #[cfg(test)]ctx.data_mut(|data|data.insert_temp(egui::Id::new(("review-note-add-draft",item.id)),(quote.id,quote.rect)));
+                                if item.stale&&recorded&&current&&source_root==Some(&item.anchor.root){
+                                    let recheck=ui.push_id(("recheck-original",navigation.focus_id()),|ui|ui.add_enabled(enabled&&self.editor.is_none(),egui::Button::new(theme::small(ui,"Re-review…")).frame(false))).inner.on_hover_text("Explicitly re-review this exact original recorded snapshot after confirmation. No fuzzy reattachment or working-tree verification.");
+                                    self.controls.push(recheck.id);
+                                    if recheck.clicked(){self.recheck_requested=Some((item.id,navigation.focus_id()));}
+                                    #[cfg(test)]ctx.data_mut(|d|d.insert_temp(egui::Id::new(("review-note-recheck",item.id)),(recheck.id,recheck.rect)));
+                                }
                                 let modify = ui.add_enabled(enabled && self.editor.is_none(), egui::Button::new(theme::small(ui,"Edit")).frame(false))
                                     .on_hover_text("Edit this local note's text only. Original anchor and status stay unchanged until Save.");
                                 self.controls.push(modify.id);
@@ -387,6 +393,7 @@ impl Comments {
             self.control_keyboard_pass = Some(ctx.cumulative_pass_nr());
             ui.input_mut(|input| input.events.retain(|event| !keyboard_event(event)));
         }
+        self.recheck_dialog(&ctx, path, diff, recorded, navigation);
         self.deletion_dialog(&ctx, navigation);
         if self.clear_requested {
             match confirmations::Dialog::new("clear-local-review-comments", "Clear local review comments?", "Removes all local notes and unfinished comment text in this window, including other sessions. The next normal app save updates the local app checkpoint. Other windows are not synchronized. Draft context already added is unchanged.", "Cancel", "Clear all").show(&ctx, |_| {}) {

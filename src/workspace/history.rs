@@ -1,5 +1,7 @@
 //! Explicit first-parent metadata from one pinned local commit. Never a Git write.
 pub(crate) mod details;
+pub(crate) mod files;
+pub(crate) mod patch;
 use super::read_only::{self, DEADLINE};
 use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Instant};
 

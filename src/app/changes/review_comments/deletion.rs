@@ -2,11 +2,12 @@
 use super::*;
 impl Comments {
     pub(in crate::app) fn confirming(&self) -> bool {
-        self.delete_requested.is_some() || self.clear_requested
+        self.delete_requested.is_some() || self.clear_requested || self.recheck_requested.is_some()
     }
     pub(in crate::app) fn cancel_confirmation(&mut self) {
         self.delete_requested = None;
         self.clear_requested = false;
+        self.recheck_requested = None;
     }
     pub(super) fn request_delete(&mut self, id: u64) -> bool {
         if self.confirming()

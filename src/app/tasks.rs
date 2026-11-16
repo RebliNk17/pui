@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 mod attachment;
 mod changes_preview;
 pub(super) mod chat;
+mod checkpoints;
 mod consent;
 pub(super) mod environment;
 mod operations;

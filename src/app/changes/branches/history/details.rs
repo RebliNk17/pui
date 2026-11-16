@@ -1,5 +1,8 @@
 //! One exact selected commit; no diff or execution actions, no persisted intent.
 use super::*;
+mod comparison;
+mod files;
+mod patch;
 #[derive(Default)]
 pub(super) struct Details {
     selected: Option<String>,
@@ -10,6 +13,11 @@ pub(super) struct Details {
     copy_key: Option<egui::Id>,
     parent_controls: Vec<(egui::Id, usize)>,
     parent_key: Option<egui::Id>,
+    parent_hops: u8,
+    list_origin: Option<String>,
+    files: files::Files,
+    patch: patch::Patch,
+    comparison: comparison::Comparison,
     #[cfg(test)]
     requests: usize,
 }
@@ -18,6 +26,8 @@ impl Details {
         *self = Self::default();
     }
     pub(super) fn poll(&mut self) {
+        self.files.poll();
+        self.patch.poll();
         let result = self
             .pending
             .as_ref()
@@ -101,6 +111,47 @@ impl History {
         }
         if self.has_detail()
             && focused.is_some()
+            && (self.detail.patch.viewer.controls.contains(&focused)
+                || self
+                    .detail
+                    .patch
+                    .viewer
+                    .fold_controls
+                    .iter()
+                    .any(|id| Some(*id) == focused))
+        {
+            self.detail.patch.viewer.key = focused;
+            return;
+        }
+        if self.has_detail()
+            && focused.is_some()
+            && self
+                .detail
+                .comparison
+                .controls
+                .iter()
+                .any(|id| Some(*id) == focused)
+        {
+            self.detail.comparison.key = focused;
+            return;
+        }
+        if self.has_detail()
+            && focused.is_some()
+            && self.detail.files.rows.iter().any(|id| Some(*id) == focused)
+        {
+            self.detail.files.row_key = focused;
+            return;
+        }
+        if self.has_detail() && focused.is_some() && focused == self.detail.patch.control {
+            self.detail.patch.key = focused;
+            return;
+        }
+        if self.has_detail() && focused.is_some() && focused == self.detail.files.control {
+            self.detail.files.key = focused;
+            return;
+        }
+        if self.has_detail()
+            && focused.is_some()
             && self
                 .detail
                 .parent_controls
@@ -144,6 +195,7 @@ impl History {
         }
         self.detail
             .start(ctx, self.owner.as_ref().unwrap(), hash, demo);
+        self.detail.list_origin = Some(hash.into());
         self.commit_controls.clear();
         self.detail_back = None;
         self.detail_key = None;
@@ -151,8 +203,40 @@ impl History {
         ctx.request_repaint();
         true
     }
+    fn open_parent(&mut self, ctx: &egui::Context, parent: &str, demo: bool) -> bool {
+        if self.pending.is_some()
+            || self.owner.is_none()
+            || self.detail.pending.is_some()
+            || self.detail.parent_hops >= 32
+        {
+            return false;
+        }
+        let valid = self.detail.result.as_ref().is_some_and(|result| {
+            result.as_ref().is_ok_and(|detail| {
+                Some(detail.oid.as_str()) == self.detail.selected.as_deref()
+                    && detail.parents.iter().any(|oid| oid == parent)
+            })
+        });
+        if !valid {
+            return false;
+        }
+        let hops = self.detail.parent_hops + 1;
+        let origin = self.detail.list_origin.take();
+        self.detail
+            .start(ctx, self.owner.as_ref().unwrap(), parent, demo);
+        self.detail.parent_hops = hops;
+        self.detail.list_origin = origin;
+        self.detail_back = None;
+        self.detail_focus = true;
+        ctx.request_repaint();
+        true
+    }
     pub(super) fn close_detail(&mut self, ctx: &egui::Context) {
-        let selected = self.detail.selected.take();
+        let selected = self
+            .detail
+            .list_origin
+            .take()
+            .or_else(|| self.detail.selected.take());
         self.detail.clear();
         self.detail_key = None;
         self.detail_back = None;
@@ -205,7 +289,11 @@ impl History {
                     // Full object identity is part of each widget, never just row position.
                     // Pending/error/mismatched bodies have no clipboard controls.
                     if detail.oid == *hash {
-                        ui.horizontal(|ui| {
+                        if self.detail.comparison.show(ui, detail) {
+                            self.detail.files = Default::default();
+                            self.detail.patch = Default::default();
+                        }
+                        ui.horizontal_wrapped(|ui| {
                             for (index, label) in
                                 ["Copy ID", "Copy message"].into_iter().enumerate()
                             {
@@ -235,7 +323,41 @@ impl History {
                                     );
                                 }
                             }
+                            if let Some(owner) = &self.owner {
+                                self.detail.files.show_control(
+                                    ui,
+                                    owner,
+                                    detail,
+                                    demo,
+                                    !self.detail.patch.pending(),
+                                    self.detail.comparison.base,
+                                );
+                                self.detail.patch.show_control(
+                                    ui,
+                                    owner,
+                                    detail,
+                                    demo,
+                                    !self.detail.files.pending(),
+                                    self.detail.comparison.base,
+                                );
+                            }
                         });
+                    }
+                    if let Some(path) =
+                        self.detail
+                            .files
+                            .show_result(ui, hash, !self.detail.patch.pending())
+                        && detail.oid == *hash
+                        && let Some(owner) = &self.owner
+                    {
+                        self.detail.patch.select_file(
+                            ui.ctx(),
+                            owner,
+                            detail,
+                            &path,
+                            demo,
+                            self.detail.comparison.base,
+                        );
                     }
                     let date = chrono::DateTime::from_timestamp(detail.time, 0)
                         .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
@@ -255,12 +377,9 @@ impl History {
                             if index == 0 { "First parent" } else { "Parent" },
                             parent
                         );
-                        let available = detail.oid == *hash
-                            && self.snapshot.as_ref().is_some_and(|snapshot| {
-                                snapshot.commits.iter().any(|commit| commit.oid == *parent)
-                            });
+                        let available = detail.oid == *hash && self.detail.parent_hops < 32;
                         if available {
-                            let response=ui.push_id(("inspect-parent",hash,parent),|ui|ui.add(egui::Button::new(RichText::new(label).monospace().size(10.5)).frame(false).wrap())).inner.on_hover_text("Inspect this exact parent already in the pinned list. No checkout, fetch or diff-base change. Back returns to the list.");
+                            let response=ui.push_id(("inspect-parent",hash,parent),|ui|ui.add(egui::Button::new(RichText::new(label).monospace().size(10.5)).frame(false).wrap())).inner.on_hover_text("Inspect this exact parent from the loaded commit, even outside the history list. Local objects only; missing objects report an error. No fetch, checkout or diff-base change. Back returns to the list. Up to 32 parent steps per inspection.");
                             self.detail.parent_controls.push((response.id, index));
                             if response.clicked() || parent_key == Some(response.id) {
                                 inspect_parent = Some(parent.clone());
@@ -273,9 +392,10 @@ impl History {
                                 )
                             });
                         } else {
-                            ui.add(egui::Label::new(RichText::new(label).monospace().size(10.5).color(theme::palette(ui.ctx()).dim)).wrap().selectable(false)).on_hover_text("Not in the pinned loaded list. Parent inspection does not expand history or fetch objects.");
+                            ui.add(egui::Label::new(RichText::new(label).monospace().size(10.5).color(theme::palette(ui.ctx()).dim)).wrap().selectable(false)).on_hover_text("Parent inspection limit reached (32 steps). Back returns to the retained list; no objects are fetched.");
                         }
                     }
+                    self.detail.patch.show_result(ui);
                     ui.add(
                         egui::Label::new(theme::small(
                             ui,
@@ -302,7 +422,7 @@ impl History {
             }
         }
         if let Some(parent) = inspect_parent {
-            self.open_detail(ui.ctx(), &parent, demo);
+            self.open_parent(ui.ctx(), &parent, demo);
         }
         true
     }

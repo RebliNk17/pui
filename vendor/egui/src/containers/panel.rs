@@ -271,6 +271,35 @@ impl SidePanel {
                     }
                 }
             }
+            // Pui: focused edge keyboard resize; menus/modals have first refusal.
+            if ui.is_enabled()
+                && !crate::Popup::is_any_open(ui.ctx())
+                && ui.memory(|memory| {
+                    memory.top_modal_layer().is_none() && memory.has_focus(resize_id)
+                })
+            {
+                let delta = ui.input_mut(|input| {
+                    let mut delta = 0.0;
+                    for event in &input.events {
+                        if let crate::Event::Key { key, pressed: true, modifiers, .. } = event {
+                            if !modifiers.command && !modifiers.ctrl && !modifiers.alt {
+                                let step = if modifiers.shift { 32.0 } else { 8.0 };
+                                match key { crate::Key::ArrowLeft => delta -= step, crate::Key::ArrowRight => delta += step, _ => {} }
+                            }
+                        }
+                    }
+                    input.events.retain(|event| !matches!(event,
+                        crate::Event::Key { key: crate::Key::ArrowLeft | crate::Key::ArrowRight, modifiers, .. }
+                            if !modifiers.command && !modifiers.ctrl && !modifiers.alt));
+                    delta
+                });
+                width += match side {
+                    Side::Left => delta,
+                    Side::Right => -delta,
+                };
+                width = clamp_to_range(width, width_range).at_most(available_rect.width());
+                side.set_rect_width(&mut panel_rect, width);
+            }
         }
 
         panel_rect = panel_rect.round_ui();
@@ -318,7 +347,38 @@ impl SidePanel {
             let resize_x = side.opposite().side_x(panel_rect);
             let resize_rect = Rect::from_x_y_ranges(resize_x..=resize_x, panel_rect.y_range())
                 .expand2(vec2(ui.style().interaction.resize_grab_radius_side, 0.0));
-            let resize_response = ui.interact(resize_rect, resize_id, Sense::drag());
+            let resize_response = ui
+                .interact(
+                    resize_rect,
+                    resize_id,
+                    Sense::drag().union(Sense::focusable_noninteractive()),
+                )
+                .on_hover_text("Resize panel · Tab to focus, then ←/→ · Shift for larger steps");
+            resize_response.widget_info(|| {
+                crate::WidgetInfo::labeled(
+                    crate::WidgetType::Other,
+                    resize_response.enabled(),
+                    "Resize side panel",
+                )
+            });
+            if resize_response.has_focus() {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter_current(
+                        resize_id,
+                        crate::EventFilter {
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                            ..Default::default()
+                        },
+                    )
+                });
+                ui.painter().vline(
+                    resize_x,
+                    panel_rect.y_range(),
+                    ui.visuals().selection.stroke,
+                );
+            }
             resize_hover = resize_response.hovered();
             is_resizing = resize_response.dragged();
         }
@@ -768,6 +828,32 @@ impl TopBottomPanel {
                     }
                 }
             }
+            if ui.is_enabled()
+                && !crate::Popup::is_any_open(ui.ctx())
+                && ui.memory(|memory| {
+                    memory.top_modal_layer().is_none() && memory.has_focus(resize_id)
+                })
+            {
+                let delta=ui.input_mut(|input|{
+                    let mut delta=0.0;
+                    for event in &input.events{
+                        if let crate::Event::Key{key,pressed:true,modifiers,..}=event{
+                            if !modifiers.command&&!modifiers.ctrl&&!modifiers.alt{
+                                let step=if modifiers.shift{32.0}else{8.0};
+                                match key{crate::Key::ArrowUp=>delta-=step,crate::Key::ArrowDown=>delta+=step,_=>{}}
+                            }
+                        }
+                    }
+                    input.events.retain(|event|!matches!(event,crate::Event::Key{key:crate::Key::ArrowUp|crate::Key::ArrowDown,modifiers,..}if !modifiers.command&&!modifiers.ctrl&&!modifiers.alt));
+                    delta
+                });
+                height += match side {
+                    TopBottomSide::Top => delta,
+                    TopBottomSide::Bottom => -delta,
+                };
+                height = clamp_to_range(height, height_range).at_most(available_rect.height());
+                side.set_rect_height(&mut panel_rect, height);
+            }
         }
 
         panel_rect = panel_rect.round_ui();
@@ -815,7 +901,38 @@ impl TopBottomPanel {
             let resize_y = side.opposite().side_y(panel_rect);
             let resize_rect = Rect::from_x_y_ranges(panel_rect.x_range(), resize_y..=resize_y)
                 .expand2(vec2(0.0, ui.style().interaction.resize_grab_radius_side));
-            let resize_response = ui.interact(resize_rect, resize_id, Sense::drag());
+            let resize_response = ui
+                .interact(
+                    resize_rect,
+                    resize_id,
+                    Sense::drag().union(Sense::focusable_noninteractive()),
+                )
+                .on_hover_text("Resize panel · Tab to focus, then ↑/↓ · Shift for larger steps");
+            resize_response.widget_info(|| {
+                crate::WidgetInfo::labeled(
+                    crate::WidgetType::Other,
+                    resize_response.enabled(),
+                    "Resize stacked panel",
+                )
+            });
+            if resize_response.has_focus() {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter_current(
+                        resize_id,
+                        crate::EventFilter {
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                            ..Default::default()
+                        },
+                    )
+                });
+                ui.painter().hline(
+                    panel_rect.x_range(),
+                    resize_y,
+                    ui.visuals().selection.stroke,
+                );
+            }
             resize_hover = resize_response.hovered();
             is_resizing = resize_response.dragged();
         }

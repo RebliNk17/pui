@@ -1,13 +1,16 @@
 //! Explicit bounded clipboard serialization of the applied view, never a file write.
 use super::*;
+use std::sync::mpsc;
+mod disk;
 
 const MAX_OUTPUT: usize = 512 * 1024;
 
 #[derive(Default)]
 pub(super) struct Export {
-    controls: Box<[Option<egui::Id>; 9]>, // bounded chrome, keep Content enum compact
+    controls: Box<[Option<egui::Id>; 11]>, // bounded chrome, keep Content enum compact
     keyboard_pass: Option<u64>,
     notice: Option<String>,
+    disk: Option<mpsc::Receiver<Result<(), String>>>,
 }
 fn encoded_len(value: &str, delimiter: u8) -> Option<usize> {
     let quoted = value.is_empty()
@@ -108,7 +111,7 @@ fn serialize_records(
 }
 impl Export {
     pub(super) fn hidden(&mut self) {
-        *self.controls = [None; 9];
+        *self.controls = [None; 11];
         self.keyboard_pass = None;
     }
     pub(super) fn owns_keyboard(&self, ctx: &egui::Context) -> bool {
@@ -164,6 +167,7 @@ impl Export {
         source_view: bool,
         path: &Path,
     ) {
+        self.poll_disk();
         let available = ui.is_enabled()
             && prompt_ui::keyboard_available(ui)
             && ui.memory(|memory| memory.top_modal_layer().is_none());
@@ -193,6 +197,8 @@ impl Export {
             ui.ctx().copy_text(source.to_owned());
             ui.close();
         }
+        ui.separator();
+        self.disk_menu(ui, source, index, header, projection, source_view, path);
         ui.separator();
         ui.vertical(|ui| {
             for (slot, label, delimiter, mode) in [

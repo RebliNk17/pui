@@ -1,4 +1,4 @@
-//! Map numbered display character ranges back to one diff hunk, never synthetic gutters.
+//! Map one widget's selected diff text across hunks, never quote synthetic gutters.
 use super::*;
 use std::{ops::Range, sync::Arc};
 
@@ -56,6 +56,7 @@ fn selected(diff: &str, range: Range<usize>, path: &str, recorded: bool) -> Opti
     let mut offset = 0usize;
     let mut text = String::with_capacity(diff.len().min(MAX_BYTES + 4));
     let mut hunk = None;
+    let mut hunk_count = 0usize;
     let mut first_row = 0;
     let mut last_row = 0;
     let mut old = None;
@@ -70,43 +71,57 @@ fn selected(diff: &str, range: Range<usize>, path: &str, recorded: bool) -> Opti
         };
         let next = offset.checked_add(length)?;
         if range.start < next && range.end > offset {
-            if !row.selectable() {
-                return None;
-            }
-            match hunk {
-                Some(hunk) if hunk != row.hunk => return None,
-                None => {
-                    hunk = Some(row.hunk);
-                    first_row = row.index + 1;
+            if row.header {
+                // Only a fully crossed caption between real selected content is supported.
+                // Quote the original header, never the rendered synthetic ellipsis.
+                if text.is_empty() || range.start > offset || range.end <= next {
+                    return None;
                 }
-                _ => {}
-            }
-            last_row = row.index + 1;
-            located &= row.located;
-            if let Some(value) = row.old {
-                old = Some(old.map_or((value, value), |(first, _)| (first, value)));
-            }
-            if let Some(value) = row.new {
-                new = Some(new.map_or((value, value), |(first, _)| (first, value)));
-            }
-            let start = range.start.saturating_sub(offset).saturating_sub(gutter);
-            let end = range
-                .end
-                .min(next)
-                .saturating_sub(offset)
-                .saturating_sub(gutter);
-            let count = row.text.chars().count();
-            if start < end && start < count {
-                let from = row.text.char_indices().nth(start)?.0;
-                let to = row
-                    .text
-                    .char_indices()
-                    .nth(end.min(count))
-                    .map_or(row.text.len(), |(byte, _)| byte);
-                append(&mut text, &row.text[from..to]);
-            }
-            if end > count && start <= count {
+                append(&mut text, row.text);
                 append(&mut text, "\n");
+            } else {
+                if !row.selectable() {
+                    return None;
+                }
+                match hunk {
+                    Some(previous) if previous != row.hunk => {
+                        hunk = Some(row.hunk);
+                        hunk_count += 1;
+                    }
+                    None => {
+                        hunk = Some(row.hunk);
+                        hunk_count = 1;
+                        first_row = row.index + 1;
+                    }
+                    _ => {}
+                }
+                last_row = row.index + 1;
+                located &= row.located;
+                if let Some(value) = row.old {
+                    old = Some(old.map_or((value, value), |(first, _)| (first, value)));
+                }
+                if let Some(value) = row.new {
+                    new = Some(new.map_or((value, value), |(first, _)| (first, value)));
+                }
+                let start = range.start.saturating_sub(offset).saturating_sub(gutter);
+                let end = range
+                    .end
+                    .min(next)
+                    .saturating_sub(offset)
+                    .saturating_sub(gutter);
+                let count = row.text.chars().count();
+                if start < end && start < count {
+                    let from = row.text.char_indices().nth(start)?.0;
+                    let to = row
+                        .text
+                        .char_indices()
+                        .nth(end.min(count))
+                        .map_or(row.text.len(), |(byte, _)| byte);
+                    append(&mut text, &row.text[from..to]);
+                }
+                if end > count && start <= count {
+                    append(&mut text, "\n");
+                }
             }
         }
         offset = next;
@@ -117,7 +132,9 @@ fn selected(diff: &str, range: Range<usize>, path: &str, recorded: bool) -> Opti
     if range.end > offset || text.is_empty() {
         return None;
     }
-    let coordinates = if located {
+    let coordinates = if hunk_count > 1 {
+        format!("{hunk_count} hunks · original hunk headers included · discontinuous file ranges")
+    } else if located {
         let value = |name: &str, span: Option<(usize, usize)>| {
             span.map(|(first, last)| format!("{name} {first}–{last}"))
         };

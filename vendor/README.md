@@ -6,6 +6,8 @@ Upstream: https://github.com/emilk/egui/tree/0.32.3/crates
 
 ## Local changes
 
+- SidePanel resize edges are focusable and support physical Left/Right arrows (8pt, Shift32pt) within existing width/available-space bounds. Current-owner focus filters preserve native Tab/ShiftTab while retaining arrows/Escape; foreign menus/modals take priority. Pui reserves global Send/Stop/Escape before rendering its known panel edges. Pointer dragging remains native. TopBottomPanel edges also support physical Up/Down with the same steps, focus rules and height clamps; Pui reserves global shortcuts for terminal and stacked Files/Changes edges. Screen-reader support is not established (AccessKit remains disabled).
+
 - `epaint/src/text/bidi.rs`: Unicode Bidirectional Algorithm (`unicode-bidi`), paragraph direction resolution and per-wrapped-line visual ordering before tessellation. Reorder grapheme clusters, mirror bracket glyphs (`unicode-bidi-mirroring`), never reorder source strings or logical glyph vectors. LTR/CJK layouts take the unchanged fast path.
 - `epaint/src/text/text_layout.rs`: invoke bidi after logical wrapping/truncation; tessellate decorated glyph runs in visual order while preserving source/style indices. Opt-in `LayoutJob::align_baseline` aligns mixed fonts/fallbacks to one baseline per row before tessellation, centering the combined ascent/descent in the line height. Markdown opts in; ordinary labels/editors retain upstream placement.
 - `epaint/src/text/text_layout_types.rs`: bidi row caret metadata, logical-to-visual hit testing, visual arrow navigation and potentially discontiguous selection rectangles; default-off `align_baseline` layout/cache flag.

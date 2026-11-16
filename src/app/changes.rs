@@ -3,6 +3,8 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 mod branches;
 pub(super) mod git_files;
+mod git_modes;
+mod index_actions;
 mod inline_review;
 pub(super) mod lines;
 pub(super) mod review_comments;
@@ -23,12 +25,16 @@ struct Diff {
 pub(super) struct Changes {
     expanded: bool,
     source: Source,
+    git_mode: workspace::DiffMode,
+    mode_controls: Vec<egui::Id>,
     query: String,
     identity: (PathBuf, String),
     open_rows: BTreeSet<(bool, String)>,
     inline: inline_review::Inline,
     diffs: BTreeMap<String, Diff>,
     refresh: bool,
+    index_actions: index_actions::IndexActions,
+    pub(super) index_writable: bool,
     pub(super) review: Option<diff_viewer::Document>,
     close: bool,
     review_files: review_files::Files,
@@ -85,6 +91,8 @@ impl Changes {
         revision: u64,
         workspace: &Workspace,
     ) {
+        self.git_mode_inputs(ctx, visible);
+        self.index_inputs(ctx, visible);
         self.branch_inputs(ctx, visible, workspace);
         if visible {
             self.inline_inputs(ctx, outputs, revision, workspace);
@@ -136,6 +144,7 @@ impl Changes {
             self.inline = Default::default();
             self.diffs.clear();
             self.query.clear();
+            self.git_mode = Default::default();
             self.review = None;
             self.review_files = Default::default();
             self.git_files = Default::default();
@@ -191,6 +200,7 @@ impl Changes {
         self.poll_branches(workspace);
         let colors = theme::palette(ctx);
         let expanded = self.expanded;
+        self.index_actions.controls.clear();
         if expanded {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(colors.bg))
@@ -206,6 +216,7 @@ impl Changes {
                     .resizable(true)
                     .frame(egui::Frame::new().fill(colors.bg))
                     .show(ctx, |ui| {
+                        ui.set_min_height(ui.available_height());
                         self.contents(ui, workspace, outputs, loading, revision)
                     });
             } else {
@@ -219,6 +230,7 @@ impl Changes {
                     });
             }
         }
+        self.index_dialog(ctx);
         expanded
     }
 
@@ -276,6 +288,10 @@ impl Changes {
                 });
             });
         if let Some(recorded) = self.review.as_ref().map(|doc| doc.3) {
+            self.mode_controls.clear();
+            if !recorded {
+                self.review_mode_controls(ui, workspace);
+            }
             let files = if recorded {
                 self.review_file_navigation(ui.ctx(), outputs, revision)
             } else {
@@ -389,6 +405,9 @@ impl Changes {
                     ui.selectable_value(&mut self.source, Source::Recorded, "Recorded edits");
                 });
             });
+        if self.source == Source::Git {
+            self.git_mode_controls(ui);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
             .show_inside(ui, |ui| {
@@ -403,10 +422,11 @@ impl Changes {
                                 if self.source == Source::Recorded {
                                     "Recorded edits, in order—not a net Git diff."
                                 } else {
-                                    "Current working tree vs HEAD—not recorded session edits. Submodule worktree edits are not inspected."
+                                    match self.git_mode{workspace::DiffMode::Combined=>"Combined: working tree vs HEAD. Submodule worktree edits are not inspected.",workspace::DiffMode::Staged=>"Staged: index vs HEAD. These are the changes currently staged for a commit.",workspace::DiffMode::Unstaged=>"Unstaged: working tree vs index. Untracked files have no Git patch."}
                                 },
                             ));
                         });
+                        if let Some(notice)=&self.index_actions.notice{ui.add(egui::Label::new(theme::small(ui,notice)).wrap());}
                         self.inline_capacity(ui);
                         let query = self.query.trim().to_lowercase();
                         let mut count = 0;
@@ -441,8 +461,10 @@ impl Changes {
                                     .iter()
                                     .filter(|file| file.path.to_lowercase().contains(&query))
                                 {
+                                    if !self.git_mode_includes(file){continue;}
                                     count += 1;
-                                    if self.header(ui, &file.path, &file.added, &file.removed, true)
+                                    self.index_row(ui,workspace,file,loading);
+                                    if self.header(ui, &file.path, if self.git_mode==workspace::DiffMode::Combined{&file.added}else{"?"}, if self.git_mode==workspace::DiffMode::Combined{&file.removed}else{"?"}, true)
                                     {
                                         if file.status == "??" {
                                             egui::Frame::new().inner_margin(12).show(ui, |ui| {
@@ -496,7 +518,7 @@ impl Changes {
                                     } else if let Some(error) = &workspace.error {
                                         error
                                     } else if workspace.is_git {
-                                        "Working tree is clean."
+                                        match self.git_mode{workspace::DiffMode::Combined=>"Working tree is clean.",workspace::DiffMode::Staged=>"No staged changes.",workspace::DiffMode::Unstaged=>"No unstaged changes."}
                                     } else {
                                         "Not a Git repository. Recorded edits are still available."
                                     },
@@ -640,7 +662,7 @@ impl Changes {
         file: workspace::FileChange,
     ) {
         let path = file.path.clone();
-        if let Some(rx) = git_files::start_inline(ctx, root, file) {
+        if let Some(rx) = git_files::start_inline(ctx, root, file, self.git_mode) {
             self.inline.reset_git(&path);
             self.diffs.insert(
                 path,

@@ -23,6 +23,7 @@ mod native_escape_tests;
 mod navigation;
 mod new_chat;
 mod notifications;
+mod panel_resize;
 mod permission_picker;
 mod permission_worker;
 #[cfg(test)]
@@ -2024,6 +2025,7 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.remember_navigation();
         self.poll();
+        self.panel_resize_inputs(ctx);
         self.chat_section_drag_inputs(ctx);
         self.section_drag_inputs(ctx);
         self.attention_inputs(ctx);
@@ -2033,9 +2035,12 @@ impl eframe::App for Pui {
         self.model_picker_escape(ctx);
         context_capture::inputs(ctx);
         self.context_chip_inputs(ctx);
+        self.checkpoint_inputs(ctx);
         let review_owner = self.review_comment_owner();
         self.changes
             .bind_inline_owner(ctx, &self.prefs.cwd, &review_owner);
+        self.changes.index_writable =
+            !self.demo && !self.is_mirror() && !self.readonly_worker() && !self.agents.exiting;
         self.changes.review_inputs(
             ctx,
             self.inspector_panel

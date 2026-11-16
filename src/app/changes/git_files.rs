@@ -1,5 +1,7 @@
 //! Read-only, bounded Git file navigation. One requested body; no patch-list cache.
 use super::*;
+mod modes;
+use modes::includes;
 use std::{
     path::Path,
     sync::{
@@ -14,9 +16,13 @@ struct List {
     root: PathBuf,
     branch: String,
     files: Vec<workspace::FileChange>,
+    mode: workspace::DiffMode,
 }
 impl List {
     fn new(workspace: &Workspace) -> Option<Self> {
+        Self::new_mode(workspace, workspace::DiffMode::Combined)
+    }
+    fn new_mode(workspace: &Workspace, mode: workspace::DiffMode) -> Option<Self> {
         if !workspace.is_git
             || workspace.root.as_os_str().len() > 8192
             || workspace.branch.len() > 1024
@@ -40,9 +46,11 @@ impl List {
         Some(Self {
             root: workspace.root.clone(),
             branch: workspace.branch.clone(),
+            mode,
             files: workspace
                 .files
                 .iter()
+                .filter(|file| includes(mode, file))
                 .map(|file| workspace::FileChange {
                     path: file.path.clone(),
                     status: file.status.clone(),
@@ -55,11 +63,21 @@ impl List {
         workspace.is_git
             && self.root == workspace.root
             && self.branch == workspace.branch
-            && self.files.len() == workspace.files.len()
+            && self.files.len()
+                == workspace
+                    .files
+                    .iter()
+                    .filter(|file| includes(self.mode, file))
+                    .count()
             && self
                 .files
                 .iter()
-                .zip(&workspace.files)
+                .zip(
+                    workspace
+                        .files
+                        .iter()
+                        .filter(|file| includes(self.mode, file)),
+                )
                 .all(|(old, now)| old.path == now.path && old.status == now.status)
     }
 }
@@ -105,12 +123,22 @@ pub(super) struct Git {
     pub(super) stale: bool,
     pending: Option<Pending>,
     error: Option<String>,
+    mode: workspace::DiffMode,
+    requested_mode: Option<workspace::DiffMode>,
 }
 
 pub(in crate::app) fn start(
     ctx: &egui::Context,
     workspace: &Workspace,
     file: workspace::FileChange,
+) -> Request<Loaded> {
+    start_mode(ctx, workspace, file, workspace::DiffMode::Combined)
+}
+fn start_mode(
+    ctx: &egui::Context,
+    workspace: &Workspace,
+    file: workspace::FileChange,
+    mode: workspace::DiffMode,
 ) -> Request<Loaded> {
     let loaded = Loaded {
         root: workspace.root.clone(),
@@ -128,7 +156,7 @@ pub(in crate::app) fn start(
     };
     spawn_read(ctx, permit, move |cancel| {
         let mut loaded = loaded;
-        loaded.result = workspace::diff_cancellable(&loaded.root, &loaded.file, cancel);
+        loaded.result = workspace::diff_mode(&loaded.root, &loaded.file, cancel, mode);
         loaded
     })
 }
@@ -195,11 +223,12 @@ pub(super) fn start_inline(
     ctx: &egui::Context,
     root: &Path,
     file: workspace::FileChange,
+    mode: workspace::DiffMode,
 ) -> Option<Request<Result<String, String>>> {
     let permit = permit(ctx)?;
     let root = root.to_path_buf();
     Some(spawn_read(ctx, permit, move |cancel| {
-        workspace::diff_cancellable(&root, &file, cancel)
+        workspace::diff_mode(&root, &file, cancel, mode)
     }))
 }
 
@@ -209,7 +238,7 @@ impl Changes {
             return;
         }
         self.git_files.bound = true;
-        self.git_files.list = List::new(workspace);
+        self.git_files.list = List::new_mode(workspace, self.git_files.mode);
         if let Some(doc) = &mut self.review {
             doc.2.set_untracked(
                 !doc.3
@@ -230,6 +259,7 @@ impl Changes {
     }
     pub(in crate::app) fn cancel_git_read(&mut self) {
         self.git_files.pending = None;
+        self.git_files.requested_mode = None;
     }
     pub(super) fn poll_git_files(&mut self, ctx: &egui::Context, workspace: &Workspace) {
         if self.review.as_ref().is_none_or(|doc| doc.3) {
@@ -267,6 +297,7 @@ impl Changes {
             return;
         };
         let pending = self.git_files.pending.take().unwrap();
+        let requested_mode = self.git_files.requested_mode.take();
         if self.git_files.stale
             || self
                 .review
@@ -299,6 +330,10 @@ impl Changes {
                         .any(|file| file.path == document.0 && file.status == "??"),
                 );
                 self.review = Some(document);
+                if let Some(mode) = requested_mode {
+                    self.git_files.mode = mode;
+                    self.git_files.list = List::new_mode(workspace, mode);
+                }
                 self.git_files.position = Some(pending.target);
                 self.git_files.error = None;
             }
@@ -327,7 +362,7 @@ impl Changes {
         clear_selection(ctx);
         self.git_files.error = None;
         self.git_files.pending = Some(Pending {
-            rx: start(ctx, workspace, file),
+            rx: start_mode(ctx, workspace, file, self.git_files.mode),
             target,
             owner: self.review.as_ref().unwrap().2.focus_id(),
         });
@@ -400,7 +435,15 @@ impl Changes {
         } else if let Some(pending) = &self.git_files.pending {
             format!("Loading Git file {} of {count}…", pending.target + 1)
         } else if let Some(position) = position {
-            format!("Current Git file {} of {count}", position + 1)
+            format!(
+                "{} Git file {} of {count}",
+                match self.git_files.mode {
+                    workspace::DiffMode::Combined => "Combined",
+                    workspace::DiffMode::Staged => "Staged",
+                    workspace::DiffMode::Unstaged => "Unstaged",
+                },
+                position + 1
+            )
         } else {
             "Git file navigation unavailable · requires ≤256 files / 64 KiB paths".into()
         };

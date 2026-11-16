@@ -24,6 +24,8 @@ impl Pui {
                 completed: false,
                 next_run: cron::Cron::parse("0 9 * * 1-5").unwrap().next(now()).unwrap(),
                 last_run: Some(now() - 86400),
+                evidence:None,
+                previous_checks:Vec::new(),
                 deliveries: 3,
                 pending: None,
                 dispatching: false,
@@ -49,6 +51,8 @@ impl Pui {
                 completed: false,
                 next_run: now() + 40,
                 last_run: Some(now() - 20),
+                evidence:None,
+                previous_checks:Vec::new(),
                 deliveries: 0,
                 pending: None,
                 dispatching: false,
@@ -67,6 +71,8 @@ impl Pui {
                 completed: false,
                 next_run: cron::Cron::parse("30 10 * * 1").unwrap().next(now()).unwrap(),
                 last_run: None,
+                evidence:None,
+                previous_checks:Vec::new(),
                 deliveries: 0,
                 pending: None,
                 dispatching: false,
@@ -90,6 +96,8 @@ impl Pui {
                 completed: true,
                 next_run: now(),
                 last_run: Some(now() - 1800),
+                evidence:None,
+                previous_checks:Vec::new(),
                 deliveries: 1,
                 pending: None,
                 dispatching: false,
@@ -108,6 +116,11 @@ impl Pui {
         let writable = self.automation.writable() && !self.demo;
         let mut action = None;
         let mut creator = None;
+        let mut reschedule = None;
+        let mut edit_content = None;
+        let mut create = false;
+        let mut monitor = false;
+        let mut test = None;
         let counts = job_counts(&self.automation.jobs);
         let filter_id = egui::Id::new("automation-filter");
         let mut filter = ctx
@@ -118,6 +131,8 @@ impl Pui {
             .show(ctx, |ui| {
                 // Navigation lives in the shared Chat / Scheduled tasks breadcrumb header.
                 ui.heading("Scheduled tasks");
+                if ui.add_enabled(writable,egui::Button::new("New recurring prompt…")).clicked(){create=true;}
+                if ui.add_enabled(writable,egui::Button::new("New shell monitor…")).clicked(){monitor=true;}
                 ui.label(theme::small(ui, format!("{} active · {} paused · {} completed", counts[0], counts[1], counts[2])));
                 if self.demo {
                     ui.label(theme::small(ui, "Design preview · fixture jobs only · no commands or provider calls"));
@@ -170,6 +185,9 @@ impl Pui {
                                         if ui.add_enabled(writable, egui::Button::new(label)).clicked() {
                                             action = Some((job.id.clone(), if job.enabled { "pause" } else { "resume" }));
                                         }
+                                        if ui.add_enabled(writable&&!job.enabled&&!job.dispatching&&job.pending.is_none(),egui::Button::new(if matches!(job.trigger,Trigger::Cron{..}){"Edit schedule…"}else{"Edit timing…"})).clicked(){reschedule=Some(job.id.clone());}
+                                        if ui.add_enabled(writable&&!job.enabled&&!job.dispatching&&job.pending.is_none(),egui::Button::new("Edit prompt…")).clicked(){edit_content=Some(job.id.clone());}
+                                        if matches!(job.trigger,Trigger::Monitor{..})&&ui.add_enabled(writable&&!job.enabled&&job.pending.is_none()&&!job.dispatching&&self.automation.precheck.is_none(),egui::Button::new("Test once…")).clicked(){test=Some(job.id.clone());}
                                         ui.menu_button("•••", |ui| {
                                             theme::menu_controls(ui);
                                             if ui.add_enabled(writable, egui::Button::new("Delete…")).clicked() {
@@ -182,6 +200,7 @@ impl Pui {
                                     ui.label(theme::small(ui, "Prompt for the creator chat"));
                                     ui.add(egui::Label::new(&job.message).wrap().selectable(true));
                                     ui.add_space(12.0);
+                                    job.show_check_history(ui);
                                     ui.label(theme::small(ui, "Created by"));
                                     if ui.add_enabled(!self.demo, egui::Button::new(RichText::new(&job.creator.name).size(12.0).color(colors.accent)).frame(false).truncate())
                                         .on_hover_text(format!("{} ({})\n{}", job.creator.name, job.creator.id, job.creator.path.display())).clicked() {
@@ -234,6 +253,30 @@ impl Pui {
                 self.automation.error = Some(error);
             }
         }
+        if let Some(id) = reschedule
+            && let Err(error) = self.begin_reschedule(&id)
+        {
+            self.automation.error = Some(error);
+        }
+        if let Some(id) = edit_content
+            && let Err(error) = self.begin_job_content(&id)
+        {
+            self.automation.error = Some(error);
+        }
+        if create && let Err(error) = self.begin_cron_form() {
+            self.automation.error = Some(error);
+        }
+        if monitor && let Err(error) = self.begin_monitor_form() {
+            self.automation.error = Some(error);
+        }
+        if let Some(id) = test
+            && let Err(error) = self.request_monitor_test(&id)
+        {
+            self.automation.error = Some(error);
+        }
+        self.monitor_test_dialog(ctx);
+        self.cron_form(ctx);
+        self.reschedule_dialog(ctx);
         if let Some(record) = creator {
             if self.agents.nodes.contains_key(&record.id) {
                 self.view_agent(&record.id);

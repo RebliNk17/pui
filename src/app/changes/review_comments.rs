@@ -11,6 +11,7 @@ mod filter_tests;
 mod jump;
 mod markers;
 mod persistence;
+mod recheck;
 #[cfg(test)]
 mod search_tests;
 #[cfg(test)]
@@ -89,6 +90,7 @@ pub(in crate::app) struct Comments {
     query: String,         // ≤128 Unicode characters, presentation only
     clear_requested: bool,
     delete_requested: Option<u64>,
+    recheck_requested: Option<(u64, egui::Id)>,
     next_id: u64,
     confirmation_pass: Option<u64>,
     error: Option<&'static str>,

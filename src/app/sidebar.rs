@@ -668,6 +668,10 @@ impl Pui {
                                 format!("{} · {}{}", branch.title, branch.status, if unread { " · Unread observed update" } else { "" }),
                             )
                         });
+                        if let sidebar_tree::Target::Task(id,None)=target
+                            && let Some(summary)=self.tasks.records.iter().find(|t|&t.id==id).and_then(|t|t.checkpoint_summary()){
+                                response.clone().on_hover_text(summary);
+                        }
                         if deleting {
                             response.on_hover_text(
                                 "Deleting chat… You can keep working in other chats.",

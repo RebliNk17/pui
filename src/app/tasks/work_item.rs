@@ -9,13 +9,15 @@ pub(in crate::app) enum Tab {
     Evidence,
     Changes,
     Activity,
+    Checkpoints,
 }
 impl Tab {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Overview,
         Self::Evidence,
         Self::Changes,
         Self::Activity,
+        Self::Checkpoints,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -23,6 +25,7 @@ impl Tab {
             Self::Evidence => "Evidence",
             Self::Changes => "Changes",
             Self::Activity => "Activity",
+            Self::Checkpoints => "Notes",
         }
     }
 }
@@ -35,6 +38,12 @@ pub(in crate::app) struct View {
     activity_heights: BTreeMap<usize, (u64, f32)>,
     activity_rendered: usize,
     preview: changes_preview::Preview,
+    pub(super) checkpoint_draft: String,
+    pub(super) checkpoint_run: Option<String>,
+    pub(super) checkpoint_edit: Option<super::checkpoints::edit::Editor>,
+    pub(super) checkpoint_delete: Option<super::checkpoints::deletion::Pending>,
+    pub(super) checkpoint_snapshot: Vec<domain::checkpoints::Checkpoint>,
+    pub(super) checkpoint_generation: u64,
 }
 
 #[cfg(test)]
@@ -83,6 +92,7 @@ impl Pui {
                 let previous_tab = view.tab;
                 tabs(ui, &task.id, &mut view.tab);
                 if view.tab != previous_tab && view.tab != Tab::Activity { self.tasks.selected_run = None; }
+                if view.tab!=Tab::Checkpoints{view.checkpoint_edit=None;view.checkpoint_delete=None;}
                 ui.add_space(12.0);
                 if self.work_item_waiting(&task) && view.permission_open { self.task_dialog(ui); ui.add_space(12.0); }
                 match view.tab {
@@ -96,6 +106,7 @@ impl Pui {
                         changes(ui, &task);
                     },
                     Tab::Activity => self.work_item_activity(ui, &task, &mut view),
+                    Tab::Checkpoints=>self.task_checkpoints(ui,&task,&mut view),
                 }
                 if matches!(task.phase, Phase::Blocked | Phase::Interrupted | Phase::Failed | Phase::Stale | Phase::Cancelled) {
                     self.work_item_recovery(ui, &task);
@@ -332,6 +343,7 @@ impl Pui {
             );
             return;
         };
+        self.checkpoint_link_action(ui, task, view, &run);
         ui.add_space(10.0);
         let available = self.tasks.search_state(&run.id).is_some();
         if !available && self.tasks.preview.is_none() {
@@ -527,7 +539,9 @@ fn tabs(ui: &mut egui::Ui, task: &str, selected: &mut Tab) {
         .show(ui, |ui| {
             ui.set_width((width - 10.0).max(1.0));
             ui.spacing_mut().item_spacing.x = 3.0;
-            let button_width = ((ui.available_width() - 9.0) / 4.0).max(1.0);
+            let button_width = ((ui.available_width() - 3.0 * (Tab::ALL.len() - 1) as f32)
+                / Tab::ALL.len() as f32)
+                .max(1.0);
             ui.horizontal(|ui| {
                 for (index, tab) in Tab::ALL.into_iter().enumerate() {
                     let id = ui.make_persistent_id((task, "work-item-tab", index));
@@ -550,13 +564,13 @@ fn tabs(ui: &mut egui::Ui, task: &str, selected: &mut Tab) {
                         });
                         let target = ui.input_mut(|i| {
                             if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
-                                Some((index + 1) % 4)
+                                Some((index + 1) % Tab::ALL.len())
                             } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
-                                Some((index + 3) % 4)
+                                Some((index + Tab::ALL.len() - 1) % Tab::ALL.len())
                             } else if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
                                 Some(0)
                             } else if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
-                                Some(3)
+                                Some(Tab::ALL.len() - 1)
                             } else {
                                 None
                             }

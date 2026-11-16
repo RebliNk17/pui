@@ -65,8 +65,8 @@ fn exact_current_recorded_target_opens_once_and_preserves_note_editor_status_and
     assert_eq!(notes.bytes(), bytes);
 }
 #[test]
-fn stale_foreign_source_root_duplicate_missing_paths_and_invalid_list_never_offer_target() {
-    for invalid in 0..8 {
+fn foreign_source_root_duplicate_missing_paths_and_invalid_list_never_offer_target() {
+    for invalid in 1..8 {
         let (_, mut notes, mut doc, mut outputs, _) = fixture();
         match invalid {
             0 => notes.items[0].stale = true,
@@ -127,7 +127,27 @@ fn explicit_mismatch_marks_original_note_and_pending_edit_stale_without_reanchor
     assert_eq!(notes.items[0].anchor.selection, original);
     outputs[0].diff = TARGET.into();
     notes.prepare_recorded_targets(&outputs, 1, &doc, true);
-    assert!(notes.recorded_targets.is_empty());
+    assert_eq!(notes.recorded_targets, [(id, 1)]);
+    notes.request_recorded_open(id, doc.2.focus_id(), ctx.cumulative_pass_nr());
+    assert!(notes.take_recorded_open(&ctx, &outputs, 1, &doc).is_some());
+    assert!(notes.items[0].stale, "inspection must not clear stale");
+}
+#[test]
+fn restored_stale_original_opens_without_freshening_and_changed_digest_refuses() {
+    let (ctx, mut notes, doc, mut outputs, id) = fixture();
+    notes.items[0].stale = true;
+    let anchor = notes.items[0].anchor.selection.clone();
+    notes.prepare_recorded_targets(&outputs, 1, &doc, true);
+    assert!(notes.request_recorded_open(id, doc.2.focus_id(), ctx.cumulative_pass_nr()));
+    let (_, opened) = notes.take_recorded_open(&ctx, &outputs, 1, &doc).unwrap();
+    assert_eq!(opened.0, "target.rs");
+    assert!(notes.items[0].stale);
+    assert_eq!(notes.items[0].anchor.selection, anchor);
+    notes.prepare_recorded_targets(&outputs, 1, &doc, true);
+    notes.request_recorded_open(id, doc.2.focus_id(), ctx.cumulative_pass_nr());
+    outputs[0].diff.push_str("+changed\n");
+    assert!(notes.take_recorded_open(&ctx, &outputs, 1, &doc).is_none());
+    assert!(notes.items[0].stale);
 }
 #[test]
 fn maximum_bounded_recorded_open_validates_only_explicit_target_then_reveals_distant_row() {

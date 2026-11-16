@@ -1,5 +1,6 @@
 //! One keyboard focus target per virtual table, never one widget per hidden cell.
 use super::*;
+mod row_drag;
 
 pub(super) struct Grid {
     identity: u64,
@@ -13,6 +14,7 @@ pub(super) struct Grid {
     changed: bool,
     header_dirty: bool,
     menu: Option<(egui::Id, u64)>,
+    row_drag: Option<(std::num::NonZeroUsize, u64)>, // applied anchor+1 and last visible input pass
 }
 
 impl Default for Grid {
@@ -30,6 +32,7 @@ impl Default for Grid {
             changed: false,
             header_dirty: false,
             menu: None,
+            row_drag: None,
         }
     }
 }
@@ -137,6 +140,7 @@ impl Grid {
     }
     pub fn projection_changed(&mut self, ctx: &egui::Context, rows: projection::Rows<'_>) -> bool {
         self.anchor = None;
+        self.row_drag = None;
         self.clear_menu(ctx);
         clear_selection(ctx);
         let position = rows.position(self.active.0);
@@ -155,6 +159,7 @@ impl Grid {
         enabled: bool,
         rows: projection::Rows<'_>,
     ) {
+        self.row_drag_inputs(ctx, enabled);
         if let Some((menu, _)) = self.menu {
             if egui::Popup::is_id_open(ctx, menu)
                 && ctx.memory(|memory| memory.top_modal_layer().is_none())
@@ -416,11 +421,29 @@ impl Grid {
             ctx.memory_mut(|memory| memory.surrender_focus(self.id(path)));
         }
     }
-    pub fn scroll(&mut self, mut scroll: egui::ScrollArea, header: bool) -> egui::ScrollArea {
+    pub fn scroll(
+        &mut self,
+        mut scroll: egui::ScrollArea,
+        header: bool,
+        ctx: &egui::Context,
+        path: &Path,
+        records: usize,
+        columns: usize,
+    ) -> egui::ScrollArea {
+        if self.row_drag.is_some() {
+            scroll = scroll.scroll_source(egui::scroll_area::ScrollSource {
+                drag: false,
+                ..Default::default()
+            });
+        }
         // Initial layout has no measured viewport yet. Retain the one-shot
         // reveal until the next pass instead of scrolling past its target.
         if self.viewport.x <= 0.0 || self.viewport.y <= 0.0 {
             return scroll;
+        }
+        if let Some(offset) = self.row_drag_scroll(ctx, path, header, records, columns) {
+            self.reveal = false;
+            return scroll.scroll_offset(offset);
         }
         if std::mem::take(&mut self.reveal) {
             let (_, column) = self.active;
@@ -463,6 +486,7 @@ impl Grid {
         {
             self.clear_menu(ui.ctx()); // virtualized owner scrolled out/disappeared
         }
+        self.finish_row_drag(ui, path, rect, offset, index, header, rows);
         self.bounded(index, rows);
         if (self.viewport - rect.size()).length_sq() > 1.0
             && ui.memory(|memory| memory.has_focus(self.id(path)))
@@ -474,7 +498,7 @@ impl Grid {
         if self.reveal && rect.is_positive() {
             ui.ctx().request_repaint();
         }
-        let mut response = ui.interact(rect, self.id(path), Sense::focusable_noninteractive());
+        let mut response = ui.interact(rect, self.id(path), Sense::focusable_noninteractive()).on_hover_text("Alt/Option-drag cells to select a rectangle. Plain drag selects text; drag record numbers for whole rows. Copy uses the applied view; no file edits.");
         if response.gained_focus() {
             self.reveal = true;
             ui.ctx().request_repaint();
@@ -554,6 +578,7 @@ impl Grid {
         }
     }
     pub fn header_changed(&mut self) {
+        self.row_drag = None;
         self.reveal = true;
         self.header_dirty = true;
     }

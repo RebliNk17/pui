@@ -72,9 +72,9 @@ fn select_all_maximum_table_is_constant_state_and_virtualized() {
         .data(|data| data.get_temp::<usize>(egui::Id::new("delimited-painted-cells")))
         .unwrap();
     assert!(painted < 100);
-    assert_eq!(std::mem::size_of::<Grid>(), 112);
+    assert_eq!(std::mem::size_of::<Grid>(), 128);
     eprintln!(
-        "selectall100000cells+10frames {:?}; constant112Bgrid",
+        "selectall100000cells+10frames {:?}; constant128Bgrid",
         start.elapsed()
     );
 }

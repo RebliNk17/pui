@@ -140,7 +140,7 @@ fn actual_inline_and_embedded_git_reads_reject_filters_without_running_them() {
     drop(config);
     let ctx = egui::Context::default();
     let file = workspace.files[0].clone();
-    let inline = start_inline(&ctx, &root, file.clone())
+    let inline = start_inline(&ctx, &root, file.clone(), workspace::DiffMode::Combined)
         .unwrap()
         .recv_timeout(Duration::from_secs(5))
         .unwrap()

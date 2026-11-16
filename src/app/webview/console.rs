@@ -1,6 +1,10 @@
 //! Bounded page console records; explicit draft capture is the only agent-facing action.
 use super::*;
 use std::sync::Arc;
+pub(super) mod batch;
+pub(super) mod filter;
+pub(super) mod pause;
+pub(super) mod search;
 mod selection;
 
 #[cfg(any(test, target_os = "macos"))]
@@ -8,7 +12,7 @@ const MAX_CHARS: usize = 4_000;
 #[cfg(any(test, target_os = "macos"))]
 const MAX_LINES: usize = 300;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ConsoleLine {
     id: u64,
     pub error: bool,

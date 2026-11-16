@@ -59,6 +59,9 @@ struct Options {
     fit: bool,
     zoom: f32,
     console: bool,
+    console_errors_only: bool,
+    console_query: String,
+    console_paused: Option<std::collections::VecDeque<console::ConsoleLine>>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -70,6 +73,9 @@ impl Default for Options {
             fit: true,
             zoom: 1.0,
             console: false,
+            console_errors_only: false,
+            console_query: String::new(),
+            console_paused: None,
         }
     }
 }
@@ -424,6 +430,11 @@ impl BrowserView {
         state: PageState,
     ) -> egui::Rect {
         let options = self.options.entry(key.into()).or_default();
+        let mut state = state;
+        if let Some(lines) = &options.console_paused {
+            state.console = lines.clone();
+        }
+        let mut toggle_pause = false;
         if options.console {
             let colors = theme::palette(ui.ctx());
             egui::TopBottomPanel::bottom(ui.make_persistent_id(("browser-console", key)))
@@ -450,12 +461,32 @@ impl BrowserView {
                             {
                                 options.console = false;
                             }
-                            if chrome::label_button(ui, "Clear", false).clicked() {
+                            console::batch::show(ui, key, &state.console);
+                            if ui
+                                .add_enabled(
+                                    options.console_paused.is_none(),
+                                    egui::Button::new(theme::small(ui, "Clear")).frame(false),
+                                )
+                                .on_hover_text(
+                                    "Clear the live retained buffer. Resume first when paused.",
+                                )
+                                .clicked()
+                            {
                                 #[cfg(target_os = "macos")]
                                 self.engine.clear_console(key);
                             }
                         });
                     });
+                    toggle_pause=console::pause::show(ui,key,options.console_paused.is_some());
+                    if options.console_paused.is_some(){ui.add(egui::Label::new(theme::small(ui,"Paused snapshot · captures use these frozen records. The page keeps collecting; Clear is disabled until Resume.")).wrap());}
+                    console::filter::show(ui, &mut options.console_errors_only, &state.console);
+                    console::search::show(
+                        ui,
+                        key,
+                        &mut options.console_query,
+                        &state.console,
+                        options.console_errors_only,
+                    );
                     ui.add(egui::Label::new(theme::small(ui,
                         "Local only unless added to your draft · review for secrets before sending."
                     )).wrap());
@@ -470,11 +501,37 @@ impl BrowserView {
                                     "No messages yet. Open DevTools for the interactive console.",
                                 ));
                             }
-                            for line in &state.console {
+                            if options.console_errors_only
+                                && !state.console.is_empty()
+                                && !state.console.iter().any(|line| line.error)
+                            {
+                                ui.label(theme::small(
+                                    ui,
+                                    "No retained errors. Other messages remain in All.",
+                                ));
+                            }
+                            if !options.console_query.is_empty()
+                                && !state.console.iter().any(|line| {
+                                    (!options.console_errors_only || line.error)
+                                        && console::search::matches(line, &options.console_query)
+                                })
+                            {
+                                ui.label(theme::small(
+                                    ui,
+                                    "No retained messages match this literal search.",
+                                ));
+                            }
+                            for line in state.console.iter().filter(|line| {
+                                (!options.console_errors_only || line.error)
+                                    && console::search::matches(line, &options.console_query)
+                            }) {
                                 console::show(ui, key, line);
                             }
                         });
                 });
+        }
+        if toggle_pause {
+            console::pause::toggle(&mut options.console_paused, &state.console, ui.ctx());
         }
         if let Some(error) = state.error {
             let colors = theme::palette(ui.ctx());

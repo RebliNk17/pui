@@ -8,6 +8,7 @@ export GIT_CONFIG_NOSYSTEM=1
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
 cargo test --offline --locked -- --test-threads=4 \
-  --skip app::sync:: --skip app::files::delimited::projection::
+  --skip app::sync:: --skip app::files::delimited::projection:: --skip app::files::delimited::export::
 cargo test --offline --locked --bin pui app::sync:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::files::delimited::projection:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::files::delimited::export:: -- --test-threads=1

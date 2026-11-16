@@ -42,7 +42,10 @@ fn selected_diff_omits_synthetic_gutters_preserves_markers_and_maps_old_new_line
 fn header_cross_hunk_empty_and_outside_ranges_are_not_mislabeled_as_source() {
     let diff = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n@@ -20 +20 @@\n-next\n+last\n";
     let rendered = display(diff);
-    assert!(selected(diff, range(&rendered, "-old", "+last"), "a", false).is_none());
+    let multi = selected(diff, range(&rendered, "-old", "+last"), "a", false).unwrap();
+    assert_eq!(multi.text, "-old\n+new\n@@ -20 +20 @@\n-next\n+last");
+    assert!(multi.label.contains("2 hunks"));
+    assert!(multi.label.contains("discontinuous"));
     assert!(selected(diff, range(&rendered, "diff --git", "a/a"), "a", false).is_none());
     assert!(selected(diff, range(&rendered, "+++ b/a", "+++ b/a"), "a", false).is_none());
     assert!(selected(diff, range(&rendered, "…", "-old"), "a", false).is_none());
@@ -58,6 +61,21 @@ fn header_cross_hunk_empty_and_outside_ranges_are_not_mislabeled_as_source() {
     assert!(selected(diff, range(&rendered, "+one", "file"), "created", false).is_none());
 }
 
+#[test]
+fn cross_hunk_unicode_partial_endpoints_three_hunks_and_caption_only_refuse() {
+    let diff = "@@ -1 +1 @@\n-old 世界\n+new 界\n@@ -20 +20 @@\n-next\n+middle\n@@ -50 +50 @@\n-last\n+final é\n";
+    let rendered = display(diff);
+    let capture = selected(diff, range(&rendered, "世界", "final"), "file", true).unwrap();
+    assert_eq!(
+        capture.text,
+        "世界\n+new 界\n@@ -20 +20 @@\n-next\n+middle\n@@ -50 +50 @@\n-last\n+final"
+    );
+    assert!(capture.label.contains("3 hunks"));
+    assert!(!capture.text.contains('…'));
+    let caption = rendered.find('…').unwrap();
+    let start = rendered[..caption].chars().count();
+    assert!(selected(diff, start..start + 1, "file", true).is_none());
+}
 #[test]
 fn marker_prefixed_content_is_not_mistaken_for_file_headers_within_a_hunk() {
     let diff = "--- a/file\n+++ b/file\n@@ -1,2 +1,2 @@\n--- removed literal\n+++ added literal\n context\n";
@@ -228,7 +246,8 @@ fn actual_numbered_diff_selection_adds_exact_text_once_and_never_includes_gutter
             let ctx = egui::Context::default();
             theme::install(&ctx);
             mode.apply(&ctx);
-            let diff = "@@ -10,2 +10,2 @@\n-old\n+new selected\n context\n";
+            let diff =
+                "@@ -10,2 +10,2 @@\n-old\n+new selected\n context\n@@ -50 +50 @@\n-next\n+last\n";
             let draw = |events| {
                 ctx.run(input(events), |ctx| {
                     context_capture::inputs(ctx);
@@ -241,7 +260,7 @@ fn actual_numbered_diff_selection_adds_exact_text_once_and_never_includes_gutter
                 draw(vec![]);
             }
             let rendered = display(diff);
-            let range = range(&rendered, "-old", "+new selected");
+            let range = range(&rendered, "-old", "+last");
             let output = draw(vec![]);
             let (start, end) = if backwards {
                 (range.end, range.start)
@@ -273,7 +292,7 @@ fn actual_numbered_diff_selection_adds_exact_text_once_and_never_includes_gutter
             app.collect_context_capture();
             assert_eq!(
                 app.draft,
-                "Keep draft\n\n[Context: src/one.rs · Recorded edits (not net Git) · diff rows 2–3 · old 10–10 · new 10–10]\n-old\n+new selected\n[/Context]"
+                "Keep draft\n\n[Context: src/one.rs · Recorded edits (not net Git) · diff rows 2–7 · 2 hunks · original hunk headers included · discontinuous file ranges]\n-old\n+new selected\n context\n@@ -50 +50 @@\n-next\n+last\n[/Context]"
             );
             let draft = app.draft.clone();
             app.collect_context_capture();

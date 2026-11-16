@@ -19,6 +19,88 @@ fn parent(ctx: &egui::Context) -> (egui::Id, egui::Rect) {
         .unwrap()
 }
 #[test]
+fn outside_list_parent_is_explicit_exact_local_bounded_and_does_not_expand_snapshot() {
+    let (ctx, mut app) = loaded();
+    let history = &mut app.changes.branches.history;
+    let head = history.snapshot.as_ref().unwrap().head.clone();
+    let count = history.snapshot.as_ref().unwrap().commits.len();
+    assert!(history.open_parent(&ctx, &"c".repeat(40), true));
+    assert_eq!(
+        history.detail.selected.as_deref(),
+        Some("c".repeat(40).as_str())
+    );
+    assert_eq!(history.detail.parent_hops, 1);
+    assert_eq!(history.snapshot.as_ref().unwrap().head, head);
+    assert_eq!(history.snapshot.as_ref().unwrap().commits.len(), count);
+    assert!(!history.open_parent(&ctx, &"d".repeat(40), true));
+    history
+        .detail
+        .result
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .parents = vec!["b".repeat(40)];
+    history.detail.parent_hops = 31;
+    assert!(history.open_parent(&ctx, &"b".repeat(40), true));
+    history
+        .detail
+        .result
+        .as_mut()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .parents = vec!["c".repeat(40)];
+    assert_eq!(history.detail.parent_hops, 32);
+    assert!(!history.open_parent(&ctx, &"c".repeat(40), true));
+    history.close_detail(&ctx);
+    assert!(!history.has_detail());
+    assert!(
+        ctx.memory(|memory| memory.has_focus(popup_id().with(("history-commit", "a".repeat(40)))))
+    );
+    assert_eq!(app.draft, "Kept draft");
+}
+#[test]
+fn outside_list_parent_native_space_with_arriving_question_is_read_only() {
+    let (ctx, mut app) = loaded();
+    let (client, _, commands) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    let id = ctx
+        .data(|data| {
+            data.get_temp::<(egui::Id, egui::Rect)>(popup_id().with(("inspect-parent", 1usize)))
+        })
+        .unwrap()
+        .0;
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    app.state.dialogs.push_back(questions::demo_dialog());
+    frame(
+        &ctx,
+        &mut app,
+        vec![
+            key(egui::Key::Space, egui::Modifiers::NONE),
+            egui::Event::Text(" ".into()),
+        ],
+    );
+    assert_eq!(
+        app.changes.branches.history.detail.selected.as_deref(),
+        Some("c".repeat(40).as_str())
+    );
+    assert_eq!(
+        app.changes
+            .branches
+            .history
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .commits
+            .len(),
+        2
+    );
+    assert_eq!(app.state.dialogs.len(), 1);
+    assert_eq!(app.draft, "Kept draft");
+    assert!(commands.try_recv().is_err());
+}
+#[test]
 fn pointer_parent_inspection_uses_exact_loaded_oid_retains_list_filter_and_no_send() {
     let (ctx, mut app) = loaded();
     let (client, _, commands) = rpc::Client::stub_with_records();
@@ -99,8 +181,8 @@ fn native_tab_parent_enter_space_new_question_and_escape_are_owned() {
     }
 }
 #[test]
-fn old_parent_control_cannot_adopt_changed_source_target_or_missing_snapshot_member() {
-    for case in 0..3 {
+fn old_parent_control_cannot_adopt_changed_source_or_target() {
+    for case in 0..2 {
         let (ctx, mut app) = loaded();
         let old = parent(&ctx).0;
         let history = &mut app.changes.branches.history;

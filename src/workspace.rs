@@ -6,6 +6,7 @@ use std::{
 
 pub(crate) mod branches;
 pub(crate) mod history;
+pub(crate) mod index_action;
 pub(crate) mod read_only;
 use read_only::DEADLINE;
 
@@ -268,10 +269,26 @@ pub(crate) fn valid_diff_path(path: &str) -> bool {
 }
 
 /// Read one literal path; never run diff helpers or open an untracked file.
+#[cfg(test)]
 pub(crate) fn diff_cancellable(
     root: &Path,
     file: &FileChange,
     cancel: &AtomicBool,
+) -> Result<String, String> {
+    diff_mode(root, file, cancel, DiffMode::Combined)
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DiffMode {
+    #[default]
+    Combined,
+    Staged,
+    Unstaged,
+}
+pub(crate) fn diff_mode(
+    root: &Path,
+    file: &FileChange,
+    cancel: &AtomicBool,
+    mode: DiffMode,
 ) -> Result<String, String> {
     if !valid_diff_path(&file.path) {
         return Err("Git review requires one regular relative file path (up to 4 KiB, no control characters).".into());
@@ -289,11 +306,19 @@ pub(crate) fn diff_cancellable(
     }
     let deadline = Instant::now() + DEADLINE;
     read_only::filters_disabled(root, cancel, deadline)?;
+    let mut cmd = read_only::command(root);
+    cmd.args(["--literal-pathspecs", "diff"]);
+    match mode {
+        DiffMode::Combined => {
+            cmd.arg("HEAD");
+        }
+        DiffMode::Staged => {
+            cmd.args(["--cached", "HEAD"]);
+        }
+        DiffMode::Unstaged => {}
+    }
     let (bytes, exit) = read_only::run(
-        read_only::command(root).args([
-            "--literal-pathspecs",
-            "diff",
-            "HEAD",
+        cmd.args([
             "--no-ext-diff",
             "--no-textconv",
             "--no-color",

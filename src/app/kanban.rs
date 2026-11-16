@@ -406,7 +406,8 @@ impl Pui {
                                     }
                                     for card in items {
                                         let since = self.kanban.observed[&card.target.key()].1;
-                                        if agent_card(ui, card, since.elapsed()) {
+                                        let checkpoint=if let Target::Task{task,..}=&card.target{self.tasks.records.iter().find(|t|&t.id==task).and_then(|t|t.checkpoint_summary())}else{None};
+                                        if agent_card(ui, card, since.elapsed(),checkpoint.as_deref()) {
                                             target = Some(card.target.clone());
                                         }
                                         ui.add_space(5.0);
@@ -479,7 +480,12 @@ fn card_preview(
     ui.add(egui::Label::new(job).wrap());
 }
 
-fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
+fn agent_card(
+    ui: &mut egui::Ui,
+    card: &AgentCard,
+    duration: Duration,
+    checkpoint: Option<&str>,
+) -> bool {
     let colors = theme::palette(ui.ctx());
     let response = ui
         .push_id(card.target.key(), |ui| {
@@ -489,7 +495,8 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                 .corner_radius(7)
                 .inner_margin(egui::Margin::symmetric(10, 6))
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
+                    ui.spacing_mut().item_spacing =
+                        egui::vec2(6.0, if checkpoint.is_some() { 0.0 } else { 2.0 });
                     ui.spacing_mut().interact_size.y = 18.0;
                     ui.set_width((ui.available_width() - 2.0).max(60.0));
                     ui.horizontal(|ui| {
@@ -532,6 +539,12 @@ fn agent_card(ui: &mut egui::Ui, card: &AgentCard, duration: Duration) -> bool {
                             });
                     } else {
                         card_preview(ui, &card.activity, 11.0, colors.muted, 1, false);
+                    }
+                    if let Some(checkpoint) = checkpoint {
+                        ui.scope(|ui| {
+                            ui.spacing_mut().interact_size.y = 12.0;
+                            card_preview(ui, checkpoint, 10.0, colors.dim, 1, false);
+                        });
                     }
                     if let Some(parent) = &card.parent {
                         ui.add(

@@ -15,7 +15,7 @@ Configure the existing toolchain/CEF and target directory, then:
 ./scripts/test-rust.sh
 ```
 
-Runs bulk tests with four threads, then the cross-window sync and table projection groups serially. All groups are included exactly once; existing ignored tests remain ignored. Hermetic Git config prevents developer-global filters from changing fixtures. This is a local validation runner, not a change to application Git permissions or installed configuration.
+Runs bulk tests with four threads, then the cross-window sync, table projection and table export groups serially. Export tests also use the projection worker permit; a later full run exposed that contention, so the entire export group is included serially rather than retried or omitted. All groups are included exactly once; existing ignored tests remain ignored. Hermetic Git config prevents developer-global filters from changing fixtures. This is a local validation runner, not a change to application Git permissions or installed configuration.
 
 ### Measured on current dirty checkout
 

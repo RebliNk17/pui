@@ -107,9 +107,9 @@ fn segmented_tabs_are_bounded_and_keyboard_navigation_wraps() {
             assert_eq!(selected, Tab::Evidence);
             for (key, expected) in [
                 (egui::Key::ArrowRight, Tab::Changes),
-                (egui::Key::End, Tab::Activity),
+                (egui::Key::End, Tab::Checkpoints),
                 (egui::Key::ArrowRight, Tab::Overview),
-                (egui::Key::ArrowLeft, Tab::Activity),
+                (egui::Key::ArrowLeft, Tab::Checkpoints),
                 (egui::Key::Home, Tab::Overview),
             ] {
                 render(
@@ -123,6 +123,7 @@ fn segmented_tabs_are_bounded_and_keyboard_navigation_wraps() {
                     &mut selected,
                 );
                 assert_eq!(selected, expected, "{mode:?}/{width}/{key:?}");
+                render(vec![], &mut selected);
             }
         }
     }

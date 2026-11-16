@@ -1,5 +1,5 @@
 use super::*;
-fn app(ctx: &egui::Context) -> Pui {
+pub(super) fn app(ctx: &egui::Context) -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
         Options {
@@ -25,7 +25,7 @@ fn app(ctx: &egui::Context) -> Pui {
     app.agents.nodes.get_mut(&id).unwrap().cwd = app.prefs.cwd.clone();
     app
 }
-fn create(app: &mut Pui, kind: &str) -> String {
+pub(super) fn create(app: &mut Pui, kind: &str) -> String {
     let source = app.agents.active.clone();
     app.automation_control(&source, &json!({"action":"automation_create","kind":kind,"name":"CI ready","message":"Review the result","command":"exit 0","interval_seconds":10,"schedule":"*/5 * * * *"})).unwrap()["job"]["job_id"].as_str().unwrap().into()
 }
@@ -52,6 +52,7 @@ fn monitor_completion_drains_before_creator_readiness_and_reconnect_has_deadline
         success: false,
         output: String::new(),
         error: None,
+        ..Default::default()
     })
     .unwrap();
     a.automation.running.insert(
@@ -148,6 +149,7 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
         success: false,
         output: "not ready".into(),
         error: None,
+        ..Default::default()
     })
     .unwrap();
     a.automation.running.insert(
@@ -174,6 +176,7 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
         success: true,
         output: "ready".into(),
         error: None,
+        ..Default::default()
     })
     .unwrap();
     a.automation.running.insert(

@@ -622,6 +622,34 @@ fn escape_leaves_board_without_stopping_a_busy_agent() {
     assert_eq!(app.waiting[&path].len(), 1, "Stop must not clear the queue");
 }
 #[test]
+fn task_checkpoint_summary_does_not_replace_waiting_status_or_authorize_actions() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.demo_task();
+    let task = app.tasks.records.first_mut().unwrap();
+    task.phase = crate::tasks::Phase::AwaitingApproval;
+    task.add_checkpoint("checkpoint visible, not verified")
+        .unwrap();
+    let before = serde_json::to_value(&app.tasks.records).unwrap();
+    app.kanban.open = true;
+    for _ in 0..3 {
+        frame(&ctx, &mut app, 1134.0, vec![]);
+    }
+    let labels = text(frame(&ctx, &mut app, 1134.0, vec![]));
+    assert!(
+        labels
+            .iter()
+            .any(|(s, _)| s.contains("User note · checkpoint visible")),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|(s, _)| s.contains("Legacy workflow · not started"))
+    );
+    assert_eq!(before, serde_json::to_value(&app.tasks.records).unwrap());
+}
+#[test]
 fn elapsed_and_summary_are_bounded_and_unicode_safe() {
     assert_eq!(elapsed(Duration::from_secs(59)), "59s");
     assert_eq!(elapsed(Duration::from_secs(3601)), "1h 0m");

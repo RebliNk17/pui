@@ -169,6 +169,7 @@ impl Preview {
     }
 
     fn show_table(&mut self, ui: &mut egui::Ui, path: &Path) {
+        self.export.poll_disk();
         let index = match &self.index {
             Ok(index) => index.clone(),
             Err(error) => {
@@ -223,7 +224,14 @@ impl Preview {
             .auto_shrink([false, false]);
         let output = self
             .grid
-            .scroll(scroll, self.header)
+            .scroll(
+                scroll,
+                self.header,
+                ui.ctx(),
+                path,
+                rows.len(),
+                index.columns,
+            )
             .show_viewport(ui, |ui, viewport| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
                 let visible_columns = visible_columns(viewport, index.columns);

@@ -208,13 +208,13 @@ fn keyboard_event(event: &egui::Event) -> bool {
             | egui::Event::Ime(_)
     )
 }
-struct Permit(Arc<AtomicBool>);
+pub(super) struct Permit(Arc<AtomicBool>);
 impl Drop for Permit {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
 }
-fn permit(ctx: &egui::Context) -> Option<Permit> {
+pub(super) fn permit(ctx: &egui::Context) -> Option<Permit> {
     let gate = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<Arc<AtomicBool>>(popup_id().with("worker"))
             .clone()

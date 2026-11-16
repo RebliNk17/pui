@@ -75,7 +75,7 @@ fn axis_selection_replaces_old_rectangle_and_escape_clears_without_extra_state()
         vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
     );
     assert!(preview.grid.selection().is_none());
-    assert_eq!(std::mem::size_of::<Grid>(), 112);
+    assert_eq!(std::mem::size_of::<Grid>(), 128);
 }
 #[test]
 fn axis_maximum_table_narrow_themes_zoom_stays_virtual_and_constant_state() {
@@ -104,7 +104,7 @@ fn axis_maximum_table_narrow_themes_zoom_stays_virtual_and_constant_state() {
                 assert!(painted < 100);
                 assert!(preview.grid.selection().is_some());
             }
-            assert_eq!(std::mem::size_of::<Grid>(), 112);
+            assert_eq!(std::mem::size_of::<Grid>(), 128);
             eprintln!("100kcell axis+20frames {:?}", start.elapsed());
         }
     }
