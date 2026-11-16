@@ -1,5 +1,5 @@
 use super::*;
-use std::fs;
+use std::{fs, process::Command};
 
 pub(crate) fn file(path: &str) -> FileChange {
     FileChange {
@@ -86,6 +86,60 @@ pub(crate) fn fixture() -> PathBuf {
         &["update-index", "--no-skip-worktree", "--", "README.md"],
     );
     fs::write(root.join("README.md"), "fixture modified README\n").unwrap();
+    root
+}
+
+// A small deterministic local history, independent of the checkout's latest
+// integration commit size or which side of a merge contains a bounded patch.
+// Every write/commit is confined to this freshly created disposable repository.
+pub(crate) fn history_fixture() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("pui-history-fixture-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args([
+                "-C",
+                root.to_str().unwrap(),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "history fixture command failed: {args:?}"
+        );
+    };
+    run(&["init", "--quiet", "--template=", "--initial-branch=main"]);
+    fs::write(root.join("README.md"), "base\n").unwrap();
+    fs::write(root.join("side.txt"), "base\n").unwrap();
+    run(&["add", "--", "README.md", "side.txt"]);
+    run(&["commit", "--quiet", "-m", "base"]);
+    run(&["branch", "side"]);
+    fs::write(root.join("README.md"), "main change\n").unwrap();
+    run(&["commit", "--quiet", "-am", "main change"]);
+    run(&["checkout", "--quiet", "side"]);
+    fs::write(root.join("side.txt"), "side change\n").unwrap();
+    run(&["commit", "--quiet", "-am", "side change"]);
+    run(&["checkout", "--quiet", "main"]);
+    run(&[
+        "merge",
+        "--quiet",
+        "--no-ff",
+        "-m",
+        "merge both small changes",
+        "side",
+    ]);
     root
 }
 

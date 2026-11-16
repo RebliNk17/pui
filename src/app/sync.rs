@@ -120,6 +120,9 @@ pub(super) struct WindowSync {
     _presence: Option<File>,
     worker: Option<std::thread::JoinHandle<()>>,
     listener: Option<std::thread::JoinHandle<()>>,
+    // Reserve the socket used to wake accept at shutdown, even at the FD limit.
+    #[cfg(unix)]
+    wake: Option<std::os::fd::OwnedFd>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     port: u16,
     pub error: Option<String>,
@@ -311,6 +314,8 @@ impl WindowSync {
             _presence: None,
             worker: None,
             listener: None,
+            #[cfg(unix)]
+            wake: None,
             stopped: Arc::new(false.into()),
             port: 0,
             error: None,
@@ -362,6 +367,19 @@ impl WindowSync {
             let token = endpoint.token.clone();
             let stopped = this.stopped.clone();
             let repaint = ctx.clone();
+            #[cfg(unix)]
+            {
+                use std::os::fd::FromRawFd;
+                let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+                if fd < 0 {
+                    return Err("Cannot reserve live-window shutdown socket".into());
+                }
+                this.wake = Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) });
+                // The descriptor must never leak into Pi or tool subprocesses.
+                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                    return Err("Cannot secure live-window shutdown socket".into());
+                }
+            }
             this.listener = Some(std::thread::spawn(move || {
                 for connection in listener.incoming() {
                     if stopped.load(std::sync::atomic::Ordering::Relaxed) {
@@ -673,6 +691,22 @@ impl Drop for WindowSync {
         self.stopped
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if self.port != 0 {
+            #[cfg(unix)]
+            if let Some(wake) = self.wake.take() {
+                use std::os::fd::AsRawFd;
+                let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+                address.sin_family = libc::AF_INET as _;
+                address.sin_port = self.port.to_be();
+                address.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
+                unsafe {
+                    libc::connect(
+                        wake.as_raw_fd(),
+                        &address as *const _ as *const libc::sockaddr,
+                        std::mem::size_of_val(&address) as libc::socklen_t,
+                    );
+                }
+            }
+            #[cfg(not(unix))]
             let _ = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, self.port));
         }
         if let Some(listener) = self.listener.take() {
@@ -1382,12 +1416,10 @@ mod tests {
         assert!(owner.attach_or_claim(&alias));
         assert_eq!(owner.sync.attention_identity(&alias), path);
         for n in 0..300 {
-            assert!(
-                owner
-                    .sync
-                    .claim(&directory.join(format!("missing-{n}.jsonl")))
-                    .unwrap()
-            );
+            let path = directory.join(format!("missing-{n}.jsonl"));
+            assert!(owner.sync.claim(&path).unwrap());
+            // Exercise cache eviction, not the process descriptor ceiling.
+            owner.sync.owned.remove(&path);
         }
         assert_eq!(owner.sync.attention_aliases.len(), 256);
         owner.sync.forget_deleted(&path);
@@ -2288,6 +2320,51 @@ mod tests {
         let lock = other.deletion_lock(&path).unwrap();
         assert!(lock.is_some());
         assert!(owner.deletion_lock(&path).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_wakes_listener_when_descriptor_limit_is_exhausted() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "ulimit -n 96; exec \"$1\" --exact app::sync::tests::descriptor_exhaustion_probe --nocapture", "fixture"])
+            .arg(std::env::current_exe().unwrap())
+            .env("PUI_TEST_SYNC_FD_EXHAUSTION", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "descriptor exhaustion child failed");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("shutdown did not wake listener at the descriptor limit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_exhaustion_probe() {
+        if std::env::var_os("PUI_TEST_SYNC_FD_EXHAUSTION").is_none() {
+            return;
+        }
+        let (directory, _) = location();
+        let sync = WindowSync::new_at(
+            &egui::Context::default(),
+            false,
+            Some(directory.join("registry")),
+        );
+        assert!(sync.error.is_none());
+        let mut files = Vec::new();
+        while let Ok(file) = File::open("/dev/null") {
+            files.push(file);
+        }
+        assert!(files.len() > 10);
+        drop(sync); // Must complete while the descriptor table is still full.
+        drop(files);
     }
     #[test]
     fn second_process_lock_probe() {

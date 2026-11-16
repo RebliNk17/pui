@@ -44,6 +44,9 @@ class ReleaseTests(unittest.TestCase):
         suffix = "-adhoc" if signing == "ad-hoc" else ""
         for ext in ("zip", "dmg"):
             (directory / f"Pui-1.2.3-macos-arm64{suffix}.{ext}").write_bytes(b"fake app")
+        runtime = self.root / "dist/Pui.app/Contents/Resources/runtime"
+        runtime.mkdir(parents=True, exist_ok=True)
+        (runtime / "manifest.json").write_text(json.dumps({"schema": 1, "node": "22.23.5", "pi": "1.5.2", "platform": "darwin-arm64"}))
         with patch.dict(os.environ, {"PUI_SIGNING_STATUS": signing}):
             release.prepare(self.root)
         return directory
@@ -72,6 +75,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(manifest["commit"], "a" * 40)
         self.assertEqual(manifest["signing"], "ad-hoc")
         self.assertEqual(manifest["architecture"], "arm64")
+        self.assertEqual(manifest["runtime"]["pi"], "1.5.2")
+        self.assertEqual(manifest["runtime"]["node"], "22.23.5")
         self.assertTrue(all("-adhoc." in name for name in manifest["files"]))
         notes = (directory / "CHANGELOG.md").read_text()
         self.assertIn("not Developer ID signed or notarized", notes)
@@ -122,6 +127,20 @@ class ReleaseTests(unittest.TestCase):
             release.publish(self.root)
         request.assert_not_called()
 
+    def test_workspace_symlinks_are_not_uploaded_even_with_matching_hash(self):
+        directory = self.prepare()
+        for name in ("release.json", "SHA256SUMS", "CHANGELOG.md", "Pui-1.2.3-macos-arm64-adhoc.zip"):
+            path = directory / name
+            moved = self.root / (name + ".outside")
+            path.rename(moved)
+            path.symlink_to(moved)
+            with self.subTest(name=name), patch.object(release.GitLab, "request") as request:
+                with self.assertRaisesRegex(ValueError, "symlinks"):
+                    release.publish(self.root)
+                request.assert_not_called()
+            path.unlink()
+            moved.rename(path)
+
     def test_retries_reuse_identical_assets_but_never_overwrite_different_content(self):
         self.prepare()
         with patch.object(release.GitLab, "request", return_value="different hash") as request:
@@ -146,7 +165,7 @@ class ReleaseTests(unittest.TestCase):
                 release.GitLab(url, "fake")
         self.assertIsNone(release.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.example"))
         request = release.Request("https://gitlab.example/api/v4/packages/file", headers={
-            "JOB-TOKEN": "fake-secret", "Authorization": "Bearer fake", "Cookie": "session=fake"})
+            "JOB-TOKEN": "fake-secret", "PRIVATE-TOKEN": "fake-project", "Authorization": "Bearer fake", "Cookie": "session=fake"})
         redirect = release.DownloadRedirect()
         redirected = redirect.redirect_request(request, None, 302, "", {}, "https://storage.example/signed?key=fake")
         self.assertEqual(redirected.full_url, "https://storage.example/signed?key=fake")
@@ -190,22 +209,34 @@ class TransportTests(unittest.TestCase):
             self.assertEqual(api.request("PUT", "/packages/file", Path(artifact.name), "application/octet-stream"),
                              {"message": "201 Created"})
 
+    def test_project_tokens_use_private_token_header_without_changing_job_token_default(self):
+        api = release.GitLab("https://gitlab.example/api/v4", "fake-project-token", "PRIVATE-TOKEN")
+        api.opener = Mock()
+        api.opener.open.return_value = self.response(b'{}')
+        api.request("GET", "/projects/123")
+        request = api.opener.open.call_args.args[0]
+        self.assertEqual(request.get_header("Private-token"), "fake-project-token")
+        self.assertIsNone(request.get_header("Job-token"))
+        for header, token in (("Authorization", "fake"), ("PRIVATE-TOKEN", "")):
+            with self.assertRaises(ValueError):
+                release.GitLab("https://gitlab.example/api/v4", token, header)
+
     def test_only_explicit_404_is_missing_and_errors_do_not_leak_credentials_or_body(self):
         api = release.GitLab("https://gitlab.example/api/v4", "fake-token")
         api.opener = Mock()
         for status in (302, 403, 404, 500):
             api.opener.open.side_effect = release.HTTPError("https://secret-query.invalid?token=secret", status,
                                                           "sensitive body", {}, None)
-            if status == 404:
-                self.assertIsNone(api.request("GET", "/releases/v1.2.3", missing=True))
-            else:
-                with self.assertRaises(ValueError) as error:
-                    api.request("GET", "/releases/v1.2.3", missing=True)
-                self.assertNotIn("secret", str(error.exception))
-                self.assertNotIn("sensitive", str(error.exception))
-                self.assertIn(f"HTTP {status}", str(error.exception))
+            with self.assertRaises(ValueError) as error:
+                api.request("GET", "/releases/v1.2.3", missing=True)
+            self.assertNotIn("secret", str(error.exception))
+            self.assertNotIn("sensitive", str(error.exception))
+            self.assertIn(f"HTTP {status}", str(error.exception))
         with self.assertRaises(ValueError):
             api.request("GET", "/releases/v1.2.3")
+        api.opener.open.side_effect = release.HTTPError("https://gitlab.example/api/v4/releases/v1.2.3", 404,
+                                                      "missing", {}, None)
+        self.assertIsNone(api.request("GET", "/releases/v1.2.3", missing=True))
 
     def test_notary_wrapper_requires_accepted_and_preserves_cli_failures(self):
         with tempfile.TemporaryDirectory() as temp:

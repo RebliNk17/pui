@@ -45,6 +45,7 @@ cp -R assets/pui-engineering "$resources/pui-engineering"
 mkdir -p "$resources/ThirdParty"
 cp -R assets/third-party/svg "$resources/ThirdParty/svg"
 python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
+python3 scripts/bundle-runtime-macos.py "$app" "${CARGO_TARGET_DIR:-target}"
 cp packaging/Info.plist "$app/Contents/Info.plist"
 # Cargo is the release-version source of truth.
 version=$(cargo pkgid --offline | awk -F# '{print $NF}' | awk -F@ '{print $NF}')

@@ -191,6 +191,9 @@ fn full_budget_is_visible_and_retry_is_explicit_preserving_draft_run_permissions
         assert!(!app.files.tabs[0].external && app.files.tabs[0].source);
         assert_eq!(fs::read(&path).unwrap(), bytes);
         app.files.close_tab(0);
+        // Receipt precedes the worker dropping its final lease. Wait for the
+        // actual worker completion, not a scheduler-dependent immediate drop.
+        loader::wait_idle(&ctx);
         assert_eq!(Lease::new(&ctx).pool.used.load(Ordering::Relaxed), 0);
     }
 }

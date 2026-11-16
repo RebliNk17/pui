@@ -15,7 +15,7 @@ Configure the existing toolchain/CEF and target directory, then:
 ./scripts/test-rust.sh
 ```
 
-Runs bulk tests with four threads, then the cross-window sync, table projection and table export groups serially. Export tests also use the projection worker permit; a later full run exposed that contention, so the entire export group is included serially rather than retried or omitted. All groups are included exactly once; existing ignored tests remain ignored. Hermetic Git config prevents developer-global filters from changing fixtures. This is a local validation runner, not a change to application Git permissions or installed configuration.
+Runs bulk tests with four threads, then the cross-window sync, table projection, table export and task ownership-lock handoff groups serially. The ownership handoff tests cannot overlap process creation in other groups: a macOS fork can temporarily retain an inherited lock file description until exec, despite close-on-exec. The restart/OS-lock regression runs in its own final invocation so it never overlaps subprocess-spawning tests. Export tests also use the projection worker permit; a later full run exposed that contention, so the entire export group is included serially rather than retried or omitted. All groups are included exactly once; existing ignored tests remain ignored. Hermetic Git config prevents developer-global filters from changing fixtures. This is a local validation runner, not a change to application Git permissions or installed configuration.
 
 ### Measured on current dirty checkout
 

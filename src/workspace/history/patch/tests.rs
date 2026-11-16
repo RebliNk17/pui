@@ -16,7 +16,7 @@ fn literal_patch_limits_controls_and_empty_are_whole_or_reject() {
 }
 #[test]
 fn per_file_patch_is_literal_bounded_and_never_mutates_git() {
-    let root = crate::workspace::tests::fixture();
+    let root = crate::workspace::tests::history_fixture();
     let cancel = AtomicBool::new(false);
     let snapshot = super::super::read(&root, &cancel).unwrap();
     let detail = super::super::details::read(&root, &snapshot.head, &cancel).unwrap();
@@ -55,7 +55,7 @@ fn per_file_patch_is_literal_bounded_and_never_mutates_git() {
 }
 #[test]
 fn real_commit_patch_root_missing_cancel_and_arguments_never_mutate_git() {
-    let root = crate::workspace::tests::fixture();
+    let root = crate::workspace::tests::history_fixture();
     let cancel = AtomicBool::new(false);
     let snapshot = super::super::read(&root, &cancel).unwrap();
     // Pick an existing small commit instead of assuming the integration merge fits.
