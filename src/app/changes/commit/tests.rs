@@ -1,5 +1,108 @@
 use super::*;
 #[test]
+fn native_cancel_commit_signals_worker_discards_late_commit_and_never_retries() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut changes = Changes {
+                index_writable: true,
+                ..Default::default()
+            };
+            let (tx, rx) = mpsc::channel();
+            let signal = Arc::new(AtomicBool::new(false));
+            changes.commit.applying = Some(workspace::read_only::Request::new(rx, signal.clone()));
+            let draw = |changes: &mut Changes, events| {
+                ctx.run(
+                    egui::RawInput {
+                        events,
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(420.0, 620.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        changes.commit_inputs(ctx, true);
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            changes.commit_control(ui, &Workspace::default(), false)
+                        });
+                    },
+                )
+            };
+            for _ in 0..3 {
+                draw(&mut changes, vec![]);
+            }
+            let (_, rect, enabled) = ctx
+                .data(|d| {
+                    d.get_temp::<(egui::Id, egui::Rect, bool)>(egui::Id::new(
+                        "cancel-commit-control",
+                    ))
+                })
+                .unwrap();
+            assert!(enabled);
+            for pressed in [true, false] {
+                draw(
+                    &mut changes,
+                    vec![
+                        egui::Event::PointerMoved(rect.center()),
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            pressed,
+                            button: egui::PointerButton::Primary,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert!(signal.load(Ordering::Acquire));
+            assert!(changes.commit.applying.is_none());
+            assert!(
+                changes
+                    .commit
+                    .notice
+                    .as_ref()
+                    .unwrap()
+                    .contains("may already have completed")
+            );
+            assert!(tx.send(Ok("a".repeat(40))).is_err());
+            draw(&mut changes, vec![]);
+            assert!(changes.commit.pending.is_none());
+            assert!(
+                changes
+                    .commit
+                    .notice
+                    .as_ref()
+                    .unwrap()
+                    .contains("cancellation requested")
+            );
+        }
+    }
+}
+#[test]
+fn hidden_commit_signals_cancel_with_uncertain_completion_notice() {
+    let ctx = egui::Context::default();
+    let mut changes = Changes {
+        index_writable: true,
+        ..Default::default()
+    };
+    let (_tx, rx) = mpsc::channel();
+    let signal = Arc::new(AtomicBool::new(false));
+    changes.commit.applying = Some(workspace::read_only::Request::new(rx, signal.clone()));
+    changes.commit_inputs(&ctx, false);
+    assert!(signal.load(Ordering::Acquire));
+    assert!(
+        changes
+            .commit
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("inspect History")
+    );
+}
+#[test]
 fn hook_failure_notice_is_literal_themes_zoom_without_capture() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for zoom in [0.8, 1.4] {

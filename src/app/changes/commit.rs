@@ -59,8 +59,43 @@ impl Changes {
         if response.clicked() {
             self.start_commit_inspection(ui.ctx(), workspace.root.clone());
         }
+        if self.commit.applying.is_some() {
+            ui.label(theme::small(
+                ui,
+                "Committing locally… hook/signer may still be running.",
+            ));
+            let cancel = prompt_ui::button(
+                ui,
+                "Cancel Commit",
+                prompt_ui::Button::Secondary,
+                self.index_writable
+                    && !egui::Popup::is_any_open(ui.ctx())
+                    && ui.memory(|m| m.top_modal_layer().is_none())
+                    && prompt_ui::keyboard_available(ui),
+            );
+            self.commit.controls.push(cancel.id);
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new("cancel-commit-control"),
+                    (cancel.id, cancel.rect, cancel.enabled()),
+                )
+            });
+            if cancel.clicked() {
+                self.cancel_commit();
+            }
+        }
         if let Some(notice) = &self.commit.notice {
             ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
+        }
+    }
+    fn cancel_commit(&mut self) {
+        if self.commit.applying.take().is_some() {
+            self.commit.snapshot = None;
+            self.commit.message.clear();
+            self.commit.notice=Some("Commit cancellation requested. Branch publication may already have completed; inspect History and staged changes before retrying. No automatic retry.".into());
+            self.refresh = true;
+            self.invalidate();
         }
     }
     fn start_commit_inspection(&mut self, ctx: &egui::Context, root: PathBuf) {
@@ -98,7 +133,14 @@ impl Changes {
                 .as_ref()
                 .is_some_and(|o| o != &self.identity)
         {
-            self.commit = Default::default();
+            let active = self.commit.applying.is_some();
+            self.cancel_commit();
+            if !active {
+                self.commit = Default::default();
+            } else {
+                self.commit.pending = None;
+                self.commit.controls.clear();
+            }
             return;
         }
         if let Some(result) = self
