@@ -61,7 +61,8 @@ done
         runner = (ROOT / "scripts/test-rust.sh").read_text()
         self.assertIn('--skip "$lock_test"', runner)
         self.assertIn('"$lock_test" -- --exact --test-threads=1', runner)
-        for group in ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::"):
+        for group in ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::",
+                      "app::tasks::save_conflict_tests::"):
             self.assertIn("--skip " + group, runner)
             self.assertIn(group + " -- --test-threads=1", runner)
 
