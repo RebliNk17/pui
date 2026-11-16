@@ -5,8 +5,10 @@ use std::{
 };
 
 pub(crate) mod branches;
+pub(crate) mod commit;
 pub(crate) mod history;
 pub(crate) mod index_action;
+pub(crate) mod push;
 pub(crate) mod read_only;
 use read_only::DEADLINE;
 
@@ -221,17 +223,25 @@ pub(crate) fn read(cwd: &Path, cancel: &AtomicBool) -> Workspace {
             return Err("Git status unavailable. No partial file list is shown.".into());
         }
         workspace.files = status(&bytes)?;
+        let (_, head) = commit::branch_head(&workspace.root, cancel, deadline)?;
+        let initial = head.bytes().all(|b| b == b'0');
+        let mut count_args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "-z",
+            "--ignore-submodules=dirty",
+        ];
+        if initial {
+            count_args.push("--cached");
+        } else {
+            count_args.push(&head);
+        }
+        count_args.push("--");
         let (bytes, exit) = git(
             &workspace.root,
-            &[
-                "diff",
-                "HEAD",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--numstat",
-                "-z",
-                "--ignore-submodules=dirty",
-            ],
+            &count_args,
             cancel,
             deadline,
             MAX_STATUS_BYTES,

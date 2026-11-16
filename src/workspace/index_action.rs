@@ -34,6 +34,7 @@ pub(crate) struct Snapshot {
     index_path: PathBuf,
     index: Vec<u8>,
     head: String,
+    branch: String,
     file: Option<[u8; 32]>,
     restore: Option<Vec<u8>>,
 }
@@ -120,19 +121,10 @@ fn prepare_at(
     if Path::new(&actual) != root {
         return Err("Repository root changed.".into());
     }
-    // Repositories without an existing HEAD/index are deliberately refused in this first slice.
-    let head = line(
-        &run(
-            root,
-            &["rev-parse", "--verify", "HEAD^{commit}"],
-            cancel,
-            deadline,
-        )?,
-        64,
-        "HEAD",
-    )?;
-    if !matches!(head.len(), 40 | 64) || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("Invalid HEAD identity.".into());
+    let (branch, head) = super::commit::branch_head(root, cancel, deadline)?;
+    let initial = head.bytes().all(|b| b == b'0');
+    if initial && action == Action::Discard {
+        return Err("Discard before first commit is unsupported.".into());
     }
     let index_path = PathBuf::from(line(
         &run(
@@ -147,8 +139,8 @@ fn prepare_at(
     if !index_path.is_absolute() {
         return Err("Invalid index path.".into());
     }
-    let index = bytes(&index_path, MAX_INDEX)?;
-    if !index.starts_with(b"DIRC") {
+    let index = inspect_index(&index_path, initial && action == Action::Stage)?;
+    if !index.is_empty() && !index.starts_with(b"DIRC") {
         return Err("Invalid index header.".into());
     }
     let shared = run(
@@ -218,7 +210,7 @@ fn prepare_at(
         }
     }
     let full = root.join(path);
-    let preview = preview(root, path, status, action, cancel, deadline)?;
+    let preview = preview(root, path, status, action, cancel, deadline, initial)?;
     if action == Action::Discard
         && preview
             .lines()
@@ -244,9 +236,16 @@ fn prepare_at(
         index_path,
         index,
         head,
+        branch,
         file,
         restore,
     })
+}
+fn inspect_index(path: &Path, allow_missing: bool) -> Result<Vec<u8>, String> {
+    match fs::symlink_metadata(path) {
+        Err(e) if allow_missing && e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        _ => bytes(path, MAX_INDEX),
+    }
 }
 fn preview(
     root: &Path,
@@ -255,6 +254,7 @@ fn preview(
     action: Action,
     cancel: &AtomicBool,
     deadline: Instant,
+    initial: bool,
 ) -> Result<String, String> {
     let bytes = if status == "??" {
         bytes(&root.join(path), 128 * 1024)?
@@ -270,7 +270,10 @@ fn preview(
             "--ignore-submodules=none",
         ]);
         if action == Action::Unstage {
-            cmd.args(["--cached", "HEAD"]);
+            cmd.arg("--cached");
+            if !initial {
+                cmd.arg("HEAD");
+            }
         }
         cmd.args(["--", path]);
         let (out, exit) = read_only::run(
@@ -348,22 +351,30 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
         .open(&lock_path)
         .map_err(|_| "Git index is locked. No changes made; retry explicitly.")?;
     let lock_guard = OwnedPath(lock_path.clone());
-    if bytes(&snapshot.index_path, MAX_INDEX)? != snapshot.index {
+    if inspect_index(&snapshot.index_path, snapshot.index.is_empty())? != snapshot.index {
         return Err("Index changed before lock acquisition.".into());
     }
     let temp = snapshot
         .index_path
         .with_file_name(format!("pui-index-{}", uuid::Uuid::new_v4()));
     let temp_guard = OwnedPath(temp.clone());
-    let mut private = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut private = options
         .open(&temp)
         .map_err(|_| "Cannot create private index.")?;
     private
         .write_all(&snapshot.index)
         .map_err(|_| "Cannot copy private index.")?;
     drop(private);
+    if snapshot.index.is_empty() {
+        fs::remove_file(&temp).map_err(|_| "Cannot initialize private empty index")?;
+    }
     let mut cmd = read_only::command(&snapshot.root);
     literal(&mut cmd);
     cmd.args([
@@ -399,7 +410,11 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
                 cmd.args(["add", "--", &snapshot.path]);
             }
             Action::Unstage => {
-                cmd.args(["reset", "--quiet", &snapshot.head, "--", &snapshot.path]);
+                if snapshot.head.bytes().all(|b| b == b'0') {
+                    cmd.args(["update-index", "--force-remove", "--", &snapshot.path]);
+                } else {
+                    cmd.args(["reset", "--quiet", &snapshot.head, "--", &snapshot.path]);
+                }
             }
             Action::Discard => unreachable!(),
         }
@@ -445,9 +460,15 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
     }
     fs::set_permissions(
         &lock_path,
-        fs::metadata(&snapshot.index_path)
-            .map_err(|_| "Cannot inspect index permissions.")?
-            .permissions(),
+        if snapshot.index.is_empty() {
+            fs::metadata(&temp)
+                .map_err(|_| "Cannot inspect new index permissions")?
+                .permissions()
+        } else {
+            fs::metadata(&snapshot.index_path)
+                .map_err(|_| "Cannot inspect index permissions.")?
+                .permissions()
+        },
     )
     .map_err(|_| "Cannot preserve index permissions.")?;
     fs::rename(&lock_path, &snapshot.index_path).map_err(|_| "Cannot publish prepared index.")?;

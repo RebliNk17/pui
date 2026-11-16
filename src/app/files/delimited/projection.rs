@@ -151,6 +151,8 @@ pub(super) struct Projection {
     started: usize,
     #[cfg(test)]
     before_scan: Option<Box<dyn FnOnce() + Send>>,
+    #[cfg(test)]
+    after_delivery: Option<Box<dyn FnOnce() + Send>>,
 }
 impl Projection {
     pub fn demo(&mut self) {
@@ -224,10 +226,12 @@ impl Projection {
         };
         #[cfg(test)]
         let before_scan = self.before_scan.take();
+        #[cfg(test)]
+        let after_delivery = self.after_delivery.take();
         let spawn = std::thread::Builder::new()
             .name("pui-table-view".into())
             .spawn(move || {
-                let _permit = permit;
+                let permit = permit;
                 let input = job; // drop shared bodies/lease before releasing permit on every exit
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     #[cfg(test)]
@@ -247,13 +251,20 @@ impl Projection {
                         Err("Cannot apply this table view. Try Apply again; Source is unchanged.")
                     }
                 };
+                // Completion is actionable immediately on receipt. Release shared
+                // input/lease first, then admission, before publishing that signal.
+                drop(input);
+                drop(permit);
                 if !cancel.load(Ordering::Relaxed) {
                     let _ = tx.send(result);
                     ctx.request_repaint();
                 } else {
                     drop(result);
                 }
-                drop(input); // includes lease, only after result transferred/dropped
+                #[cfg(test)]
+                if let Some(after_delivery) = after_delivery {
+                    after_delivery();
+                }
             });
         if spawn.is_err() {
             self.notice =

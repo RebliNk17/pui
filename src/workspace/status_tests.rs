@@ -80,20 +80,13 @@ fn real_status_errors_unborn_and_oversize_are_honest_and_never_mutate_index_head
     fs::write(empty.join("untracked"), "fixture").unwrap();
     let head = fs::read(empty.join(".git/HEAD")).unwrap();
     let unborn = read(&empty, &cancel);
-    assert!(
-        unborn.is_git
-            && unborn
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("counts unavailable")
-    );
+    assert!(unborn.is_git && unborn.error.is_none());
     assert_eq!(unborn.files.len(), 1);
     assert!(
         unborn
             .files
             .iter()
-            .all(|file| file.added == "?" && file.removed == "?")
+            .all(|file| file.status == "??" && file.added == "0" && file.removed == "0")
     );
     assert!(!empty.join(".git/index").exists());
     assert_eq!(fs::read(empty.join(".git/HEAD")).unwrap(), head);

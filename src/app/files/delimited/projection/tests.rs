@@ -204,6 +204,42 @@ fn projected_keyboard_copy_uses_visible_order_and_source_record_identity() {
     assert!(preview.projection.map.is_none());
 }
 #[test]
+fn completed_delivery_releases_permit_before_worker_return_without_retry() {
+    let ctx = egui::Context::default();
+    let mut preview = Preview::new("name\na\nb\n".into(), b',');
+    let (entered, waiting) = mpsc::channel();
+    let (release, blocked) = mpsc::channel();
+    preview.projection.after_delivery = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+    }));
+    assert!(preview.projection.start(
+        &ctx,
+        preview.source.clone(),
+        preview.index.as_ref().unwrap().clone()
+    ));
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Worker is deliberately still alive. Its delivered result must be actionable.
+    preview.projection.poll(&ctx, &mut preview.grid, 3, true);
+    assert!(preview.projection.pending.is_none());
+    let busy = ctx.data_mut(|d| {
+        d.get_temp_mut_or_default::<Arc<AtomicBool>>(egui::Id::new("table-projection-worker"))
+            .clone()
+    });
+    let released = !busy.load(Ordering::Acquire);
+    preview.projection.draft = "b".into();
+    let started = preview.projection.start(
+        &ctx,
+        preview.source.clone(),
+        preview.index.as_ref().unwrap().clone(),
+    );
+    release.send(()).unwrap();
+    assert!(released, "completion arrived before permit release");
+    assert!(started, "first post-completion Apply must not need a retry");
+    finish(&ctx, &mut preview);
+    assert_eq!(ids(preview.projection.map.as_ref().unwrap()), [2]);
+}
+#[test]
 fn removed_selection_is_explicit_and_no_match_never_copies_hidden_record() {
     let (ctx, mut preview) = setup("name,note\nBeta,hidden\nAlpha,visible\n".into(), false);
     preview.grid.active = (1, 1);

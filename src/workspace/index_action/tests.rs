@@ -9,6 +9,76 @@ fn snapshot(root: &Path) -> Snapshot {
     )
     .unwrap()
 }
+fn initial_fixture() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("pui-first-stage-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    super::super::tests::git(&root, &["init", "--initial-branch=main"]);
+    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+    super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
+    fs::write(root.join("first.txt"), "first\n").unwrap();
+    root
+}
+#[test]
+fn no_index_stage_unstage_restage_and_initial_commit_preserve_working_file() {
+    let root = initial_fixture();
+    let cancel = AtomicBool::new(false);
+    assert!(!root.join(".git/index").exists());
+    let visible = super::super::read(&root, &cancel);
+    assert!(visible.error.is_none(), "{:?}", visible.error);
+    assert!(
+        visible
+            .files
+            .iter()
+            .any(|f| f.path == "first.txt" && f.status == "??")
+    );
+    let stage = prepare(&root, "first.txt", "??", Action::Stage, &cancel).unwrap();
+    assert!(stage.index.is_empty());
+    apply(stage, &cancel).unwrap();
+    let visible = super::super::read(&root, &cancel);
+    assert!(visible.error.is_none(), "{:?}", visible.error);
+    assert!(
+        visible
+            .files
+            .iter()
+            .any(|f| f.path == "first.txt" && f.status == "A ")
+    );
+    let unstage = prepare(&root, "first.txt", "A ", Action::Unstage, &cancel).unwrap();
+    assert!(unstage.preview.contains("+first"));
+    apply(unstage, &cancel).unwrap();
+    let stage = prepare(&root, "first.txt", "??", Action::Stage, &cancel).unwrap();
+    apply(stage, &cancel).unwrap();
+    let commit = super::super::commit::prepare(&root, &cancel).unwrap();
+    super::super::commit::apply(commit, "first commit entirely native", &cancel).unwrap();
+    assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"first\n");
+    assert_eq!(
+        super::super::tests::git(&root, &["show", "HEAD:first.txt"]),
+        b"first\n"
+    );
+}
+#[test]
+fn absent_index_snapshot_refuses_new_index_foreign_lock_and_branch_creation() {
+    for case in 0..3 {
+        let root = initial_fixture();
+        let cancel = AtomicBool::new(false);
+        let stage = prepare(&root, "first.txt", "??", Action::Stage, &cancel).unwrap();
+        if case == 0 {
+            super::super::tests::git(&root, &["add", "--", "first.txt"]);
+        }
+        if case == 1 {
+            fs::write(root.join(".git/index.lock"), "foreign").unwrap();
+        }
+        if case == 2 {
+            super::super::tests::git(&root, &["symbolic-ref", "HEAD", "refs/heads/other"]);
+        }
+        assert!(apply(stage, &cancel).is_err());
+        assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"first\n");
+        if case == 1 {
+            assert_eq!(fs::read(root.join(".git/index.lock")).unwrap(), b"foreign");
+            assert!(!root.join(".git/index").exists());
+        }
+    }
+}
 #[test]
 fn stage_unstage_changes_only_disposable_index_and_preserves_head_worktree() {
     let root = fs::canonicalize(super::super::tests::fixture()).unwrap();

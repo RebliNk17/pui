@@ -31,7 +31,7 @@ fn command(root: &Path, hash: &str, parent: Option<&str>) -> Command {
     cmd.arg(hash).arg("--");
     cmd
 }
-fn parse(bytes: &[u8]) -> Result<Vec<Entry>, String> {
+pub(in crate::workspace) fn parse(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     if bytes.len() > MAX_BYTES {
         return Err("Commit file list exceeds 128 KiB. Nothing is shown.".into());
     }

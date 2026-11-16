@@ -22,7 +22,7 @@ pub(crate) struct Snapshot {
     pub commits: Vec<Commit>,
     pub limited: bool,
 }
-fn oid(value: &str) -> bool {
+pub(super) fn oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
             .bytes()

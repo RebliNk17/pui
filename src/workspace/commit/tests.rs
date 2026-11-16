@@ -1,0 +1,198 @@
+use super::*;
+fn fixture() -> PathBuf {
+    let root = fs::canonicalize(super::super::tests::fixture()).unwrap();
+    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+    super::super::tests::git(&root, &["config", "user.email", "pui-test@example.invalid"]);
+    super::super::tests::git(&root, &["add", "--", "README.md"]);
+    root
+}
+#[test]
+fn real_commit_moves_only_disposable_branch_preserves_index_worktree_and_skips_hooks() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    let s = prepare(&root, &cancel).unwrap();
+    let old = s.head.clone();
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let content = fs::read(root.join("README.md")).unwrap();
+    let hook = root.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\ntouch hook-ran\nexit 77\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let oid = apply(s, "explicit test commit", &cancel).unwrap();
+    assert_ne!(oid, old);
+    let authors = line(super::super::tests::git(
+        &root,
+        &["log", "-1", "--format=%an <%ae> | %cn <%ce>"],
+    ))
+    .unwrap();
+    assert_eq!(
+        authors,
+        "Pui Test <pui-test@example.invalid> | Pui Test <pui-test@example.invalid>"
+    );
+    assert!(!root.join("hook-ran").exists());
+    assert_eq!(
+        line(super::super::tests::git(
+            &root,
+            &["log", "-1", "--format=%s"]
+        ))
+        .unwrap(),
+        "explicit test commit"
+    );
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        oid
+    );
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    assert_eq!(fs::read(root.join("README.md")).unwrap(), content);
+    assert!(prepare(&root, &cancel).is_err());
+}
+#[test]
+fn identity_change_refuses_frozen_snapshot_before_branch_publication() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    let snapshot = prepare(&root, &cancel).unwrap();
+    let head = snapshot.head.clone();
+    let index = fs::read(root.join(".git/index")).unwrap();
+    super::super::tests::git(&root, &["config", "user.email", "changed@example.invalid"]);
+    let error = apply(snapshot, "not under a different identity", &cancel).unwrap_err();
+    assert!(error.contains("identity changed"));
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        head
+    );
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+}
+#[test]
+fn identity_parser_strips_date_not_name_and_rejects_malformed_or_oversize() {
+    let parsed = identity(
+        "世界 Name <name@example.invalid> 1234567890 +0530\n"
+            .as_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(parsed.name, "世界 Name");
+    assert_eq!(parsed.email, "name@example.invalid");
+    for bad in [
+        "missing email".into(),
+        "Name <> 12 +0000".into(),
+        format!("{} <e> 12 +0000", "x".repeat(513)),
+        "Name\0 <e> 12 +0000".into(),
+    ] {
+        assert!(identity(bad.into_bytes()).is_err());
+    }
+}
+#[test]
+fn file_list_exact_unicode_literal_paths_added_deleted_modified_and_revalidated() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    fs::write(root.join("世界 [literal].txt"), "new\n").unwrap();
+    super::super::tests::git(&root, &["add", "--", "世界 [literal].txt"]);
+    let snapshot = prepare(&root, &cancel).unwrap();
+    assert!(
+        snapshot
+            .files
+            .iter()
+            .any(|e| e.path == "世界 [literal].txt" && e.status == 'A')
+    );
+    assert!(
+        snapshot
+            .files
+            .iter()
+            .any(|e| e.path == "README.md" && e.status == 'M')
+    );
+    assert_eq!(snapshot.files.len(), 2);
+    let head = snapshot.head.clone();
+    fs::write(root.join("another.txt"), "later\n").unwrap();
+    super::super::tests::git(&root, &["add", "--", "another.txt"]);
+    assert!(apply(snapshot, "stale list", &cancel).is_err());
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        head
+    );
+}
+fn unborn() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("pui-initial-commit-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    super::super::tests::git(&root, &["init", "--initial-branch=main"]);
+    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+    super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
+    fs::write(root.join("first.txt"), "first staged version\n").unwrap();
+    super::super::tests::git(&root, &["add", "--", "first.txt"]);
+    root
+}
+#[test]
+fn initial_commit_is_parentless_and_preserves_unstaged_content_and_index() {
+    let root = unborn();
+    let cancel = AtomicBool::new(false);
+    let snapshot = prepare(&root, &cancel).unwrap();
+    assert_eq!(snapshot.head, "0".repeat(40));
+    assert_eq!(snapshot.files[0].status, 'A');
+    let index = fs::read(root.join(".git/index")).unwrap();
+    fs::write(root.join("first.txt"), "unstaged second version\n").unwrap();
+    let oid = apply(snapshot, "initial", &cancel).unwrap();
+    assert_eq!(
+        line(super::super::tests::git(
+            &root,
+            &["rev-list", "--parents", "-1", "HEAD"]
+        ))
+        .unwrap(),
+        oid
+    );
+    assert_eq!(
+        super::super::tests::git(&root, &["show", "HEAD:first.txt"]),
+        b"first staged version\n"
+    );
+    assert_eq!(
+        fs::read(root.join("first.txt")).unwrap(),
+        b"unstaged second version\n"
+    );
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+}
+#[test]
+fn branch_created_during_initial_review_refuses_without_replacing_it() {
+    let root = unborn();
+    let cancel = AtomicBool::new(false);
+    let old = prepare(&root, &cancel).unwrap();
+    let winner = apply(prepare(&root, &cancel).unwrap(), "winner", &cancel).unwrap();
+    assert!(apply(old, "stale initial", &cancel).is_err());
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        winner
+    );
+}
+#[test]
+fn changed_index_foreign_lock_cancel_and_empty_message_refuse() {
+    for case in 0..4 {
+        let root = fixture();
+        let cancel = AtomicBool::new(false);
+        let s = prepare(&root, &cancel).unwrap();
+        let head = s.head.clone();
+        if case == 0 {
+            let mut bytes = fs::read(&s.index_path).unwrap();
+            bytes.push(0);
+            fs::write(&s.index_path, bytes).unwrap();
+        }
+        if case == 1 {
+            fs::write(s.index_path.with_file_name("index.lock"), "foreign").unwrap();
+        }
+        assert!(
+            apply(
+                s,
+                if case == 3 { " " } else { "message" },
+                &AtomicBool::new(case == 2)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+            head
+        );
+        if case == 1 {
+            assert_eq!(fs::read(root.join(".git/index.lock")).unwrap(), b"foreign");
+        }
+    }
+}

@@ -9,7 +9,7 @@ pub(crate) fn file(path: &str) -> FileChange {
     }
 }
 
-fn git(root: &Path, args: &[&str]) -> Vec<u8> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Vec<u8> {
     let (bytes, status) = read_only::run(
         read_only::command(root).args(args),
         &AtomicBool::new(false),

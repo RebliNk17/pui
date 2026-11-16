@@ -21,6 +21,77 @@ fn key(key: egui::Key) -> egui::Event {
     }
 }
 #[test]
+fn first_file_stage_row_enabled_and_confirmation_cancel_narrow_themes() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        mode.apply(&ctx);
+        let root =
+            std::env::temp_dir().join(format!("pui-first-stage-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        workspace::tests::git(&root, &["init", "--initial-branch=main"]);
+        std::fs::write(root.join("first.txt"), "first\n").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let ws = workspace::read(&root, &AtomicBool::new(false));
+        assert!(ws.error.is_none());
+        let mut changes = Changes {
+            index_writable: true,
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(420.0, 620.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| changes.index_row(ui, &ws, &ws.files[0], false));
+                },
+            );
+        }
+        assert!(
+            ctx.data(
+                |d| d.get_temp::<(egui::Id, egui::Rect, bool)>(egui::Id::new((
+                    "index-action",
+                    true,
+                    "first.txt"
+                )))
+            )
+            .unwrap()
+            .2
+        );
+        changes.index_actions.inspected = Some(
+            workspace::index_action::prepare(
+                &root,
+                "first.txt",
+                "??",
+                Action::Stage,
+                &AtomicBool::new(false),
+            )
+            .unwrap(),
+        );
+        for n in 0..4 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: if n == 3 {
+                        vec![key(egui::Key::Escape)]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                },
+                |ctx| changes.index_dialog(ctx),
+            );
+        }
+        assert!(changes.index_actions.inspected.is_none());
+        assert!(!root.join(".git/index").exists());
+    }
+}
+#[test]
 fn focused_action_chords_escape_and_text_do_not_reach_busy_chat_question() {
     use crate::app::files::tests as app_test;
     let ctx = egui::Context::default();

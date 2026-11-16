@@ -2,11 +2,13 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 mod branches;
+mod commit;
 pub(super) mod git_files;
 mod git_modes;
 mod index_actions;
 mod inline_review;
 pub(super) mod lines;
+mod push;
 pub(super) mod review_comments;
 mod review_files;
 
@@ -34,6 +36,8 @@ pub(super) struct Changes {
     diffs: BTreeMap<String, Diff>,
     refresh: bool,
     index_actions: index_actions::IndexActions,
+    commit: commit::Commit,
+    push: push::Push,
     pub(super) index_writable: bool,
     pub(super) review: Option<diff_viewer::Document>,
     close: bool,
@@ -93,6 +97,7 @@ impl Changes {
     ) {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
+        self.commit_inputs(ctx, visible);
         self.branch_inputs(ctx, visible, workspace);
         if visible {
             self.inline_inputs(ctx, outputs, revision, workspace);
@@ -139,6 +144,8 @@ impl Changes {
     fn bind(&mut self, cwd: &std::path::Path, session: &str) {
         let session_changed = self.identity.1 != session;
         if self.identity.0 != cwd || session_changed {
+            self.commit = Default::default();
+            self.push = Default::default();
             self.identity = (cwd.to_path_buf(), session.to_owned());
             self.open_rows.clear();
             self.inline = Default::default();
@@ -231,6 +238,7 @@ impl Changes {
             }
         }
         self.index_dialog(ctx);
+        self.commit_dialog(ctx);
         expanded
     }
 
@@ -407,6 +415,8 @@ impl Changes {
             });
         if self.source == Source::Git {
             self.git_mode_controls(ui);
+            self.commit_control(ui, workspace, loading);
+            self.push_review(ui, workspace, loading);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new())
