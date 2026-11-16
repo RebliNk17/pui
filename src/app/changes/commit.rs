@@ -19,6 +19,7 @@ pub(super) struct Commit {
     snapshot: Option<workspace::commit::Snapshot>,
     message: String,
     sign: bool,
+    pre_commit: bool,
     applied_signed: bool,
     notice: Option<String>,
     controls: Vec<egui::Id>,
@@ -115,6 +116,7 @@ impl Changes {
                     self.commit.snapshot = Some(s);
                     self.commit.message.clear();
                     self.commit.sign = false;
+                    self.commit.pre_commit = false;
                 }
                 Err(e) => self.commit.notice = Some(e),
             }
@@ -135,7 +137,7 @@ impl Changes {
             self.commit.notice = Some(match result {
                 Ok(oid) => {
                     format!(
-                        "Committed locally: {oid}. No push. Hooks bypassed. {}",
+                        "Committed locally: {oid}. No push. Hook/signing options explicitly selected. {}",
                         if self.commit.applied_signed {
                             "Signing requested from configured Git signer; signer trust not verified by Pui."
                         } else {
@@ -188,7 +190,11 @@ impl Changes {
         let initial = snapshot.head.bytes().all(|b| b == b'0');
         self.commit.controls.truncate(1);
         ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
-        let signing = ui_signing_text(self.commit.sign);
+        let signing = if self.commit.pre_commit {
+            "Runs configured pre-commit hook with OS permissions/private index. Failure or reviewed snapshot changes stop commit. Hooks can modify files/contact services. Other commit hooks bypassed. Signing optional below; no push."
+        } else {
+            ui_signing_text(self.commit.sign)
+        };
         let choice = confirmations::Dialog::new(
             "commit-staged-confirm",
             if initial {
@@ -198,7 +204,9 @@ impl Changes {
             },
             signing,
             "Cancel",
-            if self.commit.sign {
+            if self.commit.pre_commit {
+                "Check and commit"
+            } else if self.commit.sign {
                 "Sign and commit without hooks"
             } else {
                 "Commit without hooks"
@@ -235,6 +243,11 @@ impl Changes {
                 "Sign with configured Git signer (may use agent/pinentry)",
             );
             self.commit.controls.push(signing.id);
+            let check = ui.checkbox(
+                &mut self.commit.pre_commit,
+                "Run configured pre-commit check (local code execution)",
+            );
+            self.commit.controls.push(check.id);
             ui.label(theme::small(
                 ui,
                 format!(
@@ -278,6 +291,7 @@ impl Changes {
                 };
                 let message = std::mem::take(&mut self.commit.message);
                 let sign = self.commit.sign;
+                let pre_commit = self.commit.pre_commit;
                 self.commit.applied_signed = sign;
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -286,7 +300,11 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = if sign {
+                        let result = if pre_commit {
+                            workspace::commit::apply_options(
+                                snapshot, &message, sign, true, &cancel,
+                            )
+                        } else if sign {
                             workspace::commit::apply_with_signing(snapshot, &message, true, &cancel)
                         } else {
                             workspace::commit::apply(snapshot, &message, &cancel)

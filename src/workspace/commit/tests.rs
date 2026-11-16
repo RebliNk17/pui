@@ -214,6 +214,40 @@ fn changed_signing_config_refuses_review() {
     assert!(apply_with_signing(snapshot, "stale", true, &cancel).is_err());
 }
 #[test]
+fn opted_in_pre_commit_success_failure_and_private_index_mutation() {
+    for mode in 0..3 {
+        let root = fixture();
+        let hook = root.join(".git/hooks/pre-commit");
+        let script = match mode {
+            0 => "#!/bin/sh\ntouch .git/check-ran\nexit 0\n",
+            1 => "#!/bin/sh\ntouch .git/check-ran\nexit 1\n",
+            _ => "#!/bin/sh\ntouch .git/check-ran\ngit update-index --force-remove -- README.md\n",
+        };
+        fs::write(&hook, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let snapshot = prepare(&root, &cancel).unwrap();
+        let head = snapshot.head.clone();
+        let index = fs::read(root.join(".git/index")).unwrap();
+        let result = apply_options(snapshot, "checked commit", false, true, &cancel);
+        assert!(root.join(".git/check-ran").exists());
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+        if mode == 0 {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+                head
+            );
+        }
+    }
+}
+#[test]
 fn changed_index_foreign_lock_cancel_and_empty_message_refuse() {
     for case in 0..4 {
         let root = fixture();

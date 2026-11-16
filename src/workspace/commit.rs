@@ -309,6 +309,15 @@ pub(crate) fn apply_with_signing(
     sign: bool,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
+    apply_options(snapshot, message, sign, false, cancel)
+}
+pub(crate) fn apply_options(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
+    pre_commit: bool,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
     if !valid_message(message) {
         return Err(
             "Commit message requires 1–4096 UTF-8 bytes without unsupported controls.".into(),
@@ -356,6 +365,27 @@ pub(crate) fn apply_with_signing(
     file.write_all(&snapshot.index)
         .map_err(|_| "Cannot write private index")?;
     drop(file);
+    if pre_commit {
+        let mut hook = read_only::command(&snapshot.root);
+        hook.env("GIT_INDEX_FILE", &private)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args(["hook", "run", "--ignore-missing", "pre-commit"]);
+        let (_, status) = read_only::run(
+            &mut hook,
+            cancel,
+            deadline,
+            16384,
+            "Pre-commit check",
+            "Pre-commit output exceeds limit; commit stopped",
+        )?;
+        if !status.success() {
+            return Err("Pre-commit check failed. Nothing committed; no bypass fallback. Hook output hidden; inspect local state before retrying.".into());
+        }
+        if index_bytes(&private)? != snapshot.index || prepare(&snapshot.root, cancel)? != snapshot
+        {
+            return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
+        }
+    }
     let mut cmd = read_only::command(&snapshot.root);
     cmd.env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_INDEX_FILE", &private)
