@@ -318,6 +318,16 @@ pub(crate) fn apply_options(
     pre_commit: bool,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
+    apply_checks(snapshot, message, sign, pre_commit, false, cancel)
+}
+pub(crate) fn apply_checks(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
+    pre_commit: bool,
+    commit_msg: bool,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
     if !valid_message(message) {
         return Err(
             "Commit message requires 1–4096 UTF-8 bytes without unsupported controls.".into(),
@@ -384,6 +394,54 @@ pub(crate) fn apply_options(
         if index_bytes(&private)? != snapshot.index || prepare(&snapshot.root, cancel)? != snapshot
         {
             return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
+        }
+    }
+    if commit_msg {
+        let message_path = snapshot
+            .index_path
+            .with_file_name(format!("pui-commit-message-{}", uuid::Uuid::new_v4()));
+        let mut message_file = options
+            .open(&message_path)
+            .map_err(|_| "Cannot create private commit message")?;
+        let _message_cleanup = Lock(message_path.clone());
+        let confirmed = message.trim().as_bytes();
+        message_file
+            .write_all(confirmed)
+            .map_err(|_| "Cannot write private commit message")?;
+        drop(message_file);
+        let mut hook = read_only::command(&snapshot.root);
+        hook.env("GIT_INDEX_FILE", &private)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args(["hook", "run", "--ignore-missing", "commit-msg", "--"])
+            .arg(&message_path);
+        let (_, status) = read_only::run(
+            &mut hook,
+            cancel,
+            deadline,
+            16384,
+            "Commit-message check",
+            "Commit-message hook output exceeds limit; commit stopped",
+        )?;
+        if !status.success() {
+            return Err("Commit-message check failed. Nothing committed; no bypass fallback. Inspect local state before retrying.".into());
+        }
+        let meta = fs::symlink_metadata(&message_path)
+            .map_err(|_| "Commit-message hook removed message; nothing committed")?;
+        if !meta.is_file() || meta.file_type().is_symlink() || meta.len() != confirmed.len() as u64
+        {
+            return Err("Commit-message hook rewrote the confirmed message; nothing committed. Review the message again.".into());
+        }
+        let mut actual = Vec::new();
+        fs::File::open(&message_path)
+            .map_err(|_| "Cannot read checked message")?
+            .take(4097)
+            .read_to_end(&mut actual)
+            .map_err(|_| "Cannot read checked message")?;
+        if actual != confirmed
+            || index_bytes(&private)? != snapshot.index
+            || prepare(&snapshot.root, cancel)? != snapshot
+        {
+            return Err("Commit-message check changed the reviewed message or snapshot; nothing committed. Review again.".into());
         }
     }
     let mut cmd = read_only::command(&snapshot.root);

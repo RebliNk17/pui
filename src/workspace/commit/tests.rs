@@ -248,6 +248,53 @@ fn opted_in_pre_commit_success_failure_and_private_index_mutation() {
     }
 }
 #[test]
+fn commit_message_check_success_rejection_and_rewrite_never_changes_confirmed_commit() {
+    for mode in 0..3 {
+        let root = fixture();
+        let hook = root.join(".git/hooks/commit-msg");
+        let script = match mode {
+            0 => "#!/bin/sh\ngrep -q 'confirmed message' \"$1\"\n",
+            1 => "#!/bin/sh\nexit 1\n",
+            _ => "#!/bin/sh\nprintf 'rewritten' > \"$1\"\n",
+        };
+        fs::write(&hook, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let snapshot = prepare(&root, &cancel).unwrap();
+        let head = snapshot.head.clone();
+        let index = fs::read(root.join(".git/index")).unwrap();
+        let result = apply_checks(snapshot, "confirmed message", false, false, true, &cancel);
+        if mode == 0 {
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(
+                line(super::super::tests::git(
+                    &root,
+                    &["log", "-1", "--format=%s"]
+                ))
+                .unwrap(),
+                "confirmed message"
+            );
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+                head
+            );
+        }
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+        assert!(!fs::read_dir(root.join(".git")).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("pui-commit-message-")
+        }));
+    }
+}
+#[test]
 fn changed_index_foreign_lock_cancel_and_empty_message_refuse() {
     for case in 0..4 {
         let root = fixture();

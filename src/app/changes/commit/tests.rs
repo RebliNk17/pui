@@ -77,7 +77,7 @@ fn native_confirm_commit_worker_updates_disposable_branch_once() {
 }
 #[test]
 fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes() {
-    for checked in [false, true] {
+    for (checked, message_checked) in [(false, false), (true, false), (false, true), (true, true)] {
         for signed in [false, true] {
             for mode in [theme::Theme::Light, theme::Theme::Dark] {
                 for zoom in [0.8, 1.4] {
@@ -102,6 +102,7 @@ fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes(
                     changes.commit.message = "draft".into();
                     changes.commit.sign = signed;
                     changes.commit.pre_commit = checked;
+                    changes.commit.commit_msg = message_checked;
                     for n in 0..4 {
                         let output = ctx.run(
                             egui::RawInput {

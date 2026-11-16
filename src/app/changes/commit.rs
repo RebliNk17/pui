@@ -20,6 +20,7 @@ pub(super) struct Commit {
     message: String,
     sign: bool,
     pre_commit: bool,
+    commit_msg: bool,
     applied_signed: bool,
     notice: Option<String>,
     controls: Vec<egui::Id>,
@@ -117,6 +118,7 @@ impl Changes {
                     self.commit.message.clear();
                     self.commit.sign = false;
                     self.commit.pre_commit = false;
+                    self.commit.commit_msg = false;
                 }
                 Err(e) => self.commit.notice = Some(e),
             }
@@ -190,8 +192,8 @@ impl Changes {
         let initial = snapshot.head.bytes().all(|b| b == b'0');
         self.commit.controls.truncate(1);
         ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
-        let signing = if self.commit.pre_commit {
-            "Runs configured pre-commit hook with OS permissions/private index. Failure or reviewed snapshot changes stop commit. Hooks can modify files/contact services. Other commit hooks bypassed. Signing optional below; no push."
+        let signing = if self.commit.pre_commit || self.commit.commit_msg {
+            "Runs selected pre-commit/commit-msg hooks with OS permissions/private index. Failure or changed reviewed message/snapshot stops commit. Hooks can modify files/contact services. Unselected and other commit hooks bypassed. Signing optional below; no push."
         } else {
             ui_signing_text(self.commit.sign)
         };
@@ -204,7 +206,7 @@ impl Changes {
             },
             signing,
             "Cancel",
-            if self.commit.pre_commit {
+            if self.commit.pre_commit || self.commit.commit_msg {
                 "Check and commit"
             } else if self.commit.sign {
                 "Sign and commit without hooks"
@@ -248,6 +250,11 @@ impl Changes {
                 "Run configured pre-commit check (local code execution)",
             );
             self.commit.controls.push(check.id);
+            let message_check = ui.checkbox(
+                &mut self.commit.commit_msg,
+                "Run configured commit-msg check (message rewrites refuse)",
+            );
+            self.commit.controls.push(message_check.id);
             ui.label(theme::small(
                 ui,
                 format!(
@@ -292,6 +299,7 @@ impl Changes {
                 let message = std::mem::take(&mut self.commit.message);
                 let sign = self.commit.sign;
                 let pre_commit = self.commit.pre_commit;
+                let commit_msg = self.commit.commit_msg;
                 self.commit.applied_signed = sign;
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -300,7 +308,11 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = if pre_commit {
+                        let result = if commit_msg {
+                            workspace::commit::apply_checks(
+                                snapshot, &message, sign, pre_commit, true, &cancel,
+                            )
+                        } else if pre_commit {
                             workspace::commit::apply_options(
                                 snapshot, &message, sign, true, &cancel,
                             )
