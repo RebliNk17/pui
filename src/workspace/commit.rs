@@ -1,5 +1,6 @@
 //! Explicit local staged commit, frozen index and compare-and-swap branch publication.
 use super::*;
+mod diagnostics;
 use std::{fs, io::Read};
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
@@ -380,17 +381,7 @@ pub(crate) fn apply_checks(
         hook.env("GIT_INDEX_FILE", &private)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(["hook", "run", "--ignore-missing", "pre-commit"]);
-        let (_, status) = read_only::run(
-            &mut hook,
-            cancel,
-            deadline,
-            16384,
-            "Pre-commit check",
-            "Pre-commit output exceeds limit; commit stopped",
-        )?;
-        if !status.success() {
-            return Err("Pre-commit check failed. Nothing committed; no bypass fallback. Hook output hidden; inspect local state before retrying.".into());
-        }
+        diagnostics::run(&mut hook, cancel, deadline, "Pre-commit check")?;
         if index_bytes(&private)? != snapshot.index || prepare(&snapshot.root, cancel)? != snapshot
         {
             return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
@@ -414,17 +405,7 @@ pub(crate) fn apply_checks(
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(["hook", "run", "--ignore-missing", "commit-msg", "--"])
             .arg(&message_path);
-        let (_, status) = read_only::run(
-            &mut hook,
-            cancel,
-            deadline,
-            16384,
-            "Commit-message check",
-            "Commit-message hook output exceeds limit; commit stopped",
-        )?;
-        if !status.success() {
-            return Err("Commit-message check failed. Nothing committed; no bypass fallback. Inspect local state before retrying.".into());
-        }
+        diagnostics::run(&mut hook, cancel, deadline, "Commit-message check")?;
         let meta = fs::symlink_metadata(&message_path)
             .map_err(|_| "Commit-message hook removed message; nothing committed")?;
         if !meta.is_file() || meta.file_type().is_symlink() || meta.len() != confirmed.len() as u64

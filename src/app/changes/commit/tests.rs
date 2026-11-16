@@ -1,5 +1,38 @@
 use super::*;
 #[test]
+fn hook_failure_notice_is_literal_themes_zoom_without_capture() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut changes = Changes::default();
+            changes.commit.notice = Some(
+                "Untrusted local hook output — may contain secrets\n<script>literal</script> 世界"
+                    .into(),
+            );
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(420.0, 620.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        changes.commit_control(ui, &Workspace::default(), false)
+                    });
+                },
+            );
+            assert!(out.platform_output.commands.is_empty());
+            assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.job.text.contains("<script>literal</script>"))));
+            assert!(changes.commit.applying.is_none());
+        }
+    }
+}
+#[test]
 fn native_confirm_commit_worker_updates_disposable_branch_once() {
     let ctx = egui::Context::default();
     theme::install(&ctx);
