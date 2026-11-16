@@ -9,7 +9,7 @@ pub(super) fn run_helper(cwd: &Path, request: &Value) -> Result<Value, String> {
     let sdk = crate::usage::sdk()
         .filter(|p| p.is_file())
         .ok_or("Pi SDK not found. Set PUI_PI_SDK to its dist/index.js.")?;
-    let mut command = Command::new("node");
+    let mut command = Command::new(crate::runtime::node_binary());
     command
         .args([
             "--input-type=module",
@@ -22,9 +22,7 @@ pub(super) fn run_helper(cwd: &Path, request: &Value) -> Result<Value, String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(path) = rpc::child_path() {
-        command.env("PATH", path);
-    }
+    crate::runtime::configure(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

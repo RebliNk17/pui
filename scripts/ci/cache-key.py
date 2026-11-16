@@ -20,7 +20,8 @@ def fingerprints(root, sdk, arch, system):
     dependencies = toolchain.copy()
     paths = [root / "Cargo.toml", root / "Cargo.lock", root / ".circleci/config.yml"]
     paths += sorted((root / "scripts/ci").glob("*"))
-    paths += [root / "scripts/fetch-chromium-macos.py"]
+    paths += [root / "scripts/fetch-chromium-macos.py", root / "scripts/bundle-runtime-macos.py"]
+    paths += sorted((root / "packaging/runtime").rglob("*"))
     paths += sorted((root / "vendor").rglob("*.rs"))
     paths += sorted((root / "vendor").rglob("Cargo.toml"))
     for path in paths:
@@ -43,7 +44,7 @@ def main():
     for name, value in (("toolchain", toolchain), ("dependencies", dependencies),
                         ("day", datetime.now(timezone.utc).strftime("%Y-%m-%d"))):
         (output / name).write_text(value + "\n")
-    print("Cache fingerprints prepared (Xcode, macOS, Rust, Cargo lock, CEF pin, CI scripts and vendored Rust).")
+    print("Cache fingerprints prepared (Xcode, macOS, Rust, Cargo/runtime locks and pins, CI scripts and vendored Rust).")
 
 
 if __name__ == "__main__":

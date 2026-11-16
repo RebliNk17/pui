@@ -1,0 +1,40 @@
+#!/bin/sh
+# Resolve only app-relative code; keep all caller arguments as distinct words.
+# Avoid cd in the caller process: the workspace must remain Pi's working dir.
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+export PI_SKIP_VERSION_CHECK=1
+export JITI_FS_CACHE=false
+export PATH="$root/bin:${PATH:-/usr/bin:/bin}"
+# Standalone /login and package commands use the same writable user locations.
+if [ -z "${npm_config_prefix:-}${NPM_CONFIG_PREFIX:-}" ]; then
+  export npm_config_prefix="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm-global"
+fi
+if [ -z "${NODE_COMPILE_CACHE:-}" ]; then
+  export NODE_COMPILE_CACHE="$HOME/Library/Caches/pui/node-compile"
+fi
+# Explicit pi update must never mutate the signed app or an unrelated global Pi.
+if [ "${1:-}" = update ]; then
+  safe_update=false
+  first=true
+  extension_value=false
+  for arg in "$@"; do
+    if [ "$first" = true ]; then first=false; continue; fi
+    if [ "$extension_value" = true ]; then
+      extension_value=false
+      safe_update=true
+      continue
+    fi
+    case "$arg" in
+      --self|--all|self|pi) echo "This Pi is bundled with Pui. Update Pui to update its harness." >&2; exit 1 ;;
+      --extension) extension_value=true ;;
+      --extensions|--models|--help|-h) safe_update=true ;;
+      -*) ;; # Let Pi report invalid flags; flags alone never permit self-update.
+      *) safe_update=true ;; # Pi treats other positional targets as user resources.
+    esac
+  done
+  if [ "$safe_update" != true ]; then
+    echo "This Pi is bundled with Pui. Update Pui to update its harness; use --extensions or --models for user resources." >&2
+    exit 1
+  fi
+fi
+exec "$root/node/bin/node" "$root/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js" "$@"

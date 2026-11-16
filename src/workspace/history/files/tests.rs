@@ -32,7 +32,7 @@ fn nul_paths_preserve_literal_unicode_newline_tabs_and_whole_refusal() {
 }
 #[test]
 fn merge_second_parent_tree_and_per_file_patch_use_exact_base() {
-    let root = crate::workspace::tests::fixture();
+    let root = crate::workspace::tests::history_fixture();
     let cancel = AtomicBool::new(false);
     let snapshot = super::super::read(&root, &cancel).unwrap();
     let (detail, first, second) = snapshot
@@ -69,7 +69,7 @@ fn merge_second_parent_tree_and_per_file_patch_use_exact_base() {
 }
 #[test]
 fn root_tree_comparison_uses_empty_base_and_is_bounded() {
-    let root = crate::workspace::tests::fixture();
+    let root = crate::workspace::tests::history_fixture();
     let output = Command::new("git")
         .arg("-C")
         .arg(&root)
@@ -90,7 +90,7 @@ fn root_tree_comparison_uses_empty_base_and_is_bounded() {
 }
 #[test]
 fn real_local_tree_comparison_missing_cancel_and_arguments_are_readonly() {
-    let root = crate::workspace::tests::fixture();
+    let root = crate::workspace::tests::history_fixture();
     let cancel = AtomicBool::new(false);
     let snapshot = super::super::read(&root, &cancel).unwrap();
     let detail = super::super::details::read(&root, &snapshot.head, &cancel).unwrap();

@@ -13,6 +13,7 @@ mod media;
 mod protocol;
 mod pulls;
 mod rpc;
+mod runtime;
 mod section;
 mod sessions;
 mod svg_preview;
@@ -112,6 +113,25 @@ fn app_icon() -> eframe::egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // Diagnostics only: no GUI, agent prompt, network or provider credentials.
+    if std::env::args().nth(1).as_deref() == Some("--runtime-check") {
+        if let Err(error) = runtime::check() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        println!("Bundled Node/SDK subprocess check passed.");
+        return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some("--runtime-info") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "bundled": runtime::bundled(), "pi": runtime::pi_binary(),
+                "node": runtime::node_binary(), "sdk": runtime::sdk(),
+            })
+        );
+        return Ok(());
+    }
     if svg_preview::worker_requested() {
         std::process::exit(svg_preview::worker_main());
     }
@@ -377,7 +397,7 @@ fn main() -> eframe::Result {
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
-                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n\nPi must be installed and authenticated separately. Set PUI_PI_BIN to override its executable."
+                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n\nPackaged macOS apps include Pi and Node.js; configure your model provider to begin. Development builds need Pi and Node on PATH. Set PUI_PI_BIN (and PUI_PI_SDK when needed) to use an external Pi."
                 );
                 return Ok(());
             }

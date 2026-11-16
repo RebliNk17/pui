@@ -1,0 +1,23 @@
+{
+  "@aws-sdk/credential-provider-http": {"files": ["Apache-2.0.txt"], "attribution": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."},
+  "@aws-sdk/credential-provider-login": {"files": ["Apache-2.0.txt"], "attribution": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."},
+  "@aws-sdk/nested-clients": {"files": ["Apache-2.0.txt"], "attribution": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved."},
+  "@earendil-works/pi-agent-core": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-ai": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-codemode": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-coding-agent": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-mcp": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-schema": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-telemetry": {"files": ["Pi-MIT.txt"]},
+  "@earendil-works/pi-tui": {"files": ["Pi-MIT.txt"]},
+  "data-uri-to-buffer": {"files": ["data-uri-to-buffer-README.md"]},
+  "proxy-agent-negotiate": {"files": ["proxy-agents-MIT.txt"]},
+  "standardwebhooks": {"files": ["standardwebhooks-Apache-2.0.txt"], "attribution": "Standard Webhooks contributors"},
+  "@npmcli/agent": {"files": ["npm-ISC.txt"]},
+  "@sigstore/verify": {"files": ["Apache-2.0.txt"], "attribution": "Copyright The Sigstore Authors"},
+  "eastasianwidth": {"files": ["eastasianwidth-MIT.txt"]},
+  "err-code": {"files": ["err-code-MIT.txt"]},
+  "imurmurhash": {"files": ["imurmurhash-README.md"]},
+  "spdx-exceptions": {"files": ["spdx-exceptions-README.md", "CC-BY-3.0.txt"]},
+  "spdx-license-ids": {"files": ["spdx-license-ids-README.md", "CC0-1.0.txt"]}
+}

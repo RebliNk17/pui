@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate stable releases, describe artifacts, and publish using CI_JOB_TOKEN.
+"""Validate stable releases, describe artifacts, and publish to GitLab.
 
 Python 3.11+; no third-party dependencies. Never logs HTTP bodies or credentials.
 """
@@ -67,15 +67,18 @@ def prepare(root=ROOT):
     files = {f"{name}.{ext}": digest(directory / f"{name}.{ext}") for ext in ("zip", "dmg")}
     commit = os.environ.get("CI_COMMIT_SHA") or subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    runtime = root / "dist/Pui.app/Contents/Resources/runtime/manifest.json"
+    runtime_data = json.loads(runtime.read_text())
     manifest = {"version": value, "tag": f"v{value}", "commit": commit,
-                "architecture": "arm64", "signing": signing, "files": files}
+                "architecture": "arm64", "signing": signing, "files": files,
+                "runtime": runtime_data}
     (directory / "release.json").write_text(json.dumps(manifest, indent=2) + "\n")
     body = notes(root, value)
     if signing == "ad-hoc":
         body += "\n**Ad-hoc build:** not Developer ID signed or notarized. macOS Gatekeeper may block opening it.\n"
     else:
         body += "\nDeveloper ID signed and Apple-notarized Apple Silicon build.\n"
-    body += "\nRequires a separately installed Pi and Node.js. Intel Macs are not supported by these assets.\n"
+    body += "\nIncludes Pi and Node.js; no separate runtime installation is required. Configure a model provider to begin. Intel Macs are not supported by these assets.\n"
     (directory / "CHANGELOG.md").write_text(body)
     for filename in ("release.json", "CHANGELOG.md"):
         files[filename] = digest(directory / filename)
@@ -98,20 +101,22 @@ class DownloadRedirect(HTTPRedirectHandler):
         if redirected is None:
             return None
         # Reconstruct rather than blacklist headers: never forward JOB-TOKEN,
-        # Authorization, cookies, or future authentication headers, even same-origin.
+        # PRIVATE-TOKEN, Authorization, cookies, or future auth, even same-origin.
         return Request(redirected.full_url, method="GET", unverifiable=True)
 
 
 class GitLab:
-    def __init__(self, base, token):
+    def __init__(self, base, token, token_header="JOB-TOKEN"):
         if urlsplit(base).scheme != "https" or urlsplit(base).username:
             raise ValueError("GitLab API must be an HTTPS URL without embedded credentials.")
-        self.base, self.token = base.rstrip("/"), token
+        if token_header not in ("JOB-TOKEN", "PRIVATE-TOKEN") or not token:
+            raise ValueError("Invalid GitLab publication credential configuration.")
+        self.base, self.token, self.token_header = base.rstrip("/"), token, token_header
         self.opener = build_opener(NoRedirect())
         self.download_opener = build_opener(DownloadRedirect())
 
     def request(self, method, endpoint, data=None, content_type="application/json", missing=False, sha=False):
-        headers = {"JOB-TOKEN": self.token, "Content-Type": content_type}
+        headers = {self.token_header: self.token, "Content-Type": content_type}
         if isinstance(data, Path):
             headers["Content-Length"] = str(data.stat().st_size)
             with data.open("rb") as source:
@@ -133,20 +138,32 @@ class GitLab:
                 body = response.read(2 * 1024 * 1024)
                 return json.loads(body) if body else {}
         except HTTPError as error:
-            if missing and error.code == 404:
+            # A redirected object-store 404 is not proof the GitLab filename is
+            # unused. Fail closed instead of uploading a duplicate over a broken
+            # existing package redirect.
+            if missing and error.code == 404 and error.geturl() == request.full_url:
                 return None
             raise ValueError(f"GitLab {method} failed (HTTP {error.code}); no release was overwritten.") from None
 
 
-def publish(root=ROOT):
-    tag = os.environ["CI_COMMIT_TAG"]
-    if os.environ.get("CI_COMMIT_REF_PROTECTED") != "true":
-        raise ValueError("Publishing requires a protected version tag.")
+def publish(root=ROOT, *, api=None, project_id=None, tag=None, commit=None):
+    # CircleCI supplies an API only after live tag/project/revision verification.
+    # The retained GitLab pipeline keeps its existing protected-ref gate.
+    if api is None:
+        if os.environ.get("CI_COMMIT_REF_PROTECTED") != "true":
+            raise ValueError("Publishing requires a protected version tag.")
+        tag, commit = os.environ["CI_COMMIT_TAG"], os.environ["CI_COMMIT_SHA"]
+        project_id = os.environ["CI_PROJECT_ID"]
     value = check(root, tag)
     directory = root / "dist/releases"
+    if directory.is_symlink() or (root / "dist").is_symlink():
+        raise ValueError("Release artifact directories must not be symlinks.")
+    for name in ("release.json", "SHA256SUMS", "CHANGELOG.md"):
+        if (directory / name).is_symlink() or not (directory / name).is_file():
+            raise ValueError("Release metadata must be regular files, not symlinks.")
     manifest = json.loads((directory / "release.json").read_text())
     if (manifest.get("version"), manifest.get("tag"), manifest.get("commit"), manifest.get("architecture")) != (
-            value, tag, os.environ["CI_COMMIT_SHA"], "arm64"):
+            value, tag, commit, "arm64"):
         raise ValueError("Artifact provenance does not match this release pipeline.")
     signing = manifest.get("signing")
     if signing not in ("ad-hoc", "developer-id-notarized"):
@@ -157,6 +174,9 @@ def publish(root=ROOT):
     expected = {f"Pui-{value}-macos-arm64{suffix}.{ext}" for ext in ("zip", "dmg")}
     if set(manifest["files"]) != expected:
         raise ValueError("Unexpected release assets.")
+    for name in expected:
+        if (directory / name).is_symlink() or not (directory / name).is_file():
+            raise ValueError("Release assets must be regular files, not symlinks.")
     sums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
         sha, name = line.split("  ", 1)
@@ -167,8 +187,9 @@ def publish(root=ROOT):
         sums[name] = sha
     if set(sums) != expected | {"release.json", "CHANGELOG.md"} or any(sums[name] != sha for name, sha in manifest["files"].items()):
         raise ValueError("Incomplete artifact checksums.")
-    api = GitLab(os.environ["CI_API_V4_URL"], os.environ["CI_JOB_TOKEN"])
-    project = f"/projects/{quote(os.environ['CI_PROJECT_ID'], safe='')}"
+    if api is None:
+        api = GitLab(os.environ["CI_API_V4_URL"], os.environ["CI_JOB_TOKEN"])
+    project = f"/projects/{quote(str(project_id), safe='')}"
     package = f"{project}/packages/generic/pui/{value}"
     assets = []
     for name in sorted(set(sums) | {"SHA256SUMS"}):

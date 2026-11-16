@@ -221,6 +221,11 @@ impl Browser {
 #[cfg(all(test, unix))]
 mod svg_tests;
 #[cfg(test)]
+pub(super) fn wait_idle(ctx: &egui::Context) {
+    tests::idle(&pool(ctx));
+}
+
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod ui_tests;

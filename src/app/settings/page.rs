@@ -1096,7 +1096,23 @@ impl Pui {
                 "Manage sign-in with Pi",
                 "Use Pi's /login in your terminal. Pui does not store API keys or change provider configuration.",
                 |ui| {
-                    ui.monospace("pi /login");
+                    let command = if crate::runtime::active_bundle().is_some() {
+                        format!(
+                            "'{}' /login",
+                            crate::runtime::pi_binary()
+                                .to_string_lossy()
+                                .replace('\'', "'\\''")
+                        )
+                    } else {
+                        "pi /login".into()
+                    };
+                    if ui
+                        .button("Copy sign-in command")
+                        .on_hover_text(&command)
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(command);
+                    }
                 },
             )
         });

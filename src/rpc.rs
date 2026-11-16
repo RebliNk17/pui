@@ -41,18 +41,7 @@ pub struct Client {
 }
 
 pub fn pi_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("PUI_PI_BIN") {
-        return path.into();
-    }
-    if let Some(home) = dirs::home_dir() {
-        let installed =
-            home.join(".pi/agent/bin")
-                .join(if cfg!(windows) { "pi.cmd" } else { "pi" });
-        if installed.is_file() {
-            return installed;
-        }
-    }
-    PathBuf::from(if cfg!(windows) { "pi.cmd" } else { "pi" })
+    crate::runtime::pi_binary()
 }
 
 impl Client {
@@ -213,7 +202,8 @@ impl Drop for Client {
 
 pub(crate) fn child_path() -> Option<std::ffi::OsString> {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths: Vec<PathBuf> = std::env::split_paths(&inherited).collect();
+    let mut paths =
+        crate::runtime::prepend_bundle_path(&inherited, crate::runtime::active_bundle().as_deref());
     // Finder doesn't inherit shell startup files (nvm/Homebrew are often absent).
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".local/share/pi-node/current/bin"));
@@ -254,6 +244,9 @@ fn adapter_path() -> Result<PathBuf, String> {
             if bundled.is_file() {
                 return Ok(bundled);
             }
+            if crate::runtime::bundled().is_some() {
+                return Err("Pui's bundled adapter is missing; reinstall the app.".into());
+            }
         }
     }
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/ultracode.ts");
@@ -278,9 +271,7 @@ fn run(
     ctx: eframe::egui::Context,
 ) -> Result<(), String> {
     let mut command = Command::new(binary);
-    if let Some(path) = child_path() {
-        command.env("PATH", path);
-    }
+    crate::runtime::configure(&mut command);
     #[cfg(not(test))]
     command.arg("--extension").arg(adapter_path()?);
     command.env("PUI_AGENT_CHILD", if launch.worker { "1" } else { "0" });
@@ -323,7 +314,7 @@ fn run(
     }
     let mut child = command.spawn().map_err(|e| {
         format!(
-            "Could not start {}: {e}. Install Pi or set PUI_PI_BIN.",
+            "Could not start {}: {e}. Reinstall Pui if its bundled runtime is missing, or set PUI_PI_BIN for an external Pi.",
             binary.display()
         )
     })?;
