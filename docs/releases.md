@@ -24,9 +24,10 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
 - Push/MR triggers are configured in CircleCI's GitLab integration. Configure
   **Build Push and Merge Requests** initially; custom tag triggers may also
   select `vX.Y.Z`. Workflow tag filters allow only stable version tags.
-- Rust tests all remain required. The automation restart/OS-lock test runs in a
-  separate Cargo invocation after the rest of the suite to avoid overlapping
-  subprocess-spawning tests; there are no failure retries or omitted Rust tests.
+- Rust tests all remain required via `scripts/test-rust.sh`: bounded bulk tests,
+  serial cross-window sync/table projection/table export groups, then the
+  automation restart/OS-lock regression separately. No test groups are omitted
+  and failures are not retried.
 - Adapter tests install the checked-in `packaging/runtime` npm lock (Pi 1.5.2)
   under `target/pi-sdk` with lifecycle scripts disabled and set `PUI_PI_SDK`.
   No developer Pi installation or provider key is used. A post-bundle smoke
@@ -257,7 +258,7 @@ command tests do not certify Gatekeeper behavior or future CEF entitlement needs
    python3 -m unittest discover -s tests -p 'test_release.py' -v
    cargo fmt --check
    cargo clippy --locked --all-targets -- -D warnings
-   cargo test --locked
+   bash scripts/test-rust.sh
    node --test tests/*.test.mjs
    ```
 

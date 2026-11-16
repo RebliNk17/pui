@@ -1,4 +1,4 @@
-//! Context metadata only. Unsupported Pi fields are never presented as real measurements.
+//! Pi's reported total with clearly labeled, adapter-derived category estimates.
 use crate::{
     inspector::detail,
     protocol::{PromptUsage, State},
@@ -18,12 +18,16 @@ pub fn number(value: f64) -> String {
 pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
     let colors = crate::theme::palette(ui.ctx());
     let window = state.context_window;
-    let used = state.context_tokens;
+    let parts = state.context_breakdown.as_ref();
+    let estimated_total = state.context_tokens.is_none() && parts.is_some();
+    let used = state.context_tokens.or_else(|| parts.map(|p| p.total()));
+    let prefix = if estimated_total { "~" } else { "" };
+    let scaled = parts.map(|p| p.scaled(used.unwrap_or_default()));
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(
                 used.filter(|_| window > 0.0)
-                    .map(|t| format!("{:.0}% used", t / window * 100.0))
+                    .map(|t| format!("{prefix}{:.0}% used", t / window * 100.0))
                     .unwrap_or_else(|| "Not reported".into()),
             )
             .size(12.0),
@@ -31,7 +35,7 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
                 RichText::new(
-                    used.map(|t| format!("{} / {}", number(t), number(window)))
+                    used.map(|t| format!("{prefix}{} / {}", number(t), number(window)))
                         .unwrap_or_else(|| "—".into()),
                 )
                 .size(11.0)
@@ -51,12 +55,36 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         ("Autocompact buffer", 33000.0, colors.dim),
         ("Free space", 88300.0, colors.hover),
     ];
+    let live_cats = scaled.as_ref().map(|p| {
+        vec![
+            (
+                "Messages",
+                p.user + p.assistant + p.tool_results,
+                colors.blue,
+            ),
+            ("MCP tools", p.mcp_tools, colors.accent),
+            ("Tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
+            ("System prompt", p.system, colors.muted),
+            ("Other context", p.other, colors.dim),
+            (
+                "Free space",
+                (window - used.unwrap_or_default()).max(0.0),
+                colors.hover,
+            ),
+        ]
+    });
+    let cats = if demo {
+        Some(demo_cats.as_slice())
+    } else {
+        live_cats.as_deref()
+    };
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::hover());
     ui.painter().rect_filled(rect, 3, colors.hover);
-    if demo {
+    if let Some(cats) = cats.filter(|_| window > 0.0) {
         let mut x = rect.left();
-        for (_, tokens, color) in demo_cats {
-            let width = (tokens / window * rect.width() as f64) as f32;
+        for &(_, tokens, color) in cats {
+            let width = ((tokens / window).clamp(0.0, 1.0) * rect.width() as f64) as f32;
+            let width = width.min((rect.right() - x).max(0.0));
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(width, 5.0)),
                 0,
@@ -66,34 +94,55 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         }
     } else if let Some(tokens) = used.filter(|_| window > 0.0) {
         let mut fill = rect;
-        fill.set_width((tokens / window) as f32 * rect.width());
+        fill.set_width((tokens / window).clamp(0.0, 1.0) as f32 * rect.width());
         ui.painter().rect_filled(fill, 3, colors.blue);
     }
     ui.add_space(8.0);
-    if demo {
-        for (label, tokens, color) in demo_cats {
+    if let Some(cats) = cats {
+        for &(label, tokens, color) in cats {
+            if tokens == 0.0 && label == "Other context" {
+                continue;
+            }
             if label == "Messages" {
                 let id = ui.make_persistent_id("message-context");
                 let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-                let response = category(ui, label, tokens, window, color, true, open);
+                let response = category(ui, label, tokens, window, color, true, open, !demo);
                 if response.clicked() {
                     open = !open;
                     ui.ctx().data_mut(|d| d.insert_temp(id, open));
                 }
                 if open {
                     ui.indent("parts", |ui| {
-                        for (name, value) in [
-                            ("You", 14000.0),
-                            ("Replies & thinking", 92000.0),
-                            ("Tool results", 367000.0),
-                        ] {
-                            category(ui, name, value, window, color, false, false);
+                        let values = scaled
+                            .as_ref()
+                            .filter(|_| !demo)
+                            .map(|p| [p.user, p.assistant, p.tool_results])
+                            .unwrap_or([14000.0, 92000.0, 367000.0]);
+                        for (name, value) in ["You", "Replies & thinking", "Tool results"]
+                            .into_iter()
+                            .zip(values)
+                        {
+                            category(ui, name, value, window, color, false, false, !demo);
                         }
                     });
                 }
             } else {
-                category(ui, label, tokens, window, color, false, false);
+                category(
+                    ui,
+                    label,
+                    tokens,
+                    window,
+                    color,
+                    false,
+                    false,
+                    !demo && (label != "Free space" || estimated_total),
+                );
             }
+        }
+        if !demo {
+            ui.add_space(5.0);
+            ui.label(RichText::new("~ Estimated split of Pi context").size(10.0).color(colors.dim))
+                .on_hover_text("Category proportions use Pi’s character-based token estimator on the active context, including prompt and tool schemas. They are scaled to Pi’s reported total when available; provider tokenization, hidden overhead and later extension changes can differ.");
         }
     } else {
         if let Some(tokens) = used {
@@ -105,6 +154,7 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
                 colors.blue,
                 false,
                 false,
+                false,
             );
             category(
                 ui,
@@ -114,16 +164,34 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
                 colors.hover,
                 false,
                 false,
+                false,
             );
         }
         ui.add_space(5.0);
         ui.label(
-            RichText::new("Category breakdown not supplied by Pi RPC.")
+            RichText::new("Category estimates appear when the context adapter connects.")
                 .size(10.0)
                 .color(colors.dim),
         );
     }
     ui.add_space(7.0);
+    if !demo {
+        let threshold = match state.compact_percent {
+            Some(percent) if state.compaction_settings_error.is_none() && window > 0.0 => {
+                format!(
+                    "Auto-compacts at {percent}% · {} tokens",
+                    number(window * f64::from(percent) / 100.0)
+                )
+            }
+            _ if state.compaction_settings_error.is_some() => {
+                "Auto-compaction override unavailable".into()
+            }
+            _ => "Auto-compaction threshold not reported".into(),
+        };
+        ui.label(RichText::new(threshold).size(10.0).color(colors.dim))
+            .on_hover_text("The model limit is not the auto-compaction trigger. Settings → General controls the threshold; the remaining space is a safety buffer. Overflow or truncated-response recovery can compact earlier.");
+        ui.add_space(7.0);
+    }
     crate::section::Section::new("Usage details").summary("Tokens and prompt cache").icon(crate::icons::Icon::Details).id_salt("usage-details").show(ui,|ui|{
         ui.label(RichText::new("Prompt cache").size(12.0));
         let usage = PromptUsage::last_response(&state.messages);
@@ -133,9 +201,10 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         ui.add_space(7.0);ui.label(RichText::new("This session").size(12.0));
         detail(ui,"In / Out",&format!("{} / {}",number(state.tokens["input"].as_f64().unwrap_or_default()),number(state.tokens["output"].as_f64().unwrap_or_default())));
         detail(ui,"Cache r / w",&format!("{} / {}",number(state.tokens["cacheRead"].as_f64().unwrap_or_default()),number(state.tokens["cacheWrite"].as_f64().unwrap_or_default())));
-        ui.add_space(8.0);ui.label(RichText::new(if demo{"Auto-compacts when 33k tokens remain. Example category sizes, not your live session."}else{"Usage is reported by Pi. Per-category context sizes and compaction reserve are not exposed by this RPC interface."}).size(10.0).color(colors.dim));
+        ui.add_space(8.0);ui.label(RichText::new(if demo{"Auto-compacts when 33k tokens remain. Example category sizes, not your live session."}else{"Session totals are reported by Pi. Context categories are estimates from the active prompt, tool schemas and compaction-aware messages, not cumulative session usage. Replies include thinking and tool calls; other context includes summaries and extension messages. Free space does not subtract an auto-compaction reserve."}).size(10.0).color(colors.dim));
     });
 }
+#[allow(clippy::too_many_arguments)]
 fn category(
     ui: &mut egui::Ui,
     label: &str,
@@ -144,6 +213,7 @@ fn category(
     color: egui::Color32,
     clickable: bool,
     open: bool,
+    estimated: bool,
 ) -> egui::Response {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(
@@ -163,18 +233,25 @@ fn category(
         2,
         color,
     );
-    p.text(
-        rect.left_center() + egui::vec2(15.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        label,
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        label.into(),
         egui::FontId::proportional(11.0),
+        colors.muted,
+    );
+    job.wrap.max_width = (rect.width() - 107.0).max(0.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = p.layout_job(job);
+    p.galley(
+        rect.left_center() + egui::vec2(15.0, -galley.size().y / 2.0),
+        galley,
         colors.muted,
     );
     if clickable {
         crate::icons::chevron(
             ui,
             egui::Rect::from_center_size(
-                rect.left_center() + egui::vec2(76.0, 0.0),
+                rect.left_center() + egui::vec2((rect.width() - 87.0).min(76.0), 0.0),
                 Vec2::splat(10.0),
             ),
             open,
@@ -184,7 +261,7 @@ fn category(
     p.text(
         rect.right_center() - egui::vec2(46.0, 0.0),
         egui::Align2::RIGHT_CENTER,
-        number(tokens),
+        format!("{}{}", if estimated { "~" } else { "" }, number(tokens)),
         egui::FontId::proportional(10.0),
         colors.muted,
     );
@@ -200,8 +277,13 @@ fn category(
         colors.text,
     );
     if clickable {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand)
-    } else {
         response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(label)
+    } else {
+        response.on_hover_text(label)
     }
 }
+
+#[cfg(test)]
+mod tests;

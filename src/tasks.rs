@@ -2,9 +2,17 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod apply;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[path = "tasks/apply_unsupported.rs"]
+pub mod apply;
+pub mod checkpoints;
 #[cfg(test)]
 pub mod proposal;
+pub mod recovery;
 pub mod routing;
+pub mod setup;
 pub mod store;
 pub mod workspace;
 
@@ -248,9 +256,23 @@ pub struct Task {
     pub approved: Option<Contract>,
     pub phase: Phase,
     pub note: String,
+    #[serde(default)]
+    pub checkpoints: Vec<checkpoints::Checkpoint>,
     pub dirty_source: bool,
     #[serde(default)]
     pub base_head: String,
+    #[serde(default)]
+    pub preparation_receipt: Option<apply::BaselineReceipt>,
+    #[serde(default)]
+    pub prepared_fingerprint: Option<String>,
+    #[serde(default)]
+    pub implementation_pending: bool,
+    #[serde(default)]
+    pub implementation_resumptions: Vec<String>,
+    #[serde(default)]
+    pub recoveries: Vec<recovery::RecoveryExecution>,
+    #[serde(default)]
+    pub setup: Vec<setup::SetupRecord>,
     pub attempts: Vec<Attempt>,
     pub runs: Vec<Run>,
     pub updated: u64,
@@ -280,8 +302,15 @@ impl Task {
             approved: None,
             phase: Phase::Draft,
             note: String::new(),
+            checkpoints: Vec::new(),
             dirty_source: false,
             base_head: String::new(),
+            preparation_receipt: None,
+            prepared_fingerprint: None,
+            implementation_pending: false,
+            implementation_resumptions: vec![],
+            recoveries: vec![],
+            setup: vec![],
             attempts: vec![],
             runs: vec![],
             updated: now(),
@@ -306,6 +335,10 @@ impl Task {
         self.attempts.last()
     }
     pub fn invalidate(&mut self, note: &str) {
+        if let Some(recovery) = self.recoveries.last_mut() {
+            recovery.state = recovery::RecoveryState::Stale;
+            recovery.note = note.into();
+        }
         if let Some(a) = self.attempts.last_mut() {
             a.invalidated = true;
             a.note = note.into();
@@ -317,6 +350,29 @@ impl Task {
         self.runs.iter().map(|r| r.cost + r.permission_cost).sum()
     }
     pub fn recover(&mut self) {
+        let interrupted_setup = self
+            .setup
+            .iter()
+            .any(|setup| setup.status == setup::SetupStatus::Running);
+        for setup in &mut self.setup {
+            if setup.status == setup::SetupStatus::Running {
+                setup.status = setup::SetupStatus::Unknown;
+                setup.note = "Pui stopped during setup. Effects may be partial; no command was replayed. Inspect retained evidence and files before approving any new execution.".into();
+            }
+        }
+        if let Some(recovery) = self
+            .recoveries
+            .last_mut()
+            .filter(|recovery| recovery.state.active())
+        {
+            recovery.state = recovery::RecoveryState::Blocked;
+            recovery.note =
+                "Pui stopped during recovery. No check or verification was replayed.".into();
+        }
+        if interrupted_setup {
+            self.invalidate("Pui stopped during environment setup. Effects are uncertain; no command was replayed. Inspect files and use fresh scoped approval before continuing.");
+            self.implementation_pending = false;
+        }
         if self.phase.active() {
             for run in &mut self.runs {
                 if matches!(run.status.as_str(), "Connecting" | "Working") {

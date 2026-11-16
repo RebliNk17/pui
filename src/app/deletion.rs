@@ -25,6 +25,7 @@ pub(super) struct View {
     pub pending: Option<Target>,
     jobs: Vec<(Target, Receiver<Result<(), String>>)>,
     chats: BTreeMap<PathBuf, ChatScope>,
+    empty_chats: BTreeMap<PathBuf, Receiver<Result<(), String>>>,
 }
 impl View {
     // Task deletion retains its existing modal behavior; chats never block the workspace.
@@ -46,6 +47,7 @@ impl View {
     }
     pub fn deleting_chat(&self, path: &Path) -> bool {
         self.contains(&Target::Chat(path.into()))
+            || self.empty_chats.keys().any(|pending| same(pending, path))
             || self.chats.values().any(|scope| scope.contains(path))
     }
     pub fn deleting_agent(&self, id: &str) -> bool {
@@ -183,7 +185,7 @@ impl Pui {
     pub(super) fn request_delete(&mut self, target: Target) {
         if !self.deletion.in_progress() && !self.deletion.contains(&target) {
             self.deletion.pending = Some(target);
-            self.model_picker_open = false;
+            self.close_model_popovers();
         }
     }
     fn deletion_blocked(&self, target: &Target) -> Option<String> {
@@ -293,7 +295,48 @@ impl Pui {
         }
         None
     }
+    pub(super) fn begin_empty_chat_cleanup(&mut self, path: PathBuf) -> bool {
+        if self.deletion.deleting_chat(&path) {
+            return false;
+        }
+        let Ok(lock) = self.sync.deletion_lock(&path) else {
+            return false;
+        };
+        let client = self.client.take();
+        let (tx, rx) = mpsc::channel();
+        self.deletion.empty_chats.insert(path.clone(), rx);
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _lock = lock;
+            // Stop the only writer before checking the entire on-disk session.
+            drop(client);
+            let _ = tx.send(sessions::delete_if_empty(&path));
+            ctx.request_repaint();
+        });
+        true
+    }
     pub(super) fn poll_deletions(&mut self) {
+        let finished: Vec<_> = self
+            .deletion
+            .empty_chats
+            .iter()
+            .filter_map(|(path, rx)| match rx.try_recv() {
+                Ok(result) => Some((path.clone(), result)),
+                Err(mpsc::TryRecvError::Disconnected) => Some((
+                    path.clone(),
+                    Err("Empty chat cleanup interrupted; saved history was kept.".into()),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            })
+            .collect();
+        for (path, result) in finished {
+            self.deletion.empty_chats.remove(&path);
+            match result {
+                Ok(()) => self.forget_session(&path),
+                Err(error) => self.state.notice = Some(error),
+            }
+            self.refresh_sessions();
+        }
         let mut index = 0;
         while index < self.deletion.jobs.len() {
             let result = match self.deletion.jobs[index].1.try_recv() {
@@ -623,8 +666,20 @@ impl Pui {
             self.forget_session(path);
             self.tasks.detach_deleted_chat(path);
         }
+        for id in ids {
+            self.session_layouts.forget_agent(id);
+            self.prefs
+                .workspace_layouts
+                .retain(|layout| layout.key != format!("agent:{id}"));
+        }
         self.forget_deleted_agent_ids(ids);
         if active {
+            self.files = Default::default();
+            self.changes.stale_review_comments();
+            let review_comments = std::mem::take(&mut self.changes.review_comments);
+            self.changes = Default::default();
+            self.changes.review_comments = review_comments;
+            self.inspector_panel = false;
             let models = std::mem::take(&mut self.state.models);
             self.state = State {
                 models,
@@ -634,6 +689,7 @@ impl Pui {
             self.pending_session = None;
             self.preview_rx = None;
             self.transcript.clear();
+            self.context_chips.clear();
             self.draft.clear();
             self.draft_images.clear();
             self.image_picker_rx = None;
@@ -644,6 +700,7 @@ impl Pui {
             self.history_view = Default::default();
             self.history_drafts.clear();
             self.completion_run = Default::default();
+            self.attention_observed = Default::default();
             self.questions = Default::default();
             self.current_dialog.clear();
             self.pending_dialog = None;
@@ -657,6 +714,13 @@ impl Pui {
         self.refresh_sessions();
     }
     fn forget_session(&mut self, path: &Path) {
+        self.attention
+            .forget_path(&self.sync.attention_identity(path));
+        self.session_layouts.forget_path(path);
+        self.prefs.workspace_layouts.retain(|layout| {
+            layout.key.starts_with("agent:") || !same(Path::new(&layout.key), path)
+        });
+        self.forget_restart_checkpoint(path);
         self.sessions.retain(|s| !same(&s.path, path));
         self.prefs.chats.retain(|p, _| !same(p, path));
         self.waiting.retain(|p, _| !same(p, path));

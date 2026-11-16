@@ -11,9 +11,18 @@ use std::sync::{
 
 const LOCAL: &[(&str, &str)] = &[
     ("new", "Start a new chat"),
+    ("btw", "Independent side chat; optional question draft"),
+    (
+        "main",
+        "Return from a side chat to its originating conversation",
+    ),
     ("model", "Choose model and thinking effort"),
     ("settings", "Open Pui settings"),
     ("compact", "Compact context; optional instructions"),
+    (
+        "reload",
+        "Reload resources in this chat; keeps history and draft",
+    ),
     ("stop", "Stop the agent and clear waiting messages"),
     ("files", "Toggle workspace files"),
     ("browser", "Toggle Chromium browser"),
@@ -66,6 +75,79 @@ struct Choice {
     description: String,
     insert: String,
 }
+const ROW_HEIGHT: f32 = 26.0;
+
+fn completion_row(
+    ui: &mut egui::Ui,
+    choice: &Choice,
+    selected: bool,
+    file: bool,
+) -> egui::Response {
+    let colors = theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            5,
+            if selected {
+                colors.selection_bg
+            } else {
+                colors.hover
+            },
+        );
+    }
+    let content = rect.shrink2(egui::vec2(8.0, 0.0));
+    let description_left = content.left() + content.width() * 0.36;
+    let show_description = !file && content.width() >= 340.0;
+    let label_right = if show_description {
+        description_left - 12.0
+    } else {
+        content.right()
+    };
+    let paint = |text: &str, left: f32, right: f32, size: f32, color: Color32| {
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            text.into(),
+            FontId::proportional(size),
+            color,
+        );
+        job.wrap.max_width = (right - left).max(0.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(left, content.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    };
+    paint(
+        &choice.label,
+        content.left(),
+        label_right,
+        12.0,
+        colors.text,
+    );
+    if show_description {
+        paint(
+            &choice.description,
+            description_left,
+            content.right(),
+            11.0,
+            if selected { colors.text } else { colors.muted },
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            &choice.label,
+        )
+    });
+    response.on_hover_text(format!("{}\n{}", choice.label, choice.description))
+}
+
 type SearchResult = Result<(Vec<PathBuf>, bool), String>;
 #[derive(Default)]
 pub(super) struct View {
@@ -87,6 +169,9 @@ impl Drop for View {
     }
 }
 impl View {
+    pub(super) fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
     fn reset_search(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -243,6 +328,7 @@ impl Pui {
         };
         let insert = choice.insert.clone();
         let end = self.draft[..t.start].chars().count() + insert.chars().count();
+        self.context_chips.clear();
         self.draft.replace_range(t.start..t.end, &insert);
         let id = egui::Id::new("composer");
         let mut state = TextEditState::load(ctx, id).unwrap_or_default();
@@ -277,8 +363,13 @@ impl Pui {
                 },
             )
         });
-        let width = anchor.width().clamp(180.0, 560.0);
+        let file = self.completions.token.as_ref().is_some_and(|t| t.file);
+        let width = anchor
+            .width()
+            .clamp(180.0, if file { 480.0 } else { 440.0 })
+            .min((ctx.screen_rect().width() - 16.0).max(0.0));
         let mut chosen = None;
+        let mut reload = false;
         let mut open = true;
         let popup = egui::Popup::new(
             egui::Id::new("composer-completions"),
@@ -291,13 +382,11 @@ impl Pui {
         .align_alternatives(&[])
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .width(width)
-        .gap(8.0)
+        .frame(prompt_ui::popup(ctx).inner_margin(6))
+        .gap(6.0)
         .show(|ui| {
-            ui.set_width(width - 20.0);
-            ui.label(theme::small(
-                ui,
-                "↑↓ select · Tab / Enter insert · Esc dismiss",
-            ));
+            theme::menu_controls(ui);
+            ui.set_width((width - 14.0).max(0.0));
             if self.completions.rx.is_some() {
                 ui.label(theme::small(ui, "Finding workspace files…"));
             }
@@ -309,13 +398,12 @@ impl Pui {
             }
             egui::ScrollArea::vertical()
                 .id_salt("composer-completion-results")
-                .max_height((anchor.top() - 70.0).clamp(50.0, 260.0))
+                .max_height((anchor.top() - 80.0).clamp(ROW_HEIGHT, 222.0))
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (index, choice) in self.completions.choices.iter().enumerate() {
                         let selected = index == self.completions.selected;
-                        let response = ui
-                            .selectable_label(selected, RichText::new(&choice.label).size(12.0))
-                            .on_hover_text(&choice.description);
+                        let response = completion_row(ui, choice, selected, file);
                         if selected && self.completions.scroll_selection {
                             response.scroll_to_me(Some(Align::Center));
                         }
@@ -327,9 +415,33 @@ impl Pui {
             if self.completions.limited {
                 ui.label(theme::small(
                     ui,
-                    "Search bounded; type a more specific path to narrow results.",
+                    "Search limited · type a more specific path",
                 ));
             }
+            ui.separator();
+            if !file
+                && self
+                    .completions
+                    .token
+                    .as_ref()
+                    .is_some_and(|t| t.query.starts_with("ski"))
+                && prompt_ui::button(
+                    ui,
+                    "Reload chat resources…",
+                    prompt_ui::Button::Secondary,
+                    !self.resource_reload.pending(),
+                )
+                .clicked()
+            {
+                reload = true;
+            }
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    "↑↓ select · Tab / Enter insert · Esc dismiss",
+                ))
+                .truncate(),
+            );
         });
         self.completions.popup_rect = popup.map(|p| p.response.rect);
         self.completions.scroll_selection = false;
@@ -338,6 +450,9 @@ impl Pui {
         }
         if !open {
             self.completions.dismissed = true;
+        }
+        if reload {
+            self.request_resource_reload();
         }
     }
     /// TUI built-ins do not execute over RPC. Handle supported equivalents here;
@@ -354,6 +469,15 @@ impl Pui {
             return false;
         }
         let args = args.trim().to_owned();
+        if name == "reload" {
+            if !args.is_empty() {
+                self.state.error =
+                    Some("/reload does not take arguments. Your draft was kept.".into());
+            } else {
+                self.request_resource_reload();
+            }
+            return true;
+        }
         if !LOCAL.iter().any(|(n, _)| *n == name) {
             if self.state.commands.iter().any(|c| c.name == name) || name.starts_with("pui-") {
                 return false;
@@ -378,10 +502,18 @@ impl Pui {
             self.state.error = Some("Wait for the current operation to finish before running this command. Your draft was kept.".into());
             return true;
         }
+        if name == "btw" {
+            self.start_side_chat(&args);
+            return true;
+        }
         if name != "compact" && !args.is_empty() {
             self.state.error = Some(format!(
                 "/{name} does not take arguments. Your draft was kept."
             ));
+            return true;
+        }
+        if name == "main" {
+            self.return_side_chat();
             return true;
         }
         let name = name.to_owned();
@@ -389,12 +521,14 @@ impl Pui {
             self.state.error = Some("Connect to Pi before compacting. Your draft was kept.".into());
             return true;
         }
+        self.context_chips.clear();
         self.draft.clear();
         self.recall = Default::default();
         self.completions = Default::default();
         match name.as_str() {
             "new" => self.new_session(),
             "model" => {
+                self.effort_picker_open = false;
                 self.model_picker_open = true;
                 self.model_picker_focus = true;
                 self.model_query.clear();
@@ -403,13 +537,14 @@ impl Pui {
             "compact" => self.send(json!({"type":"compact","customInstructions":args})),
             "stop" => self.stop(),
             "files" => {
+                self.diff_rx = None;
                 self.files.toggle(&self.ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
             }
             "browser" => {
+                self.diff_rx = None;
                 self.files.toggle_browser(&self.ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
-                self.terminals.close(&self.ctx);
             }
             "terminal" => self.terminals.toggle(&self.ctx, &self.prefs.cwd, self.demo),
             "help" => {

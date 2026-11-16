@@ -3,7 +3,6 @@
 //! per-window token in a user-only registry. No idle timers or filesystem polling.
 use super::*;
 use fs2::FileExt;
-use notify::Watcher;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
@@ -11,7 +10,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 const MAX_FRAME: usize = 192 * 1024 * 1024;
@@ -46,6 +48,8 @@ pub(super) struct Snapshot {
     pub worktree: Option<PathBuf>,
     #[serde(default)]
     pub notifications: notifications::NotificationSettings,
+    #[serde(default)]
+    pub attention: Option<attention::Metadata>,
     pub ultra: bool,
     pub ready: bool,
     pub cwd: PathBuf,
@@ -85,12 +89,13 @@ enum Work {
     Publish(LivePath),
     Scan,
     Forget(PathBuf),
-    Fetch(PathBuf, Endpoint, u64),
-    Act(PathBuf, Endpoint, u64, Action),
+    Fetch(PathBuf, Arc<Endpoint>, u64),
+    Act(PathBuf, Arc<Endpoint>, u64, Action),
     Stop,
 }
 enum ResultEvent {
-    Registry(Vec<Endpoint>),
+    Registry(Vec<Endpoint>, bool, u64),
+    PresenceUnknown,
     Snapshot(PathBuf, u64, Box<Snapshot>),
     Action(PathBuf, Box<Reply>, Option<run_status::WaitingMessage>),
     Failure(PathBuf, String),
@@ -105,13 +110,13 @@ pub(super) struct WindowSync {
     directory: Option<PathBuf>,
     id: String,
     owned: BTreeMap<PathBuf, Owned>,
-    endpoints: BTreeMap<PathBuf, Endpoint>,
+    endpoints: BTreeMap<PathBuf, Arc<Endpoint>>,
     revisions: BTreeMap<PathBuf, u64>,
     pending: BTreeSet<PathBuf>,
     tx: mpsc::Sender<Work>,
     rx: Receiver<ResultEvent>,
     commands: Receiver<RemoteCommand>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<crate::file_watch::Watcher>,
     _presence: Option<File>,
     worker: Option<std::thread::JoinHandle<()>>,
     listener: Option<std::thread::JoinHandle<()>>,
@@ -120,6 +125,13 @@ pub(super) struct WindowSync {
     pub error: Option<String>,
     mirror: Option<PathBuf>,
     unsent: Vec<run_status::WaitingMessage>,
+    // Reuse identities already resolved by claim; attention never probes disk.
+    attention_aliases: std::collections::VecDeque<(PathBuf, PathBuf)>,
+    // False until an event-driven scan proves no other registered window exists.
+    dock_single_window: bool,
+    dock_watch_ready: bool,
+    presence_epoch: Arc<AtomicU64>,
+    dock_epoch_accepted: Option<u64>,
 }
 fn key(path: &Path) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -205,31 +217,76 @@ fn write_endpoint(directory: &Path, endpoint: &Endpoint) -> std::io::Result<()> 
     std::fs::rename(temp, directory.join(format!("{}.json", endpoint.id)))
 }
 fn registry_changed(event: &notify::Event, own: &Path) -> bool {
-    (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
-        && event
-            .paths
-            .iter()
-            .any(|p| p != own && p.extension().is_some_and(|e| e == "json"))
+    event.need_rescan()
+        || (event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove())
+            && event.paths.iter().any(|p| {
+                p.file_stem() != own.file_stem()
+                    && p.extension().is_some_and(|e| e == "json" || e == "owner")
+            })
+}
+fn queue_scan(tx: &mpsc::Sender<Work>, pending: &AtomicBool) {
+    // Bound watcher bursts to one queued scan without coalescing explicit actions.
+    if !pending.swap(true, Ordering::AcqRel) && tx.send(Work::Scan).is_err() {
+        pending.store(false, Ordering::Release);
+    }
+}
+fn run_scan<T>(pending: &AtomicBool, scan: impl FnOnce() -> T) -> T {
+    // Changes after this point must be able to request a follow-up scan.
+    pending.store(false, Ordering::Release);
+    scan()
+}
+fn index_endpoint(endpoints: &mut BTreeMap<PathBuf, Arc<Endpoint>>, endpoint: Endpoint) {
+    let endpoint = Arc::new(endpoint);
+    for live in &endpoint.paths {
+        endpoints.insert(live.path.clone(), Arc::clone(&endpoint));
+    }
 }
 fn registry(directory: &Path, own: &str) -> Vec<Endpoint> {
-    std::fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension()?.to_str()? != "json" || path.file_stem()?.to_str()? == own {
-                return None;
-            }
-            let id = path.file_stem()?.to_str()?;
-            let presence = File::open(directory.join(format!("{id}.owner"))).ok()?;
-            if presence.try_lock_exclusive().is_ok() {
-                return None;
-            }
-            let file = File::open(path).ok()?;
-            serde_json::from_reader(file.take(1024 * 1024)).ok()
-        })
-        .collect()
+    registry_with_presence(directory, own).0
+}
+fn registry_with_presence(directory: &Path, own: &str) -> (Vec<Endpoint>, bool) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return (Vec::new(), false);
+    };
+    let mut endpoints = Vec::new();
+    let mut single = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            single = false;
+            continue;
+        };
+        let path = entry.path();
+        let extension = path.extension().and_then(|e| e.to_str());
+        if !matches!(extension, Some("json" | "owner"))
+            || path.file_stem().and_then(|s| s.to_str()) == Some(own)
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            single = false;
+            continue;
+        };
+        let Ok(presence) = File::open(directory.join(format!("{id}.owner"))) else {
+            single = false;
+            continue;
+        };
+        if presence.try_lock_exclusive().is_ok() {
+            continue;
+        }
+        // Count presence before decoding/indexing: empty-path, malformed and
+        // unreadable peer metadata cannot authorize a misleading local Dock total.
+        single = false;
+        if extension != Some("json") {
+            continue;
+        }
+        if let Some(endpoint) = File::open(path)
+            .ok()
+            .and_then(|file| serde_json::from_reader(file.take(1024 * 1024)).ok())
+        {
+            endpoints.push(endpoint);
+        }
+    }
+    (endpoints, single)
 }
 impl WindowSync {
     pub fn new(ctx: &egui::Context, disabled: bool) -> Self {
@@ -259,6 +316,11 @@ impl WindowSync {
             error: None,
             mirror: None,
             unsent: Vec::new(),
+            attention_aliases: Default::default(),
+            dock_single_window: false,
+            dock_watch_ready: false,
+            presence_epoch: Arc::new(AtomicU64::new(1)),
+            dock_epoch_accepted: None,
         };
         if disabled {
             return this;
@@ -293,6 +355,10 @@ impl WindowSync {
                 token: uuid::Uuid::new_v4().to_string(),
                 paths: Vec::new(),
             };
+            // Publish even a blank window: Dock eligibility must not mistake a
+            // live pathless window for absence. Existing watcher handles changes.
+            write_endpoint(&directory, &endpoint)
+                .map_err(|_| "Cannot publish live window presence")?;
             let token = endpoint.token.clone();
             let stopped = this.stopped.clone();
             let repaint = ctx.clone();
@@ -334,6 +400,10 @@ impl WindowSync {
             }));
             let dir = directory.clone();
             let repaint = ctx.clone();
+            let scan_pending = Arc::new(AtomicBool::new(false));
+            let worker_scan_pending = Arc::clone(&scan_pending);
+            let watcher_results = results.clone();
+            let scan_epoch = this.presence_epoch.clone();
             this.worker = Some(std::thread::spawn(move || {
                 let metadata = dir.join(format!("{id}.json"));
                 while let Ok(job) = work.recv() {
@@ -352,8 +422,13 @@ impl WindowSync {
                             continue;
                         }
                         Work::Scan => {
-                            let _ =
-                                results.send(ResultEvent::Registry(registry(&dir, &endpoint.id)));
+                            let (endpoints, single, epoch) = run_scan(&worker_scan_pending, || {
+                                let epoch = scan_epoch.load(Ordering::Acquire);
+                                let (endpoints, single) =
+                                    registry_with_presence(&dir, &endpoint.id);
+                                (endpoints, single, epoch)
+                            });
+                            let _ = results.send(ResultEvent::Registry(endpoints, single, epoch));
                         }
                         Work::Fetch(path, peer, revision) => {
                             let event = match call(&peer, &path, revision, None) {
@@ -399,23 +474,36 @@ impl WindowSync {
                 let _ = std::fs::remove_file(metadata);
             }));
             let own_metadata = directory.join(format!("{}.json", this.id));
-            let mut watcher =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if let Ok(event) = event {
-                        if registry_changed(&event, &own_metadata) {
-                            // The scan worker wakes the UI once its result is
-                            // ready. Never scan/repaint for our own publications.
-                            let _ = tx.send(Work::Scan);
+            let watcher_scan_pending = Arc::clone(&scan_pending);
+            let watcher_ctx = ctx.clone();
+            let watcher_epoch = this.presence_epoch.clone();
+            let watcher = crate::file_watch::Watcher::new(
+                directory.clone(),
+                notify::RecursiveMode::NonRecursive,
+                ctx,
+                move |event: notify::Result<notify::Event>| {
+                    match event {
+                        Ok(event) if registry_changed(&event, &own_metadata) => {
+                            // Invalidate immediately, even when the scan is
+                            // queued behind a slow peer request. Old scans may
+                            // update session metadata, never authorize Dock.
+                            watcher_epoch.fetch_add(1, Ordering::AcqRel);
+                            watcher_ctx.request_repaint();
+                            queue_scan(&tx, &watcher_scan_pending);
                         }
+                        Err(_) => {
+                            watcher_epoch.fetch_add(1, Ordering::AcqRel);
+                            let _ = watcher_results.send(ResultEvent::PresenceUnknown);
+                            watcher_ctx.request_repaint();
+                        }
+                        _ => {}
                     }
-                })
-                .map_err(|_| "Cannot watch other Pui windows")?;
-            watcher
-                .watch(&directory, notify::RecursiveMode::NonRecursive)
-                .map_err(|_| "Cannot watch window registry")?;
+                },
+            );
             this.directory = Some(directory);
             this._watcher = Some(watcher);
-            let _ = this.tx.send(Work::Scan);
+            // Registration completion requests the first scan in poll_window_sync.
+            // Do not authorize Dock from a pre-watch snapshot with a presence gap.
             Ok(())
         })();
         if let Err(error) = result {
@@ -425,6 +513,12 @@ impl WindowSync {
     }
     pub fn enabled(&self) -> bool {
         self.directory.is_some()
+    }
+    pub(super) fn dock_single_window(&self) -> bool {
+        self.dock_single_window
+            && self.dock_watch_ready
+            && self.error.is_none()
+            && self.dock_epoch_accepted == Some(self.presence_epoch.load(Ordering::Acquire))
     }
     /// Reuse an owned lock or acquire a temporary lock. Never delete another
     /// window's live transcript, even if its cached status says Idle.
@@ -451,6 +545,8 @@ impl WindowSync {
     pub(super) fn forget_deleted(&mut self, path: &Path) {
         let path = identity(path);
         self.owned.remove(&path);
+        self.attention_aliases
+            .retain(|(raw, canonical)| raw != &path && canonical != &path);
         self.endpoints.remove(&path);
         self.pending.remove(&path);
         self.revisions.remove(&path);
@@ -464,14 +560,33 @@ impl WindowSync {
         self.revisions.clear();
     }
     pub fn owns(&self, path: &Path) -> bool {
-        self.owned.contains_key(&identity(path))
+        !self.owned.is_empty() && self.owned.contains_key(&identity(path))
     }
     pub fn peer(&self, path: &Path) -> bool {
-        self.mirror.as_deref() == Some(identity(path).as_path()) && !self.owns(path)
+        self.mirror.as_ref().is_some_and(|mirror| {
+            let path = identity(path);
+            mirror == &path && !self.owned.contains_key(&path)
+        })
+    }
+    pub(super) fn attention_identity(&self, path: &Path) -> PathBuf {
+        self.attention_aliases
+            .iter()
+            .find(|(raw, _)| raw == path)
+            .map(|(_, canonical)| canonical.clone())
+            .unwrap_or_else(|| attention::lexical_identity(path))
     }
     pub fn claim(&mut self, path: &Path) -> Result<bool, String> {
+        let raw = path;
         let path = identity(path);
-        if self.owns(&path) {
+        if attention::valid_path(raw) && attention::valid_path(&path) {
+            self.attention_aliases.retain(|(alias, _)| alias != raw);
+            self.attention_aliases
+                .push_back((raw.to_path_buf(), path.clone()));
+            if self.attention_aliases.len() > 256 {
+                self.attention_aliases.pop_front();
+            }
+        }
+        if self.owned.contains_key(&path) {
             return Ok(true);
         }
         #[cfg(test)]
@@ -501,9 +616,7 @@ impl WindowSync {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 self.mirror = Some(path.clone());
                 for endpoint in registry(directory, &self.id) {
-                    for live in &endpoint.paths {
-                        self.endpoints.insert(live.path.clone(), endpoint.clone());
-                    }
+                    index_endpoint(&mut self.endpoints, endpoint);
                 }
                 Ok(false)
             }
@@ -529,7 +642,7 @@ impl WindowSync {
     pub fn live_sessions(&self) -> Vec<LivePath> {
         self.endpoints
             .iter()
-            .filter(|(path, _)| !self.owns(path))
+            .filter(|(path, _)| !self.owned.contains_key(*path))
             .filter_map(|(path, endpoint)| endpoint.paths.iter().find(|p| &p.path == path))
             .cloned()
             .collect()
@@ -565,13 +678,22 @@ impl Drop for WindowSync {
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
         }
+        self._presence.take();
+        if let Some(directory) = &self.directory {
+            // Unlock alone produces no watcher event. Removing our released
+            // lease lets peers recompute single-window eligibility after close.
+            let _ = std::fs::remove_file(directory.join(format!("{}.owner", self.id)));
+        }
     }
 }
 
 impl Pui {
     pub(super) fn other_window_status(&self, path: &Path) -> Option<&str> {
+        if self.sync.endpoints.is_empty() {
+            return None;
+        }
         let path = identity(path);
-        if self.sync.owns(&path) {
+        if self.sync.owned.contains_key(&path) {
             return None;
         }
         self.sync
@@ -590,7 +712,7 @@ impl Pui {
         ui.horizontal(|ui|{
             ui.label(RichText::new(format!("{} unsent/uncertain message(s) retained",self.sync.unsent.len())).size(11.0).color(colors.accent));
             if ui.small_button("Restore draft").clicked(){
-                if self.draft.is_empty()&&self.draft_images.is_empty(){let message=self.sync.unsent.remove(0);self.draft=message.text;self.draft_images.set_images(message.images);self.focus_composer=true;}else{self.state.error=Some("Clear the current draft first. Retained messages are not automatically retried.".into());}
+                if self.draft.is_empty()&&self.draft_images.is_empty(){let message=self.sync.unsent.remove(0);self.context_chips.clear();self.draft=message.text;self.draft_images.set_images(message.images);self.focus_composer=true;}else{self.state.error=Some("Clear the current draft first. Retained messages are not automatically retried.".into());}
             }
         });
     }
@@ -664,7 +786,7 @@ impl Pui {
         else {
             return;
         };
-        if !self.sync.owns(&path) && !self.attach_or_claim(&path) {
+        if !self.sync.owned.contains_key(&path) && !self.attach_or_claim(&path) {
             if let Some(client) = self.client.take() {
                 client.retire();
             }
@@ -700,6 +822,7 @@ impl Pui {
                 image.key.hash(&mut hash);
             }
         }
+        self.attention.metadata(&path).hash(&mut hash);
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
         format!("{:?}", self.state.dialogs).hash(&mut hash);
@@ -725,8 +848,15 @@ impl Pui {
         self.state.permission_classifier.hash(&mut hash);
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);
+        self.state.compact_percent.hash(&mut hash);
         self.state.cost.to_bits().hash(&mut hash);
         self.state.context_tokens.map(f64::to_bits).hash(&mut hash);
+        self.state.context_window.to_bits().hash(&mut hash);
+        if let Some(parts) = &self.state.context_breakdown {
+            for value in parts.values() {
+                value.to_bits().hash(&mut hash);
+            }
+        }
         for message in queue.into_iter().flatten() {
             message.text.hash(&mut hash);
             message.mode.label().hash(&mut hash);
@@ -766,18 +896,39 @@ impl Pui {
         }));
     }
     pub(super) fn poll_window_sync(&mut self) {
+        if let Some(status) = self
+            .sync
+            ._watcher
+            .as_ref()
+            .and_then(|watcher| watcher.poll())
+        {
+            match status {
+                Ok(()) => {
+                    self.sync.dock_watch_ready = true;
+                    // Include publications made while registration was pending.
+                    let _ = self.sync.tx.send(Work::Scan);
+                }
+                Err(_) => {
+                    self.sync.dock_single_window = false;
+                    self.sync.dock_watch_ready = false;
+                    self.sync.error = Some("Cannot watch other Pui windows".into());
+                }
+            }
+        }
         let events: Vec<_> = self.sync.rx.try_iter().collect();
         for event in events {
             match event {
-                ResultEvent::Registry(endpoints) => {
+                ResultEvent::PresenceUnknown => {
+                    self.sync.dock_single_window = false;
+                    self.sync.dock_watch_ready = false;
+                }
+                ResultEvent::Registry(endpoints, single, epoch) => {
+                    self.sync.dock_single_window = single;
+                    self.sync.dock_epoch_accepted = Some(epoch);
                     let before: BTreeSet<_> = self.sync.endpoints.keys().cloned().collect();
                     self.sync.endpoints.clear();
                     for endpoint in endpoints {
-                        for live in &endpoint.paths {
-                            self.sync
-                                .endpoints
-                                .insert(live.path.clone(), endpoint.clone());
-                        }
+                        index_endpoint(&mut self.sync.endpoints, endpoint);
                     }
                     if self.client.is_none() {
                         if let Some(path) = self.state.session_file.as_ref().map(PathBuf::from) {
@@ -823,6 +974,11 @@ impl Pui {
                         {
                             self.transcript
                                 .replace_history(&self.state.messages, &snapshot.state.messages);
+                        }
+                        if let Some(metadata) = snapshot.attention {
+                            // The owner supplies event identity, never derive unread
+                            // from status/transcript or a transport revision.
+                            self.attention.import_for(&path, metadata);
                         }
                         self.state = snapshot.state;
                         self.state.notice = Some(format!(
@@ -899,6 +1055,7 @@ impl Pui {
                             && self.draft_images.is_empty()
                         {
                             let edited = self.sync.unsent.pop().unwrap();
+                            self.context_chips.clear();
                             self.draft = edited.text;
                             self.draft_images.set_images(edited.images);
                             self.focus_composer = true;
@@ -998,6 +1155,10 @@ impl Pui {
                 .get(&self.agents.active)
                 .and_then(|n| n.worktree.clone()),
             notifications: self.prefs.notifications,
+            attention: self
+                .attention
+                .metadata(path)
+                .map(attention::Metadata::unread_snapshot),
             ultra: self.ultracode,
             ready: self.ultracode_ready,
             cwd: self.prefs.cwd.clone(),
@@ -1024,7 +1185,7 @@ impl Pui {
         if self.deletion.in_progress() || self.deletion.deleting_chat(path) {
             return Err("Deletion is in progress for this chat in the owning window.".into());
         }
-        if self.loading_chat {
+        if self.loading_chat || self.resource_reload.pending() {
             return Err("Owning window is connecting; try again when ready.".into());
         }
         if self.history_pending.is_some() || self.restoring_code() {
@@ -1110,6 +1271,22 @@ impl Pui {
                 ) {
                     return Err("Unsupported shared action".into());
                 }
+                if matches!(kind, "set_model" | "set_thinking_level") {
+                    if let Some(reason) = self.model_change_blocked() {
+                        return Err(reason.into());
+                    }
+                    if kind == "set_thinking_level"
+                        && !self
+                            .state
+                            .levels
+                            .iter()
+                            .any(|level| record["level"] == *level)
+                    {
+                        return Err(
+                            "This effort level is not supported by the current model.".into()
+                        );
+                    }
+                }
                 if kind == "prompt" {
                     let message = protocol::string(&record, "message");
                     if !matches!(message, "/pui-ultracode on" | "/pui-ultracode off") {
@@ -1143,6 +1320,11 @@ impl Pui {
     }
 }
 
+#[cfg(test)]
+#[path = "sync/dock_epoch_tests.rs"]
+mod dock_epoch_tests;
+#[cfg(test)]
+mod dock_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1189,6 +1371,72 @@ mod tests {
             a.state.error,
             b.state.error
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn attention_claim_identity_cache_reuses_real_alias_without_new_path_probes() {
+        let (directory, path) = location();
+        let alias = directory.join("alias.jsonl");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let mut owner = app(&directory, &alias);
+        assert!(owner.attach_or_claim(&alias));
+        assert_eq!(owner.sync.attention_identity(&alias), path);
+        for n in 0..300 {
+            assert!(
+                owner
+                    .sync
+                    .claim(&directory.join(format!("missing-{n}.jsonl")))
+                    .unwrap()
+            );
+        }
+        assert_eq!(owner.sync.attention_aliases.len(), 256);
+        owner.sync.forget_deleted(&path);
+        assert!(!owner.sync.attention_aliases.iter().any(|(_, p)| p == &path));
+    }
+    #[test]
+    fn observed_attention_mirrors_same_revision_without_replaying_or_sharing_reads() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        owner.ensure_agent();
+        assert!(owner.attach_or_claim(&path));
+        owner.completion_event(&json!({"type":"agent_start"}));
+        owner.completion_event(&json!({"type":"agent_settled"}));
+        owner.publish_live();
+        let original = owner.attention.metadata(&path).unwrap();
+        let mut mirror = app(&directory, &path);
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.attention.unread() == 1 && b.connected
+        });
+        assert_eq!(mirror.attention.metadata(&path).unwrap(), original);
+        let _ = mirror.ctx.clone().run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| mirror.attention_rendered(ui));
+        });
+        assert_eq!(mirror.attention.unread(), 0);
+        assert_eq!(owner.attention.unread(), 1);
+        owner.state.notice = Some("transport revision only".into());
+        owner.publish_live();
+        let wanted = owner.sync.owned[&path].revision;
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.sync.revisions.get(&path).copied().unwrap_or(0) >= wanted
+        });
+        assert_eq!(mirror.attention.unread(), 0);
+        mirror.completion_event(&json!({"type":"agent_start"}));
+        mirror.completion_event(&json!({"type":"agent_settled"}));
+        assert_eq!(
+            mirror.attention.metadata(&path).unwrap().unread_snapshot(),
+            original
+        );
+        let mut snapshot = serde_json::to_value(owner.live_snapshot(&path).unwrap()).unwrap();
+        snapshot["attention"]["path"] = json!("x".repeat(5000));
+        let snapshot: Snapshot = serde_json::from_value(snapshot).unwrap();
+        mirror
+            .attention
+            .import_for(&path, snapshot.attention.unwrap());
+        assert_eq!(mirror.attention.unread(), 0);
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
     }
     #[test]
     fn kanban_discovers_other_windows_without_attaching_or_duplicating_sessions() {
@@ -1249,6 +1497,132 @@ mod tests {
                 .unwrap();
         assert!(legacy.title.is_empty());
     }
+    fn endpoint(paths: impl IntoIterator<Item = PathBuf>) -> Endpoint {
+        Endpoint {
+            id: "peer".into(),
+            port: 1,
+            token: "test-token".into(),
+            paths: paths
+                .into_iter()
+                .map(|path| LivePath {
+                    path,
+                    revision: 1,
+                    label: "Working…".into(),
+                    title: String::new(),
+                    cwd: PathBuf::new(),
+                    model: String::new(),
+                })
+                .collect(),
+        }
+    }
+    #[test]
+    fn endpoint_index_and_queued_work_share_one_paths_allocation() {
+        let (directory, path) = location();
+        let mut sync = WindowSync::new(&egui::Context::default(), true);
+        let (tx, work) = mpsc::channel();
+        sync.tx = tx;
+        let paths = std::iter::once(path.clone())
+            .chain((1..1024).map(|i| directory.join(format!("chat-{i}.jsonl"))));
+        index_endpoint(&mut sync.endpoints, endpoint(paths));
+        let shared = Arc::clone(&sync.endpoints[&path]);
+        assert_eq!(sync.endpoints.len(), 1024);
+        assert_eq!(Arc::strong_count(&shared), 1025);
+        assert!(sync.endpoints.values().all(|e| Arc::ptr_eq(e, &shared)));
+        sync.fetch(&path);
+        sync.act(&path, Action::Remove(0)).unwrap();
+        let Work::Fetch(_, fetched, 1) = work.try_recv().unwrap() else {
+            panic!("expected fetch");
+        };
+        let Work::Act(_, acted, 0, Action::Remove(0)) = work.try_recv().unwrap() else {
+            panic!("expected action");
+        };
+        assert!(Arc::ptr_eq(&shared, &fetched));
+        assert!(Arc::ptr_eq(&shared, &acted));
+    }
+    #[test]
+    fn scan_bursts_coalesce_without_losing_actions_or_changes_during_scan() {
+        let (directory, path) = location();
+        let presence = private_open(&directory.join("peer.owner")).unwrap();
+        presence.try_lock_exclusive().unwrap();
+        let mut peer = endpoint([path.clone()]);
+        write_endpoint(&directory, &peer).unwrap();
+        let (tx, work) = mpsc::channel();
+        let pending = AtomicBool::new(false);
+        for _ in 0..1000 {
+            queue_scan(&tx, &pending);
+        }
+        assert!(matches!(work.try_recv().unwrap(), Work::Scan));
+        assert!(work.try_recv().is_err());
+        let first = run_scan(&pending, || {
+            let first = registry(&directory, "own");
+            // The first scan has already read the old metadata. A publication
+            // before it finishes must still cause another scan.
+            peer.paths[0].revision = 2;
+            write_endpoint(&directory, &peer).unwrap();
+            for i in 0..1000 {
+                tx.send(Work::Act(
+                    path.clone(),
+                    Arc::new(endpoint([path.clone()])),
+                    1,
+                    Action::Remove(i),
+                ))
+                .unwrap();
+                queue_scan(&tx, &pending);
+            }
+            first
+        });
+        assert_eq!(first[0].paths[0].revision, 1);
+        let mut scans = 0;
+        let mut actions = Vec::new();
+        while let Ok(job) = work.try_recv() {
+            match job {
+                Work::Scan => {
+                    scans += 1;
+                    let latest = run_scan(&pending, || registry(&directory, "own"));
+                    assert_eq!(latest[0].paths[0].revision, 2);
+                }
+                Work::Act(_, _, _, Action::Remove(i)) => actions.push(i),
+                _ => panic!("unexpected work"),
+            }
+        }
+        assert_eq!(scans, 1);
+        assert_eq!(actions, (0..1000).collect::<Vec<_>>());
+        assert!(!pending.load(Ordering::Acquire));
+        queue_scan(&tx, &pending);
+        assert!(matches!(work.try_recv().unwrap(), Work::Scan));
+        drop(work);
+        pending.store(false, Ordering::Release);
+        queue_scan(&tx, &pending);
+        assert!(!pending.load(Ordering::Acquire));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn ownership_checks_resolve_retargeted_symlinks_freshly() {
+        let (directory, path) = location();
+        let next = directory.join("next.jsonl");
+        std::fs::write(&next, "").unwrap();
+        let alias = directory.join("alias.jsonl");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        // Exercise real ownership/deletion locks without starting OS watchers.
+        let mut owner = WindowSync::new(&egui::Context::default(), true);
+        owner.directory = Some(directory.clone());
+        assert!(owner.claim(&alias).unwrap());
+        index_endpoint(&mut owner.endpoints, endpoint([path.clone(), next.clone()]));
+        let mut observer = WindowSync::new(&egui::Context::default(), true);
+        observer.mirror = Some(path.clone());
+        assert!(owner.owns(&alias));
+        assert!(observer.peer(&alias));
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&next, &alias).unwrap();
+        assert!(!owner.owns(&alias));
+        assert!(!observer.peer(&alias));
+        assert!(owner.deletion_lock(&alias).unwrap().is_some());
+        assert!(owner.owns(&path));
+        assert!(!owner.live_sessions().iter().any(|p| p.path == path));
+        assert!(owner.live_sessions().iter().any(|p| p.path == next));
+        assert!(owner.claim(&alias).unwrap());
+        assert!(owner.owned.contains_key(&next));
+    }
     #[test]
     fn registry_watcher_ignores_own_publications_and_temporary_files() {
         use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
@@ -1271,6 +1645,14 @@ mod tests {
             ));
             assert!(registry_changed(
                 &event.clone().add_path(peer.clone()),
+                &own
+            ));
+            assert!(!registry_changed(
+                &event.clone().add_path(root.join("own.owner")),
+                &own
+            ));
+            assert!(registry_changed(
+                &event.clone().add_path(root.join("peer.owner")),
                 &own
             ));
             assert!(registry_changed(
@@ -1388,6 +1770,50 @@ mod tests {
         owner.publish_live();
         spin(&mut owner, &mut mirror, |_, b| {
             b.state.messages[0].text == "updated live message" && !b.state.busy
+        });
+    }
+    #[test]
+    fn context_only_changes_publish_without_a_new_message_or_usage_total() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        assert!(owner.attach_or_claim(&path));
+        owner.state.context_tokens = Some(4200.0);
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_tokens == Some(4200.0)
+        });
+        owner.state.context_window = 10000.0;
+        owner.state.context_breakdown = Some(protocol::ContextBreakdown {
+            system: 100.0,
+            tool_results: 2000.0,
+            ..Default::default()
+        });
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_breakdown.is_some()
+        });
+        assert_eq!(mirror.state.context_window, 10000.0);
+        assert_eq!(
+            mirror
+                .state
+                .context_breakdown
+                .as_ref()
+                .unwrap()
+                .tool_results,
+            2000.0
+        );
+        owner.state.context_breakdown = None;
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.context_breakdown.is_none()
+        });
+        owner.state.compact_percent = Some(85);
+        owner.publish_live();
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.compact_percent == Some(85)
         });
     }
     #[test]
@@ -1715,6 +2141,59 @@ mod tests {
         assert!(!mirror.agents.close_prompt);
         assert!(owner.client.is_some());
     }
+    #[test]
+    fn shared_effort_changes_route_while_busy_and_revalidate_the_owners_supported_levels() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        let (client, _events, requests) = rpc::Client::stub_with_records();
+        owner.client = Some(client);
+        owner.loading_chat = false;
+        owner.state.busy = true;
+        owner.state.levels = vec!["low".into(), "high".into()];
+        owner.state.thinking = "high".into();
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.state.busy && b.state.levels.len() == 2
+        });
+        mirror.send(json!({"type":"set_thinking_level","level":"low"}));
+        let received = std::cell::RefCell::new(None);
+        spin(&mut owner, &mut mirror, |_, _| {
+            if received.borrow().is_none() {
+                *received.borrow_mut() = requests.try_recv().ok();
+            }
+            received.borrow().is_some()
+        });
+        let sent = received.into_inner().unwrap();
+        assert_eq!(sent["type"], "set_thinking_level");
+        assert_eq!(sent["level"], "low");
+        assert!(owner.state.busy);
+        assert_eq!(owner.state.thinking, "high");
+        assert!(requests.try_recv().is_err());
+        assert!(
+            owner
+                .apply_remote_action(
+                    &path,
+                    0,
+                    Action::Rpc(json!({"type":"set_thinking_level","level":"xhigh"}))
+                )
+                .is_err()
+        );
+        owner.state.compacting = true;
+        assert!(
+            owner
+                .apply_remote_action(
+                    &path,
+                    0,
+                    Action::Rpc(json!({"type":"set_thinking_level","level":"low"}))
+                )
+                .is_err()
+        );
+        assert!(requests.try_recv().is_err());
+    }
+
     #[test]
     fn shared_rpc_cannot_change_sessions_or_approve_obsolete_dialogs() {
         let (directory, path) = location();

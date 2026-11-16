@@ -127,41 +127,56 @@ impl Usage {
     pub fn footer(&mut self, ui: &mut egui::Ui, demo: bool) {
         let colors = crate::theme::palette(ui.ctx());
         let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::click());
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+        let response = response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Account budget · separate from chat context and session cost");
         let p = ui.painter();
-        p.circle_filled(
-            rect.left_center() + egui::vec2(17.0, 0.0),
-            15.0,
-            colors.hover,
+        let logo = egui::Rect::from_center_size(
+            rect.left_center() + egui::vec2(12.0, 0.0),
+            Vec2::splat(23.0),
         );
+        p.rect_filled(logo, 6, colors.hover);
         p.text(
-            rect.left_center() + egui::vec2(17.0, 0.0),
+            logo.center(),
             egui::Align2::CENTER_CENTER,
             "π",
-            FontId::proportional(20.0),
+            FontId::proportional(17.0),
             colors.accent,
         );
         p.text(
-            rect.min + egui::vec2(41.0, 9.0),
-            egui::Align2::LEFT_TOP,
+            rect.left_center() + egui::vec2(32.0, 0.0),
+            egui::Align2::LEFT_CENTER,
             "Local account",
-            FontId::proportional(12.0),
+            FontId::proportional(11.0),
             colors.text,
         );
+        let ratio = self.data.as_ref().and_then(AccountUsage::ratio);
+        let label = ratio
+            .map(|ratio| format!("{:.0}%", ratio * 100.0))
+            .unwrap_or_else(|| "—".into());
         p.text(
-            rect.min + egui::vec2(41.0, 26.0),
-            egui::Align2::LEFT_TOP,
-            "Usage",
+            rect.right_center() - egui::vec2(39.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            label,
             FontId::proportional(10.0),
             colors.muted,
         );
-        ring(
-            ui,
+        let track = egui::Rect::from_center_size(
             rect.right_center() - egui::vec2(17.0, 0.0),
-            14.0,
-            self.data.as_ref().and_then(AccountUsage::ratio),
+            egui::vec2(28.0, 3.0),
         );
+        p.rect_filled(track, 2, colors.border);
+        if let Some(ratio) = ratio {
+            p.rect_filled(
+                egui::Rect::from_min_size(
+                    track.min,
+                    egui::vec2(track.width() * ratio.clamp(0.0, 1.0), 3.0),
+                ),
+                2,
+                colors.accent,
+            );
+        }
         if response.clicked() && !demo {
             self.refresh(ui.ctx(), false);
         }

@@ -3,6 +3,171 @@ use super::{Role, Task};
 use crate::protocol::Model;
 use serde::{Deserialize, Serialize};
 
+/// Explicitly selected before consent. Dynamic is the legacy/default request,
+/// never an implicit fallback from an unavailable provider model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Policy {
+    #[default]
+    Dynamic,
+    Pinned,
+}
+
+/// Frozen native-consent routing context. Catalog changes require a new question.
+#[derive(Clone, Debug)]
+pub struct Approval {
+    pub policy: Policy,
+    pub spend_limit: Option<f64>,
+    provider: String,
+    model: String,
+    thinking: String,
+    catalog: String,
+}
+impl Approval {
+    pub fn from_request(
+        value: &serde_json::Value,
+        models: &[Model],
+        provider: &str,
+        model: &str,
+        thinking: &str,
+    ) -> Result<Self, String> {
+        let policy = match value.get("policy") {
+            None => Policy::Dynamic,
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|_| "Workflow policy must be dynamic or pinned.")?,
+        };
+        let spend_limit = match value.get("spend_limit") {
+            None => None,
+            Some(v) => Some(v.as_f64().filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or("Reported spend threshold must be finite and positive; it is not a hard billing cap.")?),
+        };
+        validate_policy(policy, models, provider, model, thinking)?;
+        Ok(Self {
+            policy,
+            spend_limit,
+            provider: provider.into(),
+            model: model.into(),
+            thinking: thinking.into(),
+            catalog: catalog_identity(models, provider)?,
+        })
+    }
+    pub fn revalidate(
+        &self,
+        models: &[Model],
+        provider: &str,
+        model: &str,
+        thinking: &str,
+    ) -> Result<(), String> {
+        if provider != self.provider
+            || model != self.model
+            || thinking != self.thinking
+            || catalog_identity(models, provider)? != self.catalog
+        {
+            return Err("Workflow model context changed after the question. Ask again; nothing was approved.".into());
+        }
+        validate_policy(self.policy, models, provider, model, thinking)
+    }
+    pub fn bind(&self, task: &mut Task) -> Result<(), String> {
+        if task.provider != self.provider
+            || task.model != self.model
+            || task.thinking != self.thinking
+        {
+            return Err("Workflow does not match the approved model context.".into());
+        }
+        task.dynamic_routing = self.policy == Policy::Dynamic;
+        task.spend_limit = self.spend_limit;
+        Ok(())
+    }
+    pub fn description(&self) -> String {
+        let policy = match self.policy {
+            Policy::Dynamic => "Dynamic routing: same-provider Haiku assesses each stage; only known normal-price models may launch. No silent fallback.".to_string(),
+            Policy::Pinned => format!("Pinned routing: every model stage uses {} / {} ({}) without a router or substitutions.", self.provider, self.model, self.thinking),
+        };
+        let spend = self.spend_limit.map(|v| format!("Reported usage stop threshold: ${v:.2}. Delayed/in-flight usage can overshoot; not a hard billing cap."))
+            .unwrap_or_else(|| "No reported usage stop threshold. Provider credits are used.".into());
+        format!("{policy}\n{spend}")
+    }
+}
+fn catalog_identity(models: &[Model], provider: &str) -> Result<String, String> {
+    let mut rows = models
+        .iter()
+        .filter(|m| m.provider == provider)
+        .map(|m| serde_json::to_string(m).map_err(|_| "Invalid model catalog.".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.sort();
+    Ok(rows.join("\n"))
+}
+pub fn validate_policy(
+    policy: Policy,
+    models: &[Model],
+    provider: &str,
+    model: &str,
+    thinking: &str,
+) -> Result<(), String> {
+    let matches: Vec<_> = models
+        .iter()
+        .filter(|m| m.provider == provider && m.id == model)
+        .collect();
+    if matches.len() != 1
+        || !matches!(
+            thinking,
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
+        )
+    {
+        return Err(
+            "An unambiguous available current model and supported thinking effort are required."
+                .into(),
+        );
+    }
+    let pool = candidates(models, provider);
+    let current = pool.iter().find(|m| m.model == model)
+        .ok_or("The current model is unclassified, unpriced or has insufficient context; no safe workflow policy is available.")?;
+    if current.family.exceptional() {
+        return Err(
+            "Exceptional-price models are outside workflow approval, including pinned routing."
+                .into(),
+        );
+    }
+    if policy == Policy::Dynamic {
+        router(&pool)?;
+    }
+    Ok(())
+}
+
+/// Runtime guard for all model launches (including pinned and retained tasks).
+/// Check-runner roles must not call this: they submit commands, not model prompts.
+pub fn validate_launch(
+    task: &Task,
+    models: &[Model],
+    selection: &Selection,
+    routing: bool,
+) -> Result<(), String> {
+    let pool = candidates(models, &task.provider);
+    let selected = pool.iter().find(|m| m.provider == selection.provider && m.model == selection.model)
+        .ok_or("Selected workflow model is unavailable or outside the known policy. Nothing was substituted.")?;
+    if selection.exceptional || selected.family.exceptional() {
+        return Err("Exceptional-price models cannot launch under workflow consent.".into());
+    }
+    if !task.dynamic_routing
+        && (routing
+            || selection.model != task.model
+            || selection.provider != task.provider
+            || selection.thinking != task.thinking)
+    {
+        return Err("Pinned workflow model context changed. No model was launched.".into());
+    }
+    if !matches!(
+        selection.thinking.as_str(),
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    ) {
+        return Err("Unsupported workflow thinking effort.".into());
+    }
+    if routing && selected.family != Family::Haiku {
+        return Err("Only a same-provider Haiku may assess dynamic routing.".into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Family {
@@ -219,6 +384,139 @@ mod tests {
             reason: "The stage is bounded and the model matches its verification demands.".into(),
             exceptional_reason: None,
         }
+    }
+    #[test]
+    fn explicit_pinned_policy_supports_provider_without_haiku() {
+        let models = vec![model("gpt-6.1-sol", 2.0)];
+        let mut task = task();
+        assert!(
+            Approval::from_request(
+                &serde_json::json!({}),
+                &models,
+                "gateway",
+                &task.model,
+                &task.thinking
+            )
+            .is_err()
+        );
+        let approval = Approval::from_request(
+            &serde_json::json!({"policy":"pinned", "spend_limit": 3.25}),
+            &models,
+            "gateway",
+            &task.model,
+            &task.thinking,
+        )
+        .unwrap();
+        assert!(approval.description().contains("Pinned routing"));
+        assert!(approval.description().contains("not a hard billing cap"));
+        approval
+            .revalidate(&models, "gateway", &task.model, &task.thinking)
+            .unwrap();
+        approval.bind(&mut task).unwrap();
+        assert!(!task.dynamic_routing);
+        assert_eq!(task.spend_limit, Some(3.25));
+        let selection = Selection {
+            provider: task.provider.clone(),
+            model: task.model.clone(),
+            thinking: task.thinking.clone(),
+            ..Selection::default()
+        };
+        assert!(validate_launch(&task, &models, &selection, false).is_ok());
+        assert!(validate_launch(&task, &models, &selection, true).is_err());
+        let mut changed = selection.clone();
+        changed.thinking = "off".into();
+        assert!(validate_launch(&task, &models, &changed, false).is_err());
+    }
+    #[test]
+    fn consent_freezes_context_and_rejects_invalid_policy_or_threshold() {
+        let models = vec![model("gpt-6.1-sol", 2.0)];
+        let request = serde_json::json!({"policy":"pinned"});
+        let a =
+            Approval::from_request(&request, &models, "gateway", "gpt-6.1-sol", "high").unwrap();
+        for value in [
+            serde_json::json!({"policy":null}),
+            serde_json::json!({"policy":"fallback"}),
+            serde_json::json!({"policy":"pinned","spend_limit":null}),
+            serde_json::json!({"policy":"pinned","spend_limit":0}),
+            serde_json::json!({"policy":"pinned","spend_limit":-1}),
+            serde_json::json!({"policy":"pinned","spend_limit":"5"}),
+        ] {
+            assert!(
+                Approval::from_request(&value, &models, "gateway", "gpt-6.1-sol", "high").is_err()
+            );
+        }
+        assert!(a.revalidate(&[], "gateway", "gpt-6.1-sol", "high").is_err());
+        assert!(
+            a.revalidate(&models, "other", "gpt-6.1-sol", "high")
+                .is_err()
+        );
+        assert!(
+            a.revalidate(&models, "gateway", "gpt-6.1-sol", "off")
+                .is_err()
+        );
+        let mut changed = models.clone();
+        changed[0].context_window += 1;
+        assert!(
+            a.revalidate(&changed, "gateway", "gpt-6.1-sol", "high")
+                .is_err()
+        );
+        assert!(
+            a.bind(&mut Task::new(
+                "/fixture".into(),
+                "other".into(),
+                "gpt-6.1-sol".into(),
+                "high".into()
+            ))
+            .is_err()
+        );
+        assert!(
+            Approval::from_request(
+                &request,
+                &[models[0].clone(), models[0].clone()],
+                "gateway",
+                "gpt-6.1-sol",
+                "high"
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn pinned_cannot_bypass_exceptional_or_unknown_model_checks() {
+        for id in ["gpt-6-astra", "claude-fable-5", "unknown-expensive"] {
+            let models = vec![model(id, 100.0)];
+            assert!(
+                Approval::from_request(
+                    &serde_json::json!({"policy":"pinned"}),
+                    &models,
+                    "gateway",
+                    id,
+                    "high"
+                )
+                .is_err()
+            );
+            let mut t = task();
+            t.model = id.into();
+            let s = Selection {
+                provider: "gateway".into(),
+                model: id.into(),
+                thinking: "high".into(),
+                exceptional: false,
+                ..Selection::default()
+            };
+            assert!(validate_launch(&t, &models, &s, false).is_err());
+            t.dynamic_routing = true;
+            assert!(validate_launch(&t, &models, &s, false).is_err());
+        }
+        assert!(
+            Approval::from_request(
+                &serde_json::json!({"policy":"pinned"}),
+                &[model("gpt-6.1-sol", 0.0)],
+                "gateway",
+                "gpt-6.1-sol",
+                "high"
+            )
+            .is_err()
+        );
     }
     #[test]
     fn catalog_filters_unknown_unpriced_and_other_providers() {

@@ -3,6 +3,91 @@
 use super::*;
 
 impl Pui {
+    /// Only newly allocated, never-used chats are disposable. An empty active
+    /// branch of saved history is not evidence that its transcript is empty.
+    pub(super) fn discard_empty_new_chat(&mut self) -> bool {
+        let id = self.agents.active.clone();
+        let node = self.agents.nodes.get(&id);
+        let path = self
+            .state
+            .session_file
+            .as_ref()
+            .map(PathBuf::from)
+            .or_else(|| node.and_then(|node| node.path.clone()));
+        if self.demo
+            || !self.new_chat
+            || !self.state.ready()
+            || self.state.run_observed
+            || !self.state.messages.is_empty()
+            || !self.state.pending_messages.is_empty()
+            || !self.state.history_points.is_empty()
+            || self.state.chat_title().is_some()
+            || !self.state.dialogs.is_empty()
+            || !self.draft.is_empty()
+            || !self.draft_images.is_empty()
+            || self.image_picker_rx.is_some()
+            || !self.deliveries.is_empty()
+            || self.interrupt.is_some()
+            || self.resource_reload.pending()
+            || self.history_pending.is_some()
+            || self.is_mirror()
+            || self.pending_session.is_some()
+            || self.preview_rx.is_some()
+            || node.is_some_and(|node| {
+                node.parent.is_some() || !node.children.is_empty() || node.setup_pending()
+            })
+            || self.agents.permission_changes.contains_key(&id)
+            || self.agent_mail_pending(&id)
+            || self.automation.has_chat_jobs(&id, path.as_deref())
+            || self.tasks.parents.values().any(|parent| parent == &id)
+            || self.tasks.records.iter().any(|task| {
+                path.as_ref().is_some_and(|path| {
+                    task.parent_session.as_ref() == Some(path)
+                        || task
+                            .runs
+                            .iter()
+                            .any(|run| run.session.as_ref() == Some(path))
+                })
+            })
+            || path.as_ref().is_some_and(|path| {
+                self.prefs.chats.contains_key(path)
+                    || self
+                        .waiting
+                        .get(path)
+                        .is_some_and(|queue| !queue.is_empty())
+                    || self
+                        .agents
+                        .nodes
+                        .values()
+                        .any(|node| node.id != id && node.path.as_ref() == Some(path))
+            })
+        {
+            return false;
+        }
+        if let Some(path) = &path {
+            // Reserve the path before detaching the client. Failure preserves
+            // the chat; another window's session must never be deleted.
+            if !self.begin_empty_chat_cleanup(path.clone()) {
+                return false;
+            }
+        }
+        self.leave_session_layout();
+        let mut chat = self.take_chat();
+        if let Some(client) = chat.client.take() {
+            client.retire();
+        }
+        self.session_layouts.forget_agent(&id);
+        if let Some(path) = path.as_deref() {
+            self.session_layouts.forget_path(path);
+        }
+        self.prefs
+            .workspace_layouts
+            .retain(|layout| layout.key != format!("agent:{id}"));
+        self.forget_deleted_agent_ids(&std::collections::BTreeSet::from([id]));
+        self.new_chat = true;
+        true
+    }
+
     fn remember_project(&mut self, folder: &std::path::Path) {
         self.prefs.projects.retain(|p| p != folder);
         self.prefs.projects.insert(0, folder.to_path_buf());
@@ -149,13 +234,22 @@ impl Pui {
             self.remember_project(&folder);
             return;
         }
+        let context_chips = std::mem::take(&mut self.context_chips);
         let draft = std::mem::take(&mut self.draft);
         let images = std::mem::take(&mut self.draft_images);
         self.start_chat_in(folder);
         self.draft = draft;
+        self.context_chips = context_chips;
         self.draft_images = images;
     }
     pub(super) fn start_chat_in(&mut self, folder: PathBuf) {
+        self.start_chat_with_permission(folder, None);
+    }
+    pub(super) fn start_chat_with_permission(
+        &mut self,
+        folder: PathBuf,
+        permission: Option<settings::PermissionMode>,
+    ) {
         if self.deletion.in_progress() {
             return;
         }
@@ -168,8 +262,8 @@ impl Pui {
             return;
         }
         let folder = sync::identity(&folder);
-        let models = self.state.models.clone();
         if !self.demo {
+            self.discard_empty_new_chat();
             // Connecting/busy/approval/mirror chats keep their original state
             // and connection, including drafts, images and pending deliveries.
             if !self.agents.active.is_empty()
@@ -187,26 +281,25 @@ impl Pui {
             self.agents = Default::default();
         }
         self.new_chat = true;
+        self.show_hidden = false;
+        self.show_archived = false;
         self.prefs.cwd = folder.clone();
         self.remember_project(&folder);
         self.closed_projects.remove(&folder);
         self.workspace_rx = None;
         self.workspace = Workspace::default();
-        self.selected_diff = None;
         self.diff_rx = None;
         self.inspector_panel = false;
-        self.model_picker_open = false;
-        self.effort_draft = None;
+        self.close_model_popovers();
         self.bypass_pending = None;
-        self.state = State {
-            models,
-            ..Default::default()
-        };
+        self.state = State::default();
         self.draft.clear();
+        self.context_chips.clear();
         self.draft_images.clear();
         self.recall = Default::default();
-        self.connect(&self.ctx.clone(), None);
         let id = self.ensure_agent();
+        self.agents.nodes.get_mut(&id).unwrap().permission = permission;
+        self.connect(&self.ctx.clone(), None);
         self.agents.nodes.get_mut(&id).unwrap().name = "New conversation".into();
         self.enter_session_layout();
         self.focus_composer = true;
@@ -453,6 +546,213 @@ mod tests {
             app.chat_folder_target.as_deref(),
             Some(app.agents.active.as_str())
         );
+    }
+    #[test]
+    fn new_chats_sort_before_saved_history_and_survive_session_discovery() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let old = std::time::SystemTime::now() - Duration::from_secs(86_400 * 21);
+        app.sessions = vec![Session {
+            path: "/fixture/old.jsonl".into(),
+            cwd: app.prefs.cwd.clone(),
+            project: app.prefs.cwd.clone(),
+            title: "Old conversation".into(),
+            created: Some(old),
+            modified: old,
+        }];
+        app.new_session();
+        let id = app.agents.active.clone();
+        for discovered in [false, true] {
+            if discovered {
+                let path = PathBuf::from("/fixture/new.jsonl");
+                app.state.session_file = Some(path.display().to_string());
+                app.agents.nodes.get_mut(&id).unwrap().path = Some(path.clone());
+                app.sessions.push(Session {
+                    path,
+                    cwd: app.prefs.cwd.clone(),
+                    project: app.prefs.cwd.clone(),
+                    title: "New conversation".into(),
+                    created: None,
+                    modified: old,
+                });
+            }
+            let rows = sidebar_tree::forest(&app);
+            let newest = rows.iter().find(|row| row.active(&app)).unwrap();
+            assert!(newest.created.unwrap() > old);
+            assert!(newest.modified > old);
+            assert!(newest.activity.unwrap() > old);
+            for sort in [sidebar_order::Sort::Activity, sidebar_order::Sort::Created] {
+                let mut sorted: Vec<_> = rows.iter().collect();
+                sorted.sort_by(|a, b| {
+                    sidebar_order::Options {
+                        sort,
+                        reverse: false,
+                    }
+                    .compare(a, b)
+                });
+                assert_eq!(sorted[0].key, newest.key);
+            }
+        }
+    }
+    #[test]
+    fn abandoned_blank_chats_are_removed_on_new_chat_and_navigation() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let original = app.ensure_agent();
+        for _ in 0..3 {
+            app.new_session();
+        }
+        assert_eq!(app.agents.nodes.len(), 2);
+        let blank = app.agents.active.clone();
+        app.view_agent(&original);
+        assert!(!app.agents.nodes.contains_key(&blank));
+        assert!(!app.agents.parked.contains_key(&blank));
+        assert_eq!(app.agents.nodes.len(), 1);
+        assert!(app.state.busy);
+    }
+    #[test]
+    fn new_chat_reveals_top_of_scrolled_history_and_exits_archive() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.projects = false;
+        let old = std::time::SystemTime::now() - Duration::from_secs(86_400);
+        app.sessions = (0..80)
+            .map(|index| Session {
+                path: format!("/fixture/history-{index}.jsonl").into(),
+                cwd: app.prefs.cwd.clone(),
+                project: app.prefs.cwd.clone(),
+                title: format!("Older conversation {index}"),
+                created: Some(old),
+                modified: old,
+            })
+            .collect();
+        for _ in 0..3 {
+            files::tests::frame(&ctx, &mut app, vec![]);
+        }
+        let pos = egui::pos2(100.0, 500.0);
+        files::tests::frame(
+            &ctx,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -3000.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        for _ in 0..15 {
+            files::tests::frame(&ctx, &mut app, vec![]);
+        }
+        app.show_archived = true;
+        app.new_session();
+        assert!(!app.show_archived);
+        assert!(!app.show_hidden);
+        for _ in 0..5 {
+            files::tests::frame(&ctx, &mut app, vec![]);
+        }
+        let output = files::tests::frame(&ctx, &mut app, vec![]);
+        let new = files::tests::text(&output, "New conversation");
+        assert!(new.x < 300.0 && new.y < 450.0, "{new:?}");
+    }
+    #[test]
+    fn allocated_empty_chat_file_is_cleaned_up_without_deleting_saved_messages() {
+        for has_message in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            let original = app.ensure_agent();
+            app.new_session();
+            let blank = app.agents.active.clone();
+            let path = folder().join("allocated.jsonl");
+            let mut content = "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n".to_string();
+            if has_message {
+                content.push_str("{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"Keep this\"}}\n");
+            }
+            std::fs::write(&path, &content).unwrap();
+            app.state.session_file = Some(path.display().to_string());
+            app.agents.nodes.get_mut(&blank).unwrap().path = Some(path.clone());
+            // No history request is pending: this is a newly allocated path,
+            // not an existing session whose transcript is still loading.
+            app.view_agent(&original);
+            assert!(!app.agents.nodes.contains_key(&blank));
+            assert_eq!(app.agents.active, original);
+            for _ in 0..200 {
+                app.poll_deletions();
+                if !app.deletion.deleting_chat(&path) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!app.deletion.deleting_chat(&path));
+            assert_eq!(path.exists(), has_message);
+            assert!(app.state.busy);
+            if has_message {
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+                assert!(app.state.notice.as_deref().unwrap().contains("kept"));
+            }
+        }
+    }
+    #[test]
+    fn navigating_from_blank_to_unopened_saved_chat_does_not_park_blank() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.new_session();
+        let blank = app.agents.active.clone();
+        app.open_chat(Session {
+            path: "/fixture/other.jsonl".into(),
+            cwd: app.prefs.cwd.clone(),
+            project: app.prefs.cwd.clone(),
+            title: "Other chat".into(),
+            created: None,
+            modified: std::time::SystemTime::now(),
+        });
+        assert!(!app.agents.nodes.contains_key(&blank));
+        assert!(!app.agents.parked.contains_key(&blank));
+        assert_eq!(
+            app.state.session_file.as_deref(),
+            Some("/fixture/other.jsonl")
+        );
+    }
+    #[test]
+    fn empty_new_chats_with_drafts_or_pending_work_are_preserved() {
+        for case in 0..10 {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            let original = app.ensure_agent();
+            app.new_session();
+            app.loading_chat = false;
+            app.connected = true;
+            let blank = app.agents.active.clone();
+            match case {
+                0 => app.draft = "Unsent draft".into(),
+                1 => app.draft_images.set_images(vec![image()]),
+                2 => app.state.busy = true,
+                3 => app
+                    .state
+                    .dialogs
+                    .push_back(json!({"id":"approval", "method":"confirm"})),
+                4 => app.state.messages.push(protocol::Message::from_json(
+                    &json!({"role":"user", "content":"Keep me"}),
+                )),
+                5 => app.new_chat = false, // Existing chat with an empty active branch.
+                6 => app.state.pending = true,
+                7 => app.pending_session = Some("/fixture/loading.jsonl".into()),
+                8 => app.state.session_name = "Named empty conversation".into(),
+                9 => {
+                    app.state.session_file = Some("/fixture/pinned.jsonl".into());
+                    app.prefs
+                        .chats
+                        .entry("/fixture/pinned.jsonl".into())
+                        .or_default()
+                        .pinned = true;
+                }
+                _ => unreachable!(),
+            }
+            app.view_agent(&original);
+            assert!(app.agents.nodes.contains_key(&blank), "case {case}");
+            assert!(app.agents.parked.contains_key(&blank), "case {case}");
+        }
     }
     #[test]
     fn existing_projects_are_unique_and_include_same_named_folder_paths() {

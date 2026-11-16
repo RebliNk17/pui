@@ -23,16 +23,11 @@ python3 scripts/release.py check
 for script in scripts/bundle-macos.sh scripts/package-macos.sh scripts/notarize-macos.sh scripts/ci/*.sh; do
   bash -n "$script"
 done
-python3 -m unittest discover -s tests -p 'test_release.py' -v
-python3 -m unittest discover -s tests -p 'test_circleci.py' -v
-python3 -m unittest discover -s tests -p 'test_runtime_bundle.py' -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-# This restart/OS-lock test must not overlap tests that spawn subprocesses.
-# Both invocations are required and fail-fast; no test is omitted or retried.
-lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
-cargo test --locked -- --skip "$lock_test"
-cargo test --locked --bin pui "$lock_test" -- --exact
+# Complete suite: bounded bulk plus all serial contention-sensitive groups.
+bash scripts/test-rust.sh
 # Adapter integration tests need the real Pi SDK, never a developer's home
 # installation. Install a pinned SDK locally without provider credentials.
 mkdir -p "$PWD/target/pi-sdk"

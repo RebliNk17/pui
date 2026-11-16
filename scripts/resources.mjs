@@ -55,6 +55,16 @@ export function editConfig(file, edit) {
   }
 }
 
+// Bundled skill previews are compiled into Pui. Bind explicit registration to
+// that exact content, checking again when a review is applied.
+function verifyContent(target, expected) {
+  if (expected === undefined) return;
+  if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected)) fail('Invalid resource content hash.');
+  assertWritableConfig(target);
+  const stat = fs.statSync(target);
+  if (!stat.isFile() || stat.size > 65536 || hash(fs.readFileSync(target)) !== expected) fail('Skill contents changed. Rebuild Pui and review again before enabling.');
+}
+
 function revision(agentDir, cwd, trusted) {
   const files = [path.join(agentDir, 'settings.json'), path.join(agentDir, 'mcp.json')];
   if (trusted) files.push(path.join(cwd, '.pi/settings.json'), path.join(cwd, '.pi/mcp.json'));
@@ -202,6 +212,7 @@ export async function manage(request, { sdk, agentDir, cwd, validateMcp }) {
       if (target.startsWith('~/')) target = path.join(process.env.HOME ?? '', target.slice(2));
       target = path.resolve(cwd, target);
       if (!fs.existsSync(target)) fail('Local resource path does not exist.');
+      verifyContent(target, request.contentHash);
       const current = settingsFor(settings, scope)[request.kind] ?? [];
       setPaths(settings, request.kind, scope, [...current.filter(p => strip(p) !== target), target, `+${target}`]);
     } else if (action === 'mcp-add' || action === 'mcp-edit') {
@@ -450,6 +461,7 @@ function planOperation(op, context, configs) {
     if (!target || target.length > 4096) fail('Enter a local resource path.');
     target = path.resolve(cwd, target.replace(/^~\//, `${process.env.HOME ?? ''}/`));
     if (!fs.existsSync(target)) fail('Local resource path does not exist.');
+    verifyContent(target, op.contentHash);
     after[op.kind] = [...(after[op.kind] ?? []).filter(p => strip(p) !== target), target, `+${target}`];
   } else if (op.action === 'mcp-add' || op.action === 'mcp-edit') {
     const name = item?.name ?? op.name?.trim();
@@ -523,14 +535,17 @@ async function batchRequest(request, context) {
         else await context.manager.removeAndPersist(step.item.source, { local: step.op.scope === 'project' });
         await context.settings.flush();
         if (context.settings.drainErrors().length) fail('Pi could not save package configuration.');
-      } else editConfig(step.file, current => {
-        // Patch only the reviewed resource fields; preserve unrelated config.
-        const keys = step.file.endsWith('mcp.json') ? ['mcpServers'] : [...Object.keys(PATH_SETTERS), 'packages'];
-        for (const key of keys) if (JSON.stringify(step.before[key]) !== JSON.stringify(step.after[key])) {
-          if (JSON.stringify(current[key]) !== JSON.stringify(step.before[key])) fail('Configuration changed while applying. Refresh before retrying.');
-          if (step.after[key] === undefined) delete current[key]; else current[key] = step.after[key];
-        }
-      });
+      } else {
+        if (step.op.action === 'register') verifyContent(path.resolve(context.cwd, step.op.source.replace(/^~\//, `${process.env.HOME ?? ''}/`)), step.op.contentHash);
+        editConfig(step.file, current => {
+          // Patch only the reviewed resource fields; preserve unrelated config.
+          const keys = step.file.endsWith('mcp.json') ? ['mcpServers'] : [...Object.keys(PATH_SETTERS), 'packages'];
+          for (const key of keys) if (JSON.stringify(step.before[key]) !== JSON.stringify(step.after[key])) {
+            if (JSON.stringify(current[key]) !== JSON.stringify(step.before[key])) fail('Configuration changed while applying. Refresh before retrying.');
+            if (step.after[key] === undefined) delete current[key]; else current[key] = step.after[key];
+          }
+        });
+      }
       results.push({ index, success: true, message: 'Applied' });
       expectedRevision = revision(context.agentDir, context.cwd, context.trusted);
     } catch (error) {

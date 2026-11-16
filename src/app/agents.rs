@@ -11,6 +11,8 @@ pub(super) struct Node {
     pub access: String,
     pub permission: Option<settings::PermissionMode>,
     pub status: String,
+    pub last_activity: Option<std::time::SystemTime>,
+    pub created: Option<std::time::SystemTime>,
     pub children: Vec<String>,
     pub stopped: bool,
     pub reported: bool,
@@ -58,17 +60,19 @@ pub(super) struct AgentRecord {
 #[derive(Default)]
 pub(super) struct Chat {
     pub(super) state: State,
-    new_chat: bool,
+    pub(super) new_chat: bool,
     pub(super) history_pending: Option<rewind::Pending>,
     history_drafts: Vec<run_status::WaitingMessage>,
     completion_run: notifications::CompletionRun,
+    attention_observed: attention::Observed,
     pub(super) client: Option<rpc::Client>,
-    connected: bool,
+    pub(super) connected: bool,
     loading: bool,
-    pending: Option<PathBuf>,
+    pub(super) pending: Option<PathBuf>,
     preview: Option<Receiver<Result<crate::history::Preview, String>>>,
     partial: bool,
-    draft: String,
+    pub(super) draft: String,
+    context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     completions: completions::View,
     images: attachments::DraftImages,
@@ -78,6 +82,7 @@ pub(super) struct Chat {
     transcript: Transcript,
     ultra: bool,
     ready: bool,
+    resource_reload: resource_reload::Reload,
     dialog_text: String,
     questions: questions::View,
     current_dialog: String,
@@ -92,6 +97,8 @@ impl Chat {
     }
     pub(super) fn deletion_busy(&self) -> bool {
         self.loading
+            || self.resource_reload.pending()
+            || self.resource_reload.confirming()
             || self.history_pending.is_some()
             || self.interrupt.is_some()
             || !self.deliveries.is_empty()
@@ -242,6 +249,8 @@ impl Pui {
                         Some(record.permission.unwrap_or(self.prefs.settings.permission))
                     },
                     status: "Saved".into(),
+                    last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: true,
                     reported: true,
@@ -284,6 +293,8 @@ impl Pui {
             .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
     }
     pub(super) fn forget_deleted_agent_ids(&mut self, ids: &std::collections::BTreeSet<String>) {
+        self.forget_unsaved_sections(ids);
+        self.attention.forget_agents(ids);
         self.agents
             .permission_changes
             .retain(|id, _| !ids.contains(id));
@@ -348,6 +359,7 @@ impl Pui {
             history_pending: self.history_pending.take(),
             history_drafts: std::mem::take(&mut self.history_drafts),
             completion_run: std::mem::take(&mut self.completion_run),
+            attention_observed: std::mem::take(&mut self.attention_observed),
             client: self.client.take(),
             connected: std::mem::take(&mut self.connected),
             loading: std::mem::take(&mut self.loading_chat),
@@ -355,6 +367,7 @@ impl Pui {
             preview: self.preview_rx.take(),
             partial: std::mem::take(&mut self.preview_partial),
             draft: std::mem::take(&mut self.draft),
+            context_chips: std::mem::take(&mut self.context_chips),
             recall: std::mem::take(&mut self.recall),
             completions: std::mem::take(&mut self.completions),
             images: std::mem::take(&mut self.draft_images),
@@ -364,6 +377,7 @@ impl Pui {
             transcript: std::mem::take(&mut self.transcript),
             ultra: std::mem::take(&mut self.ultracode),
             ready: std::mem::take(&mut self.ultracode_ready),
+            resource_reload: std::mem::take(&mut self.resource_reload),
             dialog_text: std::mem::take(&mut self.dialog_text),
             questions: std::mem::take(&mut self.questions),
             current_dialog: std::mem::take(&mut self.current_dialog),
@@ -376,6 +390,7 @@ impl Pui {
         self.history_pending = chat.history_pending;
         self.history_drafts = chat.history_drafts;
         self.completion_run = chat.completion_run;
+        self.attention_observed = chat.attention_observed;
         self.client = chat.client;
         self.connected = chat.connected;
         self.loading_chat = chat.loading;
@@ -383,6 +398,7 @@ impl Pui {
         self.preview_rx = chat.preview;
         self.preview_partial = chat.partial;
         self.draft = chat.draft;
+        self.context_chips = chat.context_chips;
         self.recall = chat.recall;
         self.draft_images = chat.images;
         self.image_picker_rx = chat.image_picker;
@@ -392,6 +408,7 @@ impl Pui {
         self.transcript = chat.transcript;
         self.ultracode = chat.ultra;
         self.ultracode_ready = chat.ready;
+        self.resource_reload = chat.resource_reload;
         self.dialog_text = chat.dialog_text;
         self.questions = chat.questions;
         self.current_dialog = chat.current_dialog;
@@ -419,6 +436,9 @@ impl Pui {
                 access: "workspace".into(),
                 permission: None,
                 status: "Connecting".into(),
+                last_activity: None,
+                // Opening saved history must not make it look newly created.
+                created: self.new_chat.then(std::time::SystemTime::now),
                 children: Vec::new(),
                 stopped: false,
                 reported: true,
@@ -453,7 +473,9 @@ impl Pui {
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
         }
-        self.leave_session_layout();
+        if !self.discard_empty_new_chat() {
+            self.leave_session_layout();
+        }
         // An empty workspace (for example after deletion) is not a chat.
         if !self.agents.active.is_empty()
             || self.client.is_some()
@@ -468,7 +490,10 @@ impl Pui {
         self.put_chat(next);
         self.prefs.cwd = self.agents.nodes[id].cwd.clone();
         self.enter_session_layout();
-        if self.client.is_none() && self.agents.nodes[id].path.is_some() {
+        if self.client.is_none()
+            && !self.resource_reload.pending()
+            && self.agents.nodes[id].path.is_some()
+        {
             if self.agents.nodes[id].parent.is_some() {
                 self.resume_agent();
             } else {
@@ -484,6 +509,15 @@ impl Pui {
     }
     /// Reconnect a persisted automation owner without navigating or sending a prompt.
     pub(super) fn reconnect_job_owner(&mut self, id: &str) -> Result<(), String> {
+        if (id == self.agents.active && self.resource_reload.pending())
+            || self
+                .agents
+                .parked
+                .get(id)
+                .is_some_and(|c| c.resource_reload.pending())
+        {
+            return Err("Creator resources are reloading; delivery remains pending.".into());
+        }
         if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
             return Err("Creator access is changing; wait for its workspace to be ready.".into());
         }
@@ -531,12 +565,14 @@ impl Pui {
             app.loading_chat = true;
             app.connected = false;
             app.ultracode_ready = false;
+            app.seed_model_catalog();
+            app.restore_restart_checkpoint();
             for kind in [
                 "get_state",
-                "get_entries",
-                "get_commands",
                 "get_available_models",
                 "get_available_thinking_levels",
+                "get_entries",
+                "get_commands",
             ] {
                 app.send(protocol::command(kind));
             }
@@ -546,6 +582,9 @@ impl Pui {
         Ok(())
     }
     pub(super) fn resume_agent(&mut self) -> bool {
+        if self.resource_reload.pending() {
+            return true;
+        }
         if self
             .agents
             .permission_changes
@@ -572,6 +611,7 @@ impl Pui {
             return true;
         };
         let reconnect_path = node.path.clone();
+        self.restore_restart_checkpoint();
         if let Some(path) = reconnect_path.as_ref() {
             if !self.attach_or_claim(path) {
                 return true;
@@ -601,12 +641,14 @@ impl Pui {
         self.loading_chat = true;
         self.ultracode_ready = false;
         self.connected = false;
+        self.seed_model_catalog();
+        self.restore_restart_checkpoint();
         for kind in [
             "get_state",
-            "get_entries",
-            "get_commands",
             "get_available_models",
             "get_available_thinking_levels",
+            "get_entries",
+            "get_commands",
         ] {
             self.send(protocol::command(kind));
         }
@@ -705,9 +747,27 @@ impl Pui {
                 }
             }
         }
+        self.promote_unsaved_section(&id);
+        self.promote_attention();
     }
     pub(super) fn agent_event(&mut self, record: &Value) {
         if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+            if matches!(
+                protocol::string(record, "type"),
+                "agent_start"
+                    | "agent_end"
+                    | "agent_settled"
+                    | "message_start"
+                    | "message_update"
+                    | "message_end"
+                    | "tool_execution_start"
+                    | "tool_execution_update"
+                    | "tool_execution_end"
+                    | "auto_compaction_start"
+                    | "auto_compaction_end"
+            ) {
+                node.last_activity = Some(std::time::SystemTime::now());
+            }
             if record["type"] == "agent_start" {
                 node.settled = false;
             }
@@ -841,6 +901,8 @@ impl Pui {
                         self.agent_settings(source).permission
                     }),
                     status: "Queued".into(),
+                    last_activity: None,
+                    created: Some(std::time::SystemTime::now()),
                     children: Vec::new(),
                     stopped: false,
                     reported: false,
@@ -959,6 +1021,15 @@ impl Pui {
         self.agents.mail.values().any(|(target, _)| target == id)
     }
     pub(super) fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
+        if (id == self.agents.active && self.resource_reload.pending())
+            || self
+                .agents
+                .parked
+                .get(id)
+                .is_some_and(|c| c.resource_reload.pending())
+        {
+            return Err("Target resources are reloading; retry when ready.".into());
+        }
         if self.agents.exiting || self.agents.permission_changes.contains_key(id) {
             return Err("Target agent is exiting or changing access; retry when ready.".into());
         }
@@ -1018,6 +1089,7 @@ impl Pui {
             }
             if id == self.agents.active {
                 self.completion_run.cancel();
+                self.attention_observed.cancel();
                 if let Some(mut client) = self.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
@@ -1036,6 +1108,7 @@ impl Pui {
                 self.state.dialogs.clear();
             } else if let Some(chat) = self.agents.parked.get_mut(&id) {
                 chat.completion_run.cancel();
+                chat.attention_observed.cancel();
                 if let Some(mut client) = chat.client.take() {
                     let _ = client.send(protocol::command("clear_queue"));
                     let _ = client.send(protocol::command("abort"));
@@ -1406,6 +1479,8 @@ impl Pui {
                     access: "workspace".into(),
                     permission: None,
                     status: status.into(),
+                    last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: true,
@@ -1457,6 +1532,8 @@ impl Pui {
                     access: "read-only".into(),
                     permission: Some(settings::PermissionMode::Plan),
                     status: status.into(),
+                    last_activity: None,
+                    created: None,
                     children: Vec::new(),
                     stopped: false,
                     reported: status == "Idle",
@@ -1547,11 +1624,12 @@ impl Pui {
                 "Keep working",
                 "Stop all and quit",
             ).show(ctx, |ui| {
-                confirmations::note(ui, "Sessions and worktrees will be kept. Running terminal commands will stop, and queued messages will be lost. Active cron jobs and monitors resume when Pui reopens.");
+                confirmations::note(ui, "Sessions, worktrees and draft text will be kept. Interrupted chats are marked for review on reopening; tools and approvals are never replayed. Running terminal commands will stop, and queued messages and unsent attachments will be lost. Active cron jobs and monitors resume when Pui reopens.");
             });
             match choice {
                 Some(confirmations::Choice::Cancel) => self.agents.close_prompt = false,
                 Some(confirmations::Choice::Confirm) => {
+                    self.checkpoint_chats();
                     self.agents.exiting = true;
                     self.tasks.stop();
                     let roots: Vec<_> = self
@@ -1788,6 +1866,55 @@ mod tests {
             "Scoped reader"
         );
     }
+    #[test]
+    fn context_stats_refresh_each_turn_and_when_compaction_starts() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let (client, events, commands) = rpc::Client::stub_with_commands();
+        app.client = Some(client);
+        app.state.context_tokens = Some(459000.0);
+        app.state.context_window = 600000.0;
+        app.state.busy = true;
+        for event in [
+            json!({"type":"turn_end"}),
+            json!({"type":"compaction_start","reason":"threshold"}),
+        ] {
+            events.send(rpc::Event::Record(event)).unwrap();
+            app.poll_rpc();
+            assert_eq!(
+                commands.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
+                "get_session_stats"
+            );
+            assert!(commands.try_recv().is_err());
+        }
+        events
+            .send(rpc::Event::Record(
+                json!({"type":"response","command":"get_session_stats","success":true,
+            "data":{"contextUsage":{"tokens":510719,"contextWindow":600000}}}),
+            ))
+            .unwrap();
+        app.poll_rpc();
+        assert_eq!(app.state.context_tokens, Some(510719.0));
+        assert!(app.state.busy);
+        assert!(app.state.compacting);
+
+        app.state.compacting = false;
+        let status = json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-compaction",
+            "statusText":json!({"percent":85,"working":true}).to_string()});
+        events.send(rpc::Event::Record(status.clone())).unwrap();
+        app.poll_rpc();
+        assert_eq!(
+            commands.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
+            "get_session_stats"
+        );
+        events.send(rpc::Event::Record(status)).unwrap();
+        app.poll_rpc();
+        assert!(
+            commands.try_recv().is_err(),
+            "unchanged status must not poll stats"
+        );
+    }
+
     #[test]
     fn full_history_refreshes_after_settle_and_manual_compaction_without_losing_draft() {
         let ctx = egui::Context::default();

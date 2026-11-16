@@ -70,6 +70,7 @@ impl Pui {
             return Some("Open this worker in its owning Pui window to change its access.");
         }
         if !self.state.ready()
+            || self.resource_reload.pending()
             || self.loading_chat
             || self.history_pending.is_some()
             || self.interrupt.is_some()

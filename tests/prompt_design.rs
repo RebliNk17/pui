@@ -50,10 +50,14 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
     // ordinary page controls and the resizable diff viewer are not decision UI.
     for path in [
         "src/app/confirmations.rs",
+        "src/app/resource_reload.rs",
         "src/app/about.rs",
+        "src/app/attention.rs",
+        "src/app/attention/ui.rs",
         "src/app/updates.rs",
         "src/app/search.rs",
         "src/app/settings/resources/dialogs.rs",
+        "src/app/sidebar/sections/confirmation.rs",
     ] {
         let source = std::fs::read_to_string(root.join(path)).expect("read prompt source");
         assert_shared_controls(path, &source);

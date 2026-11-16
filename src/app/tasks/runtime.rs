@@ -65,12 +65,6 @@ impl Pui {
             self.tasks.error = Some(e);
             return;
         }
-        if t.dirty_source {
-            self.tasks.error = Some(
-                "Source has uncommitted changes. Prepare a clean source or continue regular development.".into(),
-            );
-            return;
-        }
         let id = t.id.clone();
         let source = t.source.clone();
         let head = t.base_head.clone();
@@ -84,9 +78,22 @@ impl Pui {
             self.tasks.block("Cannot locate worktree storage.");
             return;
         };
+        let receipt_home = domain::store::home();
         self.task_job(id.clone(), move || {
-            domain::workspace::prepare(&source, &id, &home, false, &head)
-                .map(|(p, i)| JobResult::Prepared(p, i))
+            let (path, isolated) = domain::workspace::prepare(&source, &id, &home, &head)?;
+            let receipt = if isolated {
+                receipt_home.as_ref().and_then(|home| {
+                    domain::apply::capture_receipt(&source, &path, &head, &id, home).ok()
+                })
+            } else {
+                None
+            };
+            let fingerprint = if receipt.is_some() {
+                domain::workspace::fingerprint(&path).ok()
+            } else {
+                None
+            };
+            Ok(JobResult::Prepared(path, isolated, receipt, fingerprint))
         });
     }
     pub(super) fn task_job_result(&mut self, result: Result<JobResult, String>) {
@@ -105,16 +112,15 @@ impl Pui {
                 if t.phase != Phase::Proposing {
                     return;
                 }
-                if i.dirty && t.initial_approved {
-                    self.tasks.block("Source has uncommitted changes. Workflow stopped before provider calls; no changes were copied or silently omitted. Continue regular development in this workspace, or prepare a clean source and ask again.");
-                    return;
-                }
                 let t = self.tasks.live_mut().unwrap();
                 t.dirty_source = i.dirty;
                 t.base_head = i.head;
-                self.task_launch(Role::Proposal);
+                self.task_environment(environment::Stage::Proposal);
             }
-            JobResult::Prepared(path, isolated) => {
+            JobResult::Prepared(path, isolated, receipt, fingerprint) => {
+                let Some(expected) = self.tasks.live_task().cloned() else {
+                    return;
+                };
                 let Some(t) = self.tasks.live_mut() else {
                     return;
                 };
@@ -123,18 +129,129 @@ impl Pui {
                 }
                 t.workspace = Some(path);
                 t.isolated = isolated;
-                t.phase = Phase::Building;
+                t.preparation_receipt = receipt;
+                t.prepared_fingerprint = fingerprint;
+                t.implementation_pending = isolated
+                    && t.preparation_receipt.is_some()
+                    && t.prepared_fingerprint.is_some()
+                    && t.approved.is_some()
+                    && t.attempts.is_empty()
+                    && !t.runs.iter().any(|r| r.role == Role::Builder);
+                if cfg!(any(target_os = "macos", target_os = "linux"))
+                    && isolated
+                    && !t.implementation_pending
+                {
+                    self.tasks.block("Prepared workspace is retained, but its safe apply baseline or source fingerprint could not be captured. Initial implementation was not started; inspect unsupported source files or task-storage availability before creating a new workflow.");
+                    return;
+                }
                 if !isolated {
                     t.note = "Non-Git task works in place. Other chats and external tools can touch these files; concurrent changes invalidate verification.".into();
                 }
-                t.attempts.push(Attempt::new(0));
-                self.tasks.save();
-                self.task_launch(Role::Builder);
+                self.task_persist_preparation(expected);
             }
+            JobResult::Environment(stage, report) => self.task_environment_result(stage, report),
             JobResult::Fingerprint(step, fingerprint) => self.task_fingerprinted(step, fingerprint),
         }
     }
+    pub(super) fn task_environment(&mut self, stage: environment::Stage) {
+        let Some(t) = self.tasks.live_task() else {
+            return;
+        };
+        let source = t.source.clone();
+        let workspace = t.workspace.clone().unwrap_or_else(|| source.clone());
+        let contract = t.approved.clone();
+        self.task_job(t.id.clone(), move || {
+            Ok(JobResult::Environment(
+                stage,
+                environment::inspect(&source, &workspace, contract.as_ref()),
+            ))
+        });
+    }
+    fn task_environment_result(&mut self, stage: environment::Stage, report: environment::Report) {
+        let Some(task) = self.tasks.live_mut() else {
+            return;
+        };
+        let expected = match stage {
+            environment::Stage::Proposal => Phase::Proposing,
+            environment::Stage::Implementation => Phase::Preparing,
+            environment::Stage::Checks | environment::Stage::Repair(_) => Phase::Checking,
+        };
+        if task.phase != expected {
+            return;
+        }
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
+        let Some(expected_record) = self.tasks.live_task().cloned() else {
+            return;
+        };
+        let Some(task) = self.tasks.live_mut() else {
+            return;
+        };
+        let note = report.note();
+        if !report.blockers.is_empty() {
+            self.tasks.block(note);
+            return;
+        }
+        task.note = format!("{}\n{}", task.note, note).trim().to_owned();
+        match stage {
+            environment::Stage::Proposal => {
+                self.tasks.save();
+                self.task_launch(Role::Proposal);
+            }
+            environment::Stage::Implementation => {
+                task.implementation_pending = false;
+                task.phase = Phase::Building;
+                task.attempts.push(Attempt::new(0));
+                self.task_persist_initial_builder(expected_record);
+            }
+            environment::Stage::Checks => {
+                self.tasks.save();
+                self.task_launch(Role::Checks);
+            }
+            environment::Stage::Repair(number) => {
+                // Preflight failures never create or consume a repair attempt.
+                task.attempts.last_mut().unwrap().invalidated = true;
+                task.attempts.push(Attempt::new(number));
+                task.phase = Phase::Building;
+                self.tasks.save();
+                self.task_launch(Role::Builder);
+            }
+        }
+    }
     pub(super) fn task_fingerprint(&mut self, step: FingerprintStep) {
+        if step == FingerprintStep::Revalidate && self.tasks.live.is_none() {
+            let Some(id) = self.tasks.current().map(|t| t.id.clone()) else {
+                return;
+            };
+            if self.tasks.revalidate_claim.is_none() {
+                if let Some(store) = &self.tasks.store {
+                    let (reply, rx) = mpsc::channel();
+                    if store
+                        .send(StoreCommand::ClaimCurrent {
+                            expected: Box::new(self.tasks.current().unwrap().clone()),
+                            reply,
+                        })
+                        .is_err()
+                    {
+                        self.state.notice = Some(
+                            "Workflow storage is unavailable; evidence was not changed.".into(),
+                        );
+                    } else {
+                        self.tasks.revalidate_claim = Some((id, rx));
+                    }
+                    return;
+                }
+                if !cfg!(test) {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+        self.task_fingerprint_owned(step);
+    }
+    pub(super) fn task_fingerprint_owned(&mut self, step: FingerprintStep) {
         if self.tasks.job.is_some() {
             return;
         }
@@ -152,6 +269,16 @@ impl Pui {
         });
     }
     fn task_fingerprinted(&mut self, step: FingerprintStep, fingerprint: String) {
+        if matches!(
+            step,
+            FingerprintStep::RecoveryBeforeChecks
+                | FingerprintStep::RecoveryAfterChecks
+                | FingerprintStep::RecoveryAfterReview
+                | FingerprintStep::InitialResumeBeforeBuilder
+        ) {
+            self.task_recovery_fingerprinted(step, &fingerprint);
+            return;
+        }
         let Some(t) = self.tasks.live_mut() else {
             return;
         };
@@ -162,11 +289,19 @@ impl Pui {
             t.attempts.last_mut().unwrap().fingerprint = Some(fingerprint);
             t.phase = Phase::Checking;
             self.tasks.save();
-            self.task_launch(Role::Checks);
+            self.task_environment(environment::Stage::Checks);
             return;
         }
         if t.latest().and_then(|a| a.fingerprint.as_ref()) != Some(&fingerprint) {
-            t.invalidate("Source changed since the candidate was captured. Evidence is stale; no acceptance or automatic repair was performed.");
+            let note = "Source changed since the candidate was captured. Evidence is stale; no acceptance or automatic repair was performed.";
+            if let Some(execution) = t.recoveries.last_mut() {
+                execution.state = domain::recovery::RecoveryState::Stale;
+                execution.note = note.into();
+                t.phase = Phase::Stale;
+                t.note = note.into();
+            } else {
+                t.invalidate(note);
+            }
             self.tasks.save();
             self.tasks.retire();
             self.tasks.live = None;
@@ -183,17 +318,34 @@ impl Pui {
             FingerprintStep::Revalidate => {
                 self.tasks.live = None;
             }
-            FingerprintStep::Candidate => unreachable!(),
+            FingerprintStep::Candidate
+            | FingerprintStep::RecoveryBeforeChecks
+            | FingerprintStep::RecoveryAfterChecks
+            | FingerprintStep::RecoveryAfterReview
+            | FingerprintStep::InitialResumeBeforeBuilder => unreachable!(),
         }
     }
     pub(super) fn task_launch(&mut self, role: Role) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
         if self.demo {
             return;
         }
         if self.task_budget_stop(0.0) {
             return;
         }
-        if self.tasks.live_task().is_some_and(|t| t.dynamic_routing) && role != Role::Checks {
+        if self.task_recovery_execution().is_some()
+            && !matches!(role, Role::Checks | Role::Verifier)
+        {
+            self.tasks
+                .block("Recovery cannot launch a builder or proposal.");
+            return;
+        }
+        if self.tasks.live_task().is_some_and(|t| t.dynamic_routing)
+            && role != Role::Checks
+            && self.task_recovery_execution().is_none()
+        {
             self.task_route(role);
             return;
         }
@@ -220,12 +372,27 @@ impl Pui {
         routing_for: Option<Role>,
         route_prompt: Option<String>,
     ) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
         if self.demo || self.task_budget_stop(0.0) {
+            return;
+        }
+        if !self.task_recovery_selection_allowed(role, &selection, routing_for) {
+            return;
+        }
+        if !self.task_validate_model_launch(role, &selection, routing_for.is_some()) {
             return;
         }
         let Some(t) = self.tasks.live_task() else {
             return;
         };
+        let recovery = self.task_recovery_execution().is_some();
+        if recovery && (!matches!(role, Role::Checks | Role::Verifier) || routing_for.is_some()) {
+            self.tasks
+                .block("Recovery cannot launch a builder, proposal, or router.");
+            return;
+        }
         let cwd = if role == Role::Proposal {
             t.source.clone()
         } else {
@@ -281,15 +448,21 @@ impl Pui {
                 }
                 .into(),
             ),
-            settings: self
-                .agent_settings(
-                    self.tasks
-                        .parents
-                        .get(&t.id)
-                        .map(String::as_str)
-                        .unwrap_or(&self.agents.active),
-                )
-                .payload(),
+            settings: {
+                let mut settings = self
+                    .agent_settings(
+                        self.tasks
+                            .parents
+                            .get(&t.id)
+                            .map(String::as_str)
+                            .unwrap_or(&self.agents.active),
+                    )
+                    .payload();
+                if recovery {
+                    settings["permission"] = "manual".into();
+                }
+                settings
+            },
         };
         #[cfg(not(test))]
         let mut client = rpc::Client::start_with(&cwd, None, self.ctx.clone(), launch);
@@ -327,6 +500,9 @@ impl Pui {
             selection: Some(selection),
             routing_for,
         });
+        if let Some(execution) = self.task_recovery_execution_mut() {
+            execution.runs.push(run.clone());
+        }
         self.tasks.processes.push(Process {
             run: run.clone(),
             role,
@@ -339,13 +515,7 @@ impl Pui {
             routing_for,
             route_prompt,
         });
-        if !self.tasks.open || self.tasks.selected_run.is_some() {
-            self.tasks.selected_run = if role == Role::Checks {
-                None
-            } else {
-                Some(run)
-            };
-        }
+        // New stages update evidence, not the user's selected tab or log.
         self.tasks.save();
         self.ctx.request_repaint_after(DEADLINE);
     }
@@ -364,7 +534,7 @@ impl Pui {
                 t.objective,
                 t.constraints,
                 contract,
-                serde_json::to_string(t.latest().unwrap()).unwrap()
+                serde_json::to_string(&t.current_evidence().unwrap()).unwrap()
             );
         }
         let prior = t
@@ -380,13 +550,17 @@ impl Pui {
         )
     }
     fn task_send_work(&mut self, index: usize) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
         if self.task_budget_stop(0.0) {
             return;
         }
         let role = self.tasks.processes[index].role;
         let command = if role == Role::Checks {
             let t = self.tasks.live_task().unwrap();
-            let checks = &t.latest().unwrap().checks;
+            let evidence = t.current_evidence().unwrap();
+            let checks = &evidence.checks;
             let next = t.approved.as_ref().unwrap().criteria.iter().find(|c| {
                 !c.command.trim().is_empty() && !checks.iter().any(|r| r.criterion == c.id)
             });
@@ -406,7 +580,12 @@ impl Pui {
                     r.summary="Approved commands executed; see Results & evidence for exit status and output.".into();
                 }
                 self.tasks.save();
-                self.task_fingerprint(FingerprintStep::AfterChecks);
+                let step = if self.task_recovery_execution().is_some() {
+                    FingerprintStep::RecoveryAfterChecks
+                } else {
+                    FingerprintStep::AfterChecks
+                };
+                self.task_fingerprint(step);
                 return;
             };
             json!({"type":"bash","command":next.command,"excludeFromContext":true})
@@ -599,7 +778,12 @@ impl Pui {
         if matching && pending.as_ref().is_some_and(|p| p.command == "bash") {
             let data = &record["data"];
             let t = self.tasks.live_mut().unwrap();
-            let a = t.attempts.last_mut().unwrap();
+            let recovery = t.recoveries.last_mut().filter(|r| r.state.active());
+            let checks = if let Some(execution) = recovery {
+                &mut execution.checks
+            } else {
+                &mut t.attempts.last_mut().unwrap().checks
+            };
             let c = t
                 .approved
                 .as_ref()
@@ -607,7 +791,7 @@ impl Pui {
                 .criteria
                 .iter()
                 .find(|c| {
-                    !c.command.trim().is_empty() && !a.checks.iter().any(|r| r.criterion == c.id)
+                    !c.command.trim().is_empty() && !checks.iter().any(|r| r.criterion == c.id)
                 })
                 .unwrap();
             let raw = protocol::string(data, "output");
@@ -616,7 +800,7 @@ impl Pui {
             if truncated {
                 output.push_str("\n[Output truncated in task evidence]");
             }
-            a.checks.push(Check {
+            checks.push(Check {
                 criterion: c.id.clone(),
                 command: c.command.clone(),
                 exit_code: data["exitCode"].as_i64(),
@@ -625,7 +809,17 @@ impl Pui {
                 cancelled: data["cancelled"] == true,
                 duration_ms: pending.unwrap().started.elapsed().as_millis() as u64,
             });
+            let last = checks.last().unwrap();
+            let environment_blocker = if last.cancelled || last.exit_code.is_none() {
+                Some("Check was cancelled or returned no exit status. Outcome may be incomplete; no subsequent command, verifier, repair, or replay was started.".into())
+            } else {
+                environment::failed_requirement(last)
+            };
             self.tasks.save();
+            if let Some(reason) = environment_blocker {
+                self.tasks.block(reason);
+                return;
+            }
             self.task_send_work(i);
             return;
         }
@@ -749,15 +943,21 @@ impl Pui {
                     .map(|_| r)
             }) {
                 Ok(r) => {
-                    self.tasks
-                        .live_mut()
-                        .unwrap()
-                        .attempts
-                        .last_mut()
-                        .unwrap()
-                        .review = Some(r);
+                    let step = if let Some(execution) = self.task_recovery_execution_mut() {
+                        execution.review = Some(r);
+                        FingerprintStep::RecoveryAfterReview
+                    } else {
+                        self.tasks
+                            .live_mut()
+                            .unwrap()
+                            .attempts
+                            .last_mut()
+                            .unwrap()
+                            .review = Some(r);
+                        FingerprintStep::AfterReview
+                    };
                     self.tasks.save();
-                    self.task_fingerprint(FingerprintStep::AfterReview);
+                    self.task_fingerprint(step);
                 }
                 Err(e) => self.tasks.block(e),
             },
@@ -765,6 +965,11 @@ impl Pui {
         }
     }
     pub(super) fn task_finish_attempt(&mut self) {
+        if self.task_recovery_execution().is_some() {
+            self.tasks
+                .block("Recovery cannot resume implementation or consume repair rounds.");
+            return;
+        }
         let t = self.tasks.live_mut().unwrap();
         let c = t.approved.as_ref().unwrap();
         let a = t.latest().unwrap();
@@ -795,14 +1000,24 @@ impl Pui {
             return;
         }
         let number = a.number + 1;
-        t.attempts.last_mut().unwrap().invalidated = true;
-        t.attempts.push(Attempt::new(number));
-        t.phase = Phase::Building;
+        t.phase = Phase::Checking;
         self.tasks.save();
         self.tasks.retire();
-        self.task_launch(Role::Builder);
+        self.task_environment(environment::Stage::Repair(number));
     }
     pub(super) fn task_answer(&mut self, run: &str, id: &str, mut response: Value) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
+        if !self.tasks.open
+            || self.tasks.selected != self.tasks.live
+            || !self
+                .tasks
+                .live_task()
+                .is_some_and(|task| task.runs.iter().any(|r| r.id == run))
+        {
+            return;
+        }
         let Some(p) = self
             .tasks
             .processes
@@ -825,13 +1040,19 @@ impl Pui {
         self.tasks.questions = Default::default();
     }
     pub(in crate::app) fn task_apply_settings(&mut self) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
         let owner = self
             .tasks
             .live
             .as_ref()
             .and_then(|id| self.tasks.parents.get(id))
             .unwrap_or(&self.agents.active);
-        let settings = self.agent_settings(owner).payload();
+        let mut settings = self.agent_settings(owner).payload();
+        if self.task_recovery_execution().is_some() {
+            settings["permission"] = "manual".into();
+        }
         for p in &mut self.tasks.processes {
             if !p.ended {
                 let _ = p

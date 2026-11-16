@@ -2,6 +2,7 @@
 use super::*;
 use std::{collections::BTreeMap, path::Path};
 mod dialogs;
+mod engineering;
 #[cfg(test)]
 mod tests;
 mod transport;
@@ -158,6 +159,7 @@ struct Form {
     exposure: usize,
     advanced: String,
     edit_id: Option<String>,
+    engineering_selection: usize,
     error: Option<String>,
 }
 #[derive(Default)]
@@ -244,7 +246,7 @@ impl Resources {
                     self.review = None;
                     self.catalog = None;
                     self.previews.clear();
-                    self.notice = Some(if value["complete"] == true { "Configuration saved. Reopen Pui to reliably load changes; running agents were not reloaded." } else { "Stopped after an unsuccessful operation. Earlier operations may have completed. Refresh and review remaining drafts; nothing is retried automatically." }.into());
+                    self.notice = Some(if value["complete"] == true { "Configuration saved. In each existing idle chat, use /reload or Reload chat resources… in skill suggestions to load changes. Other chats are unchanged." } else { "Stopped after an unsuccessful operation. Earlier operations may have completed. Refresh and review remaining drafts; nothing is retried automatically." }.into());
                 }
             },
         }

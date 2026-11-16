@@ -3,138 +3,47 @@ use super::*;
 impl Pui {
     pub(in crate::app) fn task_panel(&mut self, ctx: &egui::Context) {
         let colors = theme::palette(ctx);
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(colors.bg))
-            .show(ctx, |ui| {
-                egui::TopBottomPanel::top("task-conversation-header")
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(colors.bg)).show(ctx, |ui| {
+            egui::TopBottomPanel::top("task-conversation-header")
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 10)))
+                .show_inside(ui, |ui| self.task_header(ui));
+            let Some(task) = self.tasks.current().cloned() else { return; };
+            let linked = self.task_in_chat(&task);
+            if linked {
+                egui::TopBottomPanel::bottom("composer-v2")
                     .show_separator_line(false)
-                    .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 10)))
-                    .show_inside(ui, |ui| self.task_header(ui));
-                let Some(task) = self.tasks.current().cloned() else { return; };
-                if self.tasks.selected_run.is_some() {
-                    self.task_run(ui, &task);
-                    return;
-                }
-                let linked = self.task_in_chat(&task);
-                if linked {
-                    egui::TopBottomPanel::bottom("composer-v2")
-                        .show_separator_line(false)
-                        .frame(egui::Frame::new().fill(colors.bg).inner_margin(egui::Margin { left: 24, right: 24, top: 8, bottom: 3 }))
-                        .show_inside(ui, |ui| {
-                            let width = (ui.available_width() - 24.0).min(760.0);
-                            let padding = ((ui.available_width() - width) / 2.0).max(0.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(padding);
-                                ui.vertical(|ui| {
-                                    ui.set_width(width);
-                                    ui.label(theme::small(ui, "Chat with Pi · ask the agent to start a new workflow for a different scope"));
-                                    self.composer(ui, ctx);
-                                });
+                    .frame(egui::Frame::new().fill(colors.bg).inner_margin(egui::Margin { left: 24, right: 24, top: 8, bottom: 3 }))
+                    .show_inside(ui, |ui| {
+                        let width = (ui.available_width() - 24.0).min(760.0);
+                        let padding = ((ui.available_width() - width) / 2.0).max(0.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(padding);
+                            ui.vertical(|ui| {
+                                ui.set_width(width);
+                                ui.label(theme::small(ui, "Chat with Pi · same conversation, separate tool permissions"));
+                                self.composer(ui, ctx);
                             });
                         });
-                }
-                // Keep Pi messages untouched. Workflow progress is a live footer in
-                // the same conversation scroll, never synthetic provider messages.
-                let messages = if linked { self.state.messages.clone() } else { vec![] };
-                let model = self.state.model.clone();
-                let thinking = self.state.thinking.clone();
-                let session = self.state.session_file.clone().unwrap_or_else(|| "new".into());
-                let mut transcript = if linked { std::mem::take(&mut self.transcript) } else { std::mem::take(&mut self.tasks.transcript) };
-                transcript.task_output = false;
-                transcript.message_actions_enabled = linked && self.history_ready();
-                transcript.pending_messages = if linked { self.state.pending_messages.clone() } else { vec![] };
-                transcript.progress = if linked { self.transcript_progress() } else { None };
-                transcript.show_with_footer(ui, &messages, &model, &thinking, linked && !self.state.ready(), if linked { &session } else { &task.id }, |ui| self.task_content(ui));
-                if linked { self.transcript = transcript; } else { self.tasks.transcript = transcript; }
-            });
-        self.history_action();
+                    });
+            }
+            // The work item has one scroll and one identity across all tabs.
+            // Worker logs render inside it; they never replace the chat composer.
+            egui::ScrollArea::vertical().id_salt(("work-item", &task.id))
+                .auto_shrink([false, false]).show(ui, |ui| {
+                    let width = ui.available_width().min(760.0);
+                    let pad = ((ui.available_width() - width) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(pad);
+                        ui.vertical(|ui| {
+                            ui.set_width(width);
+                            self.task_content(ui);
+                        });
+                    });
+                });
+        });
     }
 
-    fn task_run(&mut self, ui: &mut egui::Ui, task: &Task) {
-        let Some(run) = self.tasks.selected_run.clone() else {
-            return;
-        };
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("← Workflow & results").clicked() {
-                self.tasks.selected_run = None;
-            }
-            if let Some(record) = task.runs.iter().find(|r| r.id == run) {
-                ui.label(RichText::new(record.role.label()).strong());
-            }
-        });
-        self.task_dialog(ui);
-        let state = self
-            .tasks
-            .processes
-            .iter()
-            .find(|p| p.run == run)
-            .map(|p| &p.state)
-            .or_else(|| self.tasks.histories.get(&run))
-            .cloned();
-        if let Some(state) = state {
-            if !self.tasks.processes.iter().any(|p| p.run == run) {
-                ui.label(theme::small(ui, "Saved transcript · bounded local preview"));
-            }
-            self.tasks.transcript.task_output = task
-                .runs
-                .iter()
-                .find(|r| r.id == run)
-                .is_some_and(|r| matches!(r.role, Role::Proposal | Role::Verifier));
-            let selection = task
-                .runs
-                .iter()
-                .find(|r| r.id == run)
-                .and_then(|r| r.selection.as_ref());
-            self.tasks.transcript.show(
-                ui,
-                &state.messages,
-                selection.map(|s| s.model.as_str()).unwrap_or(&task.model),
-                selection
-                    .map(|s| s.thinking.as_str())
-                    .unwrap_or(&task.thinking),
-                !state.ready(),
-                &run,
-            );
-        } else {
-            if self.tasks.preview.is_none() {
-                if let Some(path) = task
-                    .runs
-                    .iter()
-                    .find(|r| r.id == run)
-                    .and_then(|r| r.session.clone())
-                {
-                    let (tx, rx) = mpsc::channel();
-                    let ctx = ui.ctx().clone();
-                    self.tasks.preview = Some((run.clone(), rx));
-                    std::thread::spawn(move || {
-                        let _ = tx.send(crate::history::load(&path));
-                        ctx.request_repaint();
-                    });
-                }
-            }
-            egui::ScrollArea::vertical()
-                .id_salt(("saved-task-run", &run))
-                .show(ui, |ui| {
-                    if let Some(record) = task.runs.iter().find(|r| r.id == run) {
-                        if !matches!(record.role, Role::Proposal | Role::Verifier)
-                            || !crate::task_output::show(ui, &record.summary)
-                        {
-                            ui.add(egui::Label::new(&record.summary).selectable(true).wrap());
-                        }
-                        if let Some(path) = &record.session {
-                            ui.add(
-                                egui::Label::new(theme::small(
-                                    ui,
-                                    format!("Full Pi transcript: {}", path.display()),
-                                ))
-                                .selectable(true)
-                                .wrap(),
-                            );
-                        }
-                    }
-                });
-        }
-    }
     pub(super) fn task_routing_details(&self, ui: &mut egui::Ui, task: &Task) {
         if task.dynamic_routing || task.runs.iter().any(|r| r.selection.is_some()) {
             crate::section::Section::new("Model choices & routing reasons").id_salt((&task.id, "routing-details")).summary("Per-stage models, reported cost and selection rationale").icon(Icon::Sliders).show(ui,|ui| {
@@ -150,14 +59,36 @@ impl Pui {
         }
     }
     pub(super) fn task_dialog(&mut self, ui: &mut egui::Ui) {
+        if !self.task_recovery_runtime_guard() {
+            return;
+        }
+        // Approval belongs to the displayed workflow, never to an unrelated
+        // history page that happens to be open while another workflow runs.
+        if !self.tasks.open
+            || self.tasks.selected.is_none()
+            || self.tasks.selected != self.tasks.live
+        {
+            return;
+        }
+        let Some(task) = self.tasks.current() else {
+            return;
+        };
         let Some((run, dialog)) = self
             .tasks
             .processes
             .iter()
+            .filter(|p| !p.ended && task.runs.iter().any(|r| r.id == p.run))
             .find_map(|p| p.state.dialogs.front().map(|d| (p.run.clone(), d.clone())))
         else {
             return;
         };
+        let objective = task.objective.clone();
+        let workspace = task
+            .workspace
+            .as_ref()
+            .unwrap_or(&task.source)
+            .display()
+            .to_string();
         let id = protocol::string(&dialog, "id");
         if self.tasks.current_dialog != id {
             self.tasks.current_dialog = id.into();
@@ -177,6 +108,13 @@ impl Pui {
         }
         let mut answer = None;
         prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    format!("Workflow: {objective}\nWorkspace: {workspace}"),
+                ))
+                .wrap(),
+            );
             prompt_ui::style(ui);
             ui.label(
                 RichText::new(format!(

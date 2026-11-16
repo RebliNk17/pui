@@ -8,7 +8,7 @@ mod tests;
 impl Pui {
     pub(in crate::app) fn task_workflow(&mut self, ui: &mut egui::Ui) {
         let colors = theme::palette(ui.ctx());
-        let Some(task) = self.active_workflow().cloned() else {
+        let Some(task) = self.inspector_workflow().cloned() else {
             return;
         };
         ui.label(theme::caption(
@@ -139,7 +139,11 @@ impl Pui {
                 } else {
                     run.map(|r| r.id.clone())
                 };
-                self.open_task_from_board(task.id.clone(), run);
+                if role == Role::Checks {
+                    self.open_work_item_tab(task.id.clone(), work_item::Tab::Evidence);
+                } else {
+                    self.open_task_from_board(task.id.clone(), run);
+                }
             }
         }
         if step(
@@ -152,7 +156,7 @@ impl Pui {
         )
         .clicked()
         {
-            self.open_task_from_board(task.id.clone(), None);
+            self.open_work_item_tab(task.id.clone(), work_item::Tab::Evidence);
         }
         self.task_routing_details(ui, &task);
     }

@@ -220,7 +220,7 @@ impl View {
         let colors = theme::palette(ui.ctx());
         let card_id = egui::Id::new(("question-card", id));
         let edit_id = egui::Id::new(("question-custom", id, self.page));
-        if self.focus && !self.editing {
+        if self.focus && !self.editing && keyboard {
             ui.memory_mut(|m| m.request_focus(card_id));
             self.focus = false;
         }
@@ -388,12 +388,12 @@ impl View {
                                 ui,
                                 &mut self.drafts[self.page],
                                 edit_id,
-                                self.focus,
+                                self.focus && keyboard,
                             );
                             if edit.changed() {
                                 self.answers[self.page] = None;
                             }
-                            if self.focus {
+                            if self.focus && keyboard {
                                 edit.request_focus();
                                 self.focus = false;
                             }

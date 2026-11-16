@@ -4,6 +4,7 @@ mod activity;
 mod app;
 mod chromium;
 mod context;
+mod file_watch;
 mod history;
 mod icons;
 mod inspector;
@@ -15,6 +16,7 @@ mod rpc;
 mod runtime;
 mod section;
 mod sessions;
+mod svg_preview;
 mod task_output;
 mod tasks;
 mod terminal;
@@ -31,11 +33,18 @@ pub struct Options {
     pub demo: bool,
     pub demo_languages: bool,
     pub demo_markdown: bool,
+    pub demo_quote_selection: bool,
+    pub demo_context_chips: bool,
     pub demo_expanded: bool,
     pub demo_collapsed: bool,
     pub demo_theater: bool,
     pub demo_model_picker: bool,
+    pub demo_effort_picker: bool,
     pub demo_search: bool,
+    pub demo_search_attention: bool,
+    pub demo_quick_open: bool,
+    pub demo_sections: bool,
+    pub demo_view_menu: bool,
     pub demo_compacting: bool,
     pub demo_working: bool,
     pub demo_settings: bool,
@@ -47,14 +56,40 @@ pub struct Options {
     pub demo_questions: bool,
     pub demo_question_designs: bool,
     pub demo_agents: bool,
+    pub demo_sidebar_density: bool,
     pub demo_kanban: bool,
     pub demo_automation: bool,
     pub demo_task: bool,
     pub demo_task_proposal: bool,
     pub demo_files: bool,
+    pub demo_table_grid: bool,
+    pub demo_side_chat: bool,
+    pub demo_table_projection: bool,
+    pub demo_inline_review: bool,
+    pub demo_table_headerless: bool,
+    pub demo_preview_budget: bool,
+    pub demo_preview_queue: bool,
+    pub demo_source_context: bool,
     pub demo_changes: bool,
+    pub demo_branches: bool,
+    pub demo_git_history: bool,
+    pub demo_history_filter: bool,
+    pub demo_commit_detail: bool,
+    pub demo_diff_context: bool,
+    pub demo_diff_hunks: bool,
+    pub demo_diff_wrap: bool,
+    pub demo_review_files: bool,
+    pub demo_review_comments: bool,
+    pub demo_review_note_delete: bool,
+    pub demo_review_note_edit: bool,
+    pub demo_review_note_files: bool,
+    pub demo_git_files: bool,
     pub demo_terminal: bool,
+    pub demo_terminal_tabs: bool,
+    pub demo_terminal_context: bool,
     pub demo_notifications: bool,
+    pub demo_attention: bool,
+    pub demo_attention_dock: bool,
     pub open: Option<String>,
     pub browser_device: Option<String>,
     pub browser_console: bool,
@@ -97,6 +132,9 @@ fn main() -> eframe::Result {
         );
         return Ok(());
     }
+    if svg_preview::worker_requested() {
+        std::process::exit(svg_preview::worker_main());
+    }
     let mut options = Options::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -105,6 +143,22 @@ fn main() -> eframe::Result {
             "--demo-search" => {
                 options.demo = true;
                 options.demo_search = true;
+            }
+            "--demo-search-attention" => {
+                options.demo = true;
+                options.demo_search_attention = true;
+            }
+            "--demo-quick-open" => {
+                options.demo = true;
+                options.demo_quick_open = true;
+            }
+            "--demo-sections" => {
+                options.demo = true;
+                options.demo_sections = true;
+            }
+            "--demo-view-menu" => {
+                options.demo = true;
+                options.demo_view_menu = true;
             }
             "--demo-languages" => {
                 options.demo = true;
@@ -122,6 +176,47 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_files = true;
             }
+            "--demo-preview-queue" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_preview_queue = true;
+            }
+            "--demo-preview-budget" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_preview_budget = true;
+            }
+            "--demo-side-chat" => {
+                options.demo = true;
+                options.demo_side_chat = true;
+            }
+            "--demo-table-grid" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_table_grid = true;
+            }
+            "--demo-table-projection" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_table_grid = true;
+                options.demo_table_projection = true;
+            }
+            "--demo-inline-review" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_inline_review = true;
+            }
+            "--demo-table-headerless" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_table_grid = true;
+                options.demo_table_headerless = true;
+            }
+            "--demo-source-context" => {
+                options.demo = true;
+                options.demo_files = true;
+                options.demo_source_context = true;
+            }
             "--demo-confirmation" => {
                 options.demo = true;
                 options.demo_confirmation = true;
@@ -130,17 +225,78 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_notifications = true;
             }
+            "--demo-attention" | "--demo-attention-dock" => {
+                options.demo = true;
+                options.demo_attention = true;
+                options.demo_attention_dock |= arg == "--demo-attention-dock";
+            }
             "--demo-send-now" => {
                 options.demo = true;
                 options.demo_send_now = true;
+            }
+            "--demo-terminal-tabs" => {
+                options.demo = true;
+                options.demo_terminal = true;
+                options.demo_terminal_tabs = true;
             }
             "--demo-terminal" => {
                 options.demo = true;
                 options.demo_terminal = true;
             }
+            "--demo-terminal-context" => {
+                options.demo = true;
+                options.demo_terminal = true;
+                options.demo_terminal_context = true;
+            }
             "--demo-changes" => {
                 options.demo = true;
                 options.demo_changes = true;
+            }
+            "--demo-branches"
+            | "--demo-git-history"
+            | "--demo-commit-detail"
+            | "--demo-history-filter" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_branches = true;
+                options.demo_git_history |= arg != "--demo-branches";
+                options.demo_commit_detail |= arg == "--demo-commit-detail";
+                options.demo_history_filter |= arg == "--demo-history-filter";
+            }
+            "--demo-git-files" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_git_files = true;
+            }
+            "--demo-review-files" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_review_files = true;
+            }
+            "--demo-review-comments"
+            | "--demo-review-note-delete"
+            | "--demo-review-note-edit"
+            | "--demo-review-note-files" => {
+                options.demo = true;
+                options.demo_changes = true;
+                options.demo_review_files = true;
+                options.demo_review_comments = true;
+                options.demo_review_note_delete |= arg == "--demo-review-note-delete";
+                options.demo_review_note_edit |= arg == "--demo-review-note-edit";
+                options.demo_review_note_files |= arg == "--demo-review-note-files";
+            }
+            "--demo-diff-wrap" => {
+                options.demo = true;
+                options.demo_diff_hunks = true;
+                options.demo_diff_wrap = true;
+            }
+            "--demo-diff-hunks" => {
+                options.demo = true;
+                options.demo_diff_hunks = true;
+            }
+            "--demo-diff-context" => {
+                options.demo = true;
+                options.demo_diff_context = true;
             }
             "--demo-theater" => {
                 options.demo = true;
@@ -163,10 +319,19 @@ fn main() -> eframe::Result {
                 options.demo_task = true;
                 options.demo_task_proposal = true;
             }
+            "--demo-sidebar-density" => {
+                options.demo = true;
+                options.demo_agents = true;
+                options.demo_sidebar_density = true;
+            }
             "--demo-agents" => {
                 options.demo = true;
                 options.demo_agents = true;
                 options.demo_model_picker = true;
+            }
+            "--demo-effort-picker" => {
+                options.demo = true;
+                options.demo_effort_picker = true;
             }
             "--demo-model-picker" => {
                 options.demo = true;
@@ -205,6 +370,14 @@ fn main() -> eframe::Result {
             "--demo-markdown" => {
                 options.demo = true;
                 options.demo_markdown = true;
+            }
+            "--demo-context-chips" => {
+                options.demo = true;
+                options.demo_context_chips = true;
+            }
+            "--demo-quote-selection" => {
+                options.demo = true;
+                options.demo_quote_selection = true;
             }
             "--demo-working" => {
                 options.demo = true;

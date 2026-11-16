@@ -53,7 +53,7 @@ validate:macos:
     - python3 -m unittest discover -s tests -p 'test_*.py' -v
     - cargo fmt --check
     - cargo clippy --locked --all-targets -- -D warnings
-    - cargo test --locked
+    - bash scripts/test-rust.sh
     - node --test tests/*.test.mjs
 
 build:macos:

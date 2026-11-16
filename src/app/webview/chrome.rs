@@ -52,7 +52,7 @@ pub(in crate::app) fn label_button(
     selected: bool,
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
-    ui.add(
+    let response = ui.add(
         egui::Button::new(RichText::new(label).size(11.0).color(if selected {
             colors.text
         } else {
@@ -70,7 +70,12 @@ pub(in crate::app) fn label_button(
         })
         .corner_radius(6)
         .min_size(Vec2::new(32.0, 26.0)),
-    )
+    );
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new(("browser-control", label)), response.rect);
+    });
+    response
 }
 
 pub(in crate::app) fn divider(ui: &mut egui::Ui) {
@@ -183,6 +188,7 @@ pub(in crate::app) fn address(
 ) -> bool {
     let colors = theme::palette(ui.ctx());
     let available = ui.available_width();
+    let mut submitted = false;
     let response = egui::Frame::new()
         .fill(colors.surface)
         .stroke(Stroke::new(1.0, colors.border))
@@ -198,20 +204,33 @@ pub(in crate::app) fn address(
                     if page { Icon::Globe } else { Icon::File },
                     colors.dim,
                 );
+                let id = ui.make_persistent_id("viewer-address-input");
+                // Consume before the composer can interpret Enter as a send.
+                submitted = ui.memory(|memory| memory.has_focus(id))
+                    && ui.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    });
                 ui.add_sized(
                     [(available - 49.0).max(32.0), 20.0],
                     egui::TextEdit::singleline(address)
                         .frame(false)
                         .font(FontId::proportional(12.0))
                         .hint_text("Open a URL or file path…")
-                        .id_salt("viewer-address-input"),
+                        .id(id),
                 )
             })
             .inner
         })
         .inner;
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("browser-address-editor"),
+            (response.id, response.rect),
+        )
+    });
     if focus {
         response.request_focus();
     }
-    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+    submitted
 }

@@ -74,6 +74,10 @@ impl Pui {
                 && !self.draft_images.gallery.is_open()
                 && !self.settings_open
                 && !self.model_picker_open
+                && !self.effort_picker_open
+                && !self.changes.local_comment_editor_owns_keyboard(ui.ctx())
+                && !self.files.table_export_owns_keyboard(ui.ctx())
+                && !self.files.svg_owns_keyboard(ui.ctx())
                 && prompt_ui::keyboard_available(ui);
             if let Some(response) = self
                 .questions
@@ -206,7 +210,7 @@ impl Pui {
                 if waiting {
                     ui.label(theme::small(ui, "Waiting for the owning window…"));
                 }
-                if !self.transcript.gallery.is_open() && !self.draft_images.gallery.is_open() && prompt_ui::keyboard_available(ui) {
+                if !self.model_picker_open && !self.effort_picker_open && !self.transcript.gallery.is_open() && !self.draft_images.gallery.is_open() && prompt_ui::keyboard_available(ui) {
                     if let Some(permission) = &permission {
                         // Consume even during mirror acknowledgment so a repeated
                         // approval shortcut cannot unexpectedly send the draft.
@@ -219,6 +223,8 @@ impl Pui {
                     }
                 }
                 if !waiting
+                    && !self.model_picker_open
+                    && !self.effort_picker_open
                     && prompt_ui::keyboard_available(ui)
                     && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
                 {

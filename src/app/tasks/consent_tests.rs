@@ -1,4 +1,6 @@
 use super::*;
+#[path = "consent_policy_tests.rs"]
+mod policy_tests;
 
 fn app() -> Pui {
     let mut app = Pui::new(
@@ -11,10 +13,53 @@ fn app() -> Pui {
     app.demo = false;
     app.ultracode_ready = true;
     app.state.provider = "fixture-provider".into();
-    app.state.model = "fixture-model".into();
+    app.state.model = "claude-haiku-5-5".into();
+    app.state.thinking = "high".into();
+    app.state.models = vec![crate::protocol::Model {
+        id: "claude-haiku-5-5".into(),
+        name: "Fixture Haiku".into(),
+        provider: "fixture-provider".into(),
+        context_window: 200000,
+        input_cost: 0.1,
+        output_cost: 0.5,
+    }];
     app.client = Some(rpc::Client::stub());
     app
 }
+#[test]
+fn unsupported_catalog_is_rejected_before_consent_or_task_creation() {
+    let mut app = app();
+    let (client, _, replies) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    app.state.models.clear();
+    app.control_request(&request("unsupported"));
+    assert!(app.state.dialogs.is_empty());
+    assert!(app.tasks.requests.is_empty());
+    assert!(app.tasks.records.is_empty());
+    assert!(app.tasks.job.is_none());
+    let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+    let result: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("no workflow was created")
+    );
+}
+
+#[test]
+fn catalog_change_after_question_prevents_workflow_creation() {
+    let mut app = app();
+    app.control_request(&request("ask"));
+    app.state.models.clear();
+    assert!(app.workflow_answer(
+        &json!({"type":"extension_ui_response","id":"ask","value":"Use workflow"})
+    ));
+    assert!(app.tasks.records.is_empty());
+    assert!(app.tasks.job.is_none());
+    assert!(app.tasks.requests.is_empty());
+}
+
 fn request(id: &str) -> Value {
     json!({"type":"extension_ui_request","method":"input","title":"Pui agent control","id":id,
         "placeholder":json!({"action":"workflow_request","id":id,"objective":"Preserve keyboard navigation","reason":"Separate checks and review help catch focus regressions.","approved":true}).to_string()})
@@ -142,19 +187,27 @@ fn initial_question_is_inline_and_readable_in_both_themes_without_setup_actions(
     }
 }
 #[test]
-fn initial_approval_does_not_silently_drop_dirty_source_changes() {
+fn initial_approval_allows_dirty_source_for_an_isolated_snapshot() {
     let mut app = app();
     app.control_request(&request("ask"));
     app.workflow_answer(&json!({"type":"extension_ui_response","id":"ask","value":"Use workflow"}));
     app.tasks.job = None;
+    // Pin the fixture model: routing policy has its own coverage and needs a catalog.
+    app.tasks.current_mut().unwrap().dynamic_routing = false;
     app.task_job_result(Ok(JobResult::Inspected(domain::workspace::Inspection {
         root: app.prefs.cwd.clone(),
         git: true,
         dirty: true,
         head: "head".into(),
     })));
-    assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
-    assert!(app.tasks.processes.is_empty());
+    let job = app.tasks.job.take().expect("read-only prerequisite job");
+    app.task_job_result(job.rx.recv_timeout(Duration::from_secs(10)).unwrap());
+    let task = app.tasks.current().unwrap();
+    assert_eq!(task.phase, Phase::Proposing);
+    assert!(task.dirty_source);
+    assert_eq!(task.base_head, "head");
+    assert_eq!(app.tasks.processes.len(), 1);
+    app.tasks.stop();
     app.finish_workflow_requests();
     assert!(app.tasks.requests.is_empty());
 }

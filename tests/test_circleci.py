@@ -49,15 +49,21 @@ done
             result = subprocess.run(["/bin/bash", str(root / "scripts/ci/circle-macos.sh")], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = log.read_text()
-            lock_test = "app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery"
-            self.assertIn(f"cargo test --locked -- --skip {lock_test}", calls)
-            self.assertIn(f"cargo test --locked --bin pui {lock_test} -- --exact", calls)
-            self.assertEqual(sum(line.startswith("cargo test ") for line in calls.splitlines()), 2)
+            self.assertIn("bash scripts/test-rust.sh", calls)
+            self.assertIn("-p test_*.py", calls)
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
             self.assertIn("npm ci --prefix", calls)
             self.assertIn("--ignore-scripts", calls)
             self.assertNotIn("publish", calls)
             self.assertNotIn("fake-secret", calls)
+
+    def test_complete_rust_runner_keeps_all_contention_groups_and_restart_test(self):
+        runner = (ROOT / "scripts/test-rust.sh").read_text()
+        self.assertIn('--skip "$lock_test"', runner)
+        self.assertIn('"$lock_test" -- --exact --test-threads=1', runner)
+        for group in ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::"):
+            self.assertIn("--skip " + group, runner)
+            self.assertIn(group + " -- --test-threads=1", runner)
 
     def test_setup_skips_homebrew_rustup_postinstall_and_selects_exact_toolchain(self):
         with tempfile.TemporaryDirectory() as temp:

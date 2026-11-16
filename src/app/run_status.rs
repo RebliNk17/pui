@@ -199,6 +199,11 @@ impl Pui {
                 Some("Wait for the interruption to finish. Your message was kept.".into());
             return false;
         }
+        if self.resource_reload.pending() || self.resource_reload.confirming() {
+            self.state.error =
+                Some("Finish reloading resources before sending. Your message was kept.".into());
+            return false;
+        }
         if self.history_pending.is_some() || self.restoring_code() {
             self.state.error =
                 Some("Wait for history navigation before sending. Your message was kept.".into());
@@ -256,6 +261,7 @@ impl Pui {
                     .or_default()
                     .insert(0, delivery.message);
             } else if self.draft.is_empty() {
+                self.context_chips.clear();
                 self.draft = delivery.message.text;
                 self.draft_images.set_images(delivery.message.images);
             }
@@ -362,6 +368,7 @@ impl Pui {
             self.waiting.entry(path).or_default().push(message);
         }
         self.draft.clear();
+        self.context_chips.clear();
         self.recall = Default::default();
         self.draft_images.clear();
         self.focus_composer = true;
@@ -371,6 +378,8 @@ impl Pui {
     }
     pub(super) fn deliver_waiting_at_window(&mut self, window: bool) {
         if self.is_mirror()
+            || self.resource_reload.pending()
+            || self.resource_reload.confirming()
             || !self.connected
             || self.loading_chat
             || self.state.compacting
@@ -496,6 +505,7 @@ impl Pui {
             if self.draft.is_empty() && self.draft_images.is_empty() {
                 if !self.remote_action(sync::Action::Edit(index)) {
                     let message = self.waiting.get_mut(&path).unwrap().remove(index);
+                    self.context_chips.clear();
                     self.draft = message.text;
                     self.draft_images.set_images(message.images);
                     self.focus_composer = true;

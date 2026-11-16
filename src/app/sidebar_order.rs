@@ -17,17 +17,9 @@ pub(super) enum Sort {
 impl Sort {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Activity => "Last activity",
-            Self::Created => "Creation time",
+            Self::Activity => "Last updated",
+            Self::Created => "Date created",
             Self::Name => "Name",
-        }
-    }
-
-    pub fn directions(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Activity => ("Most recent first", "Least recent first"),
-            Self::Created => ("Newest first", "Oldest first"),
-            Self::Name => ("A–Z", "Z–A"),
         }
     }
 }

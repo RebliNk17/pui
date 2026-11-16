@@ -75,6 +75,7 @@ fn result_rows_are_single_line_compact_and_metadata_is_on_the_same_baseline() {
                             },
                             kind,
                             message: None,
+                            attention: None,
                         };
                         rows.push(result_row(ui, &hit, i == 0).rect);
                     }

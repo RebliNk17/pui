@@ -159,6 +159,14 @@ fn missing_disconnected_saved_chat_is_skipped_but_connected_chat_remains_availab
         std::env::temp_dir().join(format!("pui-missing-nav-{}.jsonl", uuid::Uuid::new_v4()));
     app.state.session_file = Some(missing_path.display().to_string());
     app.agents.nodes.get_mut(&missing).unwrap().path = Some(missing_path);
+    // This fixture represents a real conversation. Truly empty new chats are
+    // discarded when left, even if their RPC client is still connected.
+    app.state
+        .messages
+        .push(protocol::Message::from_json(&json!({
+            "role": "user", "content": "Keep this connected chat"
+        })));
+    app.new_chat = false;
     app.remember_navigation();
     let missing_location = app.navigation_location();
     app.start_chat_in(app.prefs.cwd.clone());
@@ -461,6 +469,28 @@ fn a_file_pane_on_a_task_restores_the_task_underneath_it() {
     assert_eq!(app.tasks.selected, selected);
     app.files.close();
     assert!(matches!(app.navigation_location().page, Page::Task { .. }));
+}
+
+#[test]
+fn workflow_tab_survives_back_forward_and_file_overlay() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.demo_task();
+    let id = app.tasks.selected.clone().unwrap();
+    app.open_work_item_tab(id.clone(), tasks::work_item::Tab::Evidence);
+    app.remember_navigation();
+    app.open_agents_board();
+    app.remember_navigation();
+    app.navigate_history(false);
+    assert_eq!(app.work_item_tab(&id), tasks::work_item::Tab::Evidence);
+    app.open_work_item_tab(id.clone(), tasks::work_item::Tab::Changes);
+    app.files.toggle(&ctx, &app.prefs.cwd);
+    app.remember_navigation();
+    app.open_agents_board();
+    app.remember_navigation();
+    app.navigate_history(false);
+    assert!(app.files.files_open());
+    assert_eq!(app.work_item_tab(&id), tasks::work_item::Tab::Changes);
 }
 
 #[test]

@@ -362,7 +362,7 @@ fn forms_validate_arguments_and_preserve_omitted_server_fields() {
 fn resource_dialog_decisions_use_shared_actions_and_escape_never_applies() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for zoom in [1.0, 1.4] {
-            for kind in ["form", "remove", "review"] {
+            for kind in ["form", "engineering", "remove", "review"] {
                 let ctx = egui::Context::default();
                 theme::install(&ctx);
                 mode.apply(&ctx);
@@ -375,6 +375,12 @@ fn resource_dialog_decisions_use_shared_actions_and_escape_never_applies() {
                 let (id, cancel, confirm) = match kind {
                     "form" => {
                         manager.form.open = true;
+                        ("resource-add", "Cancel", "Stage & review →")
+                    }
+                    "engineering" => {
+                        manager.form.open = true;
+                        manager.form.kind = 6;
+                        manager.form.scope = "user".into();
                         ("resource-add", "Cancel", "Stage & review →")
                     }
                     "remove" => {
@@ -440,6 +446,117 @@ fn resource_dialog_decisions_use_shared_actions_and_escape_never_applies() {
                 assert!(manager.drafts.is_empty());
                 assert!(manager.job.is_none());
                 assert!(manager.notice.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn engineering_form_stages_only_on_enabled_confirmation_and_fits_small_windows() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for (width, zoom) in [(620.0, 1.0), (850.0, 1.4)] {
+            for (selection, count) in [(0, 5), (3, 1)] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                ctx.style_mut(|style| style.animation_time = 0.0);
+                let mut manager = Resources {
+                    catalog: Some(Catalog {
+                        trusted: false,
+                        ..demo_catalog()
+                    }),
+                    form: Form {
+                        open: true,
+                        kind: 6,
+                        scope: "user".into(),
+                        engineering_selection: selection,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let frame = |manager: &mut Resources, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(width, 1000.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| manager.dialogs(ctx, true),
+                    )
+                };
+                for _ in 0..4 {
+                    frame(&mut manager, vec![]);
+                }
+                let output = frame(&mut manager, vec![]);
+                let rect = ctx
+                    .read_response(egui::Id::new("resource-add"))
+                    .unwrap()
+                    .rect;
+                assert!(
+                    ctx.screen_rect().contains_rect(rect),
+                    "{width}/{zoom}: {rect:?}"
+                );
+                let mut labels = Vec::new();
+                for shape in output.shapes {
+                    painted(&shape.shape, &mut labels);
+                }
+                assert!(labels.iter().any(|(label, _)| label == "Stage & review →"));
+                assert!(manager.drafts.is_empty());
+                let click = |manager: &mut Resources| {
+                    let output = frame(manager, vec![]);
+                    let mut labels = Vec::new();
+                    for shape in output.shapes {
+                        painted(&shape.shape, &mut labels);
+                    }
+                    let pos = labels
+                        .iter()
+                        .find(|(label, _)| label == "Stage & review →")
+                        .unwrap()
+                        .1
+                        .center();
+                    for pressed in [true, false] {
+                        frame(
+                            manager,
+                            vec![
+                                egui::Event::PointerMoved(pos),
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                        );
+                    }
+                };
+                // Pending discovery/review work disables staging.
+                let (_tx, rx) = mpsc::channel();
+                manager.job = Some(Job {
+                    cwd: PathBuf::new(),
+                    kind: JobKind::List,
+                    rx,
+                });
+                click(&mut manager);
+                assert!(manager.drafts.is_empty());
+                assert!(manager.form.open);
+                manager.job = None;
+                click(&mut manager);
+                assert_eq!(manager.drafts.len(), count);
+                assert!(!manager.form.open);
+                assert!(manager.review_open);
+                assert!(manager.review.is_some());
+                assert!(manager.job.is_none()); // Demo does not invoke Node or modify config.
+                for draft in &manager.drafts {
+                    assert_eq!(draft.request["kind"], "skills");
+                    assert_eq!(draft.request["scope"], "user");
+                    if count == 1 {
+                        assert!(draft.request["source"].as_str().unwrap().contains("/tdd/"));
+                    }
+                }
             }
         }
     }

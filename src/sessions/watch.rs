@@ -1,6 +1,5 @@
 //! Debounced session discovery: filesystem notifications plus a slow fallback.
 use eframe::egui;
-use notify::Watcher;
 use std::{
     path::Path,
     sync::{
@@ -15,7 +14,7 @@ const MIN_INTERVAL: Duration = Duration::from_secs(2);
 const FALLBACK: Duration = Duration::from_secs(30);
 
 pub struct Watch {
-    _watcher: Option<notify::RecommendedWatcher>,
+    _watcher: Option<crate::file_watch::Watcher>,
     dirty: Arc<AtomicBool>,
     due: Option<Instant>,
     last_scan: Instant,
@@ -26,22 +25,22 @@ impl Watch {
         let dirty = Arc::new(AtomicBool::new(false));
         let changed = dirty.clone();
         let repaint = ctx.clone();
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            // Also rescan on errors/overflow. Ignore reads caused by discovery itself.
-            if event.as_ref().map_or(true, relevant) {
-                changed.store(true, Ordering::Relaxed);
-                repaint.request_repaint_after(DEBOUNCE);
-            }
-        })
-        .and_then(|mut watcher| {
-            // Watch an existing ancestor when sessions have not been created yet.
-            let directory = root.ancestors().find(|path| path.is_dir()).unwrap_or(root);
-            watcher.watch(directory, notify::RecursiveMode::Recursive)?;
-            Ok(watcher)
-        })
-        .ok();
+        // Watch an existing ancestor when sessions have not been created yet.
+        let directory = root.ancestors().find(|path| path.is_dir()).unwrap_or(root);
+        let watcher = crate::file_watch::Watcher::new(
+            directory.to_path_buf(),
+            notify::RecursiveMode::Recursive,
+            ctx,
+            move |event: notify::Result<notify::Event>| {
+                // Also rescan on errors/overflow. Ignore reads caused by discovery itself.
+                if event.as_ref().map_or(true, relevant) {
+                    changed.store(true, Ordering::Relaxed);
+                    repaint.request_repaint_after(DEBOUNCE);
+                }
+            },
+        );
         Self {
-            _watcher: watcher,
+            _watcher: Some(watcher),
             dirty,
             due: None,
             last_scan: Instant::now(),
@@ -57,6 +56,10 @@ impl Watch {
     }
 
     fn ready_at(&mut self, ctx: &egui::Context, scanning: bool, now: Instant) -> bool {
+        // Cover changes between the initial scan and watcher registration.
+        if let Some(Ok(())) = self._watcher.as_ref().and_then(|watcher| watcher.poll()) {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
         if self.dirty.swap(false, Ordering::Relaxed) && self.due.is_none() {
             self.due = Some((now + DEBOUNCE).max(self.last_scan + MIN_INTERVAL));
         }
@@ -110,7 +113,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ctx = egui::Context::default();
         let watch = Watch::new(&root, &ctx);
-        assert!(watch._watcher.is_some());
+        watch._watcher.as_ref().unwrap().wait_ready().unwrap();
         let wait = |stage| {
             let deadline = Instant::now() + Duration::from_secs(5);
             while !watch.dirty.swap(false, Ordering::Relaxed) {

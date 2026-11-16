@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod answers;
+mod context;
+pub use context::ContextBreakdown;
 #[cfg(test)]
 mod retry_tests;
 mod stream;
@@ -164,6 +166,11 @@ pub struct State {
     pub pending_messages: Vec<PendingMessage>,
     pub history_points: Vec<HistoryPoint>,
     pub models: Vec<Model>,
+    /// Cached metadata is display-only until Pi refreshes it.
+    pub models_cached: bool,
+    pub model_hint: String,
+    #[serde(skip)]
+    pub model_cache_key: Option<u64>,
     pub commands: Vec<SlashCommand>,
     pub model: String,
     pub model_name: String,
@@ -181,9 +188,11 @@ pub struct State {
     pub permission_mode: Option<String>,
     pub permission_cost: f64,
     pub compaction_settings_error: Option<String>,
+    pub compact_percent: Option<u32>,
     pub pending: bool,
     pub cost: f64,
     pub context_tokens: Option<f64>,
+    pub context_breakdown: Option<ContextBreakdown>,
     pub context_window: f64,
     pub tokens: Value,
     pub transcript_revision: u64,
@@ -191,6 +200,7 @@ pub struct State {
     pub outputs_revision: u64,
     pub error: Option<String>,
     pub notice: Option<String>,
+    pub restart_notice: String,
     pub diagnostics: Vec<String>,
     pub dialogs: std::collections::VecDeque<Value>,
 }
@@ -415,8 +425,16 @@ impl State {
                         self.permission_cost = value["classifierCost"].as_f64().unwrap_or(0.0);
                         return;
                     }
+                    "pui-context" => {
+                        self.apply_context(&value);
+                        return;
+                    }
                     "pui-compaction" => {
                         self.compacting = value["working"] == true;
+                        self.compact_percent = value["percent"]
+                            .as_u64()
+                            .filter(|p| (50..=95).contains(p))
+                            .map(|p| p as u32);
                         self.compaction_settings_error = value["error"].as_str().map(str::to_owned);
                         return;
                     }
@@ -436,6 +454,7 @@ impl State {
                 let data = &event["data"];
                 match string(&event, "command") {
                     "get_state" => {
+                        self.model_hint.clear();
                         self.model = string(&data["model"], "id").to_owned();
                         self.model_name = string(&data["model"], "name").into();
                         self.provider = string(&data["model"], "provider").into();
@@ -445,7 +464,11 @@ impl State {
                         }
                         self.compacting = data["isCompacting"] == true;
                         self.session_name = string(data, "sessionName").to_owned();
-                        self.session_file = data["sessionFile"].as_str().map(str::to_owned);
+                        let session_file = data["sessionFile"].as_str().map(str::to_owned);
+                        if self.session_file.is_some() && self.session_file != session_file {
+                            self.context_breakdown = None;
+                        }
+                        self.session_file = session_file;
                     }
                     "get_entries" => {
                         self.stream = None;
@@ -483,6 +506,7 @@ impl State {
                         self.levels.clear();
                     }
                     "get_available_models" => {
+                        self.models_cached = false;
                         self.models = data["models"]
                             .as_array()
                             .map(|models| models.iter().map(Model::from_json).collect())
@@ -533,7 +557,10 @@ impl State {
                 self.busy = false;
                 self.pending = false;
             }
-            "compaction_start" => self.compacting = true,
+            "compaction_start" => {
+                self.compacting = true;
+                self.context_breakdown = None;
+            }
             "compaction_end" => {
                 self.compacting = false;
                 if let Some(error) = event["errorMessage"].as_str() {

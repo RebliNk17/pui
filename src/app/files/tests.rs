@@ -79,7 +79,7 @@ pub(crate) fn folder(output: &egui::FullOutput) -> egui::Pos2 {
         })
         .expect("Folder button")
 }
-fn settle(browser: &mut Browser) {
+pub(super) fn settle(browser: &mut Browser) {
     for directory in browser.directories.values_mut() {
         if let Some(rx) = directory.rx.take() {
             directory.listing = Some(rx.recv_timeout(Duration::from_secs(5)).unwrap());
@@ -146,6 +146,54 @@ fn docked_tree_is_right_of_preview_and_reads_only_clicked_files_while_busy() {
 }
 
 #[test]
+fn restored_viewer_loads_without_a_restore_gate_across_redraws() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for (width, expanded, zoom) in [
+            (480.0, false, 1.0),
+            (1134.0, false, 1.0),
+            (1134.0, true, 1.0),
+            (480.0, false, 1.4),
+            (1134.0, true, 0.8),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_zoom_factor(zoom);
+            let mut app = app(&ctx);
+            app.prefs.theme = mode;
+            app.prefs.hide_sidebar = true;
+            app.files.toggle(&ctx, &app.prefs.cwd);
+            app.files.expanded = expanded;
+            app.files.select(&ctx, app.prefs.cwd.join("README.md"));
+            let saved = app.files.saved_layout();
+            app.files.restore_layout(&app.prefs.cwd, &saved);
+            for _ in 0..40 {
+                let mut native = eframe::Frame::_new_kittest();
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| eframe::App::update(&mut app, ctx, &mut native),
+                );
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if ["Workspace restored", "Restore tabs"].contains(&text.galley.job.text.as_str()))));
+                let pos = text(&output, "README.md");
+                assert!(
+                    ctx.screen_rect().contains(pos),
+                    "Tab must remain visible: {pos:?}"
+                );
+                assert!(app.files.restored.is_none());
+                assert_eq!(app.files.tabs.len(), 1);
+                assert!(!app.terminals.running());
+                assert!(app.state.dialogs.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn file_explorer_omits_address_and_error_rows_but_keeps_tabs_and_refresh() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for width in [360.0, 760.0] {
@@ -168,7 +216,8 @@ fn file_explorer_omits_address_and_error_rows_but_keeps_tabs_and_refresh() {
                         ..Default::default()
                     },
                     |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| browser.contents(ui));
+                        egui::CentralPanel::default()
+                            .show(ctx, |ui| browser.contents(ui, &mut TableHeaders::default()));
                     },
                 );
                 text(&output, "Hello, 世界");
@@ -263,7 +312,8 @@ fn browser_chrome_has_one_address_row_and_switches_tabs_in_narrow_panels() {
                 .open_target(&ctx, &root, "https://example.com/a/very/long/path")
                 .unwrap();
             let draw = |ctx: &egui::Context, browser: &mut Browser| {
-                egui::CentralPanel::default().show(ctx, |ui| browser.contents(ui));
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| browser.contents(ui, &mut TableHeaders::default()));
             };
             let mut output = egui::FullOutput::default();
             for _ in 0..2 {
@@ -654,6 +704,60 @@ fn explicit_open_blocks_sensitive_aliases_and_handles_missing_or_binary_files() 
             "{target}"
         );
     }
+}
+
+#[test]
+fn focused_thinking_disclosure_settles_in_full_app_update() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.state = State {
+        messages: vec![Message::from_json(&json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":"Reasoning fixture"},
+            {"type":"text","text":"Finished response"}
+        ]}))],
+        ..Default::default()
+    };
+    app.loading_chat = false;
+    app.new_chat = false;
+    app.focus_composer = false;
+    app.transcript.expand_activity = true;
+    app.prefs.hide_inspector = true;
+    app.prefs.hide_sidebar = true;
+    frame(&ctx, &mut app, vec![]);
+    let output = frame(&ctx, &mut app, vec![]);
+    click(&ctx, &mut app, text(&output, "Thinking"));
+    for _ in 0..6 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    let output = frame(&ctx, &mut app, vec![]);
+    assert!(
+        output.viewport_output[&egui::ViewportId::ROOT].repaint_delay > Duration::ZERO,
+        "settled focused disclosure must not drive an immediate app repaint loop"
+    );
+}
+
+#[test]
+fn displayed_image_transfers_pixels_once_and_keeps_its_texture() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let path = app.prefs.cwd.join("preview.png");
+    fs::write(&path, include_bytes!("../../../assets/icon.png")).unwrap();
+    app.files
+        .open_target(&ctx, &app.prefs.cwd.clone(), &path.display().to_string())
+        .unwrap();
+    settle(&mut app.files);
+    assert!(matches!(
+        app.files.tabs[0].content,
+        Some(Ok(Content::Image(_)))
+    ));
+    frame(&ctx, &mut app, vec![]);
+    assert!(matches!(
+        app.files.tabs[0].content,
+        Some(Ok(Content::UploadedImage))
+    ));
+    let id = app.files.tabs[0].texture.as_ref().unwrap().id();
+    frame(&ctx, &mut app, vec![]);
+    assert_eq!(app.files.tabs[0].texture.as_ref().unwrap().id(), id);
 }
 
 #[test]

@@ -69,6 +69,8 @@ impl Pui {
             && self.ultracode_ready
             && self.state.ready()
             && !self.loading_chat
+            && !self.resource_reload.pending()
+            && !self.resource_reload.confirming()
             && self.state.dialogs.is_empty()
             && self.deliveries.is_empty()
             && self.interrupt.is_none()
@@ -328,6 +330,7 @@ impl Pui {
             if let Some(saved) = saved_draft {
                 self.history_drafts.push(saved);
             }
+            self.context_chips.clear();
             self.draft = crate::transcript::user_display_text(&request.message).into();
             self.draft_images.set_images(request.message.images);
             self.recall = Default::default();
@@ -388,6 +391,7 @@ impl Pui {
             if ui.small_button("Restore saved draft").clicked() {
                 if self.draft.is_empty() && self.draft_images.is_empty() {
                     let draft = self.history_drafts.remove(0);
+                    self.context_chips.clear();
                     self.draft = draft.text;
                     self.draft_images.set_images(draft.images);
                     self.focus_composer = true;

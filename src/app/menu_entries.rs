@@ -40,6 +40,10 @@ pub(super) enum Command {
     Browser,
     AgentsBoard,
     Automation,
+    QuickOpen,
+    Bold,
+    Italic,
+    Underline,
 }
 impl Command {
     #[cfg(any(target_os = "macos", test))]
@@ -80,6 +84,10 @@ impl Command {
         Self::Browser,
         Self::AgentsBoard,
         Self::Automation,
+        Self::QuickOpen,
+        Self::Bold,
+        Self::Italic,
+        Self::Underline,
     ];
     #[cfg(any(target_os = "macos", test))]
     pub fn from_tag(tag: isize) -> Option<Self> {
@@ -110,8 +118,12 @@ impl Command {
             Self::Paste => (M::COMMAND, Key::V),
             Self::SelectAll => (M::COMMAND, Key::A),
             Self::Search => (M::COMMAND, Key::K),
+            Self::QuickOpen => (M::COMMAND, Key::P),
             Self::Sidebar => (M::COMMAND, Key::B),
             Self::Inspector => (M::COMMAND, Key::I),
+            Self::Bold => (M::COMMAND, Key::B),
+            Self::Italic => (M::COMMAND, Key::I),
+            Self::Underline => (M::COMMAND, Key::U),
             Self::ZoomReset => (M::COMMAND, Key::Num0),
             Self::ZoomIn => (M::COMMAND, Key::Plus),
             Self::ZoomOut => (M::COMMAND, Key::Minus),
@@ -120,6 +132,15 @@ impl Command {
             _ => return None,
         };
         Some(egui::KeyboardShortcut::new(modifiers, key))
+    }
+    pub fn contextual_shortcut(self, composer: bool) -> Option<egui::KeyboardShortcut> {
+        if (composer && matches!(self, Self::Sidebar | Self::Inspector))
+            || (!composer && matches!(self, Self::Bold | Self::Italic | Self::Underline))
+        {
+            None
+        } else {
+            self.shortcut()
+        }
     }
 }
 
@@ -179,6 +200,10 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
             A("Copy", Command::Copy),
             A("Paste", Command::Paste),
             A("Select All", Command::SelectAll),
+            S,
+            A("Bold", Command::Bold),
+            A("Italic", Command::Italic),
+            A("Underline", Command::Underline),
         ],
     ),
     (
@@ -196,6 +221,7 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
             A("Scheduled tasks", Command::Automation),
             S,
             A("Search Sessions…", Command::Search),
+            A("Quick Open File…", Command::QuickOpen),
             A("Session Sidebar", Command::Sidebar),
             A("Session Details", Command::Inspector),
             A("Workspace Files", Command::Files),
@@ -236,6 +262,7 @@ pub(super) struct MenuState {
     pub terminal: bool,
     pub terminal_focused: bool,
     pub text_focused: bool,
+    pub composer_focused: bool,
     pub text_selected: bool,
     pub fullscreen: bool,
     pub zoom: f32,
@@ -265,6 +292,7 @@ impl MenuState {
         command.supported()
             && match command {
                 Command::Inspector => self.inspector_available,
+                Command::Bold | Command::Italic | Command::Underline => self.composer_focused,
                 Command::Undo | Command::Redo | Command::SelectAll => {
                     self.text_focused && !self.terminal_focused
                 }

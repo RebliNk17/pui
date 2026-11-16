@@ -472,6 +472,9 @@ pub(crate) struct Focus {
     /// The ID of a widget to give the focus to in the next frame.
     id_next_frame: Option<Id>,
 
+    /// Exact native owner cleared by Escape during this pass, after deferred focus.
+    id_cleared_by_escape: Option<Id>,
+
     #[cfg(feature = "accesskit")]
     id_requested_by_accesskit: Option<accesskit::NodeId>,
 
@@ -526,6 +529,7 @@ impl Focus {
 
     fn begin_pass(&mut self, new_input: &crate::data::input::RawInput) {
         self.id_previous_frame = self.focused();
+        self.id_cleared_by_escape = None;
         if let Some(id) = self.id_next_frame.take() {
             self.focused_widget = Some(FocusWidget::new(id));
         }
@@ -561,6 +565,9 @@ impl Focus {
                             }
                         }
                         crate::Key::Escape => {
+                            if let Some(id) = self.focused() {
+                                self.id_cleared_by_escape = Some(id);
+                            }
                             self.focused_widget = None;
                             Some(FocusDirection::None)
                         }
@@ -856,6 +863,14 @@ impl Memory {
         self.focus().and_then(|f| f.focused())
     }
 
+    /// Whether native Escape cleared this exact focus owner in this pass.
+    /// Includes focus assigned by deferred reverse-Tab before input processing;
+    /// unlike `had_focus_last_frame`, this never identifies the departure widget.
+    pub fn focus_lost_by_escape(&self, id: Id) -> bool {
+        self.focus()
+            .is_some_and(|focus| focus.id_cleared_by_escape == Some(id))
+    }
+
     /// Set an event filter for a widget.
     ///
     /// This allows you to control whether the widget will loose focus
@@ -872,11 +887,37 @@ impl Memory {
         }
     }
 
+    /// Update only the current owner's event filter, including on its first pass.
+    /// Unlike an explicit focus request, this preserves pending native Tab moves
+    /// and never restores, transfers or clears focus.
+    pub fn set_focus_lock_filter_current(&mut self, id: Id, event_filter: EventFilter) {
+        if let Some(focused) = &mut self.focus_mut().focused_widget {
+            if focused.id == id {
+                focused.filter = event_filter;
+            }
+        }
+    }
+
     /// Give keyboard focus to a specific widget.
     /// See also [`crate::Response::request_focus`].
     #[inline(always)]
     pub fn request_focus(&mut self, id: Id) {
         self.focus_mut().focused_widget = Some(FocusWidget::new(id));
+    }
+
+    /// Give focus and install its event filter atomically, including on the first frame.
+    /// Custom menu navigation needs this when transferring focus on consecutive frames.
+    pub fn request_focus_with_filter(&mut self, id: Id, filter: EventFilter) {
+        self.request_focus(id);
+        let focus = self.focus_mut();
+        // The caller has already handled navigation this pass. Do not apply
+        // a second native move (including Tab) from the previous widget's filter.
+        focus.reset_focus();
+        focus.give_to_next = false;
+        focus.id_next_frame = None;
+        if let Some(focused) = &mut focus.focused_widget {
+            focused.filter = filter;
+        }
     }
 
     /// Surrender keyboard focus for a specific widget.

@@ -213,6 +213,39 @@ pub fn delete(path: &Path) -> Result<(), String> {
     }
 }
 
+/// For abandoned new chats only, after the writer has exited and ownership is
+/// locked. Never infer emptiness from a title or the currently selected branch.
+pub fn delete_if_empty(path: &Path) -> Result<(), String> {
+    validate_delete(path)?;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    const LIMIT: u64 = 64 * 1024;
+    if file.metadata().map_err(|e| e.to_string())?.len() > LIMIT {
+        return Err("New chat has saved data; it was kept.".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("New chat has saved data; it was kept.".into());
+    }
+    for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+        let entry: Value = serde_json::from_slice(line)
+            .map_err(|_| "New chat contains unrecognized data; it was kept.")?;
+        if !matches!(
+            string(&entry, "type"),
+            "session" | "model_change" | "thinking_level_change"
+        ) {
+            return Err("New chat has saved data; it was kept.".into());
+        }
+    }
+    delete(path)
+}
+
 pub fn export_markdown(path: &Path, destination: &Path) -> Result<(), String> {
     let file = fs::File::open(path).map_err(|e| format!("Cannot open session: {e}"))?;
     // Follow the active leaf rather than exporting abandoned branches as conversation.
@@ -318,6 +351,33 @@ mod tests {
         let session = read_session(&path, SystemTime::now()).unwrap();
         fs::remove_file(path).unwrap();
         session
+    }
+    #[test]
+    fn abandoned_session_cleanup_requires_only_known_empty_metadata() {
+        let path = std::env::temp_dir().join(format!("pui-empty-{}.jsonl", uuid::Uuid::new_v4()));
+        let header = "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n";
+        for entry in [
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"keep\"}}",
+            "{\"type\":\"session_info\",\"name\":\"Named empty chat\"}",
+            "{\"type\":\"custom\",\"data\":\"keep\"}",
+            "{\"type\":\"unknown\"}",
+            "{malformed",
+        ] {
+            let original = format!("{header}{entry}\n");
+            fs::write(&path, &original).unwrap();
+            assert!(delete_if_empty(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+        fs::write(
+            &path,
+            format!(
+                "{header}{{\"type\":\"model_change\"}}\n{{\"type\":\"thinking_level_change\"}}\n"
+            ),
+        )
+        .unwrap();
+        delete_if_empty(&path).unwrap();
+        assert!(!path.exists());
+        delete_if_empty(&path).unwrap(); // Never-persisted new chat.
     }
     #[test]
     fn pinned_and_hidden_paths_survive_the_recent_scan_limit() {

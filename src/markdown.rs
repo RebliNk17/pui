@@ -1,4 +1,5 @@
 //! Selectable Markdown with tables, one consistent baseline and real link hit targets.
+mod capture;
 mod table;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, TextFormat, Ui, text::LayoutJob};
@@ -10,7 +11,7 @@ struct ParseMarkdown;
 impl egui::cache::ComputerMut<&str, Arc<Vec<Event<'static>>>> for ParseMarkdown {
     fn compute(&mut self, source: &str) -> Arc<Vec<Event<'static>>> {
         Arc::new(
-            Parser::new_ext(source, Options::ENABLE_TABLES)
+            Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_GFM)
                 .map(Event::into_static)
                 .collect(),
         )
@@ -41,9 +42,23 @@ pub fn show_file(ui: &mut Ui, source: &str, path: &std::path::Path) {
     let id = egui::Id::new("markdown-file-base");
     ui.ctx()
         .data_mut(|data| data.insert_temp(id, path.parent().unwrap_or(path).to_path_buf()));
-    show(ui, source);
+    capture::scope(
+        ui,
+        ("markdown-file", path),
+        format!("Markdown preview {}", path.display()),
+        |ui| show(ui, source),
+    );
     ui.ctx()
         .data_mut(|data| data.remove::<std::path::PathBuf>(id));
+}
+
+pub fn show_reply(ui: &mut Ui, source: &str, identity: impl std::hash::Hash) {
+    capture::scope(
+        ui,
+        ("assistant-reply", identity),
+        "Assistant reply".into(),
+        |ui| show(ui, source),
+    );
 }
 fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     if job.text.is_empty() {
@@ -57,6 +72,7 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
 }
 fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
     let response = ui.add(egui::Label::new(galley.clone()).wrap().selectable(true));
+    capture::offer(ui, &response, &galley.job.text);
     let origin = match galley.job.halign {
         egui::Align::Min => response.rect.left_top(),
         egui::Align::Center => response.rect.center_top(),
@@ -160,7 +176,32 @@ fn show_inner(ui: &mut Ui, source: &str) {
     let events = ui
         .ctx()
         .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
-    for event in events.iter().cloned() {
+    let mut event_index = 0;
+    while event_index < events.len() {
+        let event = events[event_index].clone();
+        event_index += 1;
+        if let Event::Start(Tag::BlockQuote(Some(kind))) = event {
+            flush(ui, &mut job, &mut links);
+            let start = event_index;
+            let mut depth = 1;
+            while event_index < events.len() {
+                match &events[event_index] {
+                    Event::Start(Tag::BlockQuote(_)) => depth += 1,
+                    Event::End(TagEnd::BlockQuote(_)) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                event_index += 1;
+            }
+            let body = &events[start..event_index];
+            alert(ui, kind, body);
+            event_index = (event_index + 1).min(events.len());
+            continue;
+        }
         match event {
             Event::Start(Tag::Table(alignments)) => {
                 flush(ui, &mut job, &mut links);
@@ -234,14 +275,16 @@ fn show_inner(ui: &mut Ui, source: &str) {
                         egui::ScrollArea::horizontal()
                             .id_salt(ui.next_auto_id())
                             .show(ui, |ui| {
-                                ui.add(
+                                let text = code_text.trim_end();
+                                let response = ui.add(
                                     egui::Label::new(
-                                        RichText::new(code_text.trim_end())
+                                        RichText::new(text)
                                             .font(FontId::monospace(12.0))
                                             .color(colors.text),
                                     )
                                     .selectable(true),
                                 );
+                                capture::offer(ui, &response, text);
                             });
                     });
                 code_text.clear();
@@ -375,6 +418,72 @@ fn show_inner(ui: &mut Ui, source: &str) {
     flush(ui, &mut job, &mut links);
 }
 
+fn alert(ui: &mut Ui, kind: pulldown_cmark::BlockQuoteKind, events: &[Event<'static>]) {
+    use pulldown_cmark::BlockQuoteKind;
+    let colors = theme::palette(ui.ctx());
+    let (title, tint) = match kind {
+        BlockQuoteKind::Note => ("Note", colors.blue),
+        BlockQuoteKind::Tip => ("Tip", colors.green),
+        BlockQuoteKind::Important => ("Important", colors.accent),
+        BlockQuoteKind::Warning => ("Warning", colors.amber),
+        BlockQuoteKind::Caution => ("Caution", colors.red),
+    };
+    egui::Frame::new()
+        .fill(tint.gamma_multiply(0.08))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width((ui.available_width() - 2.0).max(0.0));
+            ui.label(RichText::new(title).size(12.0).strong().color(tint));
+            let mut job = LayoutJob::default();
+            let mut links = Vec::new();
+            let (mut bold, mut italic) = (false, false);
+            let mut link = None;
+            for event in events {
+                match event {
+                    Event::Start(Tag::Strong) => bold = true,
+                    Event::End(TagEnd::Strong) => bold = false,
+                    Event::Start(Tag::Emphasis) => italic = true,
+                    Event::End(TagEnd::Emphasis) => italic = false,
+                    Event::Start(Tag::Link { dest_url, .. }) => link = Some(dest_url.to_string()),
+                    Event::End(TagEnd::Link) => link = None,
+                    Event::Text(text) | Event::Code(text) => {
+                        let start = job.text.len();
+                        job.append(
+                            text,
+                            0.0,
+                            format(
+                                ui.ctx(),
+                                bold,
+                                italic,
+                                false,
+                                matches!(event, Event::Code(_)),
+                                link.is_some(),
+                            ),
+                        );
+                        if let Some(url) = &link {
+                            links.push(Link {
+                                range: start..job.text.len(),
+                                url: url.clone(),
+                            });
+                        }
+                    }
+                    Event::SoftBreak => job.append(
+                        " ",
+                        0.0,
+                        format(ui.ctx(), false, false, false, false, false),
+                    ),
+                    Event::HardBreak | Event::End(TagEnd::Paragraph) => {
+                        flush(ui, &mut job, &mut links);
+                    }
+                    _ => {}
+                }
+            }
+            flush(ui, &mut job, &mut links);
+        });
+    ui.add_space(4.0);
+}
+
 pub fn diff(ui: &mut Ui, source: &str) {
     let colors = crate::theme::palette(ui.ctx());
     let mut job = LayoutJob::default();
@@ -440,6 +549,38 @@ pub fn diff(ui: &mut Ui, source: &str) {
 mod tests {
     use super::*;
     use egui::cache::ComputerMut;
+    #[test]
+    fn github_callouts_render_titles_without_raw_markers_or_execution() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            for (marker, title) in [
+                ("NOTE", "Note"),
+                ("TIP", "Tip"),
+                ("IMPORTANT", "Important"),
+                ("WARNING", "Warning"),
+                ("CAUTION", "Caution"),
+            ] {
+                let source = format!(
+                    "> [!{marker}]\n> Keep **important** text and `code` readable.\n\nAfter alert."
+                );
+                let (texts, _) = render(&ctx, &source, 260.0);
+                let combined = texts
+                    .iter()
+                    .map(|t| t.galley.job.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(combined.contains(title));
+                assert!(
+                    combined.contains("important")
+                        && combined.contains("code")
+                        && combined.contains("After alert.")
+                );
+                assert!(!combined.contains("[!"));
+            }
+        }
+    }
     #[test]
     fn inline_code_and_prose_share_a_baseline() {
         for system_fonts in [false, true] {

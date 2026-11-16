@@ -26,6 +26,32 @@ fn complete(app: &mut Pui) {
     app.finish_delete(&target);
 }
 #[test]
+fn deleting_active_other_chat_keeps_window_review_comments_across_layout_restore() {
+    let mut app = app();
+    let home = home();
+    let path_a = session(&home, "review-a");
+    let path_b = session(&home, "review-b");
+    app.prefs.cwd = home.clone();
+    app.state.session_file = Some(path_a.display().to_string());
+    app.changes
+        .review_comments
+        .test_seed(&home, &path_a.display().to_string());
+    app.leave_session_layout();
+    app.state.session_file = Some(path_b.display().to_string());
+    app.enter_session_layout();
+    let id_b = app.ensure_agent();
+    assert_eq!(app.changes.review_comments.test_count(), 1);
+    app.finish_deleted_chats(std::slice::from_ref(&path_b), &BTreeSet::from([id_b]));
+    assert_eq!(app.changes.review_comments.test_count(), 1);
+    app.state.session_file = Some(path_a.display().to_string());
+    app.enter_session_layout();
+    assert_eq!(
+        app.changes.review_comments.test_count(),
+        1,
+        "Other owner's parked notes must not be lost"
+    );
+}
+#[test]
 fn chat_delete_removes_transcript_and_preferences_but_keeps_project_and_tasks() {
     let mut app = app();
     let home = home();

@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 const MAX_RECORD: u64 = 4 * 1024 * 1024;
+pub const LOCK_CONFLICT: &str =
+    "This task is open in another Pui window. Close it there before changing or deleting it.";
 pub fn home() -> Option<PathBuf> {
     dirs::data_local_dir().map(|p| p.join("pui/tasks-v1"))
 }
@@ -43,10 +45,17 @@ pub fn lock(home: &Path, id: &str) -> Result<fs::File, String> {
         options.mode(0o600);
     }
     let file = options.open(path).map_err(|e| e.to_string())?;
-    file.try_lock_exclusive().map_err(|_| "This task is open in another Pui window. Close it there before changing or deleting it.")?;
+    file.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            LOCK_CONFLICT.into()
+        } else {
+            format!("Cannot lock task storage: {error}")
+        }
+    })?;
     Ok(file)
 }
 pub fn save(home: &Path, task: &Task) -> Result<(), String> {
+    task.validate_checkpoints()?;
     uuid::Uuid::parse_str(&task.id).map_err(|_| "Invalid task ID")?;
     private_dir(home)?;
     if home.join(format!("{}.deleted", task.id)).exists() {
@@ -111,10 +120,58 @@ pub fn delete(home: &Path, id: &str, sessions: &[PathBuf]) -> Result<(), String>
     Ok(())
 }
 
-pub fn load(home: &Path) -> Result<Vec<Task>, String> {
-    if !home.exists() {
-        return Ok(vec![]);
+/// Read a bounded record without recovery so relationship-only edits preserve evidence.
+fn read_record(home: &Path, id: &str) -> Result<Task, String> {
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid task ID")?;
+    if home.join(format!("{id}.deleted")).exists() {
+        return Err("This workflow was deleted; nothing was changed.".into());
     }
+    let path = home.join(format!("{id}.json"));
+    let meta = fs::symlink_metadata(&path).map_err(|_| "Workflow record is unavailable.")?;
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_RECORD {
+        return Err("Invalid workflow record; nothing was changed.".into());
+    }
+    let task: Task = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|_| "Invalid workflow record; nothing was changed.")?;
+    task.validate_checkpoints()?;
+    if task.id != id || task.version != 1 {
+        return Err("Invalid workflow record; nothing was changed.".into());
+    }
+    Ok(task)
+}
+
+/// Caller must hold the task's real writer lock. Compare all fields, not the
+/// second-resolution timestamp: another window can write twice in one second.
+pub fn current_record(home: &Path, expected: &Task) -> Result<Task, String> {
+    let task = read_record(home, &expected.id)?;
+    let expected = serde_json::to_value(expected).map_err(|e| e.to_string())?;
+    // An owning live writer compares the raw durable record. Observers see the
+    // recovered presentation after a crash; accept that exact projection too,
+    // while the caller's real writer claim still governs whether it may act.
+    let raw = serde_json::to_value(&task).map_err(|e| e.to_string())?;
+    let mut visible = task.clone();
+    visible.recover();
+    if raw != expected && serde_json::to_value(&visible).map_err(|e| e.to_string())? != expected {
+        return Err(
+            "This workflow changed in another window. Refresh it before trying again.".into(),
+        );
+    }
+    Ok(task)
+}
+
+/// Relationship-only transaction. Caller holds the writer lock through save.
+pub fn attach(home: &Path, expected: &Task, parent: &Path) -> Result<Task, String> {
+    let mut task = current_record(home, expected)?;
+    if task.phase.active() {
+        return Err("Stop the active workflow before attaching it to another conversation.".into());
+    }
+    task.parent_session = Some(parent.into());
+    task.updated = super::now();
+    save(home, &task)?;
+    Ok(task)
+}
+
+pub fn load(home: &Path) -> Result<Vec<Task>, String> {
     private_dir(home)?;
     let mut tasks = Vec::new();
     for entry in fs::read_dir(home)
@@ -136,6 +193,7 @@ pub fn load(home: &Path) -> Result<Vec<Task>, String> {
         }
         let mut t: Task = serde_json::from_slice(&fs::read(e.path()).map_err(|e| e.to_string())?)
             .map_err(|_| "Invalid task record; no work was resumed")?;
+        t.validate_checkpoints()?;
         if t.version != 1
             || uuid::Uuid::parse_str(&t.id).is_err()
             || e.file_name().to_string_lossy() != format!("{}.json", t.id)

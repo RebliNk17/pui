@@ -84,11 +84,18 @@ fn entire_header_toggles_with_pointer_and_keyboard_and_state_is_independent() {
     assert_eq!(bodies, vec![false, false]);
     assert!(rows[0].rect.height() >= 44.0);
     click(&ctx, rows[0].rect.left_center() + egui::vec2(90.0, 0.0));
-    assert_eq!(render(&ctx, vec![], 320.0).2, vec![true, false]);
-    assert_eq!(
-        render(&ctx, vec![key(egui::Key::ArrowLeft)], 320.0).2,
-        vec![false, false]
+    let (_, focused, bodies) = render(&ctx, vec![], 320.0);
+    assert_eq!(bodies, vec![true, false]);
+    assert!(focused[0].has_focus());
+    assert!(!focused[0].changed(), "focus alone is not a layout change");
+    let (_, rows, bodies) = render(&ctx, vec![key(egui::Key::ArrowLeft)], 320.0);
+    assert_eq!(bodies, vec![false, false]);
+    assert!(
+        rows[0].changed(),
+        "keyboard collapse must invalidate layout"
     );
+    let (_, rows, _) = render(&ctx, vec![key(egui::Key::ArrowLeft)], 320.0);
+    assert!(!rows[0].changed(), "already closed must settle");
     assert_eq!(
         render(&ctx, vec![key(egui::Key::ArrowRight)], 320.0).2,
         vec![true, false]

@@ -13,6 +13,7 @@ fn row(title: &str, created: Option<u64>, modified: u64, pinned: bool) -> Branch
         project: "/fixture".into(),
         created: created.map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s)),
         modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified),
+        activity: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(modified)),
         children: vec![],
         pinned,
         archived: false,

@@ -1,0 +1,14 @@
+{
+  "name": "pui-engineering",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Original opt-in engineering skills for Pui",
+  "pi": {
+    "skills": [
+      "skills"
+    ],
+    "extensions": [],
+    "prompts": [],
+    "themes": []
+  }
+}

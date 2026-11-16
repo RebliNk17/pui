@@ -48,7 +48,7 @@ fn kanban_cards_have_bounded_compact_heights_and_preserve_parent_spacing() {
                         ui.set_width(width);
                         let spacing = ui.spacing().clone();
                         let top = ui.cursor().top();
-                        agent_card(ui, &card, Duration::from_secs(3));
+                        agent_card(ui, &card, Duration::from_secs(3),Some("User note · unverified bounded progress"));
                         let height = ui.cursor().top() - top - spacing.item_spacing.y;
                         let limit = if matches!(status, Status::Waiting | Status::Error) { 150.0 } else if long { 130.0 } else { 95.0 };
                         assert!(height <= limit, "{theme:?} {status:?} width={width}, long={long}, height={height} > {limit}");
@@ -82,7 +82,7 @@ fn compact_attention_card_is_still_clickable_without_approving_anything() {
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let top = ui.cursor().top();
-                    clicked = agent_card(ui, &card, Duration::ZERO);
+                    clicked = agent_card(ui, &card, Duration::ZERO, None);
                     rect = egui::Rect::from_min_max(
                         egui::pos2(ui.min_rect().left(), top),
                         egui::pos2(

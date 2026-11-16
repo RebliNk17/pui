@@ -238,6 +238,20 @@ impl LabelSelectionState {
         self.selection = None;
     }
 
+    /// Nonempty character range only when both endpoints belong to this exact widget/layer.
+    /// Deliberately excludes cross-label selections; callers must not capture another pane.
+    pub fn range_for_response(&self, response: &Response) -> Option<CCursorRange> {
+        let selection = self.selection?;
+        if selection.layer_id != response.layer_id
+            || selection.primary.widget_id != response.id
+            || selection.secondary.widget_id != response.id
+        {
+            return None;
+        }
+        let range = CCursorRange::two(selection.secondary.ccursor, selection.primary.ccursor);
+        (!range.is_empty()).then_some(range)
+    }
+
     fn copy_text(&mut self, new_galley_rect: Rect, galley: &Galley, cursor_range: &CCursorRange) {
         let new_text = selected_text(galley, cursor_range);
         if new_text.is_empty() {
@@ -391,7 +405,8 @@ impl LabelSelectionState {
                         WidgetTextCursor::new(response.id, new_primary, global_from_galley, galley);
 
                     // We don't want the latency of `drag_started`.
-                    let drag_started = ui.input(|i| i.pointer.any_pressed());
+                    let drag_started =
+                        ui.input(|i| i.pointer.button_pressed(crate::PointerButton::Primary));
                     if drag_started {
                         if selection.layer_id == response.layer_id {
                             if ui.input(|i| i.modifiers.shift) {
@@ -524,7 +539,8 @@ impl LabelSelectionState {
         }
 
         self.any_hovered |= response.hovered();
-        self.is_dragging |= response.is_pointer_button_down_on(); // we don't want the initial latency of drag vs click decision
+        self.is_dragging |=
+            response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_down()); // no initial drag latency; secondary click preserves selection
 
         let old_selection = self.selection;
 
@@ -533,7 +549,9 @@ impl LabelSelectionState {
         let old_range = cursor_state.range(galley);
 
         if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
-            if response.contains_pointer() {
+            if response.contains_pointer()
+                && !ui.input(|i| i.pointer.button_pressed(crate::PointerButton::Secondary))
+            {
                 let cursor_at_pointer =
                     galley.cursor_from_pos((galley_from_global * pointer_pos).to_vec2());
 

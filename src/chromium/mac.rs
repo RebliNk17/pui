@@ -8,11 +8,20 @@ use objc2::{ClassType, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSEvent};
 use std::{
     cell::Cell,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 pub(super) static LIVE_BROWSERS: AtomicUsize = AtomicUsize::new(0);
-thread_local! { static INITIALIZED: Cell<bool> = const { Cell::new(false) }; }
+static PUMP: std::sync::LazyLock<Arc<super::pump::Schedule>> =
+    std::sync::LazyLock::new(Default::default);
+thread_local! {
+    static INITIALIZED: Cell<bool> = const { Cell::new(false) };
+    static PUMPING: Cell<bool> = const { Cell::new(false) };
+    static TIMER: std::cell::RefCell<std::sync::Weak<super::pump::native::Timer>> = Default::default();
+}
 
 #[derive(Default)]
 pub struct ApplicationState {
@@ -52,13 +61,14 @@ pub fn prepare_application() {
 }
 
 wrap_browser_process_handler! {
-    struct PumpHandler { ctx: eframe::egui::Context }
+    struct PumpHandler { timer: Arc<super::pump::native::Timer> }
     impl BrowserProcessHandler {
         fn on_before_child_process_launch(&self, command_line: Option<&mut CommandLine>) {
             if let Some(command_line) = command_line { privacy::configure_command_line(command_line); }
         }
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
-            self.ctx.request_repaint_after(std::time::Duration::from_millis(delay_ms.max(0) as u64));
+            let delay = std::time::Duration::from_millis(delay_ms.max(0) as u64);
+            self.timer.schedule(delay);
         }
     }
 }
@@ -73,6 +83,7 @@ wrap_app! {
 }
 
 pub struct Runtime {
+    timer: Arc<super::pump::native::Timer>,
     library: std::mem::ManuallyDrop<cef::library_loader::LibraryLoader>,
 }
 impl Runtime {
@@ -116,7 +127,13 @@ impl Runtime {
             log_severity: LogSeverity::DISABLE,
             ..storage
         };
-        let mut app = ChromiumApp::new(PumpHandler::new(ctx.clone()));
+        let repaint = ctx.clone();
+        let timer = Arc::new(super::pump::native::Timer::new(
+            Arc::clone(&PUMP),
+            move || Self::pump(&repaint),
+        ));
+        TIMER.with(|shared| *shared.borrow_mut() = Arc::downgrade(&timer));
+        let mut app = ChromiumApp::new(PumpHandler::new(Arc::clone(&timer)));
         if cef::initialize(
             Some(args.as_main_args()),
             Some(&settings),
@@ -133,18 +150,45 @@ impl Runtime {
             );
         }
         INITIALIZED.set(true);
+        timer.schedule(std::time::Duration::ZERO);
         Ok(Self {
+            timer,
             library: std::mem::ManuallyDrop::new(library),
         })
     }
-    pub fn pump() {
+    pub fn browser(id: u64, open: bool) {
+        PUMP.browser(std::time::Instant::now(), id, open);
+        TIMER.with(|shared| {
+            if let Some(timer) = shared.borrow().upgrade() {
+                timer.rearm();
+            }
+        });
+    }
+    pub fn pump(_ctx: &eframe::egui::Context) {
         if INITIALIZED.get() {
-            cef::do_message_loop_work();
+            if PUMPING.get() {
+                return;
+            }
+            if PUMP.due(std::time::Instant::now()) {
+                PUMPING.set(true);
+                cef::do_message_loop_work();
+                PUMPING.set(false);
+            }
+            // Dispatch may wake early; rearm the same one-shot source, never
+            // tie native browser progress to a continuously repainting window.
+            TIMER.with(|shared| {
+                if let Some(timer) = shared.borrow().upgrade() {
+                    timer.rearm();
+                }
+            });
         }
     }
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
+        self.timer.cancel();
+        TIMER.with(|shared| *shared.borrow_mut() = Default::default());
+        PUMP.clear();
         // All BrowserViews close before runtime teardown. Pump close callbacks
         // before CEF shutdown; never unload a live Chromium framework.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
