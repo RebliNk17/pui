@@ -2,7 +2,7 @@
 use super::*;
 const MAX_BYTES: usize = 128 * 1024;
 const MAX_FILES: usize = 256;
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub status: char,
     pub path: String,

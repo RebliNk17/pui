@@ -89,6 +89,27 @@ pub(super) fn filters_disabled(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<(), String> {
+    filter_check(root, cancel, deadline, false)
+}
+/// Checkout may execute smudge drivers even when read-only inspection is safe.
+pub(super) fn checkout_filters_disabled(
+    root: &Path,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), String> {
+    filter_check(root, cancel, deadline, true)
+}
+fn filter_check(
+    root: &Path,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    checkout: bool,
+) -> Result<(), String> {
+    let pattern = if checkout {
+        "^filter\\..*\\.(clean|smudge|process)$"
+    } else {
+        "^filter\\..*\\.(clean|process)$"
+    };
     let (names, exit) = run(
         command(root).args([
             "config",
@@ -96,7 +117,7 @@ pub(super) fn filters_disabled(
             "--null",
             "--name-only",
             "--get-regexp",
-            "^filter\\..*\\.(clean|process)$",
+            pattern,
         ]),
         cancel,
         deadline,
@@ -108,6 +129,9 @@ pub(super) fn filters_disabled(
         return Ok(());
     }
     if exit.success() && !names.is_empty() {
+        if checkout {
+            return Err("Git clean/smudge/process filters are configured. Branch switching is unavailable because checkout filters can execute commands.".into());
+        }
         return Err("Git clean/process filters are configured. Read-only working-tree inspection is unavailable because these filters can execute commands.".into());
     }
     Err("Cannot verify Git filter configuration. Working-tree inspection is unavailable.".into())

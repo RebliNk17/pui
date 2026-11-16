@@ -1,6 +1,7 @@
 //! Docked changes inspector. Git and recorded edits are deliberately separate sources.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+mod branch_create;
 mod branches;
 mod commit;
 pub(super) mod git_files;
@@ -38,6 +39,7 @@ pub(super) struct Changes {
     index_actions: index_actions::IndexActions,
     commit: commit::Commit,
     push: push::Push,
+    branch_create: branch_create::Create,
     pub(super) index_writable: bool,
     pub(super) review: Option<diff_viewer::Document>,
     close: bool,
@@ -98,6 +100,8 @@ impl Changes {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
         self.commit_inputs(ctx, visible);
+        self.push_inputs(ctx, visible);
+        self.create_branch_inputs(ctx, visible);
         self.branch_inputs(ctx, visible, workspace);
         if visible {
             self.inline_inputs(ctx, outputs, revision, workspace);
@@ -146,6 +150,7 @@ impl Changes {
         if self.identity.0 != cwd || session_changed {
             self.commit = Default::default();
             self.push = Default::default();
+            self.branch_create = Default::default();
             self.identity = (cwd.to_path_buf(), session.to_owned());
             self.open_rows.clear();
             self.inline = Default::default();
@@ -239,6 +244,8 @@ impl Changes {
         }
         self.index_dialog(ctx);
         self.commit_dialog(ctx);
+        self.push_dialog(ctx);
+        self.create_branch_dialog(ctx);
         expanded
     }
 
@@ -417,6 +424,7 @@ impl Changes {
             self.git_mode_controls(ui);
             self.commit_control(ui, workspace, loading);
             self.push_review(ui, workspace, loading);
+            self.create_branch_ui(ui, workspace);
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new())

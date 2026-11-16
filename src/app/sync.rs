@@ -1922,6 +1922,10 @@ mod tests {
         let mut mirror = app(&directory, &path);
         owner.ensure_agent();
         let mirror_id = mirror.ensure_agent();
+        // Snapshot transport can complete before asynchronous OS registration.
+        // This test measures upgrade delivery after registration, not setup latency.
+        mirror.sync._watcher.as_ref().unwrap().wait_ready().unwrap();
+        owner.sync._watcher.as_ref().unwrap().wait_ready().unwrap();
         for app in [&mut owner, &mut mirror] {
             let node = app.agents.nodes.get_mut(&app.agents.active).unwrap();
             node.access = "read-only".into();

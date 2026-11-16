@@ -1,3 +1,9 @@
+# Feature completion and commits
+
+- User instruction: commit every finished, validated feature. This supersedes the older continuation reminder's no-commit restriction; do not leave completed features accumulating uncommitted.
+- Preserve unrelated/concurrent edits and commit only the feature and its validation documentation. Do not commit unfinished or failing work as complete.
+- This authorizes local commits only. Pushes, installations, deployments and destructive actions still require separate explicit authorization.
+
 # Validation cadence
 
 - During implementation, run focused tests for the changed feature; batch related changes.

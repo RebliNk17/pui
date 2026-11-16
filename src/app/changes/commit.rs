@@ -4,6 +4,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+fn ui_signing_text(sign: bool) -> &'static str {
+    if sign {
+        "Creates a signed local commit using the configured Git signer/key. Signer programs and agent/pinentry may run with OS permissions. Failure never falls back to unsigned. Hooks bypassed; working files unchanged; no push."
+    } else {
+        "Creates an unsigned local commit. Hooks bypassed; working files unchanged; no push. Opt in to signing below if an available Git signer/key is configured."
+    }
+}
 #[derive(Default)]
 pub(super) struct Commit {
     owner: Option<(PathBuf, String)>,
@@ -11,6 +18,8 @@ pub(super) struct Commit {
     applying: Option<workspace::read_only::Request<Result<String, String>>>,
     snapshot: Option<workspace::commit::Snapshot>,
     message: String,
+    sign: bool,
+    applied_signed: bool,
     notice: Option<String>,
     controls: Vec<egui::Id>,
 }
@@ -105,6 +114,7 @@ impl Changes {
                 Ok(s) => {
                     self.commit.snapshot = Some(s);
                     self.commit.message.clear();
+                    self.commit.sign = false;
                 }
                 Err(e) => self.commit.notice = Some(e),
             }
@@ -124,7 +134,14 @@ impl Changes {
             self.commit.applying = None;
             self.commit.notice = Some(match result {
                 Ok(oid) => {
-                    format!("Committed locally: {oid}. No push. Hooks and signing were not run.")
+                    format!(
+                        "Committed locally: {oid}. No push. Hooks bypassed. {}",
+                        if self.commit.applied_signed {
+                            "Signing requested from configured Git signer; signer trust not verified by Pui."
+                        } else {
+                            "Unsigned commit."
+                        }
+                    )
                 }
                 Err(e) => e,
             });
@@ -171,10 +188,87 @@ impl Changes {
         let initial = snapshot.head.bytes().all(|b| b == b'0');
         self.commit.controls.truncate(1);
         ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
-        let choice=confirmations::Dialog::new("commit-staged-confirm",if initial{"Create initial staged commit?"}else{"Commit staged snapshot?"},"Creates a local, unsigned commit without running Git hooks. Uses configured Git author/committer identity. Only the reviewed index snapshot is committed; working files stay unchanged. No push. Use Terminal if hooks or signing are required.","Cancel","Commit without hooks").destructive(false).enabled(workspace::commit::valid_message(&self.commit.message)).show(ctx,|ui|{ui.add(egui::Label::new(theme::small(ui,format!("{}\n{}\nAuthor: {} <{}>\nCommitter: {} <{}>",snapshot.root.display(),snapshot.branch,snapshot.author.name,snapshot.author.email,snapshot.committer.name,snapshot.committer.email))).wrap());let response=ui.add(egui::TextEdit::multiline(&mut self.commit.message).hint_text("Commit message…").char_limit(4096).desired_rows(3).desired_width(ui.available_width()));self.commit.controls.push(response.id);
-        ui.label(theme::small(ui,format!("{} staged files · renames shown as delete/add",snapshot.files.len())));
-        egui::ScrollArea::both().id_salt("commit-file-list").max_height(72.0).show_rows(ui,16.0,snapshot.files.len(),|ui,range|{for entry in &snapshot.files[range]{ui.add(egui::Label::new(theme::small(ui,format!("{}  {}",entry.status,entry.path.escape_debug()))).extend());}});
-        egui::ScrollArea::both().id_salt("commit-staged-patch").max_height(180.0).show_rows(ui,16.0,snapshot.preview.lines().count(),|ui,range|{for line in snapshot.preview.lines().skip(range.start).take(range.len()){ui.add(egui::Label::new(RichText::new(line).monospace().size(10.5)).extend().selectable(false));}});});
+        let signing = ui_signing_text(self.commit.sign);
+        let choice = confirmations::Dialog::new(
+            "commit-staged-confirm",
+            if initial {
+                "Create initial staged commit?"
+            } else {
+                "Commit staged snapshot?"
+            },
+            signing,
+            "Cancel",
+            if self.commit.sign {
+                "Sign and commit without hooks"
+            } else {
+                "Commit without hooks"
+            },
+        )
+        .destructive(false)
+        .enabled(workspace::commit::valid_message(&self.commit.message))
+        .show(ctx, |ui| {
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    format!(
+                        "{}\n{}\nAuthor: {} <{}>\nCommitter: {} <{}>",
+                        snapshot.root.display(),
+                        snapshot.branch,
+                        snapshot.author.name,
+                        snapshot.author.email,
+                        snapshot.committer.name,
+                        snapshot.committer.email
+                    ),
+                ))
+                .wrap(),
+            );
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.commit.message)
+                    .hint_text("Commit message…")
+                    .char_limit(4096)
+                    .desired_rows(3)
+                    .desired_width(ui.available_width()),
+            );
+            self.commit.controls.push(response.id);
+            let signing = ui.checkbox(
+                &mut self.commit.sign,
+                "Sign with configured Git signer (may use agent/pinentry)",
+            );
+            self.commit.controls.push(signing.id);
+            ui.label(theme::small(
+                ui,
+                format!(
+                    "{} staged files · renames shown as delete/add",
+                    snapshot.files.len()
+                ),
+            ));
+            egui::ScrollArea::both()
+                .id_salt("commit-file-list")
+                .max_height(72.0)
+                .show_rows(ui, 16.0, snapshot.files.len(), |ui, range| {
+                    for entry in &snapshot.files[range] {
+                        ui.add(
+                            egui::Label::new(theme::small(
+                                ui,
+                                format!("{}  {}", entry.status, entry.path.escape_debug()),
+                            ))
+                            .extend(),
+                        );
+                    }
+                });
+            egui::ScrollArea::both()
+                .id_salt("commit-staged-patch")
+                .max_height(180.0)
+                .show_rows(ui, 16.0, snapshot.preview.lines().count(), |ui, range| {
+                    for line in snapshot.preview.lines().skip(range.start).take(range.len()) {
+                        ui.add(
+                            egui::Label::new(RichText::new(line).monospace().size(10.5))
+                                .extend()
+                                .selectable(false),
+                        );
+                    }
+                });
+        });
         if let Some(choice) = choice {
             let snapshot = self.commit.snapshot.take().unwrap();
             if choice == confirmations::Choice::Confirm {
@@ -183,6 +277,8 @@ impl Changes {
                     return;
                 };
                 let message = std::mem::take(&mut self.commit.message);
+                let sign = self.commit.sign;
+                self.commit.applied_signed = sign;
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.commit.applying = Some(workspace::read_only::Request::new(rx, cancel.clone()));
@@ -190,7 +286,11 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = workspace::commit::apply(snapshot, &message, &cancel);
+                        let result = if sign {
+                            workspace::commit::apply_with_signing(snapshot, &message, true, &cancel)
+                        } else {
+                            workspace::commit::apply(snapshot, &message, &cancel)
+                        };
                         drop(permit);
                         let _ = tx.send(result);
                         ctx.request_repaint();

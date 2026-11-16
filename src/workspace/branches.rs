@@ -1,4 +1,5 @@
-//! Explicit, local-only branch discovery. No branch name is ever a command argument.
+//! Explicit local branch discovery and create-only reviewed ref publication.
+pub(crate) mod create;
 use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Instant};
 
 pub(crate) const MAX_BRANCHES: usize = 256;

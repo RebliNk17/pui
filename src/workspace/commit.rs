@@ -10,6 +10,7 @@ pub(crate) struct Snapshot {
     pub files: Vec<history::files::Entry>,
     pub author: Identity,
     pub committer: Identity,
+    signing_config: Vec<u8>,
     index_path: PathBuf,
     index: Vec<u8>,
 }
@@ -257,7 +258,26 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
         cancel,
         deadline,
     )?)?;
+    let (signing_config, signing_status) = read_only::run(
+        read_only::command(root).args([
+            "config",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            "^(gpg\\.|user\\.signingkey$)",
+        ]),
+        cancel,
+        deadline,
+        16384,
+        "Signing configuration",
+        "Signing configuration exceeds 16 KiB",
+    )?;
+    if !(signing_status.success() || signing_status.code() == Some(1) && signing_config.is_empty())
+    {
+        return Err("Cannot inspect signing configuration".into());
+    }
     Ok(Snapshot {
+        signing_config,
         author,
         committer,
         files,
@@ -279,6 +299,14 @@ pub(crate) fn valid_message(message: &str) -> bool {
 pub(crate) fn apply(
     snapshot: Snapshot,
     message: &str,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    apply_with_signing(snapshot, message, false, cancel)
+}
+pub(crate) fn apply_with_signing(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
     if !valid_message(message) {
@@ -344,7 +372,7 @@ pub(crate) fn apply(
         return Err("Cannot create staged tree.".into());
     }
     let tree = line(out)?;
-    // Deliberately hookless and unsigned: explicit UI contract, never silently skips requested hooks/signing.
+    // Signing explicitly requested; failure never falls back to unsigned. Hooks remain disabled.
     let mut command = read_only::command(&snapshot.root);
     command
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -363,6 +391,9 @@ pub(crate) fn apply(
     if !snapshot.head.bytes().all(|b| b == b'0') {
         command.args(["-p", &snapshot.head]);
     }
+    if sign {
+        command.arg("-S");
+    }
     command.args(["-m", message.trim()]);
     let (out, status) = read_only::run(
         &mut command,
@@ -373,7 +404,7 @@ pub(crate) fn apply(
         "Commit response exceeds limit",
     )?;
     if !status.success() {
-        return Err("Cannot create commit object with reviewed identity.".into());
+        return Err(if sign{"Signing failed or signer unavailable; no unsigned fallback or branch publication. Configure an available Git signer/key."}else{"Cannot create commit object with reviewed identity."}.into());
     }
     let oid = line(out)?;
     if !history::oid(&oid) {

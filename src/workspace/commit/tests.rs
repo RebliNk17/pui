@@ -165,6 +165,55 @@ fn branch_created_during_initial_review_refuses_without_replacing_it() {
     );
 }
 #[test]
+fn ssh_signed_commit_and_signer_failure_never_falls_back() {
+    for fail in [false, true] {
+        let root = fixture();
+        let key = root.join(".git/disposable-sign-key");
+        assert!(
+            std::process::Command::new("/usr/bin/ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(&key)
+                .status()
+                .unwrap()
+                .success()
+        );
+        super::super::tests::git(&root, &["config", "gpg.format", "ssh"]);
+        super::super::tests::git(&root, &["config", "user.signingkey", key.to_str().unwrap()]);
+        if fail {
+            super::super::tests::git(&root, &["config", "gpg.ssh.program", "/usr/bin/false"]);
+        }
+        let cancel = AtomicBool::new(false);
+        let snapshot = prepare(&root, &cancel).unwrap();
+        let head = snapshot.head.clone();
+        let index = fs::read(root.join(".git/index")).unwrap();
+        let result = apply_with_signing(snapshot, "signed", true, &cancel);
+        if fail {
+            assert!(result.unwrap_err().contains("no unsigned fallback"));
+            assert_eq!(
+                line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+                head
+            );
+        } else {
+            let oid = result.unwrap();
+            let body = super::super::tests::git(&root, &["cat-file", "commit", &oid]);
+            assert!(
+                String::from_utf8(body)
+                    .unwrap()
+                    .contains("gpgsig -----BEGIN SSH SIGNATURE-----")
+            );
+        }
+        assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    }
+}
+#[test]
+fn changed_signing_config_refuses_review() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    let snapshot = prepare(&root, &cancel).unwrap();
+    super::super::tests::git(&root, &["config", "user.signingkey", "changed-key"]);
+    assert!(apply_with_signing(snapshot, "stale", true, &cancel).is_err());
+}
+#[test]
 fn changed_index_foreign_lock_cancel_and_empty_message_refuse() {
     for case in 0..4 {
         let root = fixture();

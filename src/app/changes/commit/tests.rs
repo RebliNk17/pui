@@ -77,52 +77,58 @@ fn native_confirm_commit_worker_updates_disposable_branch_once() {
 }
 #[test]
 fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes() {
-    for mode in [theme::Theme::Light, theme::Theme::Dark] {
-        for zoom in [0.8, 1.4] {
-            let ctx = egui::Context::default();
-            theme::install(&ctx);
-            mode.apply(&ctx);
-            ctx.set_zoom_factor(zoom);
-            let root = std::fs::canonicalize(crate::workspace::tests::fixture()).unwrap();
-            crate::workspace::tests::git(&root, &["config", "user.name", "Pui Test"]);
-            crate::workspace::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
-            crate::workspace::tests::git(&root, &["add", "--", "README.md"]);
-            let snapshot = workspace::commit::prepare(&root, &AtomicBool::new(false)).unwrap();
-            let mut changes = Changes {
-                index_writable: true,
-                ..Default::default()
-            };
-            changes.commit.snapshot = Some(snapshot);
-            changes.commit.message = "draft".into();
-            for n in 0..4 {
-                let output = ctx.run(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            Vec2::new(420.0, 620.0),
-                        )),
-                        events: if n == 3 {
-                            vec![egui::Event::Key {
-                                key: egui::Key::Escape,
-                                pressed: true,
-                                repeat: false,
-                                physical_key: None,
-                                modifiers: egui::Modifiers::NONE,
-                            }]
-                        } else {
-                            vec![]
-                        },
-                        ..Default::default()
-                    },
-                    |ctx| changes.commit_dialog(ctx),
+    for signed in [false, true] {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.4] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let root = std::fs::canonicalize(crate::workspace::tests::fixture()).unwrap();
+                crate::workspace::tests::git(&root, &["config", "user.name", "Pui Test"]);
+                crate::workspace::tests::git(
+                    &root,
+                    &["config", "user.email", "pui@example.invalid"],
                 );
-                if n == 2 {
-                    assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t)if t.galley.job.text.contains("Author: Pui Test <pui@example.invalid>")&&t.galley.job.text.contains("Committer: Pui Test <pui@example.invalid>"))));
+                crate::workspace::tests::git(&root, &["add", "--", "README.md"]);
+                let snapshot = workspace::commit::prepare(&root, &AtomicBool::new(false)).unwrap();
+                let mut changes = Changes {
+                    index_writable: true,
+                    ..Default::default()
+                };
+                changes.commit.snapshot = Some(snapshot);
+                changes.commit.message = "draft".into();
+                changes.commit.sign = signed;
+                for n in 0..4 {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(420.0, 620.0),
+                            )),
+                            events: if n == 3 {
+                                vec![egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    pressed: true,
+                                    repeat: false,
+                                    physical_key: None,
+                                    modifiers: egui::Modifiers::NONE,
+                                }]
+                            } else {
+                                vec![]
+                            },
+                            ..Default::default()
+                        },
+                        |ctx| changes.commit_dialog(ctx),
+                    );
+                    if n == 2 {
+                        assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t)if t.galley.job.text.contains("Author: Pui Test <pui@example.invalid>")&&t.galley.job.text.contains("Committer: Pui Test <pui@example.invalid>"))));
+                    }
                 }
+                assert!(changes.commit.snapshot.is_none());
+                assert!(changes.commit.message.is_empty());
+                assert!(changes.commit.applying.is_none());
             }
-            assert!(changes.commit.snapshot.is_none());
-            assert!(changes.commit.message.is_empty());
-            assert!(changes.commit.applying.is_none());
         }
     }
 }

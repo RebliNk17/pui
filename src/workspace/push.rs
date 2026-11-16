@@ -1,6 +1,7 @@
-//! Local-only upstream review. No remote contact, credential lookup, fetch or push.
+//! Explicit reviewed single-branch Push; inspection remains local-only.
 use super::*;
-#[derive(Debug, PartialEq, Eq)]
+pub(crate) mod remote;
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub root: PathBuf,
     pub branch: String,
@@ -8,6 +9,7 @@ pub(crate) struct Snapshot {
     pub remote: String,
     pub destination: String,
     pub endpoint: String,
+    pub explicit_target: bool,
 }
 fn run(
     root: &Path,
@@ -39,6 +41,9 @@ fn line(bytes: Vec<u8>) -> Result<String, String> {
     Ok(text.into())
 }
 fn endpoint(url: &str) -> Result<String, String> {
+    if Path::new(url).is_absolute() {
+        return Ok(url.into());
+    }
     // Do not echo secrets or arbitrary transport-helper strings into review UI.
     if let Some(rest) = url
         .strip_prefix("https://")
@@ -67,6 +72,13 @@ fn endpoint(url: &str) -> Result<String, String> {
     Err("Push review supports HTTPS or SSH remotes without embedded credentials (git@host:path is allowed).".into())
 }
 pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, String> {
+    prepare_target(root, None, cancel)
+}
+pub(crate) fn prepare_target(
+    root: &Path,
+    target: Option<(&str, &str)>,
+    cancel: &AtomicBool,
+) -> Result<Snapshot, String> {
     let deadline = Instant::now() + DEADLINE;
     if !root.is_absolute()
         || Path::new(&line(run(
@@ -83,16 +95,20 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
     if branch.is_empty() || head.bytes().all(|b| b == b'0') {
         return Err("Push requires an existing local branch commit.".into());
     }
-    let bytes = run(
-        root,
-        &[
-            "for-each-ref",
-            "--format=%(upstream:remotename)%00%(upstream:remoteref)",
-            &branch,
-        ],
-        cancel,
-        deadline,
-    )?;
+    let bytes = if let Some((remote, destination)) = target {
+        format!("{remote}\0{destination}\n").into_bytes()
+    } else {
+        run(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:remotename)%00%(upstream:remoteref)",
+                &branch,
+            ],
+            cancel,
+            deadline,
+        )?
+    };
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "Invalid upstream configuration")?
         .strip_suffix('\n')
@@ -108,6 +124,12 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
         || destination.chars().any(char::is_control)
     {
         return Err("Configure an upstream local branch on one named remote first.".into());
+    }
+    run(root, &["check-ref-format", destination], cancel, deadline)?;
+    // Require an actual configured remote name, never interpret a URL/path as remote.
+    let remotes = run(root, &["remote"], cancel, deadline)?;
+    if !std::str::from_utf8(&remotes).is_ok_and(|s| s.lines().any(|name| name == remote)) {
+        return Err("Choose an existing named remote.".into());
     }
     // Refuse push-specific routing, mirror and custom refspecs rather than silently guessing.
     for key in [
@@ -145,7 +167,200 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
         remote: remote.into(),
         destination: destination.into(),
         endpoint,
+        explicit_target: target.is_some(),
     })
+}
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Updated,
+    UpToDate,
+}
+fn outcome(bytes: &[u8], success: bool) -> Result<Outcome, String> {
+    // Only a fixed enum escapes this parser. Remote URLs/reasons/hook text stay hidden.
+    let mut flag = None;
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.len() >= 2 && line[1] == b'\t' {
+            let fields = line.split(|b| *b == b'\t').collect::<Vec<_>>();
+            if fields.len() != 3 || flag.is_some() || !matches!(line[0], b' ' | b'=' | b'*' | b'!')
+            {
+                return Err(
+                    "Push response unavailable or ambiguous; inspect remote state before retrying."
+                        .into(),
+                );
+            }
+            flag = Some(line[0]);
+        }
+    }
+    match(flag,success){(Some(b'='),true)=>Ok(Outcome::UpToDate),(Some(b' '|b'*'),true)=>Ok(Outcome::Updated),(Some(b'!'),_)=>Err("Push rejected for the reviewed branch. Remote was not updated by this refspec. Remote details are hidden; inspect its state and policy before retrying. No automatic retry.".into()),_=>Err("Push failed or response unavailable. Authentication/connection or remote policy may be responsible; inspect remote state before retrying. Remote details hidden; no automatic retry.".into())}
+}
+pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, String> {
+    let target = snapshot
+        .explicit_target
+        .then_some((snapshot.remote.as_str(), snapshot.destination.as_str()));
+    if prepare_target(&snapshot.root, target, cancel)? != snapshot {
+        return Err("Push source or destination changed; inspect again.".into());
+    }
+    let mut command = network_command(&snapshot.root);
+    command.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "push.followTags=false",
+        "-c",
+        "push.recurseSubmodules=no",
+        "-c",
+        "push.gpgSign=false",
+        "push",
+        "--porcelain",
+        "--no-verify",
+        "--no-follow-tags",
+        "--recurse-submodules=no",
+        "--",
+        &snapshot.endpoint,
+        &format!("{}:{}", snapshot.head, snapshot.destination),
+    ]);
+    // No remote aliases/refspec defaults, no '+' or force, one exact reviewed OID/ref.
+    let result = read_only::run(
+        &mut command,
+        cancel,
+        Instant::now() + std::time::Duration::from_secs(30),
+        16384,
+        "Confirmed push",
+        "Push output exceeded limit; remote completion is uncertain.",
+    );
+    match result{Ok((bytes,status))=>outcome(&bytes,status.success()),Err(_)=>Err("Push cancelled, timed out or unavailable; remote completion may be uncertain. Inspect remote state before retrying. No automatic retry.".into())}
+}
+fn network_command(root: &Path) -> std::process::Command {
+    let mut command = read_only::command(root);
+    command
+        .env_remove("GIT_SSH")
+        .env_remove("GIT_SSH_COMMAND")
+        .env_remove("GIT_SSH_VARIANT")
+        .env(
+            "GIT_SSH_COMMAND",
+            "/usr/bin/ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=10",
+        )
+        .env("GIT_ASKPASS", "/usr/bin/false")
+        .env("SSH_ASKPASS", "/usr/bin/false")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+}
+fn remote_oid(bytes: &[u8], destination: &str) -> Result<Option<String>, String> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "Invalid remote response")?;
+    let text = text.strip_suffix('\n').ok_or("Invalid remote response")?;
+    let (oid, name) = text.split_once('\t').ok_or("Invalid remote response")?;
+    if name != destination || !history::oid(oid) {
+        return Err("Remote response does not match the exact branch.".into());
+    }
+    Ok(Some(oid.into()))
+}
+pub(crate) fn inspect_remote(
+    snapshot: &Snapshot,
+    cancel: &AtomicBool,
+) -> Result<Option<String>, String> {
+    let target = snapshot
+        .explicit_target
+        .then_some((snapshot.remote.as_str(), snapshot.destination.as_str()));
+    if prepare_target(&snapshot.root, target, cancel)? != *snapshot {
+        return Err("Push destination changed; inspect again.".into());
+    }
+    let mut command = network_command(&snapshot.root);
+    command.args([
+        "ls-remote",
+        "--refs",
+        "--",
+        &snapshot.endpoint,
+        &snapshot.destination,
+    ]);
+    let (out, status) = read_only::run(
+        &mut command,
+        cancel,
+        Instant::now() + std::time::Duration::from_secs(30),
+        1024,
+        "Remote branch inspection",
+        "Remote response exceeds limit",
+    )
+    .map_err(|_| {
+        "Remote inspection cancelled/timed out or unavailable. No automatic retry.".to_string()
+    })?;
+    if !status.success() {
+        return Err("Remote inspection failed; authentication/connection may be unavailable. Remote details hidden.".into());
+    }
+    remote_oid(&out, &snapshot.destination)
+}
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Relation {
+    Absent,
+    Equal,
+    Counts { ahead: u32, behind: u32 },
+    Unavailable,
+}
+impl Relation {
+    pub(crate) fn label(&self) -> String {
+        match self{Self::Absent=>"Remote branch was absent at inspection.".into(),Self::Equal=>"Observed remote commit equals the reviewed local commit.".into(),Self::Counts{ahead,behind}=>format!("Compared with observed remote: {ahead} ahead · {behind} behind{}",if *ahead>0&&*behind>0{" · diverged"}else{""}),Self::Unavailable=>"Observed remote commit is not fully available locally; comparison unavailable. No fetch performed.".into()}
+    }
+}
+fn parse_counts(bytes: &[u8]) -> Option<Relation> {
+    let text = std::str::from_utf8(bytes).ok()?.strip_suffix('\n')?;
+    let (a, b) = text.split_once('\t')?;
+    let parse = |s: &str| {
+        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            s.parse::<u32>().ok()
+        } else {
+            None
+        }
+    };
+    Some(Relation::Counts {
+        ahead: parse(a)?,
+        behind: parse(b)?,
+    })
+}
+pub(crate) fn compare(snapshot: &Snapshot, remote: Option<&str>, cancel: &AtomicBool) -> Relation {
+    let Some(remote) = remote else {
+        return Relation::Absent;
+    };
+    if !history::oid(remote) || remote.len() != snapshot.head.len() {
+        return Relation::Unavailable;
+    }
+    if remote == snapshot.head {
+        return Relation::Equal;
+    }
+    let deadline = Instant::now() + DEADLINE;
+    let shallow = read_only::run(
+        read_only::command(&snapshot.root).args(["rev-parse", "--is-shallow-repository"]),
+        cancel,
+        deadline,
+        16,
+        "Local graph availability",
+        "Invalid graph availability",
+    );
+    if !matches!(shallow,Ok((ref bytes,ref status))if status.success()&&bytes==b"false\n") {
+        return Relation::Unavailable;
+    }
+    let mut command = read_only::command(&snapshot.root);
+    command.env("GIT_NO_REPLACE_OBJECTS", "1").args([
+        "rev-list",
+        "--left-right",
+        "--count",
+        &format!("{}...{}", snapshot.head, remote),
+        "--",
+    ]);
+    match read_only::run(
+        &mut command,
+        cancel,
+        Instant::now() + DEADLINE,
+        128,
+        "Local branch comparison",
+        "Invalid branch counts",
+    ) {
+        Ok((bytes, status)) if status.success() => {
+            parse_counts(&bytes).unwrap_or(Relation::Unavailable)
+        }
+        _ => Relation::Unavailable,
+    }
 }
 #[cfg(test)]
 mod tests;
