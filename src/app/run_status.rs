@@ -319,6 +319,8 @@ impl Pui {
             ("Waiting for input", colors.amber)
         } else if self.state.compacting {
             ("Compacting context…", colors.accent)
+        } else if self.state.retrying && !self.state.ready() {
+            ("Retrying provider…", colors.amber)
         } else if !self.state.ready() {
             ("Working…", colors.accent)
         } else {
@@ -342,6 +344,8 @@ impl Pui {
             Some(Progress::Waiting)
         } else if self.state.compacting {
             Some(Progress::Compacting)
+        } else if self.state.retrying && !self.state.ready() {
+            Some(Progress::Retrying)
         } else if !self.state.ready() {
             Some(Progress::Working)
         } else {
@@ -638,6 +642,35 @@ mod tests {
         assert_eq!(app.run_label().0, "Compacting context…");
         app.state.dialogs.push_back(json!({"method":"confirm"}));
         assert_eq!(app.run_label().0, "Waiting for input");
+    }
+    #[test]
+    fn provider_retry_status_is_truthful_parked_and_lower_priority_than_approvals() {
+        use crate::transcript::Progress;
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.apply(json!({"type":"agent_start"}));
+        app.state
+            .apply(json!({"type":"auto_retry_start","attempt":1}));
+        assert_eq!(app.run_label().0, "Retrying provider…");
+        assert_eq!(app.transcript_progress(), Some(Progress::Retrying));
+        assert!(app.state.error.is_none());
+        assert!(app.state.notice.is_none());
+        let parked = app.take_chat();
+        assert!(parked.state.retrying);
+        assert!(!app.state.retrying);
+        app.put_chat(parked);
+        assert_eq!(app.transcript_progress(), Some(Progress::Retrying));
+        app.state.dialogs.push_back(json!({"method":"confirm"}));
+        assert_eq!(app.run_label().0, "Waiting for input");
+        assert_eq!(app.transcript_progress(), Some(Progress::Waiting));
+        app.state.dialogs.clear();
+        app.state.compacting = true;
+        assert_eq!(app.transcript_progress(), Some(Progress::Compacting));
+        app.state.compacting = false;
+        app.state
+            .apply(json!({"type":"agent_settled","aborted":true}));
+        assert_eq!(app.run_label().0, "Idle");
+        assert_eq!(app.transcript_progress(), None);
     }
     #[test]
     fn queued_images_wait_through_compaction_then_send_once() {

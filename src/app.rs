@@ -1270,6 +1270,7 @@ impl Pui {
                     self.state.busy = false;
                     self.state.pending = false;
                     self.state.compacting = false;
+                    self.state.retrying = false;
                     self.state.dialogs.clear();
                     if self.history_pending.take().is_some() {
                         self.state.error = Some("Pi disconnected during history navigation. Outcome unknown; check the chat before retrying. Nothing was resent.".into());

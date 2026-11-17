@@ -1307,6 +1307,7 @@ impl Pui {
                 n.parent.is_some()
                     && !n.stopped
                     && (n.status == "Working…"
+                        || n.status == "Retrying provider…"
                         || n.status == "Connecting"
                         || n.status == "Compacting context…"
                         || n.status == "Waiting for input")
@@ -1606,6 +1607,7 @@ impl Pui {
                     && matches!(
                         n.status.as_str(),
                         "Working…"
+                            | "Retrying provider…"
                             | "Connecting"
                             | "Compacting context…"
                             | "Waiting for input"
@@ -2218,6 +2220,12 @@ mod tests {
         app.start_waiting_agents();
         assert!(app.agents.parked[&first].client.is_some());
         assert!(app.agents.parked[&second].client.is_none());
+        app.agents.nodes.get_mut(&first).unwrap().status = "Retrying provider…".into();
+        app.start_waiting_agents();
+        assert!(
+            app.agents.parked[&second].client.is_none(),
+            "Provider backoff still occupies the first worker's concurrency slot"
+        );
         app.stop_agent_tree(&first);
         app.start_waiting_agents();
         assert!(app.agents.parked[&second].client.is_some());

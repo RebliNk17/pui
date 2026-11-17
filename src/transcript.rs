@@ -45,6 +45,7 @@ pub enum MessageAction {
 pub enum Progress {
     Interrupting,
     Working,
+    Retrying,
     Compacting,
     Waiting,
     Connecting,
@@ -68,6 +69,7 @@ impl Progress {
         match self {
             Self::Interrupting => "Interrupting current run…",
             Self::Working => WORDS[(elapsed.max(0.0) / 4.0) as usize % WORDS.len()],
+            Self::Retrying => "Provider interrupted · retrying…",
             Self::Compacting => "Compacting context…",
             Self::Waiting => "Waiting for input",
             Self::Connecting => "Connecting…",
@@ -76,7 +78,10 @@ impl Progress {
 }
 fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
     let colors = crate::theme::palette(ui.ctx());
-    let color = if matches!(progress, Progress::Waiting | Progress::Interrupting) {
+    let color = if matches!(
+        progress,
+        Progress::Waiting | Progress::Interrupting | Progress::Retrying
+    ) {
         colors.amber
     } else {
         colors.accent
@@ -2177,6 +2182,10 @@ mod tests {
         assert_ne!(Progress::Working.label(8.0), Progress::Working.label(4.0));
         for elapsed in [0.0, 4.0, 12345.0] {
             assert_eq!(Progress::Compacting.label(elapsed), "Compacting context…");
+            assert_eq!(
+                Progress::Retrying.label(elapsed),
+                "Provider interrupted · retrying…"
+            );
             assert_eq!(Progress::Waiting.label(elapsed), "Waiting for input");
             assert_eq!(Progress::Connecting.label(elapsed), "Connecting…");
         }

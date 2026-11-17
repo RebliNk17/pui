@@ -856,6 +856,7 @@ impl Pui {
                 image.key.hash(&mut hash);
             }
         }
+        self.state.retrying.hash(&mut hash);
         self.attention.metadata(&path).hash(&mut hash);
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
@@ -1833,6 +1834,35 @@ mod tests {
         spin(&mut owner, &mut mirror, |_, b| {
             b.state.messages[0].text == "updated live message" && !b.state.busy
         });
+    }
+    #[test]
+    fn retry_only_changes_publish_without_new_tokens_or_replaying_tools() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        let mut mirror = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        owner.state.apply(json!({"type":"agent_start"}));
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| b.state.busy);
+        let revision = owner.state.transcript_revision;
+        owner
+            .state
+            .apply(json!({"type":"auto_retry_start","attempt":1}));
+        spin(&mut owner, &mut mirror, |_, b| b.state.retrying);
+        assert_eq!(owner.state.transcript_revision, revision);
+        assert_eq!(mirror.run_label().0, "Retrying provider…");
+        assert!(mirror.client.is_none());
+        assert!(owner.state.messages.is_empty());
+        owner
+            .state
+            .apply(json!({"type":"auto_retry_end","success":true}));
+        spin(&mut owner, &mut mirror, |_, b| !b.state.retrying);
+        assert!(mirror.state.busy);
+        assert_eq!(mirror.run_label().0, "Working…");
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
     }
     #[test]
     fn context_only_changes_publish_without_a_new_message_or_usage_total() {

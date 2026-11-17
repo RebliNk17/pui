@@ -12,6 +12,7 @@ pub(crate) fn is_working(status: &str) -> bool {
             | "Connecting…"
             | "Changing history…"
             | "Compacting context…"
+            | "Retrying provider…"
             | "Interrupting…"
             | "Proposing checks"
             | "Preparing workspace"
@@ -60,6 +61,7 @@ mod tests {
             "Working…",
             "Connecting",
             "Compacting context…",
+            "Retrying provider…",
             "Running checks",
         ] {
             assert!(is_working(status), "{status}");

@@ -44,6 +44,27 @@ test('Ultracode does not silently change model thinking or spawn a team', async 
   assert.equal(h.requests.length, 0);
   assert.equal(h.messages.length, 0);
 });
+test('ordinary chat guidance batches independent CLI checks without enabling tools or weakening safety', async () => {
+  const h = await host();
+  const before = h.active().slice();
+  const { systemPrompt } = await h.events.get('before_agent_start')({systemPrompt:'base'});
+  assert.match(systemPrompt, /Reduce model round trips/);
+  assert.match(systemPrompt, /sibling tool calls concurrently/);
+  assert.match(systemPrompt, /separate bash tool calls in the same batch/);
+  assert.match(systemPrompt, /permission check, timeout, output and exit status/);
+  assert.match(systemPrompt, /Keep dependent commands, edits to the same file, Git\/index mutations and shared build\/test resources ordered/);
+  assert.match(systemPrompt, /never parallelize destructive actions or bypass approvals/);
+  assert.match(systemPrompt, /Do not use detached\/background shell jobs or unmanaged agents/);
+  assert.match(systemPrompt, /if codemode is active/);
+  assert.deepEqual(h.active(), before);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.messages.length, 0);
+  for (const [readonly, role] of [[true, ''], [false, 'builder'], [true, 'router'], [false, 'checks']]) {
+    const worker = await host(readonly, role);
+    const result = await worker.events.get('before_agent_start')({systemPrompt:'base'});
+    assert.ok(!result?.systemPrompt?.includes('Reduce model round trips'));
+  }
+});
 test('ordinary spawn uses the host, forwards another repo cwd and survives Ultracode off', async () => {
   const h = await host();
   for (const mode of ['off', 'on', 'off']) {

@@ -181,6 +181,9 @@ pub struct State {
     pub session_name: String,
     pub busy: bool,
     pub(crate) run_observed: bool,
+    /// Live provider retry state only; raw error text stays out of status labels.
+    #[serde(default)]
+    pub retrying: bool,
     #[serde(skip)]
     pub(crate) stream: Option<stream::Stream>,
     pub compacting: bool,
@@ -467,6 +470,10 @@ impl State {
                         let session_file = data["sessionFile"].as_str().map(str::to_owned);
                         if self.session_file.is_some() && self.session_file != session_file {
                             self.context_breakdown = None;
+                            self.retrying = false;
+                        }
+                        if !self.busy {
+                            self.retrying = false;
                         }
                         self.session_file = session_file;
                     }
@@ -554,10 +561,12 @@ impl State {
                 self.dialogs
                     .retain(|d| d["method"] != "input" || d["title"] != "Pui questions");
                 self.run_observed = false;
+                self.retrying = false;
                 self.busy = false;
                 self.pending = false;
             }
             "compaction_start" => {
+                self.retrying = false;
                 self.compacting = true;
                 self.context_breakdown = None;
             }
@@ -571,6 +580,9 @@ impl State {
                 let raw = &event["message"];
                 let role = string(raw, "role");
                 if role == "assistant" {
+                    // A real response has started; a retry attempt may still be
+                    // in flight, but we are no longer waiting on its backoff.
+                    self.retrying = false;
                     self.stream = Some(stream::Stream::new(raw.clone()));
                 }
                 if matches!(role, "user" | "assistant")
@@ -727,15 +739,19 @@ impl State {
             "session_info_changed" => self.session_name = string(&event, "name").into(),
             "thinking_level_changed" => self.thinking = string(&event, "level").into(),
             "extension_error" => self.add_diagnostic(string(&event, "error").into()),
-            // Pi owns bounded retries. Intermediate failures stay in raw history,
-            // not user-facing notices; the transcript shows only the final failure.
-            "auto_retry_end" if event["success"] == false => {
-                let error = string(&event, "finalError");
-                if !error.is_empty()
-                    && error != "Retry cancelled"
-                    && self.messages.last().and_then(|m| m.error.as_deref()) != Some(error)
-                {
-                    self.error = Some(error.into());
+            // Pi owns retry timing and execution. Surface only a live status,
+            // not repeated errors, retry scheduling or automatic tool replays.
+            "auto_retry_start" => self.retrying = true,
+            "auto_retry_end" => {
+                self.retrying = false;
+                if event["success"] == false {
+                    let error = string(&event, "finalError");
+                    if !error.is_empty()
+                        && error != "Retry cancelled"
+                        && self.messages.last().and_then(|m| m.error.as_deref()) != Some(error)
+                    {
+                        self.error = Some(error.into());
+                    }
                 }
             }
             "extension_ui_request" => match string(&event, "method") {
