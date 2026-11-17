@@ -22,6 +22,7 @@ pub(super) struct Commit {
     sign: bool,
     pre_commit: bool,
     commit_msg: bool,
+    hook_timeout: u64,
     applied_signed: bool,
     notice: Option<String>,
     controls: Vec<egui::Id>,
@@ -178,6 +179,7 @@ impl Changes {
                     self.commit.sign = false;
                     self.commit.pre_commit = false;
                     self.commit.commit_msg = false;
+                    self.commit.hook_timeout = 30;
                 }
                 Err(e) => self.commit.notice = Some(e),
             }
@@ -315,6 +317,15 @@ impl Changes {
                 "Run configured commit-msg check (message rewrites refuse)",
             );
             self.commit.controls.push(message_check.id);
+            if self.commit.pre_commit || self.commit.commit_msg {
+                ui.label(theme::small(
+                    ui,
+                    "Timeout per selected hook (seconds, 1–300)",
+                ));
+                let timeout =
+                    ui.add(egui::DragValue::new(&mut self.commit.hook_timeout).range(1..=300));
+                self.commit.controls.push(timeout.id);
+            }
             ui.label(theme::small(
                 ui,
                 format!(
@@ -361,6 +372,7 @@ impl Changes {
                 let sign = self.commit.sign;
                 let pre_commit = self.commit.pre_commit;
                 let commit_msg = self.commit.commit_msg;
+                let hook_timeout = self.commit.hook_timeout.clamp(1, 300);
                 self.commit.applied_signed = sign;
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -369,13 +381,15 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = if commit_msg {
-                            workspace::commit::apply_checks(
-                                snapshot, &message, sign, pre_commit, true, &cancel,
-                            )
-                        } else if pre_commit {
-                            workspace::commit::apply_options(
-                                snapshot, &message, sign, true, &cancel,
+                        let result = if commit_msg || pre_commit {
+                            workspace::commit::apply_timed_checks(
+                                snapshot,
+                                &message,
+                                sign,
+                                pre_commit,
+                                commit_msg,
+                                hook_timeout,
+                                &cancel,
                             )
                         } else if sign {
                             workspace::commit::apply_with_signing(snapshot, &message, true, &cancel)

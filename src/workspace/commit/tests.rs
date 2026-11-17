@@ -295,6 +295,56 @@ fn commit_message_check_success_rejection_and_rewrite_never_changes_confirmed_co
     }
 }
 #[test]
+fn hook_timeout_validation_and_longer_check_does_not_expire_publication_budget() {
+    let root = fixture();
+    let hook = root.join(".git/hooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\nsleep 3.2\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cancel = AtomicBool::new(false);
+    for timeout in [0, 301] {
+        assert!(
+            apply_timed_checks(
+                prepare(&root, &cancel).unwrap(),
+                "invalid",
+                false,
+                true,
+                false,
+                timeout,
+                &cancel
+            )
+            .unwrap_err()
+            .contains("1–300")
+        );
+    }
+    let snapshot = prepare(&root, &cancel).unwrap();
+    let head = snapshot.head.clone();
+    assert!(
+        apply_timed_checks(snapshot, "too short", false, true, false, 1, &cancel)
+            .unwrap_err()
+            .contains("timed out")
+    );
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        head
+    );
+    assert!(
+        apply_timed_checks(
+            prepare(&root, &cancel).unwrap(),
+            "long check",
+            false,
+            true,
+            false,
+            10,
+            &cancel
+        )
+        .is_ok()
+    );
+}
+#[test]
 fn changed_index_foreign_lock_cancel_and_empty_message_refuse() {
     for case in 0..4 {
         let root = fixture();

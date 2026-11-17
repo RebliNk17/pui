@@ -315,6 +315,7 @@ fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes(
                     changes.commit.sign = signed;
                     changes.commit.pre_commit = checked;
                     changes.commit.commit_msg = message_checked;
+                    changes.commit.hook_timeout = 30;
                     for n in 0..4 {
                         let output = ctx.run(
                             egui::RawInput {
@@ -337,6 +338,9 @@ fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes(
                             },
                             |ctx| changes.commit_dialog(ctx),
                         );
+                        if n == 2 && (checked || message_checked) {
+                            assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.job.text.contains("Timeout per selected hook"))))
+                        };
                         if n == 2 {
                             assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t)if t.galley.job.text.contains("Author: Pui Test <pui@example.invalid>")&&t.galley.job.text.contains("Committer: Pui Test <pui@example.invalid>"))));
                         }

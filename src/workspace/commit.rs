@@ -329,6 +329,20 @@ pub(crate) fn apply_checks(
     commit_msg: bool,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
+    apply_timed_checks(snapshot, message, sign, pre_commit, commit_msg, 30, cancel)
+}
+pub(crate) fn apply_timed_checks(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
+    pre_commit: bool,
+    commit_msg: bool,
+    hook_timeout: u64,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    if !(1..=300).contains(&hook_timeout) {
+        return Err("Hook timeout must be 1–300 seconds.".into());
+    }
     if !valid_message(message) {
         return Err(
             "Commit message requires 1–4096 UTF-8 bytes without unsupported controls.".into(),
@@ -356,7 +370,7 @@ pub(crate) fn apply_checks(
     if index_bytes(&snapshot.index_path)? != snapshot.index {
         return Err("Index changed; inspect again.".into());
     }
-    let deadline = Instant::now() + DEADLINE;
+    // Hook waits do not consume the later short Git-publication budget.
     // write-tree uses a private exact index, never updates the original index.
     let private = snapshot
         .index_path
@@ -381,7 +395,12 @@ pub(crate) fn apply_checks(
         hook.env("GIT_INDEX_FILE", &private)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(["hook", "run", "--ignore-missing", "pre-commit"]);
-        diagnostics::run(&mut hook, cancel, deadline, "Pre-commit check")?;
+        diagnostics::run(
+            &mut hook,
+            cancel,
+            Instant::now() + std::time::Duration::from_secs(hook_timeout),
+            "Pre-commit check",
+        )?;
         if index_bytes(&private)? != snapshot.index || prepare(&snapshot.root, cancel)? != snapshot
         {
             return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
@@ -405,7 +424,12 @@ pub(crate) fn apply_checks(
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(["hook", "run", "--ignore-missing", "commit-msg", "--"])
             .arg(&message_path);
-        diagnostics::run(&mut hook, cancel, deadline, "Commit-message check")?;
+        diagnostics::run(
+            &mut hook,
+            cancel,
+            Instant::now() + std::time::Duration::from_secs(hook_timeout),
+            "Commit-message check",
+        )?;
         let meta = fs::symlink_metadata(&message_path)
             .map_err(|_| "Commit-message hook removed message; nothing committed")?;
         if !meta.is_file() || meta.file_type().is_symlink() || meta.len() != confirmed.len() as u64
@@ -425,6 +449,7 @@ pub(crate) fn apply_checks(
             return Err("Commit-message check changed the reviewed message or snapshot; nothing committed. Review again.".into());
         }
     }
+    let deadline = Instant::now() + DEADLINE;
     let mut cmd = read_only::command(&snapshot.root);
     cmd.env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_INDEX_FILE", &private)
