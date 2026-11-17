@@ -20,7 +20,10 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
-      - checkout
+      # Git integration fixtures perform offline local clones and pushes.
+      # A blobless checkout can leave historical objects unavailable to them.
+      - checkout:
+          method: full
       - run:
           name: Compute cache fingerprints
           command: /usr/bin/python3 scripts/ci/cache-key.py

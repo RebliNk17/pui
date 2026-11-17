@@ -144,6 +144,12 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
             self.assertNotEqual(cache.fingerprints(root, "new-xcode+r1.88", "arm64", "26.3"), baseline)
             self.assertNotEqual(cache.fingerprints(root, "xcode+r1.88", "arm64", "26.4"), baseline)
 
+    def test_builder_checks_out_full_objects_for_offline_git_integration_tests(self):
+        parsed = subprocess.check_output(["ruby", "-rjson", "-ryaml", "-e",
+            'puts JSON.generate(YAML.load_file(ARGV[0]))', str(ROOT / ".circleci/config.yml")], text=True)
+        job = json.loads(parsed)["jobs"]["macos-build"]
+        self.assertEqual(job["steps"][0], {"checkout": {"method": "full"}})
+
     def test_config_caches_compilers_cef_downloads_and_outputs_on_failure_with_limits(self):
         import json
         parsed = subprocess.check_output(["ruby", "-rjson", "-ryaml", "-e",
