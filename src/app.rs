@@ -1599,46 +1599,112 @@ impl Pui {
                         self.context_chips.clear();
                     }
                 }
-                let decorations = ui.painter().add(egui::Shape::Noop);
                 let list_focus = composer_text::list_at_cursor(ctx, &self.draft);
                 let smart_newline = ctx.input(|i| {
                     !i.events
                         .iter()
                         .any(|e| matches!(e, egui::Event::Paste(_) | egui::Event::Ime(_)))
                 });
-                let mut buffer = composer_text::Buffer {
-                    text: &mut self.draft,
-                    smart_newline,
-                };
+                let cursor_id = ui.make_persistent_id((
+                    "composer-last-cursor",
+                    self.state.session_file.as_deref(),
+                ));
+                let cursor_before = egui::TextEdit::load_state(ctx, egui::Id::new("composer"))
+                    .and_then(|s| s.cursor.char_range());
+                let reveal_cursor = self.focus_composer
+                    || ctx.data(|d| {
+                        d.get_temp::<Option<egui::text::CCursorRange>>(cursor_id)
+                            .is_some_and(|last| last != cursor_before)
+                    });
                 let mut layouter = composer_text::layout;
-                let output = egui::TextEdit::multiline(&mut buffer)
-                    .id(egui::Id::new("composer"))
-                    .hint_text(
-                        RichText::new(if self.demo {
-                            "Start a real session to talk to Pi…"
-                        } else {
-                            "Message Pi… (/ commands, @ files, or drop files)"
-                        })
-                        .color(colors.dim),
+                // Only the editor scrolls: delivery/model controls stay below it.
+                // Bound growth on short windows and at higher UI zoom as well.
+                let max_height = (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0);
+                let scroll = egui::ScrollArea::vertical()
+                    .id_salt(("composer-text-scroll", self.state.session_file.as_deref()))
+                    .max_height(max_height)
+                    // Reserve growth budget even in the bottom panel's cached short rect;
+                    // auto-shrink still keeps one-line drafts compact.
+                    .min_scrolled_height(max_height)
+                    .auto_shrink([false, true])
+                    .animated(false)
+                    .show(ui, |ui| {
+                        let decorations = ui.painter().add(egui::Shape::Noop);
+                        let mut buffer = composer_text::Buffer {
+                            text: &mut self.draft,
+                            smart_newline,
+                        };
+                        let output = egui::TextEdit::multiline(&mut buffer)
+                            .id(egui::Id::new("composer"))
+                            .hint_text(
+                                RichText::new(if self.demo {
+                                    "Start a real session to talk to Pi…"
+                                } else {
+                                    "Message Pi… (/ commands, @ files, or drop files)"
+                                })
+                                .color(colors.dim),
+                            )
+                            .font(FontId::proportional(14.0))
+                            .layouter(&mut layouter)
+                            .frame(false)
+                            .lock_focus(completing || list_focus)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(1)
+                            .return_key(egui::KeyboardShortcut::new(
+                                egui::Modifiers::SHIFT,
+                                egui::Key::Enter,
+                            ))
+                            .show(ui);
+                        composer_text::decorate(ui, decorations, &output, &self.draft);
+                        composer_text::links(ui, &output, &self.draft);
+                        // Recall/completion restore cursor state before TextEdit runs,
+                        // so its normal selection-change auto-scroll cannot detect them.
+                        if reveal_cursor {
+                            if let Some(range) = output.state.cursor.char_range() {
+                                let caret = output
+                                    .galley
+                                    .pos_from_cursor(range.primary)
+                                    .translate(output.galley_pos.to_vec2());
+                                ui.scroll_to_rect(caret, None);
+                            }
+                        }
+                        ctx.data_mut(|d| {
+                            d.insert_temp(cursor_id, output.state.cursor.char_range())
+                        });
+                        #[cfg(test)]
+                        if let Some(range) = output.state.cursor.char_range() {
+                            let caret = output
+                                .galley
+                                .pos_from_cursor(range.primary)
+                                .translate(output.galley_pos.to_vec2());
+                            ctx.data_mut(|d| {
+                                d.insert_temp(egui::Id::new("composer-caret-rect"), caret)
+                            });
+                        }
+                        output.response
+                    });
+                // egui 0.32 returns the pre-auto-shrink budget in inner_rect.
+                // Anchor popups to the actual editor viewport, even for short drafts.
+                let editor_rect = egui::Rect::from_min_size(
+                    scroll.inner_rect.min,
+                    egui::vec2(
+                        scroll.inner_rect.width(),
+                        scroll.inner_rect.height().min(scroll.content_size.y),
+                    ),
+                );
+                #[cfg(test)]
+                ctx.data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new("composer-scroll-metrics"),
+                        (editor_rect, scroll.content_size, scroll.state.offset.y),
                     )
-                    .font(FontId::proportional(14.0))
-                    .layouter(&mut layouter)
-                    .frame(false)
-                    .lock_focus(completing || list_focus)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(1)
-                    .return_key(egui::KeyboardShortcut::new(
-                        egui::Modifiers::SHIFT,
-                        egui::Key::Enter,
-                    ))
-                    .show(ui);
-                composer_text::decorate(ui, decorations, &output, &self.draft);
-                composer_text::links(ui, &output, &self.draft);
-                let response = output.response;
+                });
+                let response = scroll.inner;
                 if response.changed() {
                     self.context_chips.clear();
                 }
-                completion_anchor = Some((response.rect, ui.layer_id()));
+                // The full editor rect may extend well beyond its viewport.
+                completion_anchor = Some((editor_rect, ui.layer_id()));
                 if self.focus_composer {
                     response.request_focus();
                     self.focus_composer = false;

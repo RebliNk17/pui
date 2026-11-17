@@ -75,6 +75,152 @@ fn dropdown_is_bounded_anchored_compact_and_marks_read_without_navigation() {
 }
 
 #[test]
+fn dropdown_checks_share_a_fixed_gutter_and_footer_stays_compact() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            for size in [Vec2::new(360.0, 500.0), Vec2::new(860.0, 700.0)] {
+                let (ctx, mut app, commands) = setup(mode, zoom, true);
+                let current = app.agents.active.clone();
+                let mut gutter: Option<f32> = None;
+                for count in [2, 12] {
+                    while app.attention.unread() < count {
+                        let n = app.attention.unread();
+                        // Synthetic metadata only: no private saved-chat fixtures.
+                        let path = std::env::temp_dir().join(format!(
+                            "unread-{n}-{}.jsonl",
+                            if n % 2 == 0 {
+                                "short".into()
+                            } else {
+                                "long title ".repeat(12)
+                            }
+                        ));
+                        app.attention.observe(
+                            Owner::Saved(path),
+                            &std::env::temp_dir(),
+                            Kind::NeedsInput,
+                        );
+                    }
+                    for _ in 0..5 {
+                        frame(&mut app, vec![], size);
+                    }
+                    let popup = app.attention.popup_rect.unwrap();
+                    let rows = ctx
+                        .data(|d| {
+                            d.get_temp::<Vec<(egui::Rect, egui::Rect)>>(egui::Id::new(
+                                "attention-row-geometry",
+                            ))
+                        })
+                        .unwrap();
+                    assert_eq!(rows.len(), count);
+                    let x = rows[0].1.center().x;
+                    for (open, mark) in &rows {
+                        assert!((mark.center().x - x).abs() < 0.1, "{rows:?}");
+                        assert!(open.right() + 7.5 <= mark.left(), "{open:?} {mark:?}");
+                        assert!(mark.right() <= popup.right() - 20.0, "{popup:?} {mark:?}");
+                    }
+                    let right = popup.right() - x;
+                    if let Some(previous) = gutter {
+                        assert!(
+                            (right - previous).abs() < 0.5,
+                            "gutter moved with scrollbar"
+                        );
+                    }
+                    gutter = Some(right);
+                    let (viewport, content, _) = ctx
+                        .data(|d| {
+                            d.get_temp::<(egui::Rect, Vec2, Vec2)>(egui::Id::new(
+                                "attention-list-geometry",
+                            ))
+                        })
+                        .unwrap();
+                    assert_eq!(content.y > viewport.height() + 1.0, count == 12);
+                    let (footer, mark_all, enabled) = ctx
+                        .data(|d| {
+                            d.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new(
+                                "attention-footer-geometry",
+                            ))
+                        })
+                        .unwrap();
+                    assert!(enabled);
+                    assert!(footer.height() <= 22.5, "{footer:?}");
+                    assert!(
+                        popup.bottom() - mark_all.bottom() <= 17.0,
+                        "{popup:?} {mark_all:?}"
+                    );
+                    if count == 12 {
+                        frame(
+                            &mut app,
+                            vec![
+                                egui::Event::PointerMoved(viewport.center()),
+                                egui::Event::MouseWheel {
+                                    unit: egui::MouseWheelUnit::Point,
+                                    delta: egui::vec2(0.0, -240.0),
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                            size,
+                        );
+                        for _ in 0..5 {
+                            frame(&mut app, vec![], size);
+                        }
+                        let (_, _, offset) = ctx
+                            .data(|d| {
+                                d.get_temp::<(egui::Rect, Vec2, Vec2)>(egui::Id::new(
+                                    "attention-list-geometry",
+                                ))
+                            })
+                            .unwrap();
+                        assert!(offset.y > 0.0, "wheel must actually scroll the list");
+                        let scrolled_rows = ctx
+                            .data(|d| {
+                                d.get_temp::<Vec<(egui::Rect, egui::Rect)>>(egui::Id::new(
+                                    "attention-row-geometry",
+                                ))
+                            })
+                            .unwrap();
+                        assert!(
+                            scrolled_rows
+                                .iter()
+                                .all(|(_, mark)| (mark.center().x - x).abs() < 0.1)
+                        );
+                        for pressed in [true, false] {
+                            frame(&mut app, pointer(mark_all.center(), pressed), size);
+                        }
+                        frame(&mut app, vec![], size);
+                        assert_eq!(app.attention.unread(), 0);
+                        let (footer, mark_all, enabled) = ctx
+                            .data(|d| {
+                                d.get_temp::<(egui::Rect, egui::Rect, bool)>(egui::Id::new(
+                                    "attention-footer-geometry",
+                                ))
+                            })
+                            .unwrap();
+                        assert!(!enabled, "empty-list action must remain disabled");
+                        assert!(footer.height() <= 22.5);
+                        assert!(
+                            app.attention.popup_rect.unwrap().bottom() - mark_all.bottom() <= 17.0
+                        );
+                        for pressed in [true, false] {
+                            frame(&mut app, pointer(mark_all.center(), pressed), size);
+                        }
+                        assert_eq!(app.attention.unread(), 0);
+                    }
+                }
+                assert!(app.attention.open);
+                assert_eq!(app.agents.active, current);
+                assert_eq!(app.draft, "keep draft");
+                assert_eq!(app.state.dialogs.len(), 1);
+                assert!(!commands.try_iter().any(|c| matches!(
+                    protocol::string(&c, "type"),
+                    "extension_ui_response" | "prompt" | "abort"
+                )));
+                app.shutdown_agents();
+            }
+        }
+    }
+}
+
+#[test]
 fn resized_dropdown_reanchors_in_the_same_frame() {
     let (_, mut app, _) = setup(theme::Theme::Dark, 1.0, false);
     for _ in 0..4 {

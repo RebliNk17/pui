@@ -1,4 +1,6 @@
 use super::*;
+#[path = "session_workflows_tests.rs"]
+mod session_workflows_tests;
 #[path = "work_item_ui_tests.rs"]
 mod work_item_ui_tests;
 

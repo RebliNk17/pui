@@ -616,4 +616,6 @@ pub(super) use commands::{Format, format, keys};
 #[cfg(test)]
 mod editing_tests;
 #[cfg(test)]
+mod scroll_tests;
+#[cfg(test)]
 mod tests;

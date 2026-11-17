@@ -67,6 +67,75 @@ fn paint_text(ui: &egui::Ui, text: &str, rect: egui::Rect, size: f32, color: Col
     );
 }
 
+// The price column ends before the independent selected-model check gutter.
+const MODEL_PRICE_RIGHT_INSET: f32 = 20.0;
+const MODEL_SCROLL_RAIL: f32 = 12.0;
+
+fn provider_filter(
+    ui: &mut egui::Ui,
+    provider: &mut String,
+    providers: &std::collections::BTreeSet<String>,
+    width: f32,
+) {
+    let colors = theme::palette(ui.ctx());
+    ui.scope(|ui| {
+        ui.set_width(width);
+        ui.set_max_width(width);
+        ui.spacing_mut().button_padding = egui::vec2(3.0, 0.0);
+        ui.spacing_mut().interact_size.y = 20.0;
+        ui.spacing_mut().icon_width = 12.0;
+        ui.spacing_mut().icon_spacing = 6.0;
+        let widgets = &mut ui.style_mut().visuals.widgets;
+        for visuals in [&mut widgets.inactive, &mut widgets.hovered] {
+            visuals.bg_stroke = Stroke::NONE;
+            visuals.weak_bg_fill = Color32::TRANSPARENT;
+        }
+        let response = egui::ComboBox::from_id_salt("provider-filter")
+            .width(width)
+            .truncate()
+            .selected_text(
+                RichText::new(if provider.is_empty() {
+                    "All providers"
+                } else {
+                    provider.as_str()
+                })
+                .size(11.0),
+            )
+            .icon(move |ui, rect, _, open| {
+                let center = rect.center();
+                let sign = if open { -1.0 } else { 1.0 };
+                ui.painter().add(egui::Shape::line(
+                    vec![
+                        center + egui::vec2(-3.0, -1.5 * sign),
+                        center + egui::vec2(0.0, 1.5 * sign),
+                        center + egui::vec2(3.0, -1.5 * sign),
+                    ],
+                    Stroke::new(1.2, colors.dim),
+                ));
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new("model-provider-chevron"), center)
+                });
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(provider, String::new(), "All providers");
+                for value in providers {
+                    ui.selectable_value(provider, value.clone(), value);
+                }
+            })
+            .response;
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::new("model-provider-control"), response.rect)
+        });
+        response.on_hover_text(if provider.is_empty() {
+            "Filter models by provider"
+        } else {
+            provider.as_str()
+        });
+    });
+}
+
 fn check(ui: &egui::Ui, center: egui::Pos2) {
     let color = theme::palette(ui.ctx()).accent;
     ui.painter().line_segment(
@@ -410,27 +479,33 @@ impl Pui {
             .frame(prompt_ui::popup(ctx).inner_margin(6)).gap(6.0).show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(width - 12.0);
-                let search = egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0, colors.border)).corner_radius(6)
+                let providers = self.state.models.iter().map(|m| m.provider.clone()).collect::<std::collections::BTreeSet<_>>();
+                let search_frame = egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0, colors.border)).corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(7, 5)).show(ui, |ui| {
                         ui.horizontal(|ui| {
                             icons::inline(ui, Icon::Search, colors.dim);
-                            ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search")
-                                .font(FontId::proportional(11.0)).frame(false).hint_text("Search models…").desired_width(ui.available_width()))
+                            let provider_width = (ui.available_width() * 0.44).clamp(44.0, 115.0);
+                            let search_width = (ui.available_width() - provider_width - 2.0 * ui.spacing().item_spacing.x - 1.0).max(8.0);
+                            let search = ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search")
+                                .font(FontId::proportional(11.0)).frame(false).margin(0).hint_text("Search models…").desired_width(search_width).min_size(egui::vec2(0.0, 20.0)));
+                            let (divider, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
+                            ui.painter().line_segment([divider.center_top(), divider.center_bottom()], Stroke::new(1.0, colors.border));
+                            provider_filter(ui, &mut self.model_provider, &providers, provider_width);
+                            search
                         }).inner
-                    }).inner;
-                if self.model_picker_focus && !ui.is_sizing_pass() { search.request_focus(); self.model_picker_focus = false; }
-                let providers = self.state.models.iter().map(|m| m.provider.clone()).collect::<std::collections::BTreeSet<_>>();
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("provider-filter").width(115.0).truncate()
-                        .selected_text(if self.model_provider.is_empty() { "All providers" } else { &self.model_provider })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.model_provider, String::new(), "All providers");
-                            for provider in providers { ui.selectable_value(&mut self.model_provider, provider.clone(), provider); }
-                        });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new("In / Out ⓘ").size(9.0).color(colors.dim))
-                            .on_hover_text("Input / output prices per 1 million tokens, as reported by Pi. Zero may be a provider placeholder.");
                     });
+                let search = search_frame.inner;
+                #[cfg(test)]
+                ctx.data_mut(|data| { data.insert_temp(egui::Id::new("model-search-row"), search_frame.response.rect); data.insert_temp(egui::Id::new("model-search-input"), search.rect); });
+                if self.model_picker_focus && !ui.is_sizing_pass() { search.request_focus(); self.model_picker_focus = false; }
+                let results_width = (ui.available_width() - MODEL_SCROLL_RAIL).max(0.0);
+                ui.allocate_ui_with_layout(egui::vec2(results_width, 16.0), Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(MODEL_PRICE_RIGHT_INSET);
+                    let _label = ui.label(RichText::new("In / Out ⓘ").size(9.0).color(colors.dim))
+                        .on_hover_text("Input / output prices per 1 million tokens, as reported by Pi. Zero may be a provider placeholder.");
+                    #[cfg(test)]
+                    ctx.data_mut(|data| data.insert_temp(egui::Id::new("model-price-heading"), _label.rect));
                 });
                 if self.state.models_cached { ui.add(egui::Label::new(theme::small(ui, if self.state.error.is_some() { "Cached models · live refresh unavailable" } else { "Cached models · refreshing from Pi…" })).wrap()); }
                 if let Some(reason) = blocked { ui.add(egui::Label::new(theme::small(ui, reason)).wrap()); }
@@ -447,12 +522,13 @@ impl Pui {
                 // the bound from this menu's actual header, including status text.
                 let header_height = ui.min_rect().height() + 20.0;
                 let results_height = (anchor.top() - ctx.screen_rect().top() - header_height)
-                    .clamp(0.0, 224.0);
+                    .clamp(0.0, 226.0);
                 let mut scroll = egui::ScrollArea::vertical().id_salt("model-results")
                     .max_height(results_height).min_scrolled_height(0.0).auto_shrink([false, false]);
                 if let Some(index) = target { scroll = scroll.vertical_scroll_offset(index as f32 * 32.0); }
                 scroll
                     .show_rows(ui, 32.0, filtered.len(), |ui, range| {
+                        ui.set_width(results_width);
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for index in range {
                             let model = filtered[index];
@@ -463,10 +539,13 @@ impl Pui {
                             let response = menu_row(ui, ids[index], 32.0, selected, blocked.is_none(), &format!("{name}, {metadata}, {prices} per million tokens"));
                             let rect = response.rect;
                             let price_width = ui.painter().layout_no_wrap(prices.clone(), FontId::proportional(10.0), colors.muted).size().x.min(rect.width() * 0.45);
-                            let text_right = rect.right() - price_width - 26.0;
+                            let text_right = rect.right() - price_width - MODEL_PRICE_RIGHT_INSET - 6.0;
                             paint_text(ui, name, egui::Rect::from_min_max(rect.min + egui::vec2(7.0, 0.0), egui::pos2(text_right, rect.top() + 17.0)), 11.5, if blocked.is_none() { colors.text } else { colors.dim });
                             paint_text(ui, &metadata, egui::Rect::from_min_max(rect.min + egui::vec2(7.0, 17.0), egui::pos2(text_right, rect.bottom())), 9.0, colors.dim);
-                            paint_text(ui, &prices, egui::Rect::from_min_max(egui::pos2(rect.right() - price_width - 20.0, rect.top()), egui::pos2(rect.right() - 20.0, rect.bottom())), 10.0, colors.muted);
+                            let price_rect = egui::Rect::from_min_max(egui::pos2(rect.right() - price_width - MODEL_PRICE_RIGHT_INSET, rect.top()), egui::pos2(rect.right() - MODEL_PRICE_RIGHT_INSET, rect.bottom()));
+                            paint_text(ui, &prices, price_rect, 10.0, colors.muted);
+                            #[cfg(test)]
+                            ctx.data_mut(|data| data.insert_temp(egui::Id::new(("model-price-column", index)), price_rect));
                             if selected { check(ui, rect.right_center() - egui::vec2(9.0, 0.0)); }
                             if target == Some(index) { response.scroll_to_me(Some(Align::Center)); }
                             if response.on_hover_text(format!("{name}\n{metadata}\n{prices} input / output per 1 million tokens")).clicked() && blocked.is_none() { selection = Some((model.provider.clone(), model.id.clone())); }
