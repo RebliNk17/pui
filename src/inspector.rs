@@ -1,4 +1,4 @@
-//! Content-sized card stack: collapse, hide and drag to reorder.
+//! Compact session sections: collapse, hide and drag to reorder.
 use crate::icons::{self, Icon};
 use eframe::egui::{self, Align, Layout, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,7 @@ pub fn stack(
     layout: &mut CardLayout,
     summary: impl Fn(Card) -> String,
     header_action: Option<(Card, &str)>,
+    context_fraction: Option<f32>,
     mut contents: impl FnMut(&mut egui::Ui, Card),
 ) -> Option<Card> {
     let colors = crate::theme::palette(ui.ctx());
@@ -129,14 +130,10 @@ pub fn stack(
         let drag_layer = egui::LayerId::new(egui::Order::Tooltip, id);
         let layer = if dragging { drag_layer } else { ui.layer_id() };
         let source = ui.scope_builder(egui::UiBuilder::new().id_salt(card).layer_id(layer), |ui| {
-            let frame = egui::Frame::new()
-                .fill(if dragging { colors.surface } else { colors.bg })
-                .stroke(Stroke::new(1.0, colors.border))
-                .corner_radius(15)
-                .inner_margin(10);
+            let frame = egui::Frame::new().fill(if dragging { colors.surface } else { colors.bg });
             frame.show(ui, |ui| {
-                ui.set_width((width - 22.0).max(40.0));
-                ui.set_max_width((width - 22.0).max(40.0));
+                ui.set_width(width);
+                ui.set_max_width(width);
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.spacing_mut().interact_size.y = 20.0;
                 ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
@@ -173,13 +170,14 @@ pub fn stack(
                     if response.hovered() || response.has_focus() {
                         ui.painter().rect_filled(rect, 6, colors.surface);
                     }
-                    ui.painter().text(
-                        rect.left_center() + egui::vec2(20.0, 0.0),
-                        egui::Align2::LEFT_CENTER,
-                        card.label(),
+                    let title = ui.painter().layout_no_wrap(
+                        card.label().into(),
                         egui::FontId::proportional(12.0),
                         colors.text,
                     );
+                    let title_pos = rect.left_center() + egui::vec2(20.0, -title.size().y / 2.0);
+                    let summary_left = title_pos.x + title.size().x + 8.0;
+                    ui.painter().galley(title_pos, title, colors.text);
                     icons::chevron(
                         ui,
                         egui::Rect::from_center_size(
@@ -190,13 +188,41 @@ pub fn stack(
                         colors.dim,
                     );
                     if collapsed && button.is_none() {
-                        ui.painter().text(
-                            rect.right_center(),
-                            egui::Align2::RIGHT_CENTER,
-                            summary(card),
+                        let bar = if card == Card::Context {
+                            context_fraction.map(|fraction| {
+                                let bar_width = (rect.width() - 120.0).clamp(16.0, 54.0);
+                                let bar = egui::Rect::from_center_size(
+                                    rect.right_center() - egui::vec2(bar_width / 2.0, 0.0),
+                                    egui::vec2(bar_width, 4.0),
+                                );
+                                ui.painter().rect_filled(bar, 2, colors.hover);
+                                let mut fill = bar;
+                                fill.set_width(bar.width() * fraction.clamp(0.0, 1.0));
+                                ui.painter().rect_filled(fill, 2, colors.blue);
+                                bar
+                            })
+                        } else {
+                            None
+                        };
+                        let right = bar.map(|b| b.left() - 8.0).unwrap_or(rect.right());
+                        let text = summary(card);
+                        let mut job = egui::text::LayoutJob::simple_singleline(
+                            text.clone(),
                             egui::FontId::proportional(11.0),
                             colors.muted,
                         );
+                        job.wrap.max_width = (right - summary_left).max(1.0);
+                        job.wrap.max_rows = 1;
+                        job.wrap.break_anywhere = true;
+                        let galley = ui.painter().layout_job(job);
+                        if galley.elided {
+                            response.clone().on_hover_text(text);
+                        }
+                        let pos = egui::pos2(
+                            right - galley.size().x,
+                            rect.center().y - galley.size().y / 2.0,
+                        );
+                        ui.painter().galley(pos, galley, colors.muted);
                     }
                     if response.clicked()
                         || (response.has_focus()
@@ -233,12 +259,29 @@ pub fn stack(
                         Sense::hover(),
                     );
                     let grip = ui.interact(grip_rect, id.with("grip"), Sense::click_and_drag());
-                    icons::draw(ui, grip_rect, Icon::Grip, colors.dim);
+                    if response.hovered() || grip.hovered() || grip.has_focus() || dragging {
+                        icons::draw(ui, grip_rect, Icon::Grip, colors.dim);
+                    }
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new(("inspector-header-rect", card)), rect);
+                        d.insert_temp(egui::Id::new(("inspector-grip-rect", card)), grip_rect);
+                        d.insert_temp(egui::Id::new(("inspector-grip-id", card)), grip.id);
+                    });
                     grip.dnd_set_drag_payload(card);
                     let grip = grip.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(
                         "Hold and drag to reorder · arrow keys move · right-click for options",
                     );
                     if grip.has_focus() {
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                grip.id,
+                                egui::EventFilter {
+                                    vertical_arrows: true,
+                                    ..Default::default()
+                                },
+                            )
+                        });
                         if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && index > 0 {
                             move_by = Some((card, visible[index - 1]));
                         }
@@ -286,7 +329,7 @@ pub fn stack(
                         .min_scrolled_height(max_height)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            ui.set_width((width - 28.0).max(40.0));
+                            ui.set_width((width - 6.0).max(40.0));
                             contents(ui, card);
                         });
                 }
@@ -305,7 +348,7 @@ pub fn stack(
                 );
                 ui.painter().rect_stroke(
                     source.response.rect,
-                    15,
+                    0,
                     Stroke::new(1.0, colors.border),
                     egui::StrokeKind::Inside,
                 );
@@ -330,7 +373,14 @@ pub fn stack(
         if let Some(payload) = source.response.dnd_release_payload::<Card>() {
             dropped = Some((*payload, card));
         }
-        ui.add_space(6.0);
+        if index + 1 < visible.len() {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), Sense::hover());
+            ui.painter().hline(
+                rect.x_range(),
+                rect.center().y,
+                Stroke::new(1.0, colors.border),
+            );
+        }
     }
     if let Some((source, target)) = dropped.or(move_by) {
         layout.move_to(source, target);
@@ -370,6 +420,7 @@ mod tests {
                         ui,
                         layout,
                         |_| "Idle".into(),
+                        None,
                         None,
                         |ui, _| {
                             ui.label("Card body");
@@ -445,6 +496,7 @@ mod tests {
                                 layout,
                                 |_| "Idle".into(),
                                 None,
+                                None,
                                 |ui, _| {
                                     renders += 1;
                                     for _ in 0..if long { 80 } else { 1 } {
@@ -468,8 +520,8 @@ mod tests {
             layout.collapsed.insert(Card::Environment);
             let collapsed = render(&mut layout, true);
             assert!(
-                (collapsed - (crate::theme::COMPACT_HEIGHT + 36.0)).abs() < 1.0,
-                "Collapsed card must contain only the shared-height header, frame margins and stack spacing: {collapsed}"
+                (collapsed - (crate::theme::COMPACT_HEIGHT + 8.0)).abs() < 1.0,
+                "Collapsed section must contain only its header and item spacing: {collapsed}"
             );
             assert_eq!(renders, 2, "Collapsed content must not be rendered");
         }
@@ -495,7 +547,7 @@ mod tests {
                             egui::CentralPanel::default().show(ctx, |ui| {
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     let mut last_body_bottom = 0.0_f32;
-                                    stack(ui, &mut layout, |_| String::new(), None, |ui, card| {
+                                    stack(ui, &mut layout, |_| String::new(), None, None, |ui, card| {
                                         for _ in 0..if card == Card::Environment { 8 } else { 2 } {
                                             ui.label("Card content must fit, even below the viewport.");
                                         }
@@ -525,6 +577,7 @@ mod tests {
                     ui,
                     &mut layout,
                     |_| String::new(),
+                    None,
                     None,
                     |ui, card| {
                         if card == Card::Environment {
@@ -581,8 +634,14 @@ mod tests {
         let mut layout = CardLayout::default();
         frame(&ctx, &mut layout, vec![]);
         frame(&ctx, &mut layout, vec![]);
-        let start = egui::pos2(308.0, 33.0);
-        let end = egui::pos2(300.0, 140.0);
+        let bounds = |kind, card| {
+            ctx.data(|d| {
+                d.get_temp::<egui::Rect>(egui::Id::new((kind, card)))
+                    .unwrap()
+            })
+        };
+        let start = bounds("inspector-grip-rect", Card::Environment).center();
+        let end = bounds("inspector-header-rect", Card::Context).center();
         frame(
             &ctx,
             &mut layout,
@@ -614,6 +673,200 @@ mod tests {
             "drag should move Environment below another card"
         );
     }
+    #[test]
+    fn flat_sections_and_collapsed_context_fit_narrow_themed_panels() {
+        fn inspect(
+            shape: &egui::Shape,
+            labels: &mut Vec<(String, egui::Rect)>,
+            rects: &mut Vec<egui::epaint::RectShape>,
+            lines: &mut usize,
+        ) {
+            match shape {
+                egui::Shape::Text(t) => labels.push((
+                    t.galley.text().into(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                )),
+                egui::Shape::Rect(r) => rects.push(r.clone()),
+                egui::Shape::LineSegment { points, stroke }
+                    if (points[1].x - points[0].x).abs() > 100.0 && stroke.width == 1.0 =>
+                {
+                    *lines += 1
+                }
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        inspect(s, labels, rects, lines);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            for zoom in [1.0, 1.5] {
+                for width in [184.0, 280.0, 400.0] {
+                    for fraction in [None, Some(0.0), Some(0.35), Some(1.0)] {
+                        let ctx = egui::Context::default();
+                        crate::theme::install(&ctx);
+                        theme.apply(&ctx);
+                        ctx.set_zoom_factor(zoom);
+                        let mut layout = CardLayout {
+                            collapsed: Card::ALL.into_iter().collect(),
+                            ..Default::default()
+                        };
+                        let mut labels = vec![];
+                        let mut rects = vec![];
+                        let mut lines = 0;
+                        for _ in 0..2 {
+                            let output = ctx.run(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        egui::vec2(900.0, 900.0),
+                                    )),
+                                    ..Default::default()
+                                },
+                                |ctx| {
+                                    egui::SidePanel::left("compact-section-test")
+                                        .exact_width(width + 16.0)
+                                        .frame(egui::Frame::new().inner_margin(8))
+                                        .show(ctx, |ui| {
+                                            stack(
+                                                ui,
+                                                &mut layout,
+                                                |card| {
+                                                    if card == Card::Context {
+                                                        if fraction.is_some() {
+                                                            "35%"
+                                                        } else {
+                                                            "Not reported"
+                                                        }
+                                                    } else {
+                                                        "Waiting for permission to run a tool"
+                                                    }
+                                                    .into()
+                                                },
+                                                None,
+                                                fraction,
+                                                |_, _| panic!("collapsed body rendered"),
+                                            );
+                                        });
+                                },
+                            );
+                            labels.clear();
+                            rects.clear();
+                            lines = 0;
+                            for s in output.shapes {
+                                inspect(&s.shape, &mut labels, &mut rects, &mut lines);
+                            }
+                        }
+                        let title = labels.iter().find(|(s, _)| s == "Context").unwrap().1;
+                        let summary = labels
+                            .iter()
+                            .find(|(s, _)| {
+                                s == if fraction.is_some() {
+                                    "35%"
+                                } else {
+                                    "Not reported"
+                                }
+                            })
+                            .unwrap()
+                            .1;
+                        assert!(
+                            summary.left() > title.right(),
+                            "Context summary overlaps title at {width}/{zoom}: {labels:?}"
+                        );
+                        assert!(
+                            labels
+                                .iter()
+                                .all(|(_, r)| r.right() <= width + 9.0 && r.left() >= 7.0),
+                            "Text overflow at {width}/{zoom}: {labels:?}"
+                        );
+                        let environment =
+                            labels.iter().find(|(s, _)| s == "Environment").unwrap().1;
+                        assert!(
+                            labels
+                                .iter()
+                                .filter(|(_, r)| (r.center().y - environment.center().y).abs()
+                                    < 1.0
+                                    && r.left() > environment.left())
+                                .all(|(_, r)| r.left() >= environment.right() + 7.0),
+                            "Long status must not collide with its title: {labels:?}"
+                        );
+                        assert_eq!(lines, 3, "one rule between each visible section");
+                        assert!(
+                            !rects
+                                .iter()
+                                .any(|r| r.stroke.width > 0.0 && r.rect.height() > 20.0),
+                            "section boxes must not return"
+                        );
+                        let colors = crate::theme::palette(&ctx);
+                        let fills: Vec<_> =
+                            rects.iter().filter(|r| r.fill == colors.blue).collect();
+                        if let Some(fraction) = fraction {
+                            let track = rects
+                                .iter()
+                                .find(|r| r.rect.height() == 4.0 && r.fill == colors.hover)
+                                .unwrap();
+                            if fraction > 0.0 {
+                                assert_eq!(fills.len(), 1);
+                                assert!(
+                                    (fills[0].rect.width() - track.rect.width() * fraction).abs()
+                                        < 0.01
+                                );
+                                assert!(track.rect.left() > summary.right());
+                            }
+                        } else {
+                            assert!(fills.is_empty());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_keyboard_reorder_keeps_focus_on_the_same_section() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut layout = CardLayout::default();
+        frame(&ctx, &mut layout, vec![]);
+        let id = ctx.data(|d| {
+            d.get_temp::<egui::Id>(egui::Id::new(("inspector-grip-id", Card::Environment)))
+                .unwrap()
+        });
+        ctx.memory_mut(|m| m.request_focus(id));
+        frame(&ctx, &mut layout, vec![]);
+        for key in [
+            egui::Key::ArrowDown,
+            egui::Key::ArrowDown,
+            egui::Key::ArrowUp,
+        ] {
+            frame(
+                &ctx,
+                &mut layout,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            assert!(ctx.memory(|m| m.has_focus(id)));
+            frame(
+                &ctx,
+                &mut layout,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        assert_eq!(layout.order[1], Card::Environment);
+    }
+
     #[test]
     fn old_card_heights_are_ignored_without_losing_visibility_or_order() {
         let restored: CardLayout = serde_json::from_str(r#"{"heights":{"Outputs":800},"collapsed":["Context"],"hidden":["Changes"],"order":["Workflow","Environment"]}"#).unwrap();

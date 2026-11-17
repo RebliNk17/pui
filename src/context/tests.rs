@@ -17,6 +17,39 @@ fn painted_labels(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
 }
 
 #[test]
+fn collapsed_usage_uses_reported_or_estimated_context_and_bounds_the_bar() {
+    let mut state = State {
+        context_tokens: Some(209000.0),
+        context_window: 600000.0,
+        ..Default::default()
+    };
+    assert_eq!(usage_summary(&state), "35%");
+    assert!((usage_fraction(&state).unwrap() - 209000.0 / 600000.0).abs() < 0.0001);
+    state.context_tokens = None;
+    state.context_breakdown = Some(ContextBreakdown {
+        user: 210000.0,
+        ..Default::default()
+    });
+    assert_eq!(usage_summary(&state), "~35%");
+    state.context_tokens = Some(0.0);
+    assert_eq!(usage_fraction(&state), Some(0.0));
+    state.context_tokens = Some(900000.0);
+    assert_eq!(usage_fraction(&state), Some(1.0));
+    assert_eq!(usage_summary(&state), "150%", "only the bar saturates");
+    for window in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        state.context_window = window;
+        assert_eq!(usage_fraction(&state), None);
+        assert_eq!(usage_summary(&state), "Not reported");
+    }
+    state.context_window = 600000.0;
+    state.context_tokens = Some(f64::NAN);
+    assert_eq!(usage_fraction(&state), None);
+    state.context_tokens = None;
+    state.context_breakdown = None;
+    assert_eq!(usage_summary(&state), "Not reported");
+}
+
+#[test]
 fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
     for dark in [false, true] {
         for width in [240.0, 320.0] {

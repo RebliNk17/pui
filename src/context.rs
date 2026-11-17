@@ -15,6 +15,39 @@ pub fn number(value: f64) -> String {
     }
 }
 
+fn usage(state: &State) -> Option<f64> {
+    state
+        .context_tokens
+        .or_else(|| state.context_breakdown.as_ref().map(|p| p.total()))
+}
+
+fn usage_ratio(state: &State) -> Option<f64> {
+    let used = usage(state)?;
+    let ratio = used / state.context_window;
+    (state.context_window.is_finite() && state.context_window > 0.0 && ratio.is_finite())
+        .then_some(ratio)
+}
+
+pub fn usage_fraction(state: &State) -> Option<f32> {
+    usage_ratio(state).map(|ratio| ratio.clamp(0.0, 1.0) as f32)
+}
+
+pub fn usage_summary(state: &State) -> String {
+    usage_ratio(state)
+        .map(|fraction| {
+            format!(
+                "{}{:.0}%",
+                if state.context_tokens.is_none() {
+                    "~"
+                } else {
+                    ""
+                },
+                fraction * 100.0
+            )
+        })
+        .unwrap_or_else(|| "Not reported".into())
+}
+
 pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
     let colors = crate::theme::palette(ui.ctx());
     let window = state.context_window;

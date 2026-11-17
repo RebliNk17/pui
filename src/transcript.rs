@@ -523,22 +523,9 @@ impl Transcript {
 
     fn rail(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let colors = crate::theme::palette(ui.ctx());
-        let response = ui
-            .interact(
-                rect,
-                ui.make_persistent_id("message-rail"),
-                Sense::click_and_drag(),
-            )
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let response = ui.interact(rect, ui.make_persistent_id("message-rail"), Sense::click());
         let height = rect.height();
         let max = (self.total - self.viewport).max(0.0);
-        let thumb_height =
-            (height * self.viewport / self.total.max(1.0)).clamp(24.0, height.max(24.0));
-        let thumb_y = if max > 0.0 {
-            self.scroll / max * (height - thumb_height)
-        } else {
-            0.0
-        };
         let positions: Vec<_> = self
             .markers
             .iter()
@@ -556,24 +543,9 @@ impl Transcript {
             })
             .filter(|i| (positions[*i] - focus.unwrap()).abs() < 7.0);
         let p = ui.painter();
-        p.rect_filled(
-            Rect::from_min_size(
-                rect.min + egui::vec2(3.0, 3.0),
-                Vec2::new(3.0, (height - 6.0).max(0.0)),
-            ),
-            3,
-            colors.border.gamma_multiply(0.6),
-        );
-        p.rect_filled(
-            Rect::from_min_size(
-                rect.min + egui::vec2(2.0, thumb_y),
-                Vec2::new(5.0, thumb_height),
-            ),
-            4,
-            colors
-                .dim
-                .gamma_multiply(if response.hovered() { 0.9 } else { 0.5 }),
-        );
+        if hovered.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         for (index, y) in positions.iter().enumerate() {
             let active = index == self.active || hovered == Some(index);
             let center = egui::pos2(rect.left() + 15.0, rect.top() + y);
@@ -595,19 +567,8 @@ impl Transcript {
         if response.clicked() {
             if let Some(index) = hovered {
                 self.jump = Some(self.markers[index]);
-            } else if let Some(pos) = response.interact_pointer_pos() {
-                self.jump = Some(((pos.y - rect.top()) / height * max).clamp(0.0, max));
             }
             response.request_focus();
-        }
-        if response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                self.jump = Some(
-                    ((pos.y - rect.top() - thumb_height / 2.0) / (height - thumb_height).max(1.0)
-                        * max)
-                        .clamp(0.0, max),
-                );
-            }
         }
         if response.hovered() {
             let delta = ui.input_mut(|i| {
@@ -620,6 +581,15 @@ impl Transcript {
             }
         }
         if response.has_focus() {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
             ui.input(|i| {
                 if i.modifiers.alt && !self.markers.is_empty() {
                     let index = if i.key_pressed(egui::Key::ArrowUp) {
@@ -2583,6 +2553,185 @@ mod tests {
             transcript.total
         );
     }
+    #[test]
+    fn message_rail_has_only_marks_and_keeps_jump_wheel_and_keyboard_navigation() {
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            theme.apply(&ctx);
+            let mut transcript = Transcript {
+                total: 2000.0,
+                viewport: 400.0,
+                scroll: 500.0,
+                markers: vec![100.0, 900.0, 1600.0],
+                ..Default::default()
+            };
+            let rect = Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(24.0, 400.0));
+            let render = |transcript: &mut Transcript, events: Vec<egui::Event>, wheel| {
+                let modifiers = events
+                    .iter()
+                    .find_map(|event| match event {
+                        egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                ctx.run(
+                    egui::RawInput {
+                        modifiers,
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            if let Some(delta) = wheel {
+                                ui.input_mut(|i| i.smooth_scroll_delta.y = delta);
+                            }
+                            transcript.rail(ui, rect);
+                        });
+                    },
+                )
+            };
+            render(&mut transcript, vec![], None);
+            let out = render(&mut transcript, vec![], None);
+            let marks: Vec<_> = out.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::LineSegment { points, .. } if rect.contains(points[0]) && rect.contains(points[1]))).collect();
+            assert_eq!(marks.len(), 3);
+            assert!(
+                !out.shapes.iter().any(
+                    |s| matches!(&s.shape, egui::Shape::Rect(r) if rect.contains_rect(r.rect))
+                ),
+                "No track or scrollbar thumb in the message rail"
+            );
+            let click = |transcript: &mut Transcript, pos| {
+                for pressed in [true, false] {
+                    render(
+                        transcript,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                        None,
+                    );
+                }
+            };
+            click(&mut transcript, egui::pos2(25.0, 190.0));
+            assert_eq!(
+                transcript.jump.take(),
+                Some(900.0),
+                "mark jumps to its message"
+            );
+            click(&mut transcript, egui::pos2(25.0, 270.0));
+            assert_eq!(
+                transcript.jump.take(),
+                None,
+                "blank rail is not a scrollbar"
+            );
+            render(
+                &mut transcript,
+                vec![egui::Event::PointerMoved(egui::pos2(25.0, 270.0))],
+                Some(-40.0),
+            );
+            assert_eq!(
+                transcript.jump.take(),
+                Some(540.0),
+                "wheel scrolling over the rail still works"
+            );
+            render(
+                &mut transcript,
+                vec![egui::Event::Key {
+                    key: egui::Key::End,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                None,
+            );
+            assert_eq!(transcript.jump.take(), Some(1600.0));
+            let focus = ctx.memory(|m| m.focused()).unwrap();
+            for _ in 0..2 {
+                for pressed in [true, false] {
+                    render(
+                        &mut transcript,
+                        vec![
+                            egui::Event::Key {
+                                key: egui::Key::ArrowDown,
+                                physical_key: None,
+                                pressed,
+                                repeat: false,
+                                modifiers: egui::Modifiers {
+                                    alt: true,
+                                    ..Default::default()
+                                },
+                            },
+                            egui::Event::PointerMoved(egui::pos2(300.0, 300.0)),
+                        ],
+                        Some(0.0),
+                    );
+                    assert!(
+                        ctx.memory(|m| m.has_focus(focus)),
+                        "rail retains arrow-key focus"
+                    );
+                }
+                assert_eq!(transcript.jump.take(), Some(900.0));
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_still_scrolls_the_chat_without_a_scrollbar() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let messages: Vec<_> = (0..40)
+            .map(|i| Message {
+                role: "user".into(),
+                text: format!("Message {i}"),
+                ..Default::default()
+            })
+            .collect();
+        let mut transcript = Transcript::default();
+        let mut render = |events, time| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    time: Some(time),
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        transcript.show(ui, &messages, "model", "high", false, "wheel-test")
+                    });
+                },
+            )
+        };
+        for i in 0..4 {
+            render(vec![], i as f64 * 0.1);
+        }
+        render(
+            vec![
+                egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 150.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            0.5,
+        );
+        assert!(
+            transcript.scroll < transcript.total - transcript.viewport - 20.0,
+            "wheel must move the chat away from bottom"
+        );
+    }
+
     #[test]
     fn zoom_preserves_order_and_bounds() {
         let p = zoom_markers(&[10.0, 11.0, 12.0, 80.0], Some(11.0), 100.0);

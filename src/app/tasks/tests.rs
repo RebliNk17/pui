@@ -760,7 +760,7 @@ fn workflow_long_titles_stay_inside_the_inspector_across_redraws() {
                             egui::SidePanel::right("workflow-overflow-test").exact_width(width).show(ctx, |ui| {
                                 let mut layout = CardLayout { order: vec![Card::Workflow], ..Default::default() };
                                 layout.hidden.clear();
-                                inspector::stack(ui, &mut layout, |_| String::new(), Some((Card::Workflow, "Open")), |ui, _| {
+                                inspector::stack(ui, &mut layout, |_| String::new(), Some((Card::Workflow, "Open")), None, |ui, _| {
                                     // Expand the connected-agent branch in task mode as well.
                                     ui.style_mut().animation_time = 0.0;
                                     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(egui::Id::new("Other connected agents")), true).store(ui.ctx());

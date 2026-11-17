@@ -192,15 +192,15 @@ impl Pui {
             .default_width(300.0)
             .width_range(220.0..=(ctx.available_rect().width() - 320.0).clamp(220.0, 600.0))
             .resizable(true)
-            .show_separator_line(false)
+            .show_separator_line(true)
             .frame(
                 egui::Frame::new()
                     .fill(colors.bg)
                     .inner_margin(egui::Margin {
-                        left: 8,
-                        right: 18,
-                        top: 18,
-                        bottom: 24,
+                        left: 14,
+                        right: 10,
+                        top: 10,
+                        bottom: 12,
                     }),
             )
             .show(ctx, |ui| {
@@ -208,7 +208,7 @@ impl Pui {
                     .id_salt("floating-cards")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        // Keep floating scrollbar handles clear of the card borders.
+                        // Keep floating scrollbar handles clear of section contents.
                         ui.set_width((ui.available_width() - 12.0).max(0.0));
                         let task = self
                             .tasks
@@ -231,11 +231,7 @@ impl Pui {
                             .to_owned();
                         let summaries = [
                             status.to_owned(),
-                            self.state
-                                .context_tokens
-                                .filter(|_| self.state.context_window > 0.0)
-                                .map(|t| format!("{:.0}%", t / self.state.context_window * 100.0))
-                                .unwrap_or_else(|| "Not reported".into()),
+                            crate::context::usage_summary(&self.state),
                             if task.is_some() {
                                 task_outputs.len()
                             } else {
@@ -275,6 +271,7 @@ impl Pui {
                                 .clone()
                             },
                             header_action,
+                            crate::context::usage_fraction(&self.state),
                             |ui, card| match card {
                                 Card::Workflow => self.task_workflow(ui),
                                 Card::Environment => {
@@ -758,6 +755,61 @@ mod tests {
         render(&mut app, 5.0);
         assert!(app.transcript.progress.is_none());
     }
+    #[test]
+    fn session_details_divider_spans_the_pane_even_with_collapsed_content() {
+        fn has_divider(shape: &egui::Shape, bounds: egui::Rect) -> bool {
+            match shape {
+                egui::Shape::LineSegment { points, stroke } => {
+                    stroke.width > 0.0
+                        && (points[0].x - bounds.right()).abs() < 1.0
+                        && (points[1].x - points[0].x).abs() < 0.01
+                        && (points[0].y - bounds.top()).abs() < 1.0
+                        && (points[1].y - bounds.bottom()).abs() < 1.0
+                }
+                egui::Shape::Vec(v) => v.iter().any(|s| has_divider(s, bounds)),
+                _ => false,
+            }
+        }
+        for theme in [theme::Theme::Dark, theme::Theme::Light] {
+            let ctx = egui::Context::default();
+            let mut app = Pui::new(
+                &eframe::CreationContext::_new_kittest(ctx.clone()),
+                Options {
+                    demo: true,
+                    ..Default::default()
+                },
+            );
+            theme.apply(&ctx);
+            app.prefs.cards.collapsed.extend(Card::ALL);
+            for zoom in [1.0, 1.5] {
+                ctx.set_zoom_factor(zoom);
+                let mut remaining = egui::Rect::NOTHING;
+                for _ in 0..2 {
+                    let out = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1000.0, 800.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::TopBottomPanel::top("divider-test-toolbar")
+                                .exact_height(40.0)
+                                .show(ctx, |_| {});
+                            app.inspector(ctx);
+                            remaining = ctx.available_rect();
+                        },
+                    );
+                    assert!(
+                        out.shapes.iter().any(|s| has_divider(&s.shape, remaining)),
+                        "Divider must span the full available pane height"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn mcp_warning_does_not_change_conversation_viewport() {
         let ctx = egui::Context::default();
