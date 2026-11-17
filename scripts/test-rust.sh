@@ -8,12 +8,13 @@ export GIT_CONFIG_NOSYSTEM=1
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
 lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
-cargo test --offline --locked -- --test-threads=4 \
+cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip app::sync:: --skip app::files::delimited::projection:: --skip app::files::delimited::export:: \
   --skip app::tasks::tests::watch_scope_tests:: --skip app::tasks::refresh::tests:: \
   --skip sessions::watch:: --skip file_watch:: \
   --skip app::changes::commit::tests:: --skip app::changes::git_files::modes::tests:: \
   --skip app::files::loader::svg_tests:: \
+  --skip workspace::commit::tests:: --skip svg_preview::process::lifecycle_tests:: \
   --skip "$lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
@@ -30,6 +31,8 @@ cargo test --offline --locked --bin pui app::files::delimited::export:: -- --tes
 cargo test --offline --locked --bin pui app::changes::commit::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::changes::git_files::modes::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::files::loader::svg_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui workspace::commit::tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui svg_preview::process::lifecycle_tests:: -- --test-threads=1
 # Ownership lock handoff assertions must not overlap fork/exec in other tests.
 cargo test --offline --locked --bin pui app::tasks::save_conflict_tests:: -- --test-threads=1
 # Restart/OS-lock test must not overlap any subprocess-spawning group.
