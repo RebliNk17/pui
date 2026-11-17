@@ -23,6 +23,7 @@ pub(super) struct Commit {
     pre_commit: bool,
     commit_msg: bool,
     hook_timeout: u64,
+    sign_timeout: u64,
     applied_signed: bool,
     notice: Option<String>,
     controls: Vec<egui::Id>,
@@ -180,6 +181,7 @@ impl Changes {
                     self.commit.pre_commit = false;
                     self.commit.commit_msg = false;
                     self.commit.hook_timeout = 30;
+                    self.commit.sign_timeout = 30;
                 }
                 Err(e) => self.commit.notice = Some(e),
             }
@@ -307,6 +309,14 @@ impl Changes {
                 "Sign with configured Git signer (may use agent/pinentry)",
             );
             self.commit.controls.push(signing.id);
+            if self.commit.sign {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(theme::small(ui, "Signing timeout · seconds"));
+                    let timeout =
+                        ui.add(egui::DragValue::new(&mut self.commit.sign_timeout).range(1..=300));
+                    self.commit.controls.push(timeout.id);
+                });
+            }
             let check = ui.checkbox(
                 &mut self.commit.pre_commit,
                 "Run configured pre-commit check (local code execution)",
@@ -318,13 +328,12 @@ impl Changes {
             );
             self.commit.controls.push(message_check.id);
             if self.commit.pre_commit || self.commit.commit_msg {
-                ui.label(theme::small(
-                    ui,
-                    "Timeout per selected hook (seconds, 1–300)",
-                ));
-                let timeout =
-                    ui.add(egui::DragValue::new(&mut self.commit.hook_timeout).range(1..=300));
-                self.commit.controls.push(timeout.id);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(theme::small(ui, "Timeout per selected hook · seconds"));
+                    let timeout =
+                        ui.add(egui::DragValue::new(&mut self.commit.hook_timeout).range(1..=300));
+                    self.commit.controls.push(timeout.id);
+                });
             }
             ui.label(theme::small(
                 ui,
@@ -373,6 +382,7 @@ impl Changes {
                 let pre_commit = self.commit.pre_commit;
                 let commit_msg = self.commit.commit_msg;
                 let hook_timeout = self.commit.hook_timeout.clamp(1, 300);
+                let sign_timeout = self.commit.sign_timeout.clamp(1, 300);
                 self.commit.applied_signed = sign;
                 let (tx, rx) = mpsc::channel();
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -381,7 +391,18 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = if commit_msg || pre_commit {
+                        let result = if sign {
+                            workspace::commit::apply_timeouts(
+                                snapshot,
+                                &message,
+                                true,
+                                pre_commit,
+                                commit_msg,
+                                hook_timeout,
+                                sign_timeout,
+                                &cancel,
+                            )
+                        } else if commit_msg || pre_commit {
                             workspace::commit::apply_timed_checks(
                                 snapshot,
                                 &message,
@@ -391,8 +412,6 @@ impl Changes {
                                 hook_timeout,
                                 &cancel,
                             )
-                        } else if sign {
-                            workspace::commit::apply_with_signing(snapshot, &message, true, &cancel)
                         } else {
                             workspace::commit::apply(snapshot, &message, &cancel)
                         };

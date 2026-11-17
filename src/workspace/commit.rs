@@ -340,6 +340,31 @@ pub(crate) fn apply_timed_checks(
     hook_timeout: u64,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
+    apply_timeouts(
+        snapshot,
+        message,
+        sign,
+        pre_commit,
+        commit_msg,
+        hook_timeout,
+        30,
+        cancel,
+    )
+}
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn apply_timeouts(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
+    pre_commit: bool,
+    commit_msg: bool,
+    hook_timeout: u64,
+    sign_timeout: u64,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    if !(1..=300).contains(&sign_timeout) {
+        return Err("Signing timeout must be 1–300 seconds.".into());
+    }
     if !(1..=300).contains(&hook_timeout) {
         return Err("Hook timeout must be 1–300 seconds.".into());
     }
@@ -492,7 +517,11 @@ pub(crate) fn apply_timed_checks(
     let (out, status) = read_only::run(
         &mut command,
         cancel,
-        deadline,
+        if sign {
+            Instant::now() + std::time::Duration::from_secs(sign_timeout)
+        } else {
+            deadline
+        },
         1024,
         "Create commit object",
         "Commit response exceeds limit",
@@ -500,6 +529,7 @@ pub(crate) fn apply_timed_checks(
     if !status.success() {
         return Err(if sign{"Signing failed or signer unavailable; no unsigned fallback or branch publication. Configure an available Git signer/key."}else{"Cannot create commit object with reviewed identity."}.into());
     }
+    let deadline = Instant::now() + DEADLINE;
     let oid = line(out)?;
     if !history::oid(&oid) {
         return Err("Invalid commit object".into());

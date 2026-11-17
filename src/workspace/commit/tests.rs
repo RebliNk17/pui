@@ -182,11 +182,46 @@ fn ssh_signed_commit_and_signer_failure_never_falls_back() {
         if fail {
             super::super::tests::git(&root, &["config", "gpg.ssh.program", "/usr/bin/false"]);
         }
+        if !fail {
+            let wrapper = root.join(".git/slow-signer");
+            fs::write(
+                &wrapper,
+                "#!/bin/sh\nsleep 3.2\nexec /usr/bin/ssh-keygen \"$@\"\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            super::super::tests::git(
+                &root,
+                &["config", "gpg.ssh.program", wrapper.to_str().unwrap()],
+            );
+        }
         let cancel = AtomicBool::new(false);
         let snapshot = prepare(&root, &cancel).unwrap();
         let head = snapshot.head.clone();
         let index = fs::read(root.join(".git/index")).unwrap();
-        let result = apply_with_signing(snapshot, "signed", true, &cancel);
+        if !fail {
+            let error = apply_timeouts(
+                prepare(&root, &cancel).unwrap(),
+                "timedout",
+                true,
+                false,
+                false,
+                30,
+                1,
+                &cancel,
+            )
+            .unwrap_err();
+            assert!(error.contains("timed out"));
+            assert_eq!(
+                line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+                head
+            );
+        }
+        let result = apply_timeouts(snapshot, "signed", true, false, false, 30, 10, &cancel);
         if fail {
             assert!(result.unwrap_err().contains("no unsigned fallback"));
             assert_eq!(

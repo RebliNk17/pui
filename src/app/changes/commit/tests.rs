@@ -316,6 +316,7 @@ fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes(
                     changes.commit.pre_commit = checked;
                     changes.commit.commit_msg = message_checked;
                     changes.commit.hook_timeout = 30;
+                    changes.commit.sign_timeout = 30;
                     for n in 0..4 {
                         let output = ctx.run(
                             egui::RawInput {
