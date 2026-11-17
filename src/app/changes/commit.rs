@@ -18,6 +18,7 @@ pub(super) struct Commit {
     applying: Option<workspace::read_only::Request<Result<String, String>>>,
     snapshot: Option<workspace::commit::Snapshot>,
     message: String,
+    retained_message: String,
     sign: bool,
     pre_commit: bool,
     commit_msg: bool,
@@ -83,6 +84,22 @@ impl Changes {
             });
             if cancel.clicked() {
                 self.cancel_commit();
+            }
+        }
+        if !self.commit.retained_message.is_empty() && self.commit.applying.is_none() {
+            ui.label(theme::small(
+                ui,
+                "Commit message retained locally. Fresh staged review is required; options reset.",
+            ));
+            let clear = prompt_ui::button(
+                ui,
+                "Discard retained message",
+                prompt_ui::Button::Secondary,
+                !egui::Popup::is_any_open(ui.ctx()) && ui.memory(|m| m.top_modal_layer().is_none()),
+            );
+            self.commit.controls.push(clear.id);
+            if clear.clicked() {
+                self.commit.retained_message.clear();
             }
         }
         if let Some(notice) = &self.commit.notice {
@@ -157,7 +174,7 @@ impl Changes {
             match result {
                 Ok(s) => {
                     self.commit.snapshot = Some(s);
-                    self.commit.message.clear();
+                    self.commit.message = self.commit.retained_message.clone();
                     self.commit.sign = false;
                     self.commit.pre_commit = false;
                     self.commit.commit_msg = false;
@@ -180,6 +197,7 @@ impl Changes {
             self.commit.applying = None;
             self.commit.notice = Some(match result {
                 Ok(oid) => {
+                    self.commit.retained_message.clear();
                     format!(
                         "Committed locally: {oid}. No push. Hook/signing options explicitly selected. {}",
                         if self.commit.applied_signed {
@@ -339,6 +357,7 @@ impl Changes {
                     return;
                 };
                 let message = std::mem::take(&mut self.commit.message);
+                self.commit.retained_message = message.clone();
                 let sign = self.commit.sign;
                 let pre_commit = self.commit.pre_commit;
                 let commit_msg = self.commit.commit_msg;

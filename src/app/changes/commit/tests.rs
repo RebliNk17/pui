@@ -1,5 +1,50 @@
 use super::*;
 #[test]
+fn failed_commit_keeps_message_fresh_review_resets_options_and_success_clears() {
+    let ctx = egui::Context::default();
+    let root = std::fs::canonicalize(crate::workspace::tests::fixture()).unwrap();
+    crate::workspace::tests::git(&root, &["config", "user.name", "Test"]);
+    crate::workspace::tests::git(&root, &["config", "user.email", "test@example.invalid"]);
+    crate::workspace::tests::git(&root, &["add", "--", "README.md"]);
+    let mut changes = Changes {
+        index_writable: true,
+        ..Default::default()
+    };
+    changes.commit.retained_message = "kept 世界 message".into();
+    let (tx, rx) = mpsc::channel();
+    tx.send(Err("controlled hook rejection".into())).unwrap();
+    changes.commit.applying = Some(rx.into());
+    changes.commit_inputs(&ctx, true);
+    assert_eq!(changes.commit.retained_message, "kept 世界 message");
+    assert!(changes.commit.snapshot.is_none());
+    changes.commit.sign = true;
+    changes.commit.pre_commit = true;
+    changes.commit.commit_msg = true;
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok(workspace::commit::prepare(
+        &root,
+        &AtomicBool::new(false),
+    )
+    .unwrap()))
+        .unwrap();
+    changes.commit.pending = Some(rx.into());
+    changes.commit_inputs(&ctx, true);
+    assert_eq!(changes.commit.message, "kept 世界 message");
+    assert!(!changes.commit.sign);
+    assert!(!changes.commit.pre_commit);
+    assert!(!changes.commit.commit_msg);
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok("a".repeat(40))).unwrap();
+    changes.commit.applying = Some(rx.into());
+    changes.commit.snapshot = None;
+    changes.commit_inputs(&ctx, true);
+    assert!(changes.commit.retained_message.is_empty());
+    changes.commit.retained_message = "private".into();
+    changes.commit.owner = Some(("/other".into(), "other-chat".into()));
+    changes.commit_inputs(&ctx, true);
+    assert!(changes.commit.retained_message.is_empty());
+}
+#[test]
 fn native_cancel_commit_signals_worker_discards_late_commit_and_never_retries() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for zoom in [0.8, 1.4] {
@@ -101,6 +146,37 @@ fn hidden_commit_signals_cancel_with_uncertain_completion_notice() {
             .unwrap()
             .contains("inspect History")
     );
+}
+#[test]
+fn retained_message_notice_themes_zoom_never_retries() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut changes = Changes::default();
+            changes.commit.retained_message = "local draft".into();
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(420.0, 620.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        changes.commit_control(ui, &Workspace::default(), false)
+                    });
+                },
+            );
+            assert!(out.platform_output.commands.is_empty());
+            assert!(out.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.job.text.contains("Fresh staged review is required"))));
+            assert!(changes.commit.pending.is_none());
+            assert!(changes.commit.applying.is_none());
+        }
+    }
 }
 #[test]
 fn hook_failure_notice_is_literal_themes_zoom_without_capture() {
