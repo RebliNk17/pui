@@ -38,25 +38,13 @@ impl Pui {
                     }
                     let narrow = ui.available_width() < 520.0;
                     let width =
-                        (ui.available_width() - if narrow { 68.0 } else { 346.0 }).max(40.0);
+                        (ui.available_width() - if narrow { 68.0 } else { 266.0 }).max(40.0);
                     self.navigation_header(ui, width);
                     if narrow {
                         self.compact_view_menu(ui);
                         return;
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                self.workflow_task().is_some(),
-                                egui::Button::new("Workflows"),
-                            )
-                            .on_hover_text(
-                                "Workflow progress and evidence · the agent asks before starting",
-                            )
-                            .clicked()
-                        {
-                            self.toggle_chat_tasks();
-                        }
                         if self.loading_chat {
                             ui.label(
                                 RichText::new(if self.preview_partial {
@@ -186,6 +174,28 @@ impl Pui {
         }
     }
 
+    /// Session-scoped workflow navigation belongs beside session information,
+    /// not among global browser/file/terminal actions in the top toolbar.
+    fn session_workflows_button(&mut self, ui: &mut egui::Ui) {
+        let available = self.workflow_task().is_some();
+        let response = prompt_ui::button(ui, "Workflows", prompt_ui::Button::Secondary, available)
+            .on_hover_text(if available {
+                "Open this session’s workflow progress and evidence"
+            } else {
+                "No workflow in this session. The agent asks before starting one."
+            });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("session-workflows-button"),
+                (response.rect, response.enabled()),
+            );
+        });
+        if response.clicked() {
+            self.toggle_chat_tasks();
+        }
+    }
+
     pub(super) fn inspector(&mut self, ctx: &egui::Context) {
         let colors = crate::theme::palette(ctx);
         egui::SidePanel::right("floating-inspector-v2")
@@ -210,6 +220,8 @@ impl Pui {
                     .show(ui, |ui| {
                         // Keep floating scrollbar handles clear of section contents.
                         ui.set_width((ui.available_width() - 12.0).max(0.0));
+                        self.session_workflows_button(ui);
+                        ui.add_space(4.0);
                         let task = self
                             .tasks
                             .open

@@ -475,6 +475,104 @@ fn provider_selection_keeps_model_picker_open_without_sending_a_model_change() {
 }
 
 #[test]
+fn provider_is_search_trailing_with_centered_chevron_and_price_aligned_heading() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            for width in [280.0, 700.0] {
+                let ctx = egui::Context::default();
+                let mut app = app(&ctx);
+                live(&mut app);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                app.model_anchor.as_mut().unwrap().0 =
+                    egui::Rect::from_min_size(egui::pos2(10.0, 620.0), egui::vec2(130.0, 28.0));
+                app.state.models = (0..16)
+                    .map(|i| protocol::Model {
+                        id: format!("model-{i}"),
+                        name: format!("Model {i}"),
+                        provider: if i % 2 == 0 {
+                            "alpha"
+                        } else {
+                            "a-very-long-provider-name-for-truncation"
+                        }
+                        .into(),
+                        context_window: 1000,
+                        input_cost: 2.0,
+                        output_cost: 10.0,
+                    })
+                    .collect();
+                app.model_picker_open = true;
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 760.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| app.model_picker(ctx),
+                );
+                drop(output);
+                for provider in ["", "a-very-long-provider-name-for-truncation"] {
+                    app.model_provider = provider.into();
+                    let output = settle(&ctx, &mut app);
+                    let rect = |name| {
+                        ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(name)))
+                            .unwrap()
+                    };
+                    let search = rect("model-search-row");
+                    let control = rect("model-provider-control");
+                    let input = rect("model-search-input");
+                    let chevron = ctx
+                        .data(|d| d.get_temp::<egui::Pos2>(egui::Id::new("model-provider-chevron")))
+                        .unwrap();
+                    assert!(
+                        search.expand(1.0).contains_rect(control),
+                        "{search:?} {control:?}"
+                    );
+                    assert!(
+                        input.right() <= control.left(),
+                        "Search/provider must not overlap"
+                    );
+                    assert!(
+                        (chevron.y - control.center().y).abs() < 0.6,
+                        "Chevron must center in the provider hit target: {chevron:?} {control:?}"
+                    );
+                    assert!(
+                        (control.right() - chevron.x - 9.0).abs() < 1.0,
+                        "Chevron must retain trailing inset"
+                    );
+                    let heading = rect("model-price-heading");
+                    let price = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(egui::Id::new(("model-price-column", 0usize)))
+                        })
+                        .unwrap();
+                    assert!(
+                        (heading.right() - price.right()).abs() < 0.6,
+                        "Heading must align with prices, not checkmark: {heading:?} {price:?}"
+                    );
+                    let painted = texts(&output)
+                        .into_iter()
+                        .find(|(s, _)| s == "$2 / $10")
+                        .unwrap()
+                        .1;
+                    assert!((heading.right() - painted.right()).abs() < 0.6);
+                    let popup = ctx
+                        .read_response(egui::Id::new("model-picker-dropdown"))
+                        .unwrap()
+                        .rect;
+                    assert!(
+                        ctx.screen_rect().expand(1.0).contains_rect(popup),
+                        "{popup:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn composer_controls_open_exclusively_and_have_independent_names() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

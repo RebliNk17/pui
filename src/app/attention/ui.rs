@@ -506,12 +506,22 @@ impl Pui {
                         close |= dismiss.clicked();
                     });
                 });
-                egui::ScrollArea::vertical()
+                #[cfg(test)]
+                let mut row_geometry = Vec::new();
+                let list = egui::ScrollArea::vertical()
                     .id_salt("catch-up-list")
                     .max_height((ctx.screen_rect().height() - 200.0).clamp(48.0, 280.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        // Keep one fixed trailing action column. Reserve the floating
+                        // scrollbar rail even when it is hidden, so neither later rows
+                        // nor scrollbar visibility can move the check targets.
+                        let row_width = (ui.available_width()
+                            - ui.spacing().scroll.bar_width
+                            - ui.spacing().scroll.bar_inner_margin)
+                            .max(0.0);
+                        let open_width = (row_width - 26.0 - ui.spacing().item_spacing.x).max(0.0);
                         if rows.is_empty() {
                             ui.add_space(10.0);
                             ui.label(theme::small(ui, "You're caught up."));
@@ -536,7 +546,7 @@ impl Pui {
                                         if active { " · Active chat" } else { "" }
                                     );
                                     let (rect, row) = ui.allocate_exact_size(
-                                        Vec2::new((ui.available_width() - 32.0).max(0.0), 42.0),
+                                        Vec2::new(open_width, 42.0),
                                         Sense::click(),
                                     );
                                     focus_ids.push(row.id);
@@ -595,12 +605,15 @@ impl Pui {
                                         prompt_ui::icon_action(ui, Icon::Check, "Mark read", true);
                                     focus_ids.push(mark.id);
                                     #[cfg(test)]
-                                    ctx.data_mut(|d| {
-                                        d.insert_temp(
-                                            egui::Id::new("attention-mark-read"),
-                                            mark.rect,
-                                        )
-                                    });
+                                    {
+                                        row_geometry.push((rect, mark.rect));
+                                        ctx.data_mut(|d| {
+                                            d.insert_temp(
+                                                egui::Id::new("attention-mark-read"),
+                                                mark.rect,
+                                            )
+                                        });
+                                    }
                                     if mark.clicked() {
                                         read = Some(entry.owner.clone());
                                     }
@@ -608,10 +621,23 @@ impl Pui {
                             });
                         }
                     });
+                #[cfg(test)]
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new("attention-row-geometry"), row_geometry);
+                    d.insert_temp(
+                        egui::Id::new("attention-list-geometry"),
+                        (list.inner_rect, list.content_size, list.state.offset),
+                    );
+                });
+                #[cfg(not(test))]
+                let _ = list;
                 ui.separator();
-                prompt_ui::footer(ui, |ui| {
-                    ui.label(RichText::new("Esc to close").size(9.0).color(colors.dim));
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                // Dense popover footer, not the shared 32pt dialog footer. Avoid
+                // nesting a full-height layout around the small text action.
+                let footer = ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 22.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
                         let mark = icons::labeled_button(
                             ui,
                             Icon::Check,
@@ -622,8 +648,25 @@ impl Pui {
                             focus_ids.push(mark.id);
                         }
                         clear |= mark.clicked();
-                    });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new("Esc to close").size(9.0).color(colors.dim));
+                        });
+                        mark
+                    },
+                );
+                #[cfg(test)]
+                ctx.data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new("attention-footer-geometry"),
+                        (
+                            footer.response.rect,
+                            footer.inner.rect,
+                            footer.inner.enabled(),
+                        ),
+                    );
                 });
+                #[cfg(not(test))]
+                let _ = footer;
             });
         self.attention.popup_rect = response.as_ref().map(|response| response.response.rect);
         self.attention.focus_ids = focus_ids;
