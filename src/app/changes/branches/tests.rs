@@ -228,7 +228,7 @@ fn popup_is_quiet_bounded_in_themes_zoom_and_narrow_with_truthful_selection() {
             let output = render(&ctx, &mut changes, width, vec![]);
             assert!(text(
                 &output,
-                "Read-only · switching branches not implemented"
+                "Inspect names · prepare a reviewed switch"
             ));
             assert!(text(&output, "Current local: main"));
             let rect = ctx.memory(|memory| memory.area_rect(popup_id())).unwrap();
