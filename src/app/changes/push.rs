@@ -17,6 +17,7 @@ pub(super) struct Push {
     notice: Option<String>,
     confirm: bool,
     hooks: bool,
+    diagnostics: bool,
     upstream: upstream::Upstream,
     create: create::Form,
     create_root: Option<PathBuf>,
@@ -49,6 +50,7 @@ impl Changes {
                 Ok(s) => {
                     self.push.snapshot = Some(s);
                     self.push.hooks = false;
+                    self.push.diagnostics = false;
                 }
                 Err(e) => self.push.notice = Some(e),
             }
@@ -436,12 +438,18 @@ impl Changes {
                 "Run configured pre-push hooks (local code execution)",
             );
             self.push.controls.push(response.id);
+            let details = ui.checkbox(
+                &mut self.push.diagnostics,
+                "Show failure diagnostics (may expose secrets from remote/hooks)",
+            );
+            self.push.controls.push(details.id);
         });
         if let Some(choice) = choice {
             self.push.confirm = false;
             if choice == confirmations::Choice::Confirm {
                 let snapshot = self.push.snapshot.take().unwrap();
                 let hooks = self.push.hooks;
+                let details = self.push.diagnostics;
                 let Some(permit) = branches::permit(ctx) else {
                     self.push.notice = Some("Git busy; inspect again.".into());
                     return;
@@ -453,7 +461,9 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-confirmed-push".into())
                     .spawn(move || {
-                        let result = if hooks {
+                        let result = if details {
+                            workspace::push::apply_diagnostics(snapshot, hooks, true, &cancel)
+                        } else if hooks {
                             workspace::push::apply_with_hooks(snapshot, true, &cancel)
                         } else {
                             workspace::push::apply(snapshot, &cancel)

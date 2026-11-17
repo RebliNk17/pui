@@ -279,51 +279,54 @@ fn upstream_confirmation_escape_never_changes_configuration() {
 }
 #[test]
 fn push_confirmation_escape_never_starts_network_worker() {
-    for hooks in [false, true] {
-        for mode in [theme::Theme::Light, theme::Theme::Dark] {
-            let ctx = egui::Context::default();
-            theme::install(&ctx);
-            mode.apply(&ctx);
-            let mut changes = Changes {
-                index_writable: true,
-                ..Default::default()
-            };
-            changes.push.snapshot = Some(workspace::push::Snapshot {
-                root: "/fixture".into(),
-                branch: "refs/heads/main".into(),
-                head: "a".repeat(40),
-                remote: "origin".into(),
-                destination: "refs/heads/master".into(),
-                endpoint: "https://example.invalid/repo".into(),
-                explicit_target: false,
-            });
-            changes.push.confirm = true;
-            changes.push.hooks = hooks;
-            for n in 0..4 {
-                let _ = ctx.run(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            Vec2::new(420.0, 620.0),
-                        )),
-                        events: if n == 3 {
-                            vec![egui::Event::Key {
-                                key: egui::Key::Escape,
-                                physical_key: None,
-                                pressed: true,
-                                repeat: false,
-                                modifiers: egui::Modifiers::NONE,
-                            }]
-                        } else {
-                            vec![]
+    for details in [false, true] {
+        for hooks in [false, true] {
+            for mode in [theme::Theme::Light, theme::Theme::Dark] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                let mut changes = Changes {
+                    index_writable: true,
+                    ..Default::default()
+                };
+                changes.push.snapshot = Some(workspace::push::Snapshot {
+                    root: "/fixture".into(),
+                    branch: "refs/heads/main".into(),
+                    head: "a".repeat(40),
+                    remote: "origin".into(),
+                    destination: "refs/heads/master".into(),
+                    endpoint: "https://example.invalid/repo".into(),
+                    explicit_target: false,
+                });
+                changes.push.confirm = true;
+                changes.push.hooks = hooks;
+                changes.push.diagnostics = details;
+                for n in 0..4 {
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(420.0, 620.0),
+                            )),
+                            events: if n == 3 {
+                                vec![egui::Event::Key {
+                                    key: egui::Key::Escape,
+                                    physical_key: None,
+                                    pressed: true,
+                                    repeat: false,
+                                    modifiers: egui::Modifiers::NONE,
+                                }]
+                            } else {
+                                vec![]
+                            },
+                            ..Default::default()
                         },
-                        ..Default::default()
-                    },
-                    |ctx| changes.push_dialog(ctx),
-                );
+                        |ctx| changes.push_dialog(ctx),
+                    );
+                }
+                assert!(!changes.push.confirm);
+                assert!(changes.push.applying.is_none());
             }
-            assert!(!changes.push.confirm);
-            assert!(changes.push.applying.is_none());
         }
     }
 }

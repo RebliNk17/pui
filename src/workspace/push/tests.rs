@@ -156,6 +156,10 @@ fn rejected_remote_hook_preserves_destination_and_never_discloses_output() {
     let error = apply(prepare(&root, &cancel).unwrap(), &cancel).unwrap_err();
     assert!(error.contains("Push rejected"));
     assert!(!error.contains("secret-token"));
+    let details =
+        apply_diagnostics(prepare(&root, &cancel).unwrap(), false, true, &cancel).unwrap_err();
+    assert!(details.contains("secret-token-must-not-escape"));
+    assert!(details.contains("Opted-in untrusted"));
     assert!(!remote.join("refs/heads/master").exists());
 }
 #[test]
@@ -355,6 +359,33 @@ fn opted_in_pre_push_hook_failure_stops_remote_update_without_bypass() {
     assert_eq!(
         apply_with_hooks(prepare(&root, &cancel).unwrap(), true, &cancel).unwrap(),
         Outcome::Updated
+    );
+}
+#[test]
+fn diagnostics_dual_pipes_escape_controls_and_refuse_oversize() {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "printf 'out'; printf '\\033[31merror' >&2; exit 1"]);
+    let (out, err, status) = diagnostics::run(
+        &mut cmd,
+        &AtomicBool::new(false),
+        Instant::now() + DEADLINE,
+        "test",
+    )
+    .unwrap();
+    assert_eq!(out, b"out");
+    assert!(err.starts_with(b"\x1b"));
+    assert!(!status.success());
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "yes secret | head -c 20000 >&2"]);
+    assert!(
+        diagnostics::run(
+            &mut cmd,
+            &AtomicBool::new(false),
+            Instant::now() + DEADLINE,
+            "test"
+        )
+        .unwrap_err()
+        .contains("output exceeds")
     );
 }
 #[test]

@@ -1,5 +1,6 @@
 //! Explicit reviewed single-branch Push; inspection remains local-only.
 use super::*;
+mod diagnostics;
 pub(crate) mod remote;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
@@ -201,6 +202,14 @@ pub(crate) fn apply_with_hooks(
     hooks: bool,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
+    apply_diagnostics(snapshot, hooks, false, cancel)
+}
+pub(crate) fn apply_diagnostics(
+    snapshot: Snapshot,
+    hooks: bool,
+    details: bool,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
     let target = snapshot
         .explicit_target
         .then_some((snapshot.remote.as_str(), snapshot.destination.as_str()));
@@ -232,6 +241,36 @@ pub(crate) fn apply_with_hooks(
         &format!("{}:{}", snapshot.head, snapshot.destination),
     ]);
     // No remote aliases/refspec defaults, no '+' or force, one exact reviewed OID/ref.
+    if details {
+        return match diagnostics::run(
+            &mut command,
+            cancel,
+            Instant::now() + std::time::Duration::from_secs(30),
+            "Push diagnostics",
+        ) {
+            Ok((out, err, status)) => match outcome(&out, status.success()) {
+                Ok(result) => Ok(result),
+                Err(error) => {
+                    let mut combined = out;
+                    combined.extend_from_slice(b"\n[stderr]\n");
+                    combined.extend_from_slice(&err);
+                    let text = String::from_utf8_lossy(&combined);
+                    let mut literal = String::new();
+                    for ch in text.chars() {
+                        if ch.is_control() && !matches!(ch, '\n' | '\t') {
+                            literal.extend(ch.escape_default());
+                        } else {
+                            literal.push(ch);
+                        }
+                    }
+                    Err(format!(
+                        "{error}\nOpted-in untrusted remote/hook stdout then stderr — may contain secrets; review before sharing. Not redacted; stream ordering not preserved.\n{literal}"
+                    ))
+                }
+            },
+            Err(error) => Err(error),
+        };
+    }
     let result = read_only::run(
         &mut command,
         cancel,
