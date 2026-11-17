@@ -80,7 +80,7 @@ pub(crate) fn create(
         || Ok(()),
     )
 }
-fn update(
+pub(in crate::workspace) fn update(
     root: &Path,
     values: &[(String, String)],
     cancel: &AtomicBool,

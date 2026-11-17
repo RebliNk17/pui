@@ -1,6 +1,7 @@
 //! Explicit local staged commit, frozen index and compare-and-swap branch publication.
 use super::*;
 mod diagnostics;
+pub(crate) mod identity_setup;
 use std::{fs, io::Read};
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
