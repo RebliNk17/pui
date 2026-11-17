@@ -18,6 +18,7 @@ pub(super) struct Push {
     confirm: bool,
     hooks: bool,
     diagnostics: bool,
+    timeout: Option<u64>,
     upstream: upstream::Upstream,
     create: create::Form,
     create_root: Option<PathBuf>,
@@ -51,6 +52,7 @@ impl Changes {
                     self.push.snapshot = Some(s);
                     self.push.hooks = false;
                     self.push.diagnostics = false;
+                    self.push.timeout = None;
                 }
                 Err(e) => self.push.notice = Some(e),
             }
@@ -433,6 +435,16 @@ impl Changes {
                 ))
                 .wrap(),
             );
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    "Push timeout (seconds, includes hooks and network; cleanup may take longer)",
+                ))
+                .wrap(),
+            );
+            let timeout =
+                ui.add(egui::DragValue::new(self.push.timeout.get_or_insert(30)).range(1..=300));
+            self.push.controls.push(timeout.id);
             let response = ui.checkbox(
                 &mut self.push.hooks,
                 "Run configured pre-push hooks (local code execution)",
@@ -450,6 +462,7 @@ impl Changes {
                 let snapshot = self.push.snapshot.take().unwrap();
                 let hooks = self.push.hooks;
                 let details = self.push.diagnostics;
+                let seconds = self.push.timeout.unwrap_or(30);
                 let Some(permit) = branches::permit(ctx) else {
                     self.push.notice = Some("Git busy; inspect again.".into());
                     return;
@@ -461,7 +474,9 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-confirmed-push".into())
                     .spawn(move || {
-                        let result = if details {
+                        let result = if seconds != 30 {
+                            workspace::push::apply_timed(snapshot, hooks, details, seconds, &cancel)
+                        } else if details {
                             workspace::push::apply_diagnostics(snapshot, hooks, true, &cancel)
                         } else if hooks {
                             workspace::push::apply_with_hooks(snapshot, true, &cancel)

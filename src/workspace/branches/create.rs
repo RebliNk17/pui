@@ -10,6 +10,9 @@ pub(crate) struct Review {
     pub target: String,
     pub files: Vec<crate::workspace::history::files::Entry>,
 }
+pub(crate) fn valid_start(start: &str) -> bool {
+    crate::workspace::history::oid(start)
+}
 pub(crate) fn valid_name(name: &str) -> bool {
     !name.starts_with('-') && valid_ref(&format!("refs/heads/{name}"))
 }
@@ -158,8 +161,47 @@ pub(crate) fn inspect_action(
         files,
     })
 }
+/// A supplied start must be a full immutable commit OID, never a moving revision expression.
+pub(crate) fn inspect_start(
+    root: &Path,
+    name: &str,
+    start: &str,
+    cancel: &AtomicBool,
+) -> Result<Review, String> {
+    if !valid_start(start) {
+        return Err(
+            "Use a full 40- or 64-character commit ID, not a branch or revision expression.".into(),
+        );
+    }
+    let mut review = inspect(root, name, cancel)?;
+    if start.len() != review.head.len() {
+        return Err("Commit ID object format differs from repository.".into());
+    }
+    let (out, status) = read_only::run(
+        read_only::command(root)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args(["cat-file", "-t", start]),
+        cancel,
+        Instant::now() + DEADLINE,
+        32,
+        "Branch start commit",
+        "Invalid object type",
+    )?;
+    if !status.success() || out != b"commit\n" {
+        return Err(
+            "Start commit is unavailable locally or is not a commit. No fetch performed.".into(),
+        );
+    }
+    review.target = start.into();
+    Ok(review)
+}
 pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
-    if inspect_action(&review.root, &review.name, review.switch, cancel)? != review {
+    let fresh = if review.switch {
+        inspect_action(&review.root, &review.name, true, cancel)?
+    } else {
+        inspect_start(&review.root, &review.name, &review.target, cancel)?
+    };
+    if fresh != review {
         return Err("Source branch or commit changed; inspect again.".into());
     }
     if review.switch {
@@ -200,7 +242,7 @@ pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
             "-m",
             "Pui: create local branch",
             &destination,
-            &review.head,
+            &review.target,
             &zero,
         ]),
         cancel,

@@ -210,6 +210,18 @@ pub(crate) fn apply_diagnostics(
     details: bool,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
+    apply_timed(snapshot, hooks, details, 30, cancel)
+}
+pub(crate) fn apply_timed(
+    snapshot: Snapshot,
+    hooks: bool,
+    details: bool,
+    seconds: u64,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
+    if !(1..=300).contains(&seconds) {
+        return Err("Push timeout must be 1–300 seconds.".into());
+    }
     let target = snapshot
         .explicit_target
         .then_some((snapshot.remote.as_str(), snapshot.destination.as_str()));
@@ -245,7 +257,7 @@ pub(crate) fn apply_diagnostics(
         return match diagnostics::run(
             &mut command,
             cancel,
-            Instant::now() + std::time::Duration::from_secs(30),
+            Instant::now() + std::time::Duration::from_secs(seconds),
             "Push diagnostics",
         ) {
             Ok((out, err, status)) => match outcome(&out, status.success()) {
@@ -274,7 +286,7 @@ pub(crate) fn apply_diagnostics(
     let result = read_only::run(
         &mut command,
         cancel,
-        Instant::now() + std::time::Duration::from_secs(30),
+        Instant::now() + std::time::Duration::from_secs(seconds),
         16384,
         "Confirmed push",
         "Push output exceeded limit; remote completion is uncertain.",

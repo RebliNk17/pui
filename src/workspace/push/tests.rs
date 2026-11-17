@@ -1,4 +1,50 @@
 use super::*;
+#[cfg(unix)]
+#[test]
+fn push_timeout_bounds_slow_hook_without_retry_and_longer_budget_succeeds() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = fixture();
+    let remote = root.with_extension("bare");
+    std::fs::create_dir(&remote).unwrap();
+    super::super::tests::git(&remote, &["init", "--bare"]);
+    super::super::tests::git(
+        &root,
+        &["config", "remote.origin.url", remote.to_str().unwrap()],
+    );
+    let hook = root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\ncat >/dev/null\nsleep 2\nexit 0\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cancel = AtomicBool::new(false);
+    for details in [false, true] {
+        let snapshot = prepare(&root, &cancel).unwrap();
+        let error = apply_timed(snapshot, true, details, 1, &cancel).unwrap_err();
+        assert!(error.contains("uncertain"));
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&remote)
+            .args(["show-ref", "--verify", "refs/heads/master"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+    assert_eq!(
+        apply_timed(prepare(&root, &cancel).unwrap(), true, false, 10, &cancel).unwrap(),
+        Outcome::Updated
+    );
+    for seconds in [0, 301] {
+        assert!(
+            apply_timed(
+                prepare(&root, &cancel).unwrap(),
+                false,
+                false,
+                seconds,
+                &cancel
+            )
+            .unwrap_err()
+            .contains("1–300")
+        );
+    }
+}
 fn fixture() -> PathBuf {
     let root = std::fs::canonicalize(super::super::tests::fixture()).unwrap();
     let branch = String::from_utf8(super::super::tests::git(

@@ -7,6 +7,7 @@ pub(crate) struct Review {
     pub email: String,
     pub inherited: Vec<(String, String)>,
     pub override_inherited: bool,
+    pub edit_local: bool,
     config: Vec<u8>,
 }
 pub(crate) fn valid(name: &str, email: &str) -> bool {
@@ -25,6 +26,7 @@ fn absent(
     cancel: &AtomicBool,
     deadline: Instant,
     allow: bool,
+    edit: bool,
 ) -> Result<Vec<(String, String)>, String> {
     let mut inherited = Vec::new();
     for key in [
@@ -47,7 +49,7 @@ fn absent(
         if status.code() == Some(1) && out.is_empty() {
             continue;
         }
-        if !allow || !matches!(key, "user.name" | "user.email") || !status.success() {
+        if !(allow || edit) || !matches!(key, "user.name" | "user.email") || !status.success() {
             return Err("Identity settings already exist or worktree config is enabled. Existing identity is never replaced.".into());
         }
         let (local, local_status) = read_only::run(
@@ -58,7 +60,13 @@ fn absent(
             "Local identity",
             "Local identity exceeds limit",
         )?;
-        if local_status.code() != Some(1) || !local.is_empty() {
+        if edit {
+            if !local_status.success() || local != out {
+                return Err(
+                    "Editing requires one direct local value without inherited ambiguity.".into(),
+                );
+            }
+        } else if local_status.code() != Some(1) || !local.is_empty() {
             return Err("Repository-local identity already exists; nothing replaced.".into());
         }
         let value = String::from_utf8(out).map_err(|_| "Inherited identity is not UTF-8")?;
@@ -69,6 +77,9 @@ fn absent(
             return Err("Inherited identity is ambiguous or oversized.".into());
         }
         inherited.push((key.into(), value.into()));
+    }
+    if edit && inherited.len() != 2 {
+        return Err("Editing requires both existing local name and email.".into());
     }
     Ok(inherited)
 }
@@ -110,6 +121,16 @@ pub(crate) fn inspect_override(
     allow: bool,
     cancel: &AtomicBool,
 ) -> Result<Review, String> {
+    inspect_mode(root, name, email, allow, false, cancel)
+}
+pub(crate) fn inspect_mode(
+    root: &Path,
+    name: &str,
+    email: &str,
+    allow: bool,
+    edit: bool,
+    cancel: &AtomicBool,
+) -> Result<Review, String> {
     if !valid(name, email) {
         return Err(
             "Use a name and email up to 512 UTF-8 bytes, without controls or angle brackets."
@@ -128,23 +149,37 @@ pub(crate) fn inspect_override(
     {
         return Err("Exact repository root required.".into());
     }
-    let inherited = absent(root, cancel, deadline, allow)?;
+    let inherited = absent(root, cancel, deadline, allow, edit)?;
     Ok(Review {
         root: root.into(),
         inherited,
         override_inherited: allow,
+        edit_local: edit,
         name: name.trim().into(),
         email: email.into(),
         config: config(root, cancel, deadline)?,
     })
 }
+/// Read-only form population; this result is not an authorization to publish.
+pub(crate) fn load_local(root: &Path, cancel: &AtomicBool) -> Result<(String, String), String> {
+    let review = inspect_mode(
+        root,
+        "Read only",
+        "read-only@example.invalid",
+        false,
+        true,
+        cancel,
+    )?;
+    Ok((review.inherited[0].1.clone(), review.inherited[1].1.clone()))
+}
 pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
     let validate = || {
-        if inspect_override(
+        if inspect_mode(
             &review.root,
             &review.name,
             &review.email,
             review.override_inherited,
+            review.edit_local,
             cancel,
         )? != review
         {
@@ -153,7 +188,7 @@ pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
         Ok(())
     };
     validate()?;
-    super::super::push::remote::update(
+    super::super::push::remote::update_mode(
         &review.root,
         &[
             ("user.name".into(), review.name.clone()),
@@ -161,6 +196,7 @@ pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
         ],
         cancel,
         Instant::now() + DEADLINE,
+        review.edit_local,
         validate,
     )
 }

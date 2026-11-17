@@ -12,6 +12,8 @@ cargo test --offline --locked -- --test-threads=4 \
   --skip app::sync:: --skip app::files::delimited::projection:: --skip app::files::delimited::export:: \
   --skip app::tasks::tests::watch_scope_tests:: --skip app::tasks::refresh::tests:: \
   --skip sessions::watch:: --skip file_watch:: \
+  --skip app::changes::commit::tests:: --skip app::changes::git_files::modes::tests:: \
+  --skip app::files::loader::svg_tests:: \
   --skip "$lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
@@ -22,6 +24,12 @@ cargo test --offline --locked --bin pui file_watch:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::sync:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::files::delimited::projection:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::files::delimited::export:: -- --test-threads=1
+# Real Git fixture deadlines and Python helper protocol startup failed under
+# bulk context/process load. Preserve deadlines/assertions and run each once,
+# without overlapping other test groups. This is scheduling, not a timeout repair.
+cargo test --offline --locked --bin pui app::changes::commit::tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::changes::git_files::modes::tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::files::loader::svg_tests:: -- --test-threads=1
 # Ownership lock handoff assertions must not overlap fork/exec in other tests.
 cargo test --offline --locked --bin pui app::tasks::save_conflict_tests:: -- --test-threads=1
 # Restart/OS-lock test must not overlap any subprocess-spawning group.

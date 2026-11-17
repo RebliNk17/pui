@@ -285,6 +285,7 @@ fn push_confirmation_escape_never_starts_network_worker() {
                 let ctx = egui::Context::default();
                 theme::install(&ctx);
                 mode.apply(&ctx);
+                ctx.set_zoom_factor(if hooks { 1.4 } else { 0.8 });
                 let mut changes = Changes {
                     index_writable: true,
                     ..Default::default()
@@ -301,6 +302,7 @@ fn push_confirmation_escape_never_starts_network_worker() {
                 changes.push.confirm = true;
                 changes.push.hooks = hooks;
                 changes.push.diagnostics = details;
+                changes.push.timeout = Some(300);
                 for n in 0..4 {
                     let _ = ctx.run(
                         egui::RawInput {
@@ -325,6 +327,7 @@ fn push_confirmation_escape_never_starts_network_worker() {
                     );
                 }
                 assert!(!changes.push.confirm);
+                assert_eq!(changes.push.timeout, Some(300));
                 assert!(changes.push.applying.is_none());
             }
         }

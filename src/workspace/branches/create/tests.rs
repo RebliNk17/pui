@@ -1,5 +1,42 @@
 use super::*;
 #[test]
+fn create_from_old_commit_preserves_dirty_checkout_and_refuses_bad_or_stale_start() {
+    let root = switch_fixture();
+    let git = crate::workspace::tests::git;
+    let cancel = AtomicBool::new(false);
+    let old = String::from_utf8(git(&root, &["rev-parse", "target"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    std::fs::write(root.join("file.txt"), "dirty retained\n").unwrap();
+    let before = crate::workspace::tests::snapshot(&root);
+    let review = inspect_start(&root, "from-history", &old, &cancel).unwrap();
+    assert_ne!(review.head, review.target);
+    apply(review, &cancel).unwrap();
+    assert_eq!(
+        git(&root, &["rev-parse", "from-history"]),
+        format!("{old}\n").as_bytes()
+    );
+    assert_eq!(crate::workspace::tests::snapshot(&root), before);
+    assert_eq!(
+        std::fs::read(root.join("file.txt")).unwrap(),
+        b"dirty retained\n"
+    );
+    for bad in [
+        "HEAD~1".into(),
+        "f".repeat(40),
+        String::from_utf8(git(&root, &["rev-parse", "HEAD:file.txt"]))
+            .unwrap()
+            .trim()
+            .into(),
+    ] {
+        assert!(inspect_start(&root, "bad-start", &bad, &cancel).is_err());
+    }
+    let review = inspect_start(&root, "stale-start", &old, &cancel).unwrap();
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/target"]);
+    assert!(apply(review, &cancel).is_err());
+}
+#[test]
 fn exact_create_preserves_current_head_index_files_and_refuses_existing() {
     let root = std::fs::canonicalize(crate::workspace::tests::fixture()).unwrap();
     let cancel = AtomicBool::new(false);

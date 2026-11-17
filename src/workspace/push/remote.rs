@@ -87,6 +87,16 @@ pub(in crate::workspace) fn update(
     deadline: Instant,
     revalidate: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    update_mode(root, values, cancel, deadline, false, revalidate)
+}
+pub(in crate::workspace) fn update_mode(
+    root: &Path,
+    values: &[(String, String)],
+    cancel: &AtomicBool,
+    deadline: Instant,
+    replace: bool,
+    revalidate: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let path = PathBuf::from(line(run(
         root,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -128,7 +138,7 @@ pub(in crate::workspace) fn update(
         let mut cmd = read_only::command(root);
         cmd.args(["config", "--no-includes", "--file"])
             .arg(&temp)
-            .args(["--add", key, value]);
+            .args([if replace { "--replace-all" } else { "--add" }, key, value]);
         let (_, status) = read_only::run(
             &mut cmd,
             cancel,

@@ -11,6 +11,8 @@ pub(super) struct Details {
     result: Option<Result<workspace::history::details::Detail, String>>,
     copy_controls: [Option<egui::Id>; 2],
     copy_key: Option<egui::Id>,
+    branch_control: Option<egui::Id>,
+    branch_key: Option<egui::Id>,
     parent_controls: Vec<(egui::Id, usize)>,
     parent_key: Option<egui::Id>,
     parent_hops: u8,
@@ -161,6 +163,10 @@ impl History {
             self.detail.parent_key = focused;
             return;
         }
+        if self.has_detail() && focused.is_some() && focused == self.detail.branch_control {
+            self.detail.branch_key = focused;
+            return;
+        }
         if self.has_detail() && focused.is_some() && self.detail.copy_controls.contains(&focused) {
             self.detail.copy_key = focused;
             return;
@@ -254,6 +260,8 @@ impl History {
             return false;
         }
         let copy_key = self.detail.copy_key.take();
+        let branch_key = self.detail.branch_key.take();
+        self.detail.branch_control = None;
         let parent_key = self.detail.parent_key.take();
         self.detail.parent_controls.clear();
         let mut inspect_parent = None;
@@ -415,6 +423,31 @@ impl History {
                         .wrap()
                         .selectable(false),
                     );
+                    if detail.oid == *hash && !demo {
+                        let prepare = ui
+                            .push_id(("history-branch-draft", hash), |ui| {
+                                prompt_ui::button(
+                                    ui,
+                                    "Prepare branch here…",
+                                    prompt_ui::Button::Secondary,
+                                    self.branch_enabled && !demo,
+                                )
+                            })
+                            .inner;
+                        self.detail.branch_control = Some(prepare.id);
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                popup_id().with("history-branch-draft"),
+                                (prepare.id, prepare.rect, prepare.enabled()),
+                            )
+                        });
+                        if prepare.enabled()
+                            && (prepare.clicked() || branch_key == Some(prepare.id))
+                        {
+                            self.branch_draft = Some(detail.oid.clone());
+                        }
+                    }
                 }
                 Err(error) => {
                     ui.add(egui::Label::new(theme::small(ui, error)).wrap());
@@ -441,6 +474,8 @@ impl Changes {
         }
     }
 }
+#[cfg(test)]
+mod branch_tests;
 #[cfg(test)]
 mod copy_tests;
 #[cfg(test)]

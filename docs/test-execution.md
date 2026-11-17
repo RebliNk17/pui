@@ -17,6 +17,10 @@ Configure the existing toolchain/CEF and target directory, then:
 
 Runs bulk tests with four threads, then the task watch-scope, task refresh, session watcher, watcher lifecycle, cross-window sync, table projection and table export groups serially. Real OS watcher setup previously timed out under bulk application-context registration load (`src/file_watch.rs:72`); watcher groups now run once serially with unchanged setup deadlines and assertions. This is scheduling mitigation, not proof of an OS-service repair or zero flake rate. Export tests also use the projection worker permit; a later full run exposed that contention, so the entire export group is included serially rather than retried or omitted. All groups are included exactly once; existing ignored tests remain ignored. Hermetic Git config prevents developer-global filters from changing fixtures. This is a local validation runner, not a change to application Git permissions or installed configuration. Task ownership-lock handoff and the exact automation restart/OS-lock regression also run in separate serial invocations after process-spawning groups, preserving upstream fork/exec lock-inheritance protections.
 
+### Additional process-sensitive serial groups
+
+The History→branch validation run recorded two existing Git fixture 3-second deadline failures and two SVG Python helper protocol-start failures during four-thread bulk execution. The commit-dialog, Git full-review-mode and SVG loader test groups now run once serially, excluded from bulk, before ownership-lock groups. Assertions, deadlines, Python child protocol and real reaping checks are unchanged. This is a conservative scheduling mitigation, not established root-cause attribution or a production timeout/helper repair. No failed test is automatically retried.
+
 ### Measured on current dirty checkout
 
 - Previous serial full run: **1,658 Rust + 3 prompt passed**, 2 ignored, **492.97s** Rust-body time (`/tmp/pui-chat-resource-full.log`).

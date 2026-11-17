@@ -80,6 +80,8 @@ pub(super) struct Branches {
     history: history::History,
     tabs: [Option<egui::Id>; 2],
     tab_key: Option<bool>, // false branches, true history
+    switch_control: Option<egui::Id>,
+    switch_key: Option<egui::Id>,
     #[cfg(test)]
     requests: usize,
 }
@@ -302,12 +304,14 @@ impl Changes {
         if !branch.history.active
             && focused != Some(search_id())
             && focused != branch.refresh_id
+            && focused != branch.switch_control
             && row_focus.is_none()
             && !branch.tabs.contains(&focused)
         {
             branch.focus_search = true;
             ctx.memory_mut(|memory| memory.request_focus(search_id()));
         }
+        if focused.is_some()&&focused==branch.switch_control&&ctx.input(|i|i.events.iter().any(|e|matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Space,pressed:true,repeat:false,modifiers,..}if *modifiers==egui::Modifiers::NONE))){branch.switch_key=focused;}
         let mut close = false;
         let mut delta = 0isize;
         // Runs before global Stop, approvals/questions, composer and presets.
@@ -345,6 +349,7 @@ impl Changes {
                             } else {
                                 branch.focus_search |= !branch.history.active
                                     && focused != branch.refresh_id
+                                    && focused != branch.switch_control
                                     && !branch.tabs.contains(&focused);
                             }
                         }
@@ -416,7 +421,11 @@ impl Changes {
     pub(super) fn branch_button(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
         let ctx = ui.ctx().clone();
         let owner = Owner::new(&self.identity, workspace);
+        let draft_available = self.branch_draft_available();
         let branch = &mut self.branches;
+        branch.history.branch_enabled =
+            draft_available && !branch.stale && !branch.demo && branch.owner == owner;
+        branch.history.branch_draft = None;
         let label = branch
             .snapshot
             .as_ref()
@@ -431,7 +440,7 @@ impl Changes {
                 "Branches"
             });
         let full = format!(
-            "Local branches · read-only\nLast observed: {label}\n{}\nSwitching branches is not implemented. Does not choose the Changes diff base.",
+            "Local branches · read-only\nLast observed: {label}\n{}\nPrepare switch fills a draft; review and confirmation are required. Does not choose the Changes diff base.",
             workspace.root.display()
         );
         let width = (ui.available_width() - 8.0).clamp(28.0, 136.0);
@@ -522,6 +531,9 @@ impl Changes {
             branch.close(&ctx, false);
             return;
         }
+        let mut switch_draft = None;
+        let switch_key = branch.switch_key.take();
+        branch.switch_control = None;
         let width = (ctx.screen_rect().width() - 32.0).clamp(120.0, 380.0);
         egui::Popup::from_response(&response).id(popup_id()).open_memory(None)
             .width(width).layout(Layout::top_down_justified(Align::Min))
@@ -531,7 +543,7 @@ impl Changes {
                 ui.set_width((width - 20.0).max(1.0));
                 prompt_ui::style(ui);
                 egui::ScrollArea::vertical().animated(false).max_height((ctx.screen_rect().height() - 100.0).clamp(80.0, 440.0)).show(ui, |ui| {
-                    prompt_ui::heading(ui, if branch.history.active {"Recent history"}else{"Local branches"}, if branch.history.active {"Read-only · pinned local HEAD"}else{"Read-only · switching branches not implemented"});
+                    prompt_ui::heading(ui, if branch.history.active {"Recent history"}else{"Local branches"}, if branch.history.active {"Read-only · pinned local HEAD"}else{"Inspect names · prepare a reviewed switch"});
                     ui.horizontal(|ui| {
                         let branches=ui.add(egui::Button::selectable(!branch.history.active,"Branches"));
                         let history=ui.add(egui::Button::selectable(branch.history.active,"History"));
@@ -576,6 +588,11 @@ impl Changes {
                         }
                         if let Some(name) = branch.hits.get(branch.selected).map(|&n| &snapshot.local[n]) {
                             ui.add(egui::Label::new(theme::small(ui, format!("Highlighted local: {name} · {}", if snapshot.current == Current::Local(name.clone()) { "current" } else { "not current" }))).wrap());
+                            let enabled=draft_available&&!branch.demo&&!branch.stale&&branch.owner==owner&&snapshot.current!=Current::Local(name.clone());
+                            let prepare=ui.push_id(("branch-switch-draft",name),|ui|prompt_ui::button(ui,"Prepare switch…",prompt_ui::Button::Secondary,enabled)).inner;
+                            #[cfg(test)]ctx.data_mut(|d|d.insert_temp(popup_id().with("branch-switch-draft"),(prepare.id,prepare.rect,prepare.enabled())));
+                            branch.switch_control=Some(prepare.id);
+                            if enabled&&(prepare.clicked()||switch_key==Some(prepare.id)){switch_draft=Some(name.clone());}
                         }
                     }
                     }
@@ -597,8 +614,22 @@ impl Changes {
                 // receive this popup's editing/preset keys, even after focus theft.
                 ui.input_mut(|input| input.events.retain(|event| !keyboard_event(event)));
             });
+        let draft = branch.history.branch_draft.take();
+        if draft.is_some() || switch_draft.is_some() {
+            branch.close(&ctx, false);
+            egui::Popup::close_id(&ctx, popup_id());
+            ctx.input_mut(|i| i.events.retain(|e| !keyboard_event(e)));
+        }
         if !egui::Popup::is_id_open(&ctx, popup_id()) {
             branch.close(&ctx, false);
+        }
+        if let Some(name) = switch_draft {
+            self.prepare_branch_switch(name);
+            ctx.request_repaint();
+        }
+        if let Some(hash) = draft {
+            self.prepare_history_branch(hash);
+            ctx.request_repaint();
         }
     }
 }

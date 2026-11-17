@@ -90,6 +90,68 @@ fn inherited_include_override_is_explicit_preserves_origin_and_revalidates() {
     assert!(apply(review, &cancel).is_err());
 }
 #[test]
+fn edit_local_identity_replaces_exact_pair_and_refuses_stale_duplicate_or_inherited() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    apply(
+        inspect(&root, "Old", "old@example.invalid", &cancel).unwrap(),
+        &cancel,
+    )
+    .unwrap();
+    let review = inspect_mode(&root, "New", "new@example.invalid", false, true, &cancel).unwrap();
+    assert_eq!(review.inherited[0].1, "Old");
+    apply(review, &cancel).unwrap();
+    assert_eq!(
+        crate::workspace::tests::git(&root, &["config", "--get-all", "user.name"]),
+        b"New\n"
+    );
+    assert_eq!(
+        crate::workspace::tests::git(&root, &["config", "--get-all", "user.email"]),
+        b"new@example.invalid\n"
+    );
+    let review = inspect_mode(&root, "Next", "next@example.invalid", false, true, &cancel).unwrap();
+    crate::workspace::tests::git(&root, &["config", "user.name", "Concurrent"]);
+    let before = fs::read(root.join(".git/config")).unwrap();
+    assert!(apply(review, &cancel).is_err());
+    assert_eq!(fs::read(root.join(".git/config")).unwrap(), before);
+    crate::workspace::tests::git(&root, &["config", "--add", "user.name", "Duplicate"]);
+    assert!(inspect_mode(&root, "Next", "next@example.invalid", false, true, &cancel).is_err());
+    assert!(
+        inspect_mode(
+            &fixture(),
+            "Next",
+            "next@example.invalid",
+            false,
+            true,
+            &cancel
+        )
+        .is_err()
+    );
+}
+#[test]
+fn load_local_is_read_only_and_refuses_ambiguous_or_missing_identity() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    assert!(load_local(&root, &cancel).is_err());
+    apply(
+        inspect(&root, "Local 世界", "local@example.invalid", &cancel).unwrap(),
+        &cancel,
+    )
+    .unwrap();
+    let before = fs::read(root.join(".git/config")).unwrap();
+    assert_eq!(
+        load_local(&root, &cancel).unwrap(),
+        ("Local 世界".into(), "local@example.invalid".into())
+    );
+    assert_eq!(fs::read(root.join(".git/config")).unwrap(), before);
+    assert!(!root.join(".git/config.lock").exists());
+    crate::workspace::tests::git(
+        &root,
+        &["config", "--add", "user.email", "duplicate@example.invalid"],
+    );
+    assert!(load_local(&root, &cancel).is_err());
+}
+#[test]
 fn config_change_foreign_lock_and_invalid_inputs_refuse() {
     for case in 0..2 {
         let root = fixture();

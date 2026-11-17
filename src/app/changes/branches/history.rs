@@ -7,6 +7,8 @@ mod graph;
 pub(super) struct History {
     pub(super) active: bool,
     pub(super) loaded: bool,
+    pub(super) branch_enabled: bool,
+    pub(super) branch_draft: Option<String>,
     merged: bool,
     mode_control: Option<egui::Id>,
     mode_key: bool,

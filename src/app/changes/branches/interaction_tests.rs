@@ -50,6 +50,41 @@ fn setup(ctx: &egui::Context) -> (Pui, Permit, Vec<u8>) {
     (app, permit, index)
 }
 #[test]
+fn highlighted_branch_prepares_switch_draft_by_keyboard_without_git_write() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        let (mut app, _permit, before) = setup(&ctx);
+        mode.apply(&ctx);
+        app.demo = false;
+        app.changes.index_writable = true;
+        app.changes.branches.error = None;
+        app.changes.branches.snapshot = Some(workspace::branches::Snapshot {
+            current: Current::Local("main".into()),
+            local: vec!["main".into(), "feature/世界".into()],
+        });
+        app.changes.branches.project();
+        app.changes.branches.selected = 1;
+        for _ in 0..3 {
+            file_tests::frame(&ctx, &mut app, vec![]);
+        }
+        let (id, _, enabled) = ctx
+            .data(|d| {
+                d.get_temp::<(egui::Id, egui::Rect, bool)>(popup_id().with("branch-switch-draft"))
+            })
+            .unwrap();
+        assert!(enabled);
+        ctx.memory_mut(|m| m.request_focus(id));
+        file_tests::frame(&ctx, &mut app, vec![]);
+        file_tests::frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
+        assert!(!app.changes.branches.open);
+        assert_eq!(
+            std::fs::read(app.prefs.cwd.join(".git/index")).unwrap(),
+            before
+        );
+        assert!(!app.changes.prepare_branch_switch("bad..branch".into()));
+    }
+}
+#[test]
 fn real_header_click_explicit_refresh_pointer_keyboard_and_outside_close_only_read() {
     let ctx = egui::Context::default();
     let (mut app, permit, before) = setup(&ctx);
