@@ -87,7 +87,6 @@ fn drafts_are_atomic_preserve_preferences_and_do_not_change_options_until_applie
     let mut options = Options {
         device: Device::Mobile,
         rotate: true,
-        fit: false,
         zoom: 1.5,
         console: true,
         ..Default::default()
@@ -106,7 +105,6 @@ fn drafts_are_atomic_preserve_preferences_and_do_not_change_options_until_applie
     assert_eq!(options.device, Device::Custom);
     assert_eq!(options.dimensions(), Some((1200, 800)));
     assert!(!options.rotate);
-    assert!(!options.fit);
     assert_eq!(options.zoom, 1.5);
     assert!(options.console);
     assert!(
@@ -325,7 +323,7 @@ fn toolbar_frame(ctx: &egui::Context, browser: &mut BrowserView, events: Vec<egu
         |ctx| {
             egui::TopBottomPanel::top("toolbar")
                 .exact_height(42.0)
-                .show(ctx, |ui| browser.toolbar(ui, "fixture"));
+                .show(ctx, |ui| browser.toolbar(ui, "fixture", None));
             egui::CentralPanel::default().show(ctx, |ui| {
                 browser.viewport(ui, "fixture");
             });
@@ -360,7 +358,7 @@ fn actual_popup_discards_on_outside_click_reopen_tab_switch_and_close() {
         toolbar_frame(&ctx, &mut browser, vec![]);
     }
     let size = ctx
-        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Auto"))))
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Responsive"))))
         .unwrap();
     toolbar_click(&ctx, &mut browser, size.center());
     toolbar_frame(&ctx, &mut browser, vec![]);
@@ -422,14 +420,19 @@ fn popup_and_controls_stay_in_screen_at_narrow_widths_and_zoom() {
                         |ctx| {
                             egui::TopBottomPanel::top("toolbar")
                                 .exact_height(42.0)
-                                .show(ctx, |ui| browser.toolbar(ui, "fixture"));
+                                .show(ctx, |ui| browser.toolbar(ui, "fixture", None));
                         },
                     );
                 };
                 for _ in 0..3 {
                     draw(&mut browser, vec![]);
                 }
-                for label in ["Auto", "Show console", "100%"] {
+                let labels: &[&str] = if ctx.screen_rect().width() - 16.0 < 210.0 {
+                    &["Preview settings"]
+                } else {
+                    &["Responsive", "Show console", "100%"]
+                };
+                for &label in labels {
                     let rect = ctx
                         .data(|data| {
                             data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", label)))
@@ -458,7 +461,7 @@ fn popup_and_controls_stay_in_screen_at_narrow_widths_and_zoom() {
                 };
                 let size = ctx
                     .data(|data| {
-                        data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Auto")))
+                        data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", labels[0])))
                     })
                     .unwrap();
                 click(&mut browser, size.center());
@@ -591,7 +594,7 @@ fn maximum_applied_label_fits_near_compact_breakpoint_in_both_orientations() {
                         |ctx| {
                             egui::TopBottomPanel::top("toolbar")
                                 .exact_height(42.0)
-                                .show(ctx, |ui| browser.toolbar(ui, "fixture"));
+                                .show(ctx, |ui| browser.toolbar(ui, "fixture", None));
                         },
                     );
                 }
@@ -627,7 +630,7 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for width in [180.0, 320.0, 650.0] {
             for zoom in [0.8, 1.0, 1.6] {
-                for fit in [false, true] {
+                for rotate in [false, true] {
                     let ctx = egui::Context::default();
                     theme::install(&ctx);
                     mode.apply(&ctx);
@@ -640,7 +643,7 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
                             width: 3840,
                             height: 2160,
                             console: true,
-                            fit,
+                            rotate,
                             ..Default::default()
                         },
                     );
@@ -693,7 +696,7 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
                         .unwrap();
                     assert!(
                         native.is_finite() && native.is_positive(),
-                        "{width} {zoom} {fit}: {native:?}"
+                        "{width} {zoom} {rotate}: {native:?}"
                     );
                     assert!(pane.contains_rect(native), "{pane:?} / {native:?}");
                     assert!(native.top() >= status_bottom);
@@ -722,7 +725,9 @@ fn full_app_preset_popup_owns_modified_keys_and_space_without_answering_approval
             frame(&ctx, &mut app, vec![]);
         }
         let size = ctx
-            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Auto"))))
+            .data(|data| {
+                data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Responsive")))
+            })
             .unwrap();
         click(&ctx, &mut app, size.center());
         for _ in 0..3 {
@@ -764,7 +769,7 @@ fn full_app_preset_popup_owns_modified_keys_and_space_without_answering_approval
         if !egui::Popup::is_any_open(&ctx) {
             let size = ctx
                 .data(|data| {
-                    data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Auto")))
+                    data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Responsive")))
                 })
                 .unwrap();
             // Label changes one frame after selecting the preset.
@@ -807,7 +812,9 @@ fn full_app_custom_editor_keys_preserve_chat_work_draft_and_pending_approval() {
             frame(&ctx, &mut app, vec![]);
         }
         let pos = ctx
-            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Auto"))))
+            .data(|data| {
+                data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Responsive")))
+            })
             .unwrap()
             .center();
         click(&ctx, &mut app, pos);
@@ -862,6 +869,6 @@ fn full_app_custom_editor_keys_preserve_chat_work_draft_and_pending_approval() {
             Some("http://localhost:3000/custom-fixture")
         );
         let output = frame(&ctx, &mut app, vec![]);
-        text(&output, "Auto");
+        text(&output, "Responsive");
     }
 }

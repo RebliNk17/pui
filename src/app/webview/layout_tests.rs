@@ -23,7 +23,6 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                         Options {
                             device,
                             console: true,
-                            fit: false,
                             ..Default::default()
                         },
                     );
@@ -90,6 +89,61 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn fixed_viewports_scale_down_automatically_without_reflow_or_zoom_changes() {
+    for (device, width, height) in [
+        ("responsive", 320.0, 500.0),
+        ("desktop", 320.0, 500.0),
+        ("tablet", 700.0, 260.0),
+        ("mobile", 320.0, 500.0),
+        ("custom:3840x2160", 180.0, 100.0),
+    ] {
+        for rotate in [false, true] {
+            let ctx = egui::Context::default();
+            let mut browser = BrowserView::default();
+            browser.configure("fixture", device, false).unwrap();
+            let options = browser.options.get_mut("fixture").unwrap();
+            options.rotate = rotate;
+            options.zoom = 1.5;
+            let expected = options.clone();
+            let mut pane = egui::Rect::NOTHING;
+            let mut native = egui::Rect::NOTHING;
+            for _ in 0..3 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, height),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            pane = ui.available_rect_before_wrap();
+                            native =
+                                browser.viewport_with_state(ui, "fixture", PageState::default());
+                        });
+                    },
+                );
+            }
+            assert!(native.is_positive() && pane.contains_rect(native));
+            if let Some((w, h)) = expected.dimensions() {
+                assert!(
+                    (native.width() / native.height() - w as f32 / h as f32).abs() < 0.01,
+                    "{device} {rotate}: aspect ratio changed: {native:?}"
+                );
+                assert!(native.width() <= w as f32 && native.height() <= h as f32);
+            } else {
+                assert_eq!(native, pane);
+            }
+            assert_eq!(
+                browser.options["fixture"], expected,
+                "Scaling must not change CSS viewport or page zoom"
+            );
         }
     }
 }

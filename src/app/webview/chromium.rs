@@ -230,13 +230,9 @@ impl Tab {
             return;
         }
         if let Some((width, height)) = options.dimensions() {
-            let scale = if options.fit {
-                (rect.width() as f64 / width as f64)
-                    .min(rect.height() as f64 / height as f64)
-                    .min(1.0)
-            } else {
-                1.0
-            };
+            let scale = (rect.width() as f64 / width as f64)
+                .min(rect.height() as f64 / height as f64)
+                .min(1.0);
             self.command("Emulation.setDeviceMetricsOverride", serde_json::json!({"width":width,"height":height,"deviceScaleFactor":if options.mobile(){2}else{1},"mobile":options.mobile(),"scale":scale,"screenWidth":width,"screenHeight":height,"screenOrientation":{"type":if options.rotate{"landscapePrimary"}else{"portraitPrimary"},"angle":if options.rotate{90}else{0}}}));
         } else {
             self.command(

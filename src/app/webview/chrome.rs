@@ -9,13 +9,20 @@ pub(in crate::app) fn icon_button(
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
-    if selected || (response.hovered() && ui.is_enabled()) {
+    let reload = matches!(icon, Icon::Refresh | Icon::Stop);
+    if selected || reload || (response.hovered() && ui.is_enabled()) {
         ui.painter().rect_filled(
             rect.shrink(1.0),
             6,
-            if selected { colors.bg } else { colors.hover },
+            if selected {
+                colors.bg
+            } else if response.hovered() && ui.is_enabled() {
+                colors.hover
+            } else {
+                colors.surface
+            },
         );
-        if selected {
+        if selected || reload {
             ui.painter().rect_stroke(
                 rect.shrink(1.0),
                 6,
@@ -44,6 +51,82 @@ pub(in crate::app) fn icon_button(
     response
         .on_hover_text(tip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Reload and Stop share a visible button surface, including at rest.
+pub(super) fn reload_button(ui: &mut egui::Ui, loading: bool) -> egui::Response {
+    let (icon, tip) = if loading {
+        (Icon::Stop, "Stop loading")
+    } else {
+        (Icon::Refresh, "Reload page")
+    };
+    icon_button(ui, icon, tip, false)
+}
+
+/// A single, accessible eye toggle: pressed means rendered preview.
+pub(super) fn preview_toggle(ui: &mut egui::Ui, source: &mut bool) -> egui::Response {
+    let colors = theme::palette(ui.ctx());
+    let selected = !*source;
+    let mut response = ui.add_sized(
+        Vec2::splat(28.0),
+        egui::Button::new("")
+            .fill(if selected {
+                colors.accent_bg
+            } else {
+                Color32::TRANSPARENT
+            })
+            .stroke(Stroke::new(
+                1.0,
+                if selected {
+                    colors.accent
+                } else {
+                    colors.border
+                },
+            ))
+            .corner_radius(6),
+    );
+    if response.clicked() {
+        *source = !*source;
+        response.mark_changed();
+    }
+    let center = response.rect.center();
+    let stroke = Stroke::new(
+        1.3,
+        if !*source {
+            colors.accent
+        } else {
+            colors.muted
+        },
+    );
+    let points = (0..=32)
+        .map(|step| {
+            let angle = step as f32 * std::f32::consts::TAU / 32.0;
+            center + egui::vec2(7.0 * angle.cos(), 4.5 * angle.sin())
+        })
+        .collect();
+    ui.painter().add(egui::Shape::closed_line(points, stroke));
+    ui.painter().circle_stroke(center, 2.0, stroke);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            !*source,
+            "Preview",
+        )
+    });
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new(("browser-control", "Preview")), response.rect);
+        data.insert_temp(
+            egui::Id::new("file-preview-toggle"),
+            (response.id, response.rect),
+        );
+    });
+    response.on_hover_text(if *source {
+        "Show preview"
+    } else {
+        "Show source"
+    })
 }
 
 pub(in crate::app) fn label_button(
@@ -100,7 +183,7 @@ pub(in crate::app) fn tab(
     width: f32,
 ) -> (bool, bool) {
     let colors = theme::palette(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
     let close_rect = egui::Rect::from_center_size(
         egui::pos2(rect.right() - 17.0, rect.center().y),
         Vec2::splat(22.0),
@@ -187,43 +270,60 @@ pub(in crate::app) fn address(
     focus: bool,
 ) -> bool {
     let colors = theme::palette(ui.ctx());
-    let available = ui.available_width();
     let mut submitted = false;
-    let response = egui::Frame::new()
-        .fill(colors.surface)
-        .stroke(Stroke::new(1.0, colors.border))
-        .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(9, 5))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                icons::draw(
-                    ui,
-                    rect,
-                    if page { Icon::Globe } else { Icon::File },
-                    colors.dim,
-                );
-                let id = ui.make_persistent_id("viewer-address-input");
-                // Consume before the composer can interpret Enter as a send.
-                submitted = ui.memory(|memory| memory.has_focus(id))
-                    && ui.input_mut(|input| {
-                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                    });
-                ui.add_sized(
-                    [(available - 49.0).max(32.0), 20.0],
-                    egui::TextEdit::singleline(address)
-                        .frame(false)
-                        .font(FontId::proportional(12.0))
-                        .hint_text("Open a URL or file path…")
-                        .id(id),
-                )
-            })
-            .inner
+    let (field, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+    ui.painter().rect_filled(field, 6, colors.surface);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(field.left() + 15.0, field.center().y),
+        Vec2::splat(14.0),
+    );
+    icons::draw(
+        ui,
+        icon_rect,
+        if page { Icon::Globe } else { Icon::File },
+        colors.dim,
+    );
+    let id = ui.make_persistent_id("viewer-address-input");
+    // Consume before the composer can interpret Enter as a send.
+    submitted |= ui.memory(|memory| memory.has_focus(id))
+        && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    let editor = egui::Rect::from_min_max(
+        egui::pos2(field.left() + 28.0, field.top() + 4.0),
+        egui::pos2(
+            (field.right() - 32.0).max(field.left() + 28.0),
+            field.bottom() - 4.0,
+        ),
+    );
+    let response = ui.put(
+        editor,
+        egui::TextEdit::singleline(address)
+            .frame(false)
+            .font(FontId::proportional(12.0))
+            .hint_text("Open a URL or file path…")
+            .id(id),
+    );
+    let go = egui::Rect::from_min_max(egui::pos2(field.right() - 28.0, field.top()), field.max);
+    submitted |= ui
+        .scope_builder(egui::UiBuilder::new().max_rect(go), |ui| {
+            icon_button(ui, Icon::ArrowRight, "Go to address", false).clicked()
         })
         .inner;
+    ui.painter().rect_stroke(
+        field,
+        6,
+        Stroke::new(
+            1.0,
+            if response.has_focus() {
+                colors.accent
+            } else {
+                colors.border
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
     #[cfg(test)]
     ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new("browser-address-field"), field);
         data.insert_temp(
             egui::Id::new("browser-address-editor"),
             (response.id, response.rect),

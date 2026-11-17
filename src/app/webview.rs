@@ -56,7 +56,6 @@ struct Options {
     width: u32,
     height: u32,
     rotate: bool,
-    fit: bool,
     zoom: f32,
     console: bool,
     console_errors_only: bool,
@@ -70,7 +69,6 @@ impl Default for Options {
             width: 390,
             height: 844,
             rotate: false,
-            fit: true,
             zoom: 1.0,
             console: false,
             console_errors_only: false,
@@ -267,22 +265,7 @@ impl BrowserView {
         {
             self.action(Action::Forward);
         }
-        if chrome::icon_button(
-            ui,
-            if state.loading {
-                Icon::Stop
-            } else {
-                Icon::Refresh
-            },
-            if state.loading {
-                "Stop loading"
-            } else {
-                "Reload page"
-            },
-            false,
-        )
-        .clicked()
-        {
+        if chrome::reload_button(ui, state.loading).clicked() {
             self.action(if state.loading {
                 Action::Stop
             } else {
@@ -299,11 +282,13 @@ impl BrowserView {
             self.action(Action::DevTools);
         }
     }
-    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, key: &str) {
+    pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, key: &str, source: Option<&mut bool>) {
         let colors = theme::palette(ui.ctx());
-        let narrow = ui.available_width() < 440.0;
-        let compact = ui.available_width() < 300.0
-            || (ui.available_width() < 360.0
+        let width = ui.available_width() - if source.is_some() { 40.0 } else { 0.0 };
+        let overflow = width < 210.0;
+        let narrow = width < 360.0;
+        let compact = width < 300.0
+            || (width < 360.0
                 && self
                     .options
                     .get(key)
@@ -319,6 +304,18 @@ impl BrowserView {
         let options = self.options.entry(key.into()).or_default();
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
+            ui.spacing_mut().interact_size.y = 28.0;
+            ui.spacing_mut().button_padding.y = 3.0;
+            if let Some(source) = source {
+                chrome::preview_toggle(ui, source);
+                if *source {
+                    self.viewport_editor = None;
+                    return;
+                }
+                if !overflow {
+                    chrome::divider(ui);
+                }
+            }
             if !compact {
                 egui::Frame::new()
                     .fill(colors.hover.gamma_multiply(0.45))
@@ -328,11 +325,6 @@ impl BrowserView {
                         ui.horizontal_centered(|ui| {
                             ui.spacing_mut().item_spacing.x = 1.0;
                             for (device, icon, label) in [
-                                (
-                                    Device::Responsive,
-                                    Icon::Expand,
-                                    "Responsive: fill the pane",
-                                ),
                                 (Device::Desktop, Icon::Desktop, "Desktop: 1440 × 900"),
                                 (Device::Tablet, Icon::Tablet, "Tablet: 768 × 1024"),
                                 (Device::Mobile, Icon::Phone, "Mobile: 390 × 844"),
@@ -350,9 +342,13 @@ impl BrowserView {
             let dimensions = options
                 .dimensions()
                 .map(|(w, h)| format!("{w} × {h}"))
-                .unwrap_or_else(|| "Auto".into());
-            let size = chrome::label_button(ui, &dimensions, false)
-                .on_hover_text("Viewport size and device settings");
+                .unwrap_or_else(|| "Responsive".into());
+            let size = if overflow {
+                chrome::icon_button(ui, Icon::Sliders, "Preview settings", false)
+            } else {
+                chrome::label_button(ui, &dimensions, false)
+                    .on_hover_text("Viewport size and device settings")
+            };
             let popup = egui::Popup::from_toggle_button_response(&size)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .frame(prompt_ui::popup(ui.ctx()))
@@ -365,22 +361,15 @@ impl BrowserView {
             {
                 self.viewport_editor = None;
             }
-            if !narrow {
-                if ui
-                    .add_enabled_ui(options.dimensions().is_some(), |ui| {
-                        chrome::icon_button(ui, Icon::Rotate, "Rotate viewport", false)
-                    })
-                    .inner
+            if overflow {
+                return;
+            }
+            if !narrow
+                && options.dimensions().is_some()
+                && chrome::icon_button(ui, Icon::Rotate, "Rotate viewport", options.rotate)
                     .clicked()
-                {
-                    options.rotate = !options.rotate;
-                }
-                if chrome::label_button(ui, "Fit", options.fit)
-                    .on_hover_text("Fit viewport to panel")
-                    .clicked()
-                {
-                    options.fit = !options.fit;
-                }
+            {
+                options.rotate = !options.rotate;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let console = options.console;
@@ -567,25 +556,13 @@ impl BrowserView {
             .min(available.width() * 0.25)
             .min(available.height() * 0.25);
         let available = available.shrink(inset);
-        let scale = if options.fit {
-            (available.width() / width as f32)
-                .min(available.height() / height as f32)
-                .clamp(0.05, 1.0)
-        } else {
-            1.0
-        };
+        let scale = (available.width() / width as f32)
+            .min(available.height() / height as f32)
+            .min(1.0);
         let size = egui::vec2(width as f32 * scale, height as f32 * scale);
-        let mut rect = available;
-        egui::ScrollArea::both()
-            .id_salt(("device-viewport", key))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let left = ((ui.available_width() - size.x) / 2.0).max(0.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(left);
-                    rect = ui.allocate_exact_size(size, Sense::hover()).0;
-                });
-            });
+        // Fixed CSS viewports always fit; a scroll container can reserve gutters
+        // and clip one axis, distorting the native emulation's aspect ratio.
+        let rect = egui::Rect::from_center_size(available.center(), size);
         ui.painter().rect_stroke(
             rect.expand(1.0),
             2,
@@ -711,7 +688,7 @@ mod tests {
                     |ctx: &egui::Context, browser: &mut BrowserView, row: &mut egui::Rect| {
                         *row = egui::TopBottomPanel::top("test-browser-toolbar")
                             .exact_height(42.0)
-                            .show(ctx, |ui| browser.toolbar(ui, key))
+                            .show(ctx, |ui| browser.toolbar(ui, key, None))
                             .response
                             .rect;
                     };

@@ -12,11 +12,11 @@ impl Browser {
         let mut close_url = None;
         let mut new_tab = false;
         egui::TopBottomPanel::top("viewer-tab-strip")
-            .exact_height(44.0)
+            .exact_height(36.0)
             .frame(
                 egui::Frame::new()
                     .fill(colors.sidebar)
-                    .inner_margin(egui::Margin::symmetric(10, 6)),
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -192,11 +192,11 @@ impl Browser {
         };
         let mut open = false;
         egui::TopBottomPanel::top("viewer-navigation")
-            .exact_height(48.0)
+            .exact_height(36.0)
             .frame(
                 egui::Frame::new()
                     .fill(colors.bg)
-                    .inner_margin(egui::Margin::symmetric(10, 7)),
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
@@ -206,27 +206,35 @@ impl Browser {
                         .filter(|key| super::super::webview::web_url(key))
                     {
                         self.web.navigation(ui, key);
-                    } else if chrome::icon_button(
-                        ui,
-                        Icon::Refresh,
-                        "Refresh files and selected preview",
-                        false,
-                    )
-                    .clicked()
+                    } else if ui
+                        .add_enabled_ui(page.is_some(), |ui| {
+                            chrome::icon_button(
+                                ui,
+                                Icon::Refresh,
+                                "Refresh files and selected preview",
+                                false,
+                            )
+                        })
+                        .inner
+                        .clicked()
                     {
                         self.refresh(&ctx);
                     }
-                    let trailing = if page.is_some() { 98.0 } else { 34.0 };
+                    let tools = page.as_ref().filter(|key| {
+                        !self
+                            .tabs
+                            .iter()
+                            .any(|tab| tab.path == Path::new(key) && tab.source)
+                    });
+                    let trailing = if tools.is_some() { 64.0 } else { 0.0 };
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_width() - trailing).max(50.0), 32.0),
+                        Vec2::new((ui.available_width() - trailing).max(50.0), 28.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             open = chrome::address(ui, &mut self.address, self.browser_mode, focus);
                         },
                     );
-                    open |=
-                        chrome::icon_button(ui, Icon::ArrowRight, "Go to address", false).clicked();
-                    if let Some(key) = &page {
+                    if let Some(key) = tools {
                         self.web.tools(ui, key);
                     }
                 });
@@ -247,15 +255,32 @@ impl Browser {
                     );
                 });
         }
-        if let Some(key) = self.selected_url.clone().filter(|_| self.browser_mode) {
-            egui::TopBottomPanel::top("browser-device-toolbar")
-                .exact_height(42.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(colors.sidebar)
-                        .inner_margin(egui::Margin::symmetric(10, 6)),
-                )
-                .show_inside(ui, |ui| self.web.toolbar(ui, &key));
+    }
+
+    pub(super) fn preview_toolbar(&mut self, ui: &mut egui::Ui) {
+        let path = if self.browser_mode {
+            self.selected_url.as_ref().map(PathBuf::from)
+        } else {
+            self.selected.clone()
+        };
+        let Some(path) = path else { return };
+        let key = path.display().to_string();
+        let source = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.path == path && is_html(&tab.path))
+            .map(|tab| &mut tab.source);
+        if source.is_none() && !(self.browser_mode && super::super::webview::web_url(&key)) {
+            return;
         }
+        let colors = theme::palette(ui.ctx());
+        egui::TopBottomPanel::top("browser-device-toolbar")
+            .exact_height(36.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(colors.sidebar)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show_inside(ui, |ui| self.web.toolbar(ui, &key, source));
     }
 }

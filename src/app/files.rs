@@ -969,7 +969,10 @@ impl Browser {
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().inner_margin(0))
-            .show_inside(ui, |ui| self.preview(ui, tables));
+            .show_inside(ui, |ui| {
+                self.preview_toolbar(ui);
+                self.preview(ui, tables);
+            });
     }
 
     fn tree(&self, ui: &mut egui::Ui, path: &Path, depth: usize, actions: &mut Vec<Action>) {
@@ -1173,8 +1176,15 @@ impl Browser {
             .path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("csv") || ext.eq_ignore_ascii_case("tsv"));
+        let html_preview = is_html(&tab.path) && !tab.source;
         egui::Frame::new()
-            .inner_margin(if table { 10 } else { 16 })
+            .inner_margin(if html_preview {
+                0
+            } else if table {
+                10
+            } else {
+                12
+            })
             .show(ui, |ui| {
                 let extension = tab
                     .path
@@ -1186,7 +1196,7 @@ impl Browser {
                 let html = matches!(extension.as_str(), "html" | "htm");
                 let table = matches!(extension.as_str(), "csv" | "tsv");
                 let svg = extension == "svg";
-                if markdown || html || svg {
+                if markdown || svg {
                     ui.horizontal(|ui| {
                         let preview_response = ui.selectable_value(
                             &mut tab.source,
@@ -1197,12 +1207,6 @@ impl Browser {
                         if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
                             preview.remember(0, &preview_response);
                             preview.remember(1, &source_response);
-                        }
-                        if html {
-                            ui.label(theme::small(
-                                ui,
-                                "Isolated preview · scripts enabled · network disabled",
-                            ));
                         }
                     });
                 }
@@ -1788,3 +1792,5 @@ mod restore_tests;
 mod source_selection_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod toolbar_tests;

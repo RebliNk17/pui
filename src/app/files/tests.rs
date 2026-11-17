@@ -512,7 +512,10 @@ fn local_html_uses_browser_tabs_and_retains_file_selection_and_source() {
         );
         assert!(app.files.web_preview.as_ref().unwrap().url.is_none());
         assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(t) if t.galley.job.text.contains("Search files"))));
-        click(&ctx, &mut app, text(&output, "Source"));
+        let preview = ctx
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("browser-control", "Preview"))))
+            .unwrap();
+        click(&ctx, &mut app, preview.center());
         let output = frame(&ctx, &mut app, vec![]);
         text(&output, "onclick");
         assert!(app.files.web_preview.is_none());
