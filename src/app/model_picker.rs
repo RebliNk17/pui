@@ -396,9 +396,17 @@ impl Pui {
         let width = 320.0_f32.min((ctx.screen_rect().width() - 16.0).max(120.0));
         let mut open = true;
         let mut selection = None;
+        // The provider ComboBox is its own popup/layer. Its selection click
+        // belongs to that child, not an outside click dismissing this parent.
+        // Capture before rendering: selecting a provider closes the child.
+        let close_behavior = if egui::Popup::is_any_open(ctx) {
+            egui::PopupCloseBehavior::IgnoreClicks
+        } else {
+            egui::PopupCloseBehavior::CloseOnClickOutside
+        };
         egui::Popup::new(egui::Id::new("model-picker-dropdown"), ctx.clone(), anchor, layer)
             .open_bool(&mut open).align(egui::emath::RectAlign::TOP_START).align_alternatives(&[])
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).width(width)
+            .close_behavior(close_behavior).width(width)
             .frame(prompt_ui::popup(ctx).inner_margin(6)).gap(6.0).show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(width - 12.0);
@@ -433,9 +441,15 @@ impl Pui {
                 let ids = filtered.iter().map(|m| ui.id().with(("model", &m.provider, &m.id))).collect::<Vec<_>>();
                 let selected_index = filtered.iter().position(|m| m.id == self.state.model && m.provider == self.state.provider).unwrap_or(0);
                 let target = navigate(ui, &ids, selected_index, blocked.is_none());
+                if filtered.is_empty() { ui.add(egui::Label::new(theme::small(ui, if self.state.models.is_empty() { "Pi has not returned available models yet." } else { "No matching models." })).wrap()); }
                 ui.spacing_mut().item_spacing.y = 0.0;
+                // Reserve a useful result viewport even for a short catalog. Derive
+                // the bound from this menu's actual header, including status text.
+                let header_height = ui.min_rect().height() + 20.0;
+                let results_height = (anchor.top() - ctx.screen_rect().top() - header_height)
+                    .clamp(0.0, 224.0);
                 let mut scroll = egui::ScrollArea::vertical().id_salt("model-results")
-                    .max_height((anchor.top() - 105.0).clamp(64.0, 220.0)).auto_shrink([false, true]);
+                    .max_height(results_height).min_scrolled_height(0.0).auto_shrink([false, false]);
                 if let Some(index) = target { scroll = scroll.vertical_scroll_offset(index as f32 * 32.0); }
                 scroll
                     .show_rows(ui, 32.0, filtered.len(), |ui, range| {
@@ -458,7 +472,6 @@ impl Pui {
                             if response.on_hover_text(format!("{name}\n{metadata}\n{prices} input / output per 1 million tokens")).clicked() && blocked.is_none() { selection = Some((model.provider.clone(), model.id.clone())); }
                         }
                     });
-                if filtered.is_empty() { ui.add(egui::Label::new(theme::small(ui, if self.state.models.is_empty() { "Pi has not returned available models yet." } else { "No matching models." })).wrap()); }
             });
         self.model_picker_open = open;
         if let Some((provider, id)) = selection {

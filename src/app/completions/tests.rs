@@ -1,5 +1,44 @@
 use super::*;
 
+#[test]
+fn skill_reload_is_an_accent_text_link_at_the_right_of_the_footer() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for zoom in [1.0, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            focus(&ctx, &mut app, "/ski");
+            for _ in 0..4 {
+                frame(&ctx, &mut app, vec![]);
+            }
+            let output = frame(&ctx, &mut app, vec![]);
+            let popup = app.completions.popup_rect.unwrap();
+            let link = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == "Reload chat resources" => {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .expect("Reload text link");
+            let rect = egui::Rect::from_min_size(link.pos, link.galley.size());
+            assert!(popup.contains_rect(rect));
+            assert!(popup.right() - rect.right() < 12.0);
+            assert_eq!(
+                link.galley.job.sections[0].format.color,
+                theme::palette(&ctx).accent
+            );
+            assert!(link.galley.job.sections[0].format.font_id.size <= 11.0);
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(bg) if bg.rect.contains(rect.center()) && bg.rect.width() < popup.width() - 20.0
+            )), "Text link must not have button chrome");
+        }
+    }
+}
+
 fn app(ctx: &egui::Context) -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
@@ -382,7 +421,7 @@ fn reload_is_local_and_skill_popup_offers_it_without_replacing_the_draft() {
         frame(&ctx, &mut app, vec![]);
     }
     let output = frame(&ctx, &mut app, vec![]);
-    let pos = files::tests::text(&output, "Reload chat resources…");
+    let pos = files::tests::text(&output, "Reload chat resources");
     for pressed in [true, false] {
         frame(
             &ctx,

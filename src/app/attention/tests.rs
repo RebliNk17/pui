@@ -29,7 +29,7 @@ fn fixture() -> (PathBuf, PathBuf) {
     std::fs::write(&path, b"{\"type\":\"session\",\"cwd\":\"/tmp\"}\n").unwrap();
     (root, path)
 }
-fn app(ctx: &egui::Context) -> Pui {
+pub(super) fn app(ctx: &egui::Context) -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
         Options {
@@ -51,7 +51,7 @@ fn app(ctx: &egui::Context) -> Pui {
 fn rendered(app: &mut Pui, ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |ui| app.attention_rendered(ui));
 }
-fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+pub(super) fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,
         physical_key: None,
@@ -60,7 +60,7 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         modifiers,
     }
 }
-fn frame(app: &mut Pui, events: Vec<egui::Event>, size: Vec2) -> egui::FullOutput {
+pub(super) fn frame(app: &mut Pui, events: Vec<egui::Event>, size: Vec2) -> egui::FullOutput {
     use eframe::App;
     let ctx = app.ctx.clone();
     ctx.run(
@@ -514,7 +514,7 @@ fn missing_explicit_owner_is_cleared_without_retargeting_or_rpc() {
     );
 }
 
-fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+pub(super) fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
     vec![
         egui::Event::PointerMoved(pos),
         egui::Event::PointerButton {

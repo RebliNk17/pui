@@ -1,5 +1,104 @@
 use super::*;
 
+#[test]
+fn compact_questions_keep_descriptions_and_drop_redundant_copy() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for zoom in [1.0, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            for _ in 0..5 {
+                frame(&mut app, 860.0, 620.0, vec![]);
+            }
+            let output = texts(frame(&mut app, 860.0, 620.0, vec![]));
+            assert!(
+                !output
+                    .iter()
+                    .any(|(t, _, _)| t.contains("continues automatically"))
+            );
+            for label in ["How should users start a task?", "Skip", "Cancel"] {
+                let (_, rect, clip) = output.iter().find(|(t, _, _)| t == label).expect(label);
+                assert!(clip.contains_rect(*rect), "{label} clipped at zoom {zoom}");
+            }
+            frame(&mut app, 860.0, 620.0, vec![key(egui::Key::Num4)]);
+            for _ in 0..3 {
+                frame(&mut app, 860.0, 620.0, vec![]);
+            }
+            let output = texts(frame(&mut app, 860.0, 620.0, vec![]));
+            assert!(!output.iter().any(|(t, _, _)| t == "Your answer"));
+            assert!(
+                output
+                    .iter()
+                    .any(|(t, rect, clip)| t.starts_with("Share your preference")
+                        && clip.contains_rect(*rect))
+            );
+        }
+    }
+}
+
+#[test]
+fn waiting_card_keeps_status_and_rejects_keyboard_and_pointer_actions() {
+    let ctx = egui::Context::default();
+    let dialog = demo_dialog();
+    let request = Request::parse(&dialog).unwrap();
+    let mut v = View::default();
+    let mut output = None;
+    for event in [
+        None,
+        Some(key(egui::Key::Num1)),
+        Some(key(egui::Key::Escape)),
+    ] {
+        output = Some(ctx.run(
+            egui::RawInput {
+                events: event.into_iter().collect(),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(v.show(ui, &dialog, &request, true, true).is_none());
+                });
+            },
+        ));
+    }
+    let output = texts(output.unwrap());
+    assert!(
+        output
+            .iter()
+            .any(|(t, _, _)| t == "Waiting for the owning window…")
+    );
+    assert_eq!(v.page, 0);
+    assert!(v.answers.iter().all(Option::is_none));
+    let pos = output
+        .iter()
+        .find(|(t, _, _)| t == "Cancel")
+        .unwrap()
+        .1
+        .center();
+    for pressed in [true, false] {
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(v.show(ui, &dialog, &request, true, true).is_none());
+                });
+            },
+        );
+    }
+    assert!(v.answers.iter().all(Option::is_none));
+}
+
 fn request() -> Request {
     Request::parse(&demo_dialog()).unwrap()
 }

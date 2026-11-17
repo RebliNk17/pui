@@ -169,6 +169,7 @@ pub struct Pui {
     new_chat: bool,
     chat_folder_rx: Option<Receiver<Option<PathBuf>>>,
     chat_folder_target: Option<String>,
+    project_picker: new_chat::project_picker::Picker,
     paste_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(target_os = "macos")]
     _paste_monitor: Option<attachments::PasteMonitor>,
@@ -309,6 +310,7 @@ impl Pui {
             new_chat: session.is_none() && !options.demo,
             chat_folder_rx: None,
             chat_folder_target: None,
+            project_picker: Default::default(),
             paste_requested,
             #[cfg(target_os = "macos")]
             _paste_monitor: paste_monitor,
@@ -2031,6 +2033,7 @@ impl eframe::App for Pui {
         self.attention_inputs(ctx);
         let attention_was_open = self.attention.open;
         self.attention_panel(ctx);
+        let attention_layout_deferred = self.attention.defer_layout;
         self.search_jump();
         self.model_picker_escape(ctx);
         context_capture::inputs(ctx);
@@ -2207,7 +2210,10 @@ impl eframe::App for Pui {
             }
             self.top_bar(ctx);
             self.side_chat_bar(ctx);
-            if !attention_was_open {
+            if !attention_was_open
+                || self.attention.popup_rect.is_none()
+                || attention_layout_deferred
+            {
                 self.attention_panel(ctx);
             }
             let terminal_expanded = !self.kanban.open

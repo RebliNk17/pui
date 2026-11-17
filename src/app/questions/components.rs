@@ -23,13 +23,13 @@ fn text(
     (
         ui.painter().layout(
             label.into(),
-            FontId::proportional(13.5),
+            FontId::proportional(13.0),
             colors.text,
             width.max(40.0),
         ),
         ui.painter().layout(
             description.into(),
-            FontId::proportional(12.0),
+            FontId::proportional(11.5),
             colors.muted,
             width.max(40.0),
         ),
@@ -37,15 +37,15 @@ fn text(
 }
 
 pub(super) fn row_height(ui: &egui::Ui, label: &str, description: &str, width: f32) -> f32 {
-    let (title, detail) = text(ui, label, description, width - 86.0);
-    (24.0
+    let (title, detail) = text(ui, label, description, width - 70.0);
+    (16.0
         + title.size().y
         + if description.is_empty() {
             0.0
         } else {
-            4.0 + detail.size().y
+            3.0 + detail.size().y
         })
-    .max(46.0)
+    .max(38.0)
 }
 
 pub(super) fn choice(
@@ -58,7 +58,7 @@ pub(super) fn choice(
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
     let width = ui.available_width();
-    let (title, detail) = text(ui, label, description, width - 86.0);
+    let (title, detail) = text(ui, label, description, width - 70.0);
     let height = row_height(ui, label, description, width);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let active = checked || focused || response.has_focus();
@@ -80,7 +80,7 @@ pub(super) fn choice(
         ),
         egui::StrokeKind::Inside,
     );
-    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 10.0), Vec2::splat(24.0));
+    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(9.0, 8.0), Vec2::splat(20.0));
     ui.painter()
         .rect_filled(badge, 5, prompt_ui::subtle(ui.ctx()));
     // Keep the shortcut visible even when selected. Selection has its own check.
@@ -88,11 +88,11 @@ pub(super) fn choice(
         badge.center(),
         egui::Align2::CENTER_CENTER,
         number.to_string(),
-        FontId::proportional(11.0),
+        FontId::proportional(10.0),
         if active { colors.accent } else { colors.muted },
     );
-    let pos = rect.min + egui::vec2(48.0, 12.0);
-    let detail_pos = pos + egui::vec2(0.0, title.size().y + 4.0);
+    let pos = rect.min + egui::vec2(38.0, 8.0);
+    let detail_pos = pos + egui::vec2(0.0, title.size().y + 3.0);
     ui.painter().galley(pos, title, colors.text);
     if !description.is_empty() {
         ui.painter().galley(detail_pos, detail, colors.muted);
@@ -133,18 +133,16 @@ pub(super) fn editor(
             },
         ))
         .corner_radius(12)
-        .inner_margin(14)
+        .inner_margin(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("Your answer").size(12.0).color(colors.muted));
-            ui.add_space(8.0);
             let response = ui.add(
                 egui::TextEdit::multiline(draft)
                     .id(id)
                     .frame(false)
                     .desired_width(f32::INFINITY)
-                    .desired_rows(3)
-                    .font(FontId::proportional(13.5))
+                    .desired_rows(2)
+                    .font(FontId::proportional(13.0))
                     .char_limit(4000)
                     .hint_text(
                         RichText::new("Share your preference, details or constraints…")

@@ -51,14 +51,14 @@ impl Pui {
             self.diagnostics_open = !self.diagnostics_open;
         }
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Notifications")
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Chat notices")
         });
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(if count == 0 {
-                "Notifications".into()
+                "Chat notices".into()
             } else {
-                format!("Notifications · {count}")
+                format!("Chat notices · {count}")
             })
     }
 
@@ -86,11 +86,11 @@ impl Pui {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.label(RichText::new("Notifications").size(15.0).strong());
-                        ui.label(theme::small(ui, "Updates from this conversation"));
+                        ui.label(RichText::new("Chat notices").size(15.0).strong());
+                        ui.label(theme::small(ui, "Session and connection notices · this chat"));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Close, "Close notifications").clicked() {
+                        if icons::button(ui, Icon::Close, "Close chat notices").clicked() {
                             ui.close();
                         }
                     });
@@ -145,7 +145,7 @@ impl Pui {
                     ui.vertical_centered(|ui| {
                         icons::inline(ui, Icon::Bell, colors.dim);
                         ui.add_space(4.0);
-                        ui.label(RichText::new("You’re all caught up").size(13.0));
+                        ui.label(RichText::new("No chat notices").size(13.0));
                         ui.label(theme::small(ui, "Session updates and connection notices appear here."));
                     });
                     ui.add_space(12.0);

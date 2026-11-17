@@ -303,8 +303,9 @@ impl View {
                 }
             });
         }
-        prompt_ui::inline(ui.ctx()).show(ui, |ui| {
+        prompt_ui::compact_inline(ui.ctx()).show(ui, |ui| {
             prompt_ui::style(ui);
+            ui.spacing_mut().item_spacing.y = 6.0;
             ui.set_width(ui.available_width());
             ui.add_enabled_ui(!waiting, |ui| {
                 ui.horizontal(|ui| {
@@ -328,7 +329,7 @@ impl View {
                         }
                     });
                 });
-                ui.add_space(7.0);
+                ui.add_space(4.0);
                 // Everything that can grow scrolls; navigation and submission
                 // stay visible even in the minimum supported window size.
                 egui::ScrollArea::vertical()
@@ -338,12 +339,12 @@ impl View {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.add(
-                            egui::Label::new(RichText::new(&q.question).size(18.0).strong()).wrap(),
+                            egui::Label::new(RichText::new(&q.question).size(14.5).strong()).wrap(),
                         );
                         if q.multi_select {
                             ui.label(theme::small(ui, "Select all that apply"));
                         }
-                        ui.add_space(9.0);
+                        ui.add_space(6.0);
                         for (index, option) in q.options.iter().enumerate() {
                             let selected = !self.editing && self.selected == index;
                             let answer = self.answers[self.page].as_ref().is_some_and(|a| {
@@ -364,7 +365,7 @@ impl View {
                             if row.clicked() {
                                 action = Some(Action::Choose(index));
                             }
-                            ui.add_space(3.0);
+                            ui.add_space(2.0);
                         }
                         if !q.options.is_empty() {
                             let row = components::choice(
@@ -448,17 +449,9 @@ impl View {
                     });
                 });
             });
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    if waiting {
-                        "Waiting for the owning window…"
-                    } else {
-                        "The agent continues automatically after your last answer."
-                    },
-                ))
-                .wrap(),
-            );
+            if waiting {
+                ui.add(egui::Label::new(theme::small(ui, "Waiting for the owning window…")).wrap());
+            }
         });
         ui.add_space(6.0);
         if waiting {
@@ -511,12 +504,12 @@ fn content_height(ui: &egui::Ui, question: &Question, editing: bool) -> f32 {
     // The bottom composer panel starts with its previous height. A ScrollArea
     // sized from that remaining space can never grow beyond its first 64 px.
     // Measure the wrapped rows instead, so ordinary sets show every choice.
-    let width = (ui.available_width() - 28.0).max(100.0);
+    let width = (ui.available_width() - 26.0).max(100.0);
     let heading = ui
         .painter()
         .layout(
             question.question.clone(),
-            FontId::proportional(15.0),
+            FontId::proportional(14.5),
             theme::palette(ui.ctx()).text,
             width,
         )
@@ -527,20 +520,20 @@ fn content_height(ui: &egui::Ui, question: &Question, editing: bool) -> f32 {
         .iter()
         .map(|option| {
             components::row_height(ui, &option.label, &option.description, width)
-                + ui.spacing().item_spacing.y
-                + 3.0
+                + 6.0 // Compact inline item spacing.
+                + 2.0
         })
         .sum::<f32>();
     heading
-        + 20.0
-        + if question.multi_select { 22.0 } else { 0.0 }
+        + 16.0
+        + if question.multi_select { 20.0 } else { 0.0 }
         + options
         + if question.options.is_empty() {
             0.0
         } else {
             components::row_height(ui, "Something else", "Write your own answer", width) + 8.0
         }
-        + if editing { 115.0 } else { 0.0 }
+        + if editing { 72.0 } else { 0.0 }
 }
 
 #[cfg(test)]

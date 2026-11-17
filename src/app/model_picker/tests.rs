@@ -1,5 +1,69 @@
 use super::*;
 
+#[test]
+fn short_model_results_reserve_a_taller_viewport_bounded_by_available_height() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        for zoom in [1.0, 1.5, 2.0] {
+            for anchor_top in [180.0, 700.0] {
+                let ctx = egui::Context::default();
+                let mut app = app(&ctx);
+                live(&mut app);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                app.model_anchor.as_mut().unwrap().0 = egui::Rect::from_min_size(
+                    egui::pos2(20.0, anchor_top),
+                    egui::vec2(130.0, 28.0),
+                );
+                app.state.models = vec![protocol::Model {
+                    id: "fixture".into(),
+                    name: "Only model".into(),
+                    provider: "test".into(),
+                    context_window: 1000,
+                    input_cost: 1.0,
+                    output_cost: 2.0,
+                }];
+                app.model_picker_open = true;
+                let mut output = None;
+                for _ in 0..6 {
+                    output = Some(ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(700.0, 800.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| app.model_picker(ctx),
+                    ));
+                }
+                let popup = ctx
+                    .read_response(egui::Id::new("model-picker-dropdown"))
+                    .unwrap()
+                    .rect;
+                assert!(
+                    ctx.screen_rect().expand(1.0).contains_rect(popup),
+                    "{popup:?}"
+                );
+                assert!(
+                    popup.height() <= anchor_top,
+                    "{popup:?} exceeds {anchor_top}"
+                );
+                if anchor_top > 600.0 {
+                    let (_, row) = texts(&output.unwrap())
+                        .into_iter()
+                        .find(|(s, _)| s == "Only model")
+                        .unwrap();
+                    assert!(
+                        // Name text is inset slightly below the first row edge.
+                        popup.bottom() - row.top() >= 220.0,
+                        "{popup:?} / {row:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn app(ctx: &egui::Context) -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(ctx.clone()),
@@ -366,6 +430,48 @@ fn model_search_provider_filter_and_rejected_selection_preserve_authoritative_st
         .apply(json!({"type":"response","command":"set_model","success":false,"error":"Rejected"}));
     assert_eq!(app.state.model, "old");
     assert_eq!(app.state.levels, ["high"]);
+}
+
+#[test]
+fn provider_selection_keeps_model_picker_open_without_sending_a_model_change() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let (_, requests) = live(&mut app);
+        mode.apply(&ctx);
+        app.state.models = ["alpha", "beta"]
+            .into_iter()
+            .map(|provider| protocol::Model {
+                id: format!("{provider}-model"),
+                name: format!("{provider} model"),
+                provider: provider.into(),
+                context_window: 1000,
+                input_cost: 1.0,
+                output_cost: 2.0,
+            })
+            .collect();
+        app.draft = "preserve draft".into();
+        app.model_picker_open = true;
+        let output = settle(&ctx, &mut app);
+        click(&ctx, &mut app, position(&output, "All providers"));
+        let output = settle(&ctx, &mut app);
+        click(&ctx, &mut app, position(&output, "beta"));
+        assert!(
+            app.model_picker_open,
+            "Provider choice must not close model picker"
+        );
+        assert_eq!(app.model_provider, "beta");
+        let output = settle(&ctx, &mut app);
+        assert!(texts(&output).iter().any(|(text, _)| text == "beta model"));
+        assert!(!texts(&output).iter().any(|(text, _)| text == "alpha model"));
+        assert_eq!(app.draft, "preserve draft");
+        assert!(requests.try_recv().is_err());
+        click(&ctx, &mut app, egui::pos2(650.0, 750.0));
+        assert!(
+            !app.model_picker_open,
+            "Outside click must still dismiss the parent"
+        );
+    }
 }
 
 #[test]

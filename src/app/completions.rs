@@ -419,29 +419,36 @@ impl Pui {
                 ));
             }
             ui.separator();
-            if !file
-                && self
-                    .completions
-                    .token
-                    .as_ref()
-                    .is_some_and(|t| t.query.starts_with("ski"))
-                && prompt_ui::button(
-                    ui,
-                    "Reload chat resources…",
-                    prompt_ui::Button::Secondary,
-                    !self.resource_reload.pending(),
-                )
-                .clicked()
-            {
-                reload = true;
-            }
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    "↑↓ select · Tab / Enter insert · Esc dismiss",
-                ))
-                .truncate(),
-            );
+            ui.horizontal(|ui| {
+                let show_reload = !file
+                    && self
+                        .completions
+                        .token
+                        .as_ref()
+                        .is_some_and(|t| t.query.starts_with("ski"));
+                let hint = "↑↓ select · Tab / Enter insert · Esc dismiss";
+                let hint_width =
+                    (ui.available_width() - if show_reload { 153.0 } else { 0.0 }).max(0.0);
+                ui.add_sized(
+                    egui::vec2(hint_width, 22.0),
+                    egui::Label::new(theme::small(ui, hint)).truncate(),
+                );
+                if show_reload {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if prompt_ui::text_link(
+                            ui,
+                            "Reload chat resources",
+                            Icon::Refresh,
+                            !self.resource_reload.pending(),
+                        )
+                        .on_hover_text(hint)
+                        .clicked()
+                        {
+                            reload = true;
+                        }
+                    });
+                }
+            });
         });
         self.completions.popup_rect = popup.map(|p| p.response.rect);
         self.completions.scroll_selection = false;

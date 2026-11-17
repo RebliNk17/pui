@@ -77,7 +77,7 @@ fn notifications_separate_session_updates_from_connection_help() {
     let output = settle(&ctx, &mut app);
     let text = labels(&output);
     for expected in [
-        "Notifications",
+        "Chat notices",
         "Session update",
         "Connection warning",
         "MCP connection help",
@@ -120,7 +120,7 @@ fn clear_all_leaves_an_accessible_empty_state_and_does_not_close_the_panel() {
     assert!(
         labels(&settle(&ctx, &mut app))
             .iter()
-            .any(|(s, _)| s == "You’re all caught up")
+            .any(|(s, _)| s == "No chat notices")
     );
 }
 

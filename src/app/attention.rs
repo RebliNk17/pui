@@ -17,6 +17,8 @@ pub(super) use search::SearchEvent;
 pub(super) use sidebar::paint_unread;
 
 #[cfg(test)]
+mod dropdown_tests;
+#[cfg(test)]
 mod tests;
 
 const MAX_RECORDS: usize = 256;
@@ -96,6 +98,11 @@ pub(super) struct Attention {
     reverse_from: Option<egui::Id>,
     reverse_focus: Option<egui::Id>,
     button_hit: Option<(egui::Rect, egui::LayerId, egui::Rect, u64)>,
+    anchor: Option<(egui::Rect, egui::LayerId)>,
+    geometry: Option<(egui::Rect, f32, bool)>,
+    pub(super) defer_layout: bool,
+    pub(super) popup_rect: Option<egui::Rect>,
+    focus_ids: Vec<egui::Id>,
 }
 
 fn now() -> u64 {

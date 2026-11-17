@@ -175,11 +175,11 @@ impl Pui {
         if self.demo && self.attention_dock.fixture {
             "Synthetic Dock fixture only · no saved history, provider or window synchronization. Mark read to change the native count."
         } else if !cfg!(target_os = "macos") || self.demo {
-            "Catch up counts observed updates in this window only. Saved history is not inferred unread."
+            "Unread chat count reflects observed updates in this window only. Saved history is not inferred unread."
         } else if self.sync.dock_single_window() {
-            "Catch up counts observed updates in this window only. Dock badge matches this count."
+            "Unread chat count reflects observed updates in this window only. Dock badge matches this count."
         } else {
-            "Catch up count is this window. Dock badge paused with multiple windows or while window presence is unknown."
+            "Unread chat count is this window. Dock badge paused with multiple windows or while window presence is unknown."
         }
     }
 }

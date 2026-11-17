@@ -39,6 +39,7 @@ pub enum Icon {
     Code,
     Expand,
     Collapse,
+    Check,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -63,6 +64,10 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
         );
     };
     match icon {
+        Icon::Check => {
+            line((-5.0, 0.0), (-1.0, 4.0));
+            line((-1.0, 4.0), (6.0, -4.0));
+        }
         Icon::Plus => {
             line((-5.0, 0.0), (5.0, 0.0));
             line((0.0, -5.0), (0.0, 5.0));

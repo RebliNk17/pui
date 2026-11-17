@@ -2,6 +2,8 @@
 //! inside the blank chat, never the side effect of pressing +.
 use super::*;
 
+pub(super) mod project_picker;
+
 impl Pui {
     /// Only newly allocated, never-used chats are disposable. An empty active
     /// branch of saved history is not evidence that its transcript is empty.
@@ -110,7 +112,12 @@ impl Pui {
                     .map(|n| &n.cwd),
             )
         {
-            if !path.as_os_str().is_empty() && seen.insert(path.clone()) {
+            let known_worktree = self.agents.nodes.values().any(|node| {
+                node.worktree
+                    .as_ref()
+                    .is_some_and(|root| path.starts_with(root))
+            });
+            if !path.as_os_str().is_empty() && !known_worktree && seen.insert(path.clone()) {
                 projects.push(path.clone());
             }
         }
@@ -122,32 +129,17 @@ impl Pui {
         let mut selection = None;
         let mut browse = false;
         let width = 240.0_f32.min(ui.available_width());
+        let projects = self.chat_projects();
         ui.horizontal(|ui| {
             ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            egui::ComboBox::from_id_salt("new-chat-project")
-                .selected_text(sessions::project_name(&current))
-                .width(width)
-                .show_ui(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    for project in self.chat_projects() {
-                        let label = format!(
-                            "{}\n{}",
-                            sessions::project_name(&project),
-                            project.display()
-                        );
-                        if ui
-                            .selectable_label(project == current, RichText::new(label).size(11.5))
-                            .clicked()
-                        {
-                            selection = Some(project);
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Open folder…").clicked() {
-                        browse = true;
-                        ui.close();
-                    }
-                });
+            (selection, browse) = self.project_picker.show(
+                ui,
+                &self.agents.active,
+                &current,
+                width,
+                projects,
+                self.chat_folder_rx.is_none(),
+            );
         });
         ui.add(
             egui::Label::new(theme::small(ui, current.display().to_string()))
@@ -523,11 +515,17 @@ mod tests {
                 .1
                 .center(),
         );
+        for _ in 0..100 {
+            if labels(&mut app).iter().any(|(s, _)| s == "another-project") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let text = labels(&mut app);
         let other = text
             .iter()
-            .find(|(s, _)| s.starts_with("another-project\n"))
-            .expect("Existing project choice with its path");
+            .find(|(s, _)| s == "another-project")
+            .expect("Existing project choice with a separate muted path");
         click(&mut app, other.1.center());
         assert_eq!(app.prefs.cwd, next);
         assert_eq!(app.draft, "keep this draft");

@@ -36,6 +36,11 @@ pub(super) fn inline(ctx: &egui::Context) -> egui::Frame {
         .shadow(egui::epaint::Shadow::NONE)
 }
 
+/// Dense inline prompts keep the same surface and focus treatment as dialogs.
+pub(super) fn compact_inline(ctx: &egui::Context) -> egui::Frame {
+    inline(ctx).inner_margin(13)
+}
+
 pub(super) fn popup(ctx: &egui::Context) -> egui::Frame {
     surface(ctx).inner_margin(10).corner_radius(10)
 }
@@ -172,6 +177,12 @@ pub(super) fn heading(ui: &mut egui::Ui, title: &str, description: &str) {
     }
 }
 
+/// Small popover title without the visual weight of a dialog heading.
+pub(super) fn compact_heading(ui: &mut egui::Ui, title: &str) {
+    let colors = theme::palette(ui.ctx());
+    ui.add(egui::Label::new(RichText::new(title).size(13.0).strong().color(colors.text)).wrap());
+}
+
 pub(super) fn close(ui: &mut egui::Ui) -> bool {
     let rect = egui::Rect::from_min_size(
         ui.max_rect().right_top() + egui::vec2(-12.0, -12.0),
@@ -219,6 +230,102 @@ pub(super) fn button(
             .corner_radius(7)
             .min_size(egui::vec2(0.0, 32.0)),
     )
+}
+
+/// Compact, named icon action for dense popovers and inline footers.
+pub(super) fn icon_action(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    enabled: bool,
+) -> egui::Response {
+    ui.push_id(label, |ui| {
+        ui.add_enabled_ui(enabled, |ui| {
+            let colors = theme::palette(ui.ctx());
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+            if response.hovered() && ui.is_enabled() {
+                ui.painter().rect_filled(rect, 5, colors.hover);
+            }
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect.shrink(0.5),
+                    5,
+                    Stroke::new(1.0, colors.accent),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            icons::draw(
+                ui,
+                rect.shrink(6.0),
+                icon,
+                if ui.is_enabled() {
+                    colors.muted
+                } else {
+                    colors.dim
+                },
+            );
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+            });
+            response
+                .on_hover_text(label)
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+        })
+        .inner
+    })
+    .inner
+}
+
+/// A quiet secondary action: one keyboard-accessible target, without button chrome.
+pub(super) fn text_link(
+    ui: &mut egui::Ui,
+    label: &str,
+    icon: Icon,
+    enabled: bool,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let colors = theme::palette(ui.ctx());
+        let color = if ui.is_enabled() {
+            colors.accent
+        } else {
+            colors.dim
+        };
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            label.into(),
+            FontId::proportional(11.0),
+            color,
+        );
+        job.wrap.max_width = (ui.available_width() - 18.0).max(0.0);
+        job.wrap.max_rows = 1;
+        let galley = ui.painter().layout_job(job);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2((galley.size().x + 18.0).min(ui.available_width()), 22.0),
+            Sense::click(),
+        );
+        icons::draw(
+            ui,
+            egui::Rect::from_center_size(
+                rect.left_center() + egui::vec2(6.0, 0.0),
+                Vec2::splat(12.0),
+            ),
+            icon,
+            color,
+        );
+        let pos = rect.left_center() + egui::vec2(18.0, -galley.size().y / 2.0);
+        let text_rect = egui::Rect::from_min_size(pos, galley.size());
+        ui.painter().galley(pos, galley, color);
+        if response.hovered() || response.has_focus() {
+            ui.painter().line_segment(
+                [text_rect.left_bottom(), text_rect.right_bottom()],
+                Stroke::new(1.0, color),
+            );
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), label)
+        });
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    })
+    .inner
 }
 
 /// Bounded height, even inside a scroll area. Call in visual right-to-left order.
