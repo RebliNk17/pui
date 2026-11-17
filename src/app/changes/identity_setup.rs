@@ -9,6 +9,7 @@ pub(super) struct Setup {
     owner: Option<(PathBuf, String)>,
     name: String,
     email: String,
+    override_inherited: bool,
     pending: Option<
         workspace::read_only::Request<Result<workspace::commit::identity_setup::Review, String>>,
     >,
@@ -41,6 +42,11 @@ impl Changes {
                     );
                     s.controls.push(input.id);
                 }
+                let toggle = ui.checkbox(
+                    &mut s.override_inherited,
+                    "Override inherited identity locally (never replace local values)",
+                );
+                s.controls.push(toggle.id);
                 let response = prompt_ui::button(
                     ui,
                     "Review local identity…",
@@ -56,6 +62,7 @@ impl Changes {
                     let root = workspace.root.clone();
                     let name = s.name.clone();
                     let email = s.email.clone();
+                    let allow = s.override_inherited;
                     let (tx, rx) = mpsc::channel();
                     let cancel = Arc::new(AtomicBool::new(false));
                     s.owner = Some(self.identity.clone());
@@ -64,9 +71,15 @@ impl Changes {
                     if std::thread::Builder::new()
                         .name("pui-identity-review".into())
                         .spawn(move || {
-                            let result = workspace::commit::identity_setup::inspect(
-                                &root, &name, &email, &cancel,
-                            );
+                            let result = if allow {
+                                workspace::commit::identity_setup::inspect_override(
+                                    &root, &name, &email, true, &cancel,
+                                )
+                            } else {
+                                workspace::commit::identity_setup::inspect(
+                                    &root, &name, &email, &cancel,
+                                )
+                            };
                             drop(permit);
                             if !cancel.load(Ordering::Acquire) {
                                 let _ = tx.send(result);
@@ -134,7 +147,7 @@ impl Changes {
             self.identity_setup.review = None;
             return;
         }
-        let choice=confirmations::Dialog::new("local-identity-confirm","Save repository commit identity?","Writes user.name and user.email only to this repository’s shared local Git config. Existing identity settings are never replaced. Future commits may publicly expose this identity. No global settings, credentials, commit or network.","Cancel","Save local identity").destructive(false).show(ctx,|ui|{ui.add(egui::Label::new(theme::small(ui,format!("{}\n{} <{}>",review.root.display(),review.name,review.email))).wrap());});
+        let choice=confirmations::Dialog::new("local-identity-confirm","Save repository commit identity?","Writes user.name and user.email only to this repository’s shared local Git config. Existing repository-local identity settings are never replaced. Explicit inherited overrides add local values; inherited/global files stay unchanged. Future commits may publicly expose this identity. No global settings, credentials, commit or network.","Cancel","Save local identity").destructive(false).show(ctx,|ui|{ui.add(egui::Label::new(theme::small(ui,format!("{}\n{} <{}>",review.root.display(),review.name,review.email))).wrap());for(key,value)in &review.inherited{ui.add(egui::Label::new(theme::small(ui,format!("Inherited {key}: {value} → local override"))).wrap());}});
         if let Some(choice) = choice {
             let review = self.identity_setup.review.take().unwrap();
             if choice == confirmations::Choice::Confirm {

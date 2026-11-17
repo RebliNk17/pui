@@ -5,6 +5,8 @@ pub(crate) struct Review {
     pub root: PathBuf,
     pub name: String,
     pub email: String,
+    pub inherited: Vec<(String, String)>,
+    pub override_inherited: bool,
     config: Vec<u8>,
 }
 pub(crate) fn valid(name: &str, email: &str) -> bool {
@@ -18,7 +20,13 @@ pub(crate) fn valid(name: &str, email: &str) -> bool {
             .any(|s| s.chars().any(char::is_control) || s.contains(['<', '>']))
         && !email.chars().any(char::is_whitespace)
 }
-fn absent(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<(), String> {
+fn absent(
+    root: &Path,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    allow: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut inherited = Vec::new();
     for key in [
         "user.name",
         "user.email",
@@ -36,11 +44,33 @@ fn absent(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<(), Str
             "Identity configuration",
             "Identity configuration exceeds limit",
         )?;
-        if status.code() != Some(1) || !out.is_empty() {
+        if status.code() == Some(1) && out.is_empty() {
+            continue;
+        }
+        if !allow || !matches!(key, "user.name" | "user.email") || !status.success() {
             return Err("Identity settings already exist or worktree config is enabled. Existing identity is never replaced.".into());
         }
+        let (local, local_status) = read_only::run(
+            read_only::command(root).args(["config", "--local", "--no-includes", "--get-all", key]),
+            cancel,
+            deadline,
+            16384,
+            "Local identity",
+            "Local identity exceeds limit",
+        )?;
+        if local_status.code() != Some(1) || !local.is_empty() {
+            return Err("Repository-local identity already exists; nothing replaced.".into());
+        }
+        let value = String::from_utf8(out).map_err(|_| "Inherited identity is not UTF-8")?;
+        let value = value
+            .strip_suffix('\n')
+            .ok_or("Invalid inherited identity")?;
+        if value.len() > 512 || value.chars().any(char::is_control) {
+            return Err("Inherited identity is ambiguous or oversized.".into());
+        }
+        inherited.push((key.into(), value.into()));
     }
-    Ok(())
+    Ok(inherited)
 }
 fn config(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<Vec<u8>, String> {
     let common = line(run(
@@ -71,6 +101,15 @@ pub(crate) fn inspect(
     email: &str,
     cancel: &AtomicBool,
 ) -> Result<Review, String> {
+    inspect_override(root, name, email, false, cancel)
+}
+pub(crate) fn inspect_override(
+    root: &Path,
+    name: &str,
+    email: &str,
+    allow: bool,
+    cancel: &AtomicBool,
+) -> Result<Review, String> {
     if !valid(name, email) {
         return Err(
             "Use a name and email up to 512 UTF-8 bytes, without controls or angle brackets."
@@ -89,9 +128,11 @@ pub(crate) fn inspect(
     {
         return Err("Exact repository root required.".into());
     }
-    absent(root, cancel, deadline)?;
+    let inherited = absent(root, cancel, deadline, allow)?;
     Ok(Review {
         root: root.into(),
+        inherited,
+        override_inherited: allow,
         name: name.trim().into(),
         email: email.into(),
         config: config(root, cancel, deadline)?,
@@ -99,7 +140,14 @@ pub(crate) fn inspect(
 }
 pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
     let validate = || {
-        if inspect(&review.root, &review.name, &review.email, cancel)? != review {
+        if inspect_override(
+            &review.root,
+            &review.name,
+            &review.email,
+            review.override_inherited,
+            cancel,
+        )? != review
+        {
             return Err("Identity configuration changed; review again.".into());
         }
         Ok(())

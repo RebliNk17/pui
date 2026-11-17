@@ -12,11 +12,22 @@ fn local_identity_confirmation_escape_themes_zoom_never_writes() {
                 index_writable: true,
                 ..Default::default()
             };
+            let inherited = root.join(".git/inherited");
+            std::fs::write(
+                &inherited,
+                "[user]\n name = Inherited\n email = inherited@example.invalid\n",
+            )
+            .unwrap();
+            workspace::tests::git(
+                &root,
+                &["config", "include.path", inherited.to_str().unwrap()],
+            );
             changes.identity_setup.review = Some(
-                workspace::commit::identity_setup::inspect(
+                workspace::commit::identity_setup::inspect_override(
                     &root,
                     "Fixture",
                     "fixture@example.invalid",
+                    true,
                     &AtomicBool::new(false),
                 )
                 .unwrap(),

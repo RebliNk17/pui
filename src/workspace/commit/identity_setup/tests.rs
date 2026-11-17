@@ -46,6 +46,50 @@ fn local_identity_atomic_pair_enables_first_commit_and_refuses_overwrite() {
     super::super::apply(snapshot, "first", &cancel).unwrap();
 }
 #[test]
+fn inherited_include_override_is_explicit_preserves_origin_and_revalidates() {
+    let root = fixture();
+    let inherited = root.join(".git/inherited-identity");
+    fs::write(
+        &inherited,
+        "[user]\n name = Inherited\n email = inherited@example.invalid\n",
+    )
+    .unwrap();
+    crate::workspace::tests::git(
+        &root,
+        &["config", "include.path", inherited.to_str().unwrap()],
+    );
+    let bytes = fs::read(&inherited).unwrap();
+    let cancel = AtomicBool::new(false);
+    assert!(inspect(&root, "Local", "local@example.invalid", &cancel).is_err());
+    let review = inspect_override(&root, "Local", "local@example.invalid", true, &cancel).unwrap();
+    assert_eq!(review.inherited.len(), 2);
+    apply(review, &cancel).unwrap();
+    assert_eq!(fs::read(&inherited).unwrap(), bytes);
+    assert_eq!(
+        crate::workspace::tests::git(&root, &["config", "--get", "user.name"]),
+        b"Local\n"
+    );
+    assert!(inspect_override(&root, "Other", "other@example.invalid", true, &cancel).is_err());
+    let root = fixture();
+    let inherited = root.join(".git/inherited-identity");
+    fs::write(
+        &inherited,
+        "[user]\n name = First\n email = first@example.invalid\n",
+    )
+    .unwrap();
+    crate::workspace::tests::git(
+        &root,
+        &["config", "include.path", inherited.to_str().unwrap()],
+    );
+    let review = inspect_override(&root, "Local", "local@example.invalid", true, &cancel).unwrap();
+    fs::write(
+        &inherited,
+        "[user]\n name = Changed\n email = changed@example.invalid\n",
+    )
+    .unwrap();
+    assert!(apply(review, &cancel).is_err());
+}
+#[test]
 fn config_change_foreign_lock_and_invalid_inputs_refuse() {
     for case in 0..2 {
         let root = fixture();
