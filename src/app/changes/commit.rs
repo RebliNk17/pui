@@ -22,6 +22,7 @@ pub(super) struct Commit {
     sign: bool,
     pre_commit: bool,
     commit_msg: bool,
+    prepare_msg: bool,
     hook_timeout: u64,
     sign_timeout: u64,
     applied_signed: bool,
@@ -180,6 +181,7 @@ impl Changes {
                     self.commit.sign = false;
                     self.commit.pre_commit = false;
                     self.commit.commit_msg = false;
+                    self.commit.prepare_msg = false;
                     self.commit.hook_timeout = 30;
                     self.commit.sign_timeout = 30;
                 }
@@ -256,8 +258,9 @@ impl Changes {
         let initial = snapshot.head.bytes().all(|b| b == b'0');
         self.commit.controls.truncate(1);
         ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
-        let signing = if self.commit.pre_commit || self.commit.commit_msg {
-            "Runs selected pre-commit/commit-msg hooks with OS permissions/private index. Failure or changed reviewed message/snapshot stops commit. Hooks can modify files/contact services. Unselected and other commit hooks bypassed. Signing optional below; no push."
+        let signing = if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg
+        {
+            "Runs selected pre-commit/prepare-commit-msg/commit-msg hooks with OS permissions/private index. Failure or changed reviewed message/snapshot stops commit. Hooks can modify files/contact services. Unselected and other commit hooks bypassed. Signing optional below; no push."
         } else {
             ui_signing_text(self.commit.sign)
         };
@@ -270,7 +273,7 @@ impl Changes {
             },
             signing,
             "Cancel",
-            if self.commit.pre_commit || self.commit.commit_msg {
+            if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg {
                 "Check and commit"
             } else if self.commit.sign {
                 "Sign and commit without hooks"
@@ -317,23 +320,30 @@ impl Changes {
                     self.commit.controls.push(timeout.id);
                 });
             }
-            let check = ui.checkbox(
-                &mut self.commit.pre_commit,
-                "Run configured pre-commit check (local code execution)",
-            );
-            self.commit.controls.push(check.id);
-            let message_check = ui.checkbox(
-                &mut self.commit.commit_msg,
-                "Run configured commit-msg check (message rewrites refuse)",
-            );
-            self.commit.controls.push(message_check.id);
-            if self.commit.pre_commit || self.commit.commit_msg {
+            if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(theme::small(ui, "Timeout per selected hook · seconds"));
                     let timeout =
                         ui.add(egui::DragValue::new(&mut self.commit.hook_timeout).range(1..=300));
                     self.commit.controls.push(timeout.id);
                 });
+            }
+            for (value, label) in [
+                (
+                    &mut self.commit.pre_commit,
+                    "Run configured pre-commit check (local code execution)",
+                ),
+                (
+                    &mut self.commit.prepare_msg,
+                    "Run prepare-commit-msg (rewrites refuse)",
+                ),
+                (
+                    &mut self.commit.commit_msg,
+                    "Run configured commit-msg check (message rewrites refuse)",
+                ),
+            ] {
+                let control = ui.checkbox(value, label);
+                self.commit.controls.push(control.id);
             }
             ui.label(theme::small(
                 ui,
@@ -381,6 +391,7 @@ impl Changes {
                 let sign = self.commit.sign;
                 let pre_commit = self.commit.pre_commit;
                 let commit_msg = self.commit.commit_msg;
+                let prepare_msg = self.commit.prepare_msg;
                 let hook_timeout = self.commit.hook_timeout.clamp(1, 300);
                 let sign_timeout = self.commit.sign_timeout.clamp(1, 300);
                 self.commit.applied_signed = sign;
@@ -391,7 +402,19 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-commit-publish".into())
                     .spawn(move || {
-                        let result = if sign {
+                        let result = if prepare_msg {
+                            workspace::commit::apply_message_preparation(
+                                snapshot,
+                                &message,
+                                sign,
+                                pre_commit,
+                                commit_msg,
+                                true,
+                                hook_timeout,
+                                sign_timeout,
+                                &cancel,
+                            )
+                        } else if sign {
                             workspace::commit::apply_timeouts(
                                 snapshot,
                                 &message,

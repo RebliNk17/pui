@@ -362,6 +362,30 @@ pub(crate) fn apply_timeouts(
     sign_timeout: u64,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
+    apply_message_preparation(
+        snapshot,
+        message,
+        sign,
+        pre_commit,
+        commit_msg,
+        false,
+        hook_timeout,
+        sign_timeout,
+        cancel,
+    )
+}
+#[expect(clippy::too_many_arguments)]
+pub(crate) fn apply_message_preparation(
+    snapshot: Snapshot,
+    message: &str,
+    sign: bool,
+    pre_commit: bool,
+    commit_msg: bool,
+    prepare_msg: bool,
+    hook_timeout: u64,
+    sign_timeout: u64,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
     if !(1..=300).contains(&sign_timeout) {
         return Err("Signing timeout must be 1–300 seconds.".into());
     }
@@ -431,7 +455,7 @@ pub(crate) fn apply_timeouts(
             return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
         }
     }
-    if commit_msg {
+    if commit_msg || prepare_msg {
         let message_path = snapshot
             .index_path
             .with_file_name(format!("pui-commit-message-{}", uuid::Uuid::new_v4()));
@@ -444,34 +468,47 @@ pub(crate) fn apply_timeouts(
             .write_all(confirmed)
             .map_err(|_| "Cannot write private commit message")?;
         drop(message_file);
-        let mut hook = read_only::command(&snapshot.root);
-        hook.env("GIT_INDEX_FILE", &private)
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .args(["hook", "run", "--ignore-missing", "commit-msg", "--"])
-            .arg(&message_path);
-        diagnostics::run(
-            &mut hook,
-            cancel,
-            Instant::now() + std::time::Duration::from_secs(hook_timeout),
-            "Commit-message check",
-        )?;
-        let meta = fs::symlink_metadata(&message_path)
-            .map_err(|_| "Commit-message hook removed message; nothing committed")?;
-        if !meta.is_file() || meta.file_type().is_symlink() || meta.len() != confirmed.len() as u64
-        {
-            return Err("Commit-message hook rewrote the confirmed message; nothing committed. Review the message again.".into());
-        }
-        let mut actual = Vec::new();
-        fs::File::open(&message_path)
-            .map_err(|_| "Cannot read checked message")?
-            .take(4097)
-            .read_to_end(&mut actual)
-            .map_err(|_| "Cannot read checked message")?;
-        if actual != confirmed
-            || index_bytes(&private)? != snapshot.index
-            || prepare(&snapshot.root, cancel)? != snapshot
-        {
-            return Err("Commit-message check changed the reviewed message or snapshot; nothing committed. Review again.".into());
+        for (enabled, name) in [
+            (prepare_msg, "prepare-commit-msg"),
+            (commit_msg, "commit-msg"),
+        ] {
+            if !enabled {
+                continue;
+            }
+            let mut hook = read_only::command(&snapshot.root);
+            hook.env("GIT_INDEX_FILE", &private)
+                .env("GIT_NO_REPLACE_OBJECTS", "1")
+                .args(["hook", "run", "--ignore-missing", name, "--"])
+                .arg(&message_path);
+            if name == "prepare-commit-msg" {
+                hook.arg("message");
+            }
+            diagnostics::run(
+                &mut hook,
+                cancel,
+                Instant::now() + std::time::Duration::from_secs(hook_timeout),
+                name,
+            )?;
+            let meta = fs::symlink_metadata(&message_path)
+                .map_err(|_| "Commit-message hook removed message; nothing committed")?;
+            if !meta.is_file()
+                || meta.file_type().is_symlink()
+                || meta.len() != confirmed.len() as u64
+            {
+                return Err("Commit-message hook rewrote the confirmed message; nothing committed. Review the message again.".into());
+            }
+            let mut actual = Vec::new();
+            fs::File::open(&message_path)
+                .map_err(|_| "Cannot read checked message")?
+                .take(4097)
+                .read_to_end(&mut actual)
+                .map_err(|_| "Cannot read checked message")?;
+            if actual != confirmed
+                || index_bytes(&private)? != snapshot.index
+                || prepare(&snapshot.root, cancel)? != snapshot
+            {
+                return Err("Commit-message hook changed the reviewed message or snapshot; nothing committed. Review again.".into());
+            }
         }
     }
     let deadline = Instant::now() + DEADLINE;

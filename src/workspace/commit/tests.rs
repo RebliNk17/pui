@@ -330,6 +330,46 @@ fn commit_message_check_success_rejection_and_rewrite_never_changes_confirmed_co
     }
 }
 #[test]
+fn prepare_message_runs_before_validation_and_rewrite_or_failure_refuses() {
+    for mode in 0..3 {
+        let root = fixture();
+        let hook = root.join(".git/hooks/prepare-commit-msg");
+        let script = match mode {
+            0 => "#!/bin/sh\ntest \"$2\" = message || exit 9\nprintf prepared > .git/prepared\n",
+            1 => "#!/bin/sh\nexit 1\n",
+            _ => "#!/bin/sh\nprintf rewritten > \"$1\"\n",
+        };
+        fs::write(&hook, script).unwrap();
+        let validate = root.join(".git/hooks/commit-msg");
+        fs::write(
+            &validate,
+            "#!/bin/sh\ntest -f .git/prepared || exit 8\ngrep -q confirmed \"$1\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&hook, &validate] {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let s = prepare(&root, &cancel).unwrap();
+        let head = s.head.clone();
+        let result =
+            apply_message_preparation(s, "confirmed", false, false, true, true, 30, 30, &cancel);
+        if mode == 0 {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+                head
+            );
+        }
+    }
+}
+#[test]
 fn hook_timeout_validation_and_longer_check_does_not_expire_publication_budget() {
     let root = fixture();
     let hook = root.join(".git/hooks/pre-commit");
