@@ -304,6 +304,7 @@ impl Pui {
             };
             if !self.agents.background {
                 self.ensure_agent();
+                self.update_session_title();
                 self.publish_live();
                 self.park_tree();
                 self.connect(&self.ctx.clone(), Some(PathBuf::from(path)));

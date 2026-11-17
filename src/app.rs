@@ -39,6 +39,7 @@ mod rewind;
 mod run_status;
 mod search;
 mod session_layout;
+mod session_titles;
 mod settings;
 mod side_chat;
 mod sidebar;
@@ -1033,11 +1034,13 @@ impl Pui {
         self.poll_window_sync();
     }
     fn poll_rpc(&mut self) {
+        let mut title_dirty = false;
         if let Some(preview) = self.preview_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.preview_rx = None;
             if let Ok(preview) = preview {
                 self.preview_partial = preview.partial;
                 self.state.messages = preview.messages;
+                title_dirty = true;
                 self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
             }
         }
@@ -1049,6 +1052,7 @@ impl Pui {
         for event in events {
             match event {
                 rpc::Event::History(messages) => {
+                    title_dirty = true;
                     self.resource_reload_history();
                     self.preview_rx = None;
                     self.preview_partial = false;
@@ -1067,6 +1071,7 @@ impl Pui {
                     self.pending_session = None;
                 }
                 rpc::Event::Record(record) => {
+                    title_dirty |= session_titles::title_event(&record);
                     self.resource_reload_record(&record);
                     self.completion_event(&record);
                     self.agent_event(&record);
@@ -1089,6 +1094,7 @@ impl Pui {
                         // Fork can open a new owner. Never apply remaining source
                         // records to the newly visible chat.
                         if self.agents.active != history_source {
+                            title_dirty = false;
                             break;
                         }
                         continue;
@@ -1274,56 +1280,15 @@ impl Pui {
         }
         self.poll_resource_reload();
         self.promote_attention();
-        self.update_session_title();
-    }
-    fn update_session_title(&mut self) {
-        let Some(path) = self.state.session_file.as_deref() else {
-            return;
-        };
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|s| s.path == std::path::Path::new(path));
-        if self.state.session_name.trim().is_empty()
-            || matches!(
-                self.state.session_name.as_str(),
-                "Untitled session" | "New conversation" | "Opening chat…"
-            )
-        {
-            self.state.session_name = session
-                .as_ref()
-                .filter(|s| {
-                    !s.title.trim().is_empty()
-                        && !matches!(
-                            s.title.as_str(),
-                            "Untitled session" | "New conversation" | "Opening chat…"
-                        )
-                })
-                .map(|s| s.title.clone())
-                .or_else(|| {
-                    self.state
-                        .messages
-                        .iter()
-                        .filter(|m| m.role == "user")
-                        .find_map(|m| {
-                            sessions::prompt_title(&m.text).or_else(|| {
-                                (!m.images.is_empty()).then(|| "Image attachment".into())
-                            })
-                        })
-                })
-                .unwrap_or_default();
-        }
-        if let Some(session) = session {
-            if !self.state.session_name.is_empty() {
-                session.title = self.state.session_name.clone();
-            }
+        if title_dirty {
+            self.update_session_title();
         }
     }
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.sessions = result;
             self.session_rx = None;
-            self.update_session_title();
+            self.refresh_session_titles();
         }
         if !self.demo
             && self

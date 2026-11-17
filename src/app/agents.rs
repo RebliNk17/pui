@@ -285,6 +285,7 @@ impl Pui {
                 node.parent = None;
             }
         }
+        self.refresh_session_titles();
     }
     pub(super) fn agents_still_retiring(&self) -> bool {
         self.agents

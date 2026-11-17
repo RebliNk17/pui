@@ -239,6 +239,19 @@ fn fork_during_poll_cannot_apply_old_source_records_to_the_new_chat() {
     app.history_action();
     app.begin_history(app.history_view.request.clone().unwrap());
     let id = app.history_pending.as_ref().unwrap().id.clone();
+    app.sessions = vec![Session {
+        path: "/fixture/history.jsonl".into(),
+        cwd: "/fixture".into(),
+        project: "/fixture".into(),
+        title: "Old source title".into(),
+        created: None,
+        modified: std::time::SystemTime::UNIX_EPOCH,
+    }];
+    inject
+        .send(rpc::Event::Record(
+            json!({"type":"session_info_changed","name":"Renamed before fork"}),
+        ))
+        .unwrap();
     inject
         .send(rpc::Event::Record(result(
             &id,
@@ -248,6 +261,11 @@ fn fork_during_poll_cannot_apply_old_source_records_to_the_new_chat() {
     inject.send(rpc::Event::Record(json!({"type":"extension_ui_request","method":"set_editor_text","text":"stale source draft"}))).unwrap();
     app.poll_rpc();
     assert_ne!(app.agents.active, original);
+    assert_eq!(app.sessions[0].title, "Renamed before fork");
+    assert_eq!(
+        app.agents.parked[&original].state.session_name,
+        "Renamed before fork"
+    );
     assert!(app.draft.is_empty());
     assert_eq!(
         app.state.session_file.as_deref(),

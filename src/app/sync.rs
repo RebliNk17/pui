@@ -1015,6 +1015,7 @@ impl Pui {
                             self.attention.import_for(&path, metadata);
                         }
                         self.state = snapshot.state;
+                        self.update_session_title();
                         self.state.notice = Some(format!(
                             "Shared chat · {} in another Pui window",
                             snapshot.label
@@ -1424,6 +1425,35 @@ mod tests {
         assert_eq!(owner.sync.attention_aliases.len(), 256);
         owner.sync.forget_deleted(&path);
         assert!(!owner.sync.attention_aliases.iter().any(|(_, p)| p == &path));
+    }
+    #[test]
+    fn mirror_snapshot_rename_reconciles_cached_session_title_without_rpc() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        owner.state.session_name = "Owner renamed title".into();
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        let mut mirror = app(&directory, &path);
+        mirror.sessions = vec![Session {
+            path: path.clone(),
+            cwd: directory.clone(),
+            project: directory.clone(),
+            title: "Stale discovered title".into(),
+            created: None,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        }];
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, b| {
+            b.sessions[0].title == "Owner renamed title"
+        });
+        assert_eq!(mirror.state.session_name, "Owner renamed title");
+        assert!(
+            mirror.client.is_none(),
+            "Snapshots must not start an RPC owner"
+        );
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
     }
     #[test]
     fn observed_attention_mirrors_same_revision_without_replaying_or_sharing_reads() {
