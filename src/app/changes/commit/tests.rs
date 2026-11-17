@@ -1,5 +1,29 @@
 use super::*;
 #[test]
+fn after_commit_warning_is_success_clears_draft_and_never_retries() {
+    let ctx = egui::Context::default();
+    let mut changes = Changes {
+        index_writable: true,
+        ..Default::default()
+    };
+    changes.commit.retained_message = "do not duplicate".into();
+    let (wtx, wrx) = mpsc::channel();
+    wtx.send(Some(
+        "Commit already published; hook failed. Do not repeat.".into(),
+    ))
+    .unwrap();
+    changes.commit.post_warning = Some(wrx);
+    let (tx, rx) = mpsc::channel();
+    tx.send(Ok("a".repeat(40))).unwrap();
+    changes.commit.applying = Some(rx.into());
+    changes.commit_inputs(&ctx, true);
+    assert!(changes.commit.retained_message.is_empty());
+    let notice = changes.commit.notice.as_ref().unwrap();
+    assert!(notice.contains("Committed locally"));
+    assert!(notice.contains("After-commit warning"));
+    assert!(changes.commit.pending.is_none());
+}
+#[test]
 fn failed_commit_keeps_message_fresh_review_resets_options_and_success_clears() {
     let ctx = egui::Context::default();
     let root = std::fs::canonicalize(crate::workspace::tests::fixture()).unwrap();
@@ -316,6 +340,7 @@ fn native_commit_dialog_escape_themes_zoom_preserves_message_and_never_executes(
                     changes.commit.pre_commit = checked;
                     changes.commit.commit_msg = message_checked;
                     changes.commit.prepare_msg = message_checked;
+                    changes.commit.post_commit = message_checked;
                     changes.commit.hook_timeout = 30;
                     changes.commit.sign_timeout = 30;
                     for n in 0..4 {

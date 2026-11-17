@@ -584,5 +584,22 @@ pub(crate) fn apply_message_preparation(
     run(&snapshot.root,&["-c","core.hooksPath=/dev/null","update-ref","-m","Pui: commit staged snapshot",&snapshot.branch,&oid,&snapshot.head],cancel,deadline).map_err(|_|"Branch update failed or completion uncertain; inspect History before retrying. An unattached object may remain.")?;
     Ok(oid)
 }
+/// Run only after successful publication. Error is a warning, never a failed commit.
+pub(crate) fn post_commit(root: &Path, cancel: &AtomicBool, timeout: u64) -> Result<(), String> {
+    if !(1..=300).contains(&timeout) {
+        return Err(
+            "Commit already published; post-commit timeout invalid. Do not repeat the commit."
+                .into(),
+        );
+    }
+    let mut hook = read_only::command(root);
+    hook.env("GIT_NO_REPLACE_OBJECTS", "1").args([
+        "hook",
+        "run",
+        "--ignore-missing",
+        "post-commit",
+    ]);
+    diagnostics::run(&mut hook,cancel,Instant::now()+std::time::Duration::from_secs(timeout),"Post-commit hook").map_err(|_|"Commit already published; post-commit hook failed, was cancelled or exceeded its limits. Output hidden. Inspect local state; do not repeat the commit to retry this hook.".into())
+}
 #[cfg(test)]
 mod tests;

@@ -370,6 +370,35 @@ fn prepare_message_runs_before_validation_and_rewrite_or_failure_refuses() {
     }
 }
 #[test]
+fn post_commit_failure_preserves_published_commit_and_reports_no_repeat() {
+    let root = fixture();
+    let hook = root.join(".git/hooks/post-commit");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf observed > .git/post-observed\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cancel = AtomicBool::new(false);
+    let oid = apply(prepare(&root, &cancel).unwrap(), "published", &cancel).unwrap();
+    assert!(!root.join(".git/post-observed").exists());
+    let warning = post_commit(&root, &cancel, 30).unwrap_err();
+    assert!(warning.contains("already published"));
+    assert!(warning.contains("do not repeat"));
+    assert_eq!(
+        fs::read(root.join(".git/post-observed")).unwrap(),
+        b"observed"
+    );
+    assert_eq!(
+        line(super::super::tests::git(&root, &["rev-parse", "HEAD"])).unwrap(),
+        oid
+    );
+}
+#[test]
 fn hook_timeout_validation_and_longer_check_does_not_expire_publication_budget() {
     let root = fixture();
     let hook = root.join(".git/hooks/pre-commit");

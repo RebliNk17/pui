@@ -23,6 +23,8 @@ pub(super) struct Commit {
     pre_commit: bool,
     commit_msg: bool,
     prepare_msg: bool,
+    post_commit: bool,
+    post_warning: Option<Receiver<Option<String>>>,
     hook_timeout: u64,
     sign_timeout: u64,
     applied_signed: bool,
@@ -182,6 +184,7 @@ impl Changes {
                     self.commit.pre_commit = false;
                     self.commit.commit_msg = false;
                     self.commit.prepare_msg = false;
+                    self.commit.post_commit = false;
                     self.commit.hook_timeout = 30;
                     self.commit.sign_timeout = 30;
                 }
@@ -201,11 +204,21 @@ impl Changes {
             })
         {
             self.commit.applying = None;
+            let after_warning = self
+                .commit
+                .post_warning
+                .take()
+                .and_then(|rx| rx.try_recv().ok())
+                .flatten();
             self.commit.notice = Some(match result {
                 Ok(oid) => {
                     self.commit.retained_message.clear();
                     format!(
-                        "Committed locally: {oid}. No push. Hook/signing options explicitly selected. {}",
+                        "Committed locally: {oid}. No push. Hook/signing options explicitly selected. {}{}",
+                        after_warning
+                            .as_ref()
+                            .map(|w| format!("After-commit warning: {w}\n"))
+                            .unwrap_or_default(),
                         if self.commit.applied_signed {
                             "Signing requested from configured Git signer; signer trust not verified by Pui."
                         } else {
@@ -258,9 +271,12 @@ impl Changes {
         let initial = snapshot.head.bytes().all(|b| b == b'0');
         self.commit.controls.truncate(1);
         ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
-        let signing = if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg
+        let signing = if self.commit.pre_commit
+            || self.commit.commit_msg
+            || self.commit.prepare_msg
+            || self.commit.post_commit
         {
-            "Runs selected pre-commit/prepare-commit-msg/commit-msg hooks with OS permissions/private index. Failure or changed reviewed message/snapshot stops commit. Hooks can modify files/contact services. Unselected and other commit hooks bypassed. Signing optional below; no push."
+            "Runs selected hooks with OS permissions. Pre-publication failure or changed message/snapshot stops commit. Post-commit failure only warns; commit stays published. Hooks can modify files/contact services. Unselected and other commit hooks bypassed. Signing optional below; no push."
         } else {
             ui_signing_text(self.commit.sign)
         };
@@ -273,7 +289,11 @@ impl Changes {
             },
             signing,
             "Cancel",
-            if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg {
+            if self.commit.pre_commit
+                || self.commit.commit_msg
+                || self.commit.prepare_msg
+                || self.commit.post_commit
+            {
                 "Check and commit"
             } else if self.commit.sign {
                 "Sign and commit without hooks"
@@ -320,7 +340,11 @@ impl Changes {
                     self.commit.controls.push(timeout.id);
                 });
             }
-            if self.commit.pre_commit || self.commit.commit_msg || self.commit.prepare_msg {
+            if self.commit.pre_commit
+                || self.commit.commit_msg
+                || self.commit.prepare_msg
+                || self.commit.post_commit
+            {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(theme::small(ui, "Timeout per selected hook · seconds"));
                     let timeout =
@@ -340,6 +364,10 @@ impl Changes {
                 (
                     &mut self.commit.commit_msg,
                     "Run configured commit-msg check (message rewrites refuse)",
+                ),
+                (
+                    &mut self.commit.post_commit,
+                    "Run post-commit (failure warns; commit remains)",
                 ),
             ] {
                 let control = ui.checkbox(value, label);
@@ -392,6 +420,10 @@ impl Changes {
                 let pre_commit = self.commit.pre_commit;
                 let commit_msg = self.commit.commit_msg;
                 let prepare_msg = self.commit.prepare_msg;
+                let post_commit = self.commit.post_commit;
+                let root = snapshot.root.clone();
+                let (warning_tx, warning_rx) = mpsc::channel();
+                self.commit.post_warning = Some(warning_rx);
                 let hook_timeout = self.commit.hook_timeout.clamp(1, 300);
                 let sign_timeout = self.commit.sign_timeout.clamp(1, 300);
                 self.commit.applied_signed = sign;
@@ -438,6 +470,12 @@ impl Changes {
                         } else {
                             workspace::commit::apply(snapshot, &message, &cancel)
                         };
+                        let warning = if result.is_ok() && post_commit {
+                            workspace::commit::post_commit(&root, &cancel, hook_timeout).err()
+                        } else {
+                            None
+                        };
+                        let _ = warning_tx.send(warning);
                         drop(permit);
                         let _ = tx.send(result);
                         ctx.request_repaint();
