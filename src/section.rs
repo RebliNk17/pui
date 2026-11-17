@@ -5,6 +5,8 @@ use crate::{
 };
 use eframe::egui::{self, Color32, FontId, Rect, Response, Sense, Stroke, Vec2};
 
+mod grouped;
+
 pub struct Section {
     title: String,
     id: egui::Id,
@@ -12,6 +14,7 @@ pub struct Section {
     icon: Icon,
     status: Option<(String, Color32)>,
     default_open: bool,
+    grouped: bool,
 }
 impl Section {
     pub fn new(title: impl Into<String>) -> Self {
@@ -23,6 +26,7 @@ impl Section {
             icon: Icon::Details,
             status: None,
             default_open: false,
+            grouped: false,
         }
     }
     pub fn id_salt(mut self, salt: impl std::hash::Hash) -> Self {
@@ -46,7 +50,16 @@ impl Section {
         self
     }
 
+    /// Compact outlined disclosure with one hit target and a trailing summary.
+    pub fn grouped(mut self) -> Self {
+        self.grouped = true;
+        self
+    }
+
     pub fn show(self, ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) -> Response {
+        if self.grouped {
+            return grouped::show(self, ui, contents);
+        }
         let colors = theme::palette(ui.ctx());
         let id = ui.make_persistent_id(self.id);
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(

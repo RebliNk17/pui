@@ -225,18 +225,71 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
             .on_hover_text("The model limit is not the auto-compaction trigger. Settings → General controls the threshold; the remaining space is a safety buffer. Overflow or truncated-response recovery can compact earlier.");
         ui.add_space(7.0);
     }
-    crate::section::Section::new("Usage details").summary("Tokens and prompt cache").icon(crate::icons::Icon::Details).id_salt("usage-details").show(ui,|ui|{
-        ui.label(RichText::new("Prompt cache").size(12.0));
-        let usage = PromptUsage::last_response(&state.messages);
-        if let Some(label) = usage.cache_label() {
-            ui.scope(|ui| detail(ui, "Last response", &label)).response.on_hover_text(usage.cache_tooltip());
-        }
-        ui.add_space(7.0);ui.label(RichText::new("This session").size(12.0));
-        detail(ui,"In / Out",&format!("{} / {}",number(state.tokens["input"].as_f64().unwrap_or_default()),number(state.tokens["output"].as_f64().unwrap_or_default())));
-        detail(ui,"Cache r / w",&format!("{} / {}",number(state.tokens["cacheRead"].as_f64().unwrap_or_default()),number(state.tokens["cacheWrite"].as_f64().unwrap_or_default())));
-        ui.add_space(8.0);ui.label(RichText::new(if demo{"Auto-compacts when 33k tokens remain. Example category sizes, not your live session."}else{"Session totals are reported by Pi. Context categories are estimates from the active prompt, tool schemas and compaction-aware messages, not cumulative session usage. Replies include thinking and tool calls; other context includes summaries and extension messages. Free space does not subtract an auto-compaction reserve."}).size(10.0).color(colors.dim));
-    });
+    crate::section::Section::new("Usage details")
+        .grouped()
+        .summary(session_token_summary(state))
+        .icon(crate::icons::Icon::Details)
+        .id_salt("usage-details")
+        .show(ui, |ui| {
+            ui.label(RichText::new("Prompt cache · last response").size(11.0));
+            let usage = PromptUsage::last_response(&state.messages);
+            if let Some(label) = usage.cache_label() {
+                ui.scope(|ui| detail(ui, "Cached input", &label))
+                    .response
+                    .on_hover_text(usage.cache_tooltip());
+            } else {
+                detail(ui, "Cached input", "Not reported");
+            }
+            ui.add_space(7.0);
+            ui.label(RichText::new("This session").size(11.0));
+            for (label, key) in [
+                ("Input · uncached", "input"),
+                ("Output", "output"),
+                ("Cache read", "cacheRead"),
+                ("Cache write", "cacheWrite"),
+            ] {
+                let value = state.tokens[key].as_f64()
+                    .filter(|n| n.is_finite() && *n >= 0.0)
+                    .map(number)
+                    .unwrap_or_else(|| "Not reported".into());
+                detail(ui, label, &value);
+            }
+            ui.separator();
+            let total = session_tokens(state).map(number).unwrap_or_else(|| "Not reported".into());
+            detail(ui, "Total · session", &total);
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(RichText::new(if demo {
+                "Example category sizes, not your live session."
+            } else {
+                "Session totals are reported by Pi. Context categories estimate the active prompt, not cumulative usage. Replies include thinking and tool calls. Free space does not subtract the auto-compaction reserve."
+            }).size(10.0).color(colors.dim)).wrap());
+        });
 }
+
+/// A cumulative session total, deliberately distinct from live context usage.
+fn session_tokens(state: &State) -> Option<f64> {
+    let reported = state.tokens["total"]
+        .as_f64()
+        .filter(|n| n.is_finite() && *n >= 0.0);
+    reported.or_else(|| {
+        ["input", "output", "cacheRead", "cacheWrite"]
+            .into_iter()
+            .map(|key| {
+                state.tokens[key]
+                    .as_f64()
+                    .filter(|n| n.is_finite() && *n >= 0.0)
+            })
+            .try_fold(0.0, |sum, value| value.map(|value| sum + value))
+            .filter(|n| n.is_finite())
+    })
+}
+
+fn session_token_summary(state: &State) -> String {
+    session_tokens(state)
+        .map(|total| format!("{} · session", number(total)))
+        .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn category(
     ui: &mut egui::Ui,

@@ -1,5 +1,8 @@
 //! Selectable Markdown with tables, one consistent baseline and real link hit targets.
 mod capture;
+mod reply;
+#[cfg(test)]
+mod reply_tests;
 mod table;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, TextFormat, Ui, text::LayoutJob};
@@ -57,7 +60,13 @@ pub fn show_reply(ui: &mut Ui, source: &str, identity: impl std::hash::Hash) {
         ui,
         ("assistant-reply", identity),
         "Assistant reply".into(),
-        |ui| show(ui, source),
+        |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let events = ui
+                .ctx()
+                .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
+            show_events(ui, &events, true, None);
+        },
     );
 }
 fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
@@ -161,7 +170,37 @@ pub fn show(ui: &mut Ui, source: &str) {
 }
 
 fn show_inner(ui: &mut Ui, source: &str) {
+    let events = ui
+        .ctx()
+        .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
+    show_events(ui, &events, false, None);
+}
+
+fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Option<reply::Item>) {
     let colors = crate::theme::palette(ui.ctx());
+    let text_format = |ctx: &egui::Context, bold, italic, heading, code, link| {
+        let mut format = format(ctx, bold, italic, heading, code, link);
+        if reply {
+            format.line_height = Some(21.0);
+            if code {
+                // A neutral wash, not a second card or an accent-colored pill.
+                format.background = if ctx.style().visuals.dark_mode {
+                    Color32::from_white_alpha(6)
+                } else {
+                    Color32::from_black_alpha(8)
+                };
+            }
+        }
+        format
+    };
+    let top_level = item.is_none();
+    let mut flush = |ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>| {
+        if let Some(item) = &mut item {
+            item.flush(ui, job, links);
+        } else {
+            flush(ui, job, links);
+        }
+    };
     let mut job = LayoutJob::default();
     let mut links = Vec::new();
     let (mut bold, mut italic, mut heading) = (false, false, false);
@@ -173,13 +212,31 @@ fn show_inner(ui: &mut Ui, source: &str) {
     let mut in_item = false;
     let mut table: Option<Table> = None;
     let mut table_header = false;
-    let events = ui
-        .ctx()
-        .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
     let mut event_index = 0;
     while event_index < events.len() {
         let event = events[event_index].clone();
         event_index += 1;
+        if reply && matches!(event, Event::Start(Tag::List(_))) {
+            flush(ui, &mut job, &mut links);
+            let start = event_index - 1;
+            let mut depth = 1;
+            while event_index < events.len() {
+                match events[event_index] {
+                    Event::Start(Tag::List(_)) => depth += 1,
+                    Event::End(TagEnd::List(_)) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                event_index += 1;
+            }
+            reply::list(ui, &events[start..event_index], top_level);
+            event_index = (event_index + 1).min(events.len());
+            continue;
+        }
         if let Event::Start(Tag::BlockQuote(Some(kind))) = event {
             flush(ui, &mut job, &mut links);
             let start = event_index;
@@ -313,7 +370,7 @@ fn show_inner(ui: &mut Ui, source: &str) {
                 job.append(
                     &marker,
                     0.0,
-                    format(ui.ctx(), false, false, false, false, false),
+                    text_format(ui.ctx(), false, false, false, false, false),
                 );
             }
             Event::End(TagEnd::Item) => {
@@ -332,7 +389,7 @@ fn show_inner(ui: &mut Ui, source: &str) {
                 job.append(
                     &text,
                     0.0,
-                    format(
+                    text_format(
                         ui.ctx(),
                         false,
                         false,
@@ -361,7 +418,7 @@ fn show_inner(ui: &mut Ui, source: &str) {
                 job.append(
                     &text,
                     0.0,
-                    format(
+                    text_format(
                         ui.ctx(),
                         bold || table_header,
                         italic,
@@ -401,12 +458,12 @@ fn show_inner(ui: &mut Ui, source: &str) {
             Event::SoftBreak => job.append(
                 " ",
                 0.0,
-                format(ui.ctx(), false, false, false, false, false),
+                text_format(ui.ctx(), bold, italic, heading, false, link.is_some()),
             ),
             Event::HardBreak => job.append(
                 "\n",
                 0.0,
-                format(ui.ctx(), false, false, false, false, false),
+                text_format(ui.ctx(), bold, italic, heading, false, link.is_some()),
             ),
             Event::Rule => {
                 flush(ui, &mut job, &mut links);

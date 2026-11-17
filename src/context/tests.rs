@@ -50,6 +50,75 @@ fn collapsed_usage_uses_reported_or_estimated_context_and_bounds_the_bar() {
 }
 
 #[test]
+fn grouped_usage_summary_only_shows_reported_session_totals() {
+    let mut state = State::default();
+    assert_eq!(session_token_summary(&state), "");
+    state.tokens =
+        serde_json::json!({"input":12977,"output":1526,"cacheRead":339181,"cacheWrite":0});
+    assert_eq!(session_token_summary(&state), "354k · session");
+    state.tokens = serde_json::json!({"total":12});
+    assert_eq!(session_token_summary(&state), "12 · session");
+    state.tokens = serde_json::json!({"input":100,"output":200});
+    assert_eq!(
+        session_token_summary(&state),
+        "",
+        "Do not invent missing cache figures"
+    );
+    state.tokens = serde_json::json!({"total":-1});
+    assert_eq!(session_token_summary(&state), "");
+}
+
+#[test]
+fn grouped_usage_keeps_session_and_last_response_scopes_separate_when_expanded() {
+    for mode in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        mode.apply(&ctx);
+        let state = State {
+            tokens: serde_json::json!({"input":12977,"output":1526,"cacheRead":339181,"cacheWrite":0}),
+            context_tokens: Some(4200.0),
+            context_window: 600000.0,
+            ..Default::default()
+        };
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_width(320.0);
+                let id = ui.make_persistent_id(egui::Id::new("usage-details"));
+                let mut open =
+                    egui::collapsing_header::CollapsingState::load_with_default_open(ctx, id, true);
+                open.set_open(true);
+                open.store(ctx);
+                show(ui, &state, false);
+            });
+        });
+        let mut labels = Vec::new();
+        for shape in output.shapes {
+            painted_labels(&shape.shape, &mut labels);
+        }
+        for expected in [
+            "Usage details",
+            "354k · session",
+            "Prompt cache · last response",
+            "This session",
+            "Input · uncached",
+            "Cache read",
+            "Cache write",
+            "Total · session",
+        ] {
+            assert!(
+                labels.iter().any(|(text, _)| text == expected),
+                "Missing {expected}: {labels:?}"
+            );
+        }
+        assert!(
+            !labels
+                .iter()
+                .any(|(text, _)| text == "Tokens and prompt cache")
+        );
+    }
+}
+
+#[test]
 fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
     for dark in [false, true] {
         for width in [240.0, 320.0] {

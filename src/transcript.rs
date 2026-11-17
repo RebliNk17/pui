@@ -1232,7 +1232,7 @@ fn activity(
                     ui.push_id(i, |ui| match item {
                         ActivityItem::Thinking(text) => {
                             let response = crate::section::Section::new("Thinking")
-                                .summary("Model reasoning")
+                                .grouped()
                                 .icon(Icon::Spark)
                                 .show(ui, |ui| {
                                     markdown::show(ui, text);
