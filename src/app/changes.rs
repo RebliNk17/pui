@@ -7,6 +7,7 @@ mod commit;
 pub(super) mod git_files;
 mod git_modes;
 mod index_actions;
+mod initialize;
 mod inline_review;
 pub(super) mod lines;
 mod push;
@@ -38,6 +39,7 @@ pub(super) struct Changes {
     refresh: bool,
     index_actions: index_actions::IndexActions,
     commit: commit::Commit,
+    initialize: initialize::Initialize,
     push: push::Push,
     branch_create: branch_create::Create,
     pub(super) index_writable: bool,
@@ -100,6 +102,7 @@ impl Changes {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
         self.commit_inputs(ctx, visible);
+        self.initialize_inputs(ctx, visible);
         self.push_inputs(ctx, visible);
         self.create_branch_inputs(ctx, visible);
         self.branch_inputs(ctx, visible, workspace);
@@ -149,6 +152,7 @@ impl Changes {
         let session_changed = self.identity.1 != session;
         if self.identity.0 != cwd || session_changed {
             self.commit = Default::default();
+            self.initialize = Default::default();
             self.push = Default::default();
             self.branch_create = Default::default();
             self.identity = (cwd.to_path_buf(), session.to_owned());
@@ -244,6 +248,7 @@ impl Changes {
         }
         self.index_dialog(ctx);
         self.commit_dialog(ctx);
+        self.initialize_dialog(ctx);
         self.push_dialog(ctx);
         self.create_branch_dialog(ctx);
         expanded
@@ -421,6 +426,7 @@ impl Changes {
                 });
             });
         if self.source == Source::Git {
+            self.initialize_ui(ui, workspace, loading);
             self.git_mode_controls(ui);
             self.commit_control(ui, workspace, loading);
             self.push_review(ui, workspace, loading);

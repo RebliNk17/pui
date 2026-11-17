@@ -145,6 +145,7 @@ impl Changes {
     }
     pub(in crate::app) fn cancel_index_intent(&mut self) {
         self.commit = Default::default();
+        self.initialize = Default::default();
         self.push = Default::default();
         self.branch_create = Default::default();
         self.index_actions.pending = None;

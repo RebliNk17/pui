@@ -8,6 +8,7 @@ pub(crate) mod branches;
 pub(crate) mod commit;
 pub(crate) mod history;
 pub(crate) mod index_action;
+pub(crate) mod initialize;
 pub(crate) mod push;
 pub(crate) mod read_only;
 use read_only::DEADLINE;
