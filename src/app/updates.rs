@@ -36,13 +36,15 @@ impl Default for InstallState {
     }
 }
 
+type StagedInstall = (PathBuf, PathBuf, Option<PathBuf>);
+
 pub(super) struct Updates {
     pub open: bool,
     pub auto_check: bool,
     result: Option<Result<Release, String>>,
     rx: Option<Receiver<Result<Release, String>>>,
     install: InstallState,
-    install_rx: Option<Receiver<Result<(PathBuf, PathBuf, Option<PathBuf>), String>>>,
+    install_rx: Option<Receiver<Result<StagedInstall, String>>>,
     last_auto_check: Option<std::time::Instant>,
     checked: bool,
     cleaned_up: bool,
@@ -133,10 +135,9 @@ fn release(repo: &str, current: &str, data: &Value) -> Result<Release, String> {
             } else if name.starts_with("Pui-")
                 && name.contains("macos-arm64")
                 && name.ends_with(".zip")
+                && (zip_url.is_none() || !name.contains("-adhoc."))
             {
-                if zip_url.is_none() || !name.contains("-adhoc.") {
-                    zip_url = Some(download.to_owned());
-                }
+                zip_url = Some(download.to_owned());
             }
         }
     }

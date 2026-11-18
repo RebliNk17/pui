@@ -3,7 +3,7 @@ fn hash() -> String {
     "a".repeat(40)
 }
 fn encoded(oid: &str, time: &str, message: &str) -> Vec<u8> {
-    format!("{oid}\0{time}\0\0{message}\0\n").into_bytes()
+    format!("{oid}\0{time}\0\0N\0\0{message}\0\n").into_bytes()
 }
 #[test]
 fn exact_message_unicode_newlines_empty_literal_markup_and_sha256_are_preserved() {
@@ -44,8 +44,11 @@ fn parent_topology_preserves_order_root_linear_merge_sha256_and_whole_refusal() 
             let parents = (0..count)
                 .map(|index| format!("{index:0width$x}"))
                 .collect::<Vec<_>>();
-            let bytes =
-                format!("{selected}\x001\x00{}\x00message\x00\n", parents.join(" ")).into_bytes();
+            let bytes = format!(
+                "{selected}\x001\x00{}\x00N\x00\x00message\x00\n",
+                parents.join(" ")
+            )
+            .into_bytes();
             assert_eq!(parse(&bytes, &selected).unwrap().parents, parents);
         }
     }
@@ -63,7 +66,7 @@ fn parent_topology_preserves_order_root_linear_merge_sha256_and_whole_refusal() 
     ] {
         assert!(
             parse(
-                format!("{selected}\x001\x00{parents}\x00message\x00\n").as_bytes(),
+                format!("{selected}\x001\x00{parents}\x00N\x00\x00message\x00\n").as_bytes(),
                 &selected
             )
             .is_err()
@@ -107,7 +110,6 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     for flag in [
         "show",
         "--no-patch",
-        "--no-show-signature",
         "--no-notes",
         "--no-use-mailmap",
         "--no-ext-diff",
@@ -116,6 +118,8 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     ] {
         assert!(args.contains(&flag));
     }
+    // Passive reads must never use signature verification placeholders.
+    assert!(args.contains(&"--format=%H%x00%ct%x00%P%x00N%x00%x00%B%x00"));
     assert_eq!(args[args.len() - 2], oid);
     assert_eq!(args.last(), Some(&"--"));
     assert!(
@@ -243,4 +247,65 @@ fn maximum_message_parse_has_bounded_owned_capacity_and_no_partial_output() {
         start.elapsed(),
         bytes.len()
     );
+}
+#[test]
+fn signed_object_detection_never_executes_configured_verifier() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = crate::workspace::tests::fixture();
+    let git = crate::workspace::tests::git;
+    let tree = String::from_utf8(git(&root, &["rev-parse", "HEAD^{tree}"])).unwrap();
+    let raw = format!(
+        "tree {}\nauthor Fixture <f@example.invalid> 1700000000 +0000\ncommitter Fixture <f@example.invalid> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n invalid untrusted payload\n -----END PGP SIGNATURE-----\n\nmessage\n",
+        tree.trim()
+    );
+    let marker = root.join("verifier-ran");
+    let script = root.join("verifier");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&root, &["config", "gpg.program", script.to_str().unwrap()]);
+    let mut p = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    p.stdin.take().unwrap().write_all(raw.as_bytes()).unwrap();
+    let out = p.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let oid = String::from_utf8(out.stdout).unwrap();
+    let loaded = read(&root, oid.trim(), &AtomicBool::new(false)).unwrap();
+    assert_eq!(loaded.signature, "P");
+    assert!(!marker.exists());
+}
+#[test]
+fn signature_status_signer_parsed_and_unsigned_is_empty() {
+    let oid = hash();
+    for (status, signer, expected) in [
+        ("N", "", ""),
+        (
+            "G",
+            "Alice <a@example.invalid>",
+            "G Alice <a@example.invalid>",
+        ),
+        ("B", "Bad", "B Bad"),
+        ("X", "Expired", "X Expired"),
+    ] {
+        let bytes = format!("{oid}\x001\x00\x00{status}\x00{signer}\x00msg\x00\n").into_bytes();
+        let detail = parse(&bytes, &oid).unwrap();
+        assert_eq!(detail.signature, expected);
+    }
+    // Malformed signer with controls is stripped to status-only.
+    let bytes = format!("{oid}\x001\x00\x00G\x00al\x1bice\x00msg\x00\n").into_bytes();
+    assert_eq!(parse(&bytes, &oid).unwrap().signature, "G");
 }

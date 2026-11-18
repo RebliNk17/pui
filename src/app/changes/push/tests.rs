@@ -145,6 +145,7 @@ fn remote_inspect_confirmation_escape_never_contacts_remote() {
             destination: "refs/heads/main".into(),
             endpoint: "https://example.invalid/repo".into(),
             explicit_target: false,
+            signing_config: Vec::new(),
         });
         changes.push.remote_confirm = true;
         for n in 0..4 {
@@ -190,6 +191,7 @@ fn observed_divergence_label_is_read_only_themes_zoom() {
                 destination: "refs/heads/main".into(),
                 endpoint: "https://example.invalid/repo".into(),
                 explicit_target: false,
+                signing_config: Vec::new(),
             };
             let mut changes = Changes::default();
             changes.push.snapshot = Some(s.clone());
@@ -247,6 +249,7 @@ fn upstream_confirmation_escape_never_changes_configuration() {
                 destination: "refs/heads/main".into(),
                 endpoint: "https://example.invalid/repo".into(),
                 explicit_target: true,
+                signing_config: Vec::new(),
             });
             changes.push.upstream.confirm = true;
             for n in 0..4 {
@@ -281,54 +284,59 @@ fn upstream_confirmation_escape_never_changes_configuration() {
 fn push_confirmation_escape_never_starts_network_worker() {
     for details in [false, true] {
         for hooks in [false, true] {
-            for mode in [theme::Theme::Light, theme::Theme::Dark] {
-                let ctx = egui::Context::default();
-                theme::install(&ctx);
-                mode.apply(&ctx);
-                ctx.set_zoom_factor(if hooks { 1.4 } else { 0.8 });
-                let mut changes = Changes {
-                    index_writable: true,
-                    ..Default::default()
-                };
-                changes.push.snapshot = Some(workspace::push::Snapshot {
-                    root: "/fixture".into(),
-                    branch: "refs/heads/main".into(),
-                    head: "a".repeat(40),
-                    remote: "origin".into(),
-                    destination: "refs/heads/master".into(),
-                    endpoint: "https://example.invalid/repo".into(),
-                    explicit_target: false,
-                });
-                changes.push.confirm = true;
-                changes.push.hooks = hooks;
-                changes.push.diagnostics = details;
-                changes.push.timeout = Some(300);
-                for n in 0..4 {
-                    let _ = ctx.run(
-                        egui::RawInput {
-                            screen_rect: Some(egui::Rect::from_min_size(
-                                egui::Pos2::ZERO,
-                                Vec2::new(420.0, 620.0),
-                            )),
-                            events: if n == 3 {
-                                vec![egui::Event::Key {
-                                    key: egui::Key::Escape,
-                                    physical_key: None,
-                                    pressed: true,
-                                    repeat: false,
-                                    modifiers: egui::Modifiers::NONE,
-                                }]
-                            } else {
-                                vec![]
+            for sign in [false, true] {
+                for mode in [theme::Theme::Light, theme::Theme::Dark] {
+                    let ctx = egui::Context::default();
+                    theme::install(&ctx);
+                    mode.apply(&ctx);
+                    ctx.set_zoom_factor(if hooks || sign { 1.4 } else { 0.8 });
+                    let mut changes = Changes {
+                        index_writable: true,
+                        ..Default::default()
+                    };
+                    changes.push.snapshot = Some(workspace::push::Snapshot {
+                        root: "/fixture".into(),
+                        branch: "refs/heads/main".into(),
+                        head: "a".repeat(40),
+                        remote: "origin".into(),
+                        destination: "refs/heads/master".into(),
+                        endpoint: "https://example.invalid/repo".into(),
+                        explicit_target: false,
+                        signing_config: Vec::new(),
+                    });
+                    changes.push.confirm = true;
+                    changes.push.hooks = hooks;
+                    changes.push.diagnostics = details;
+                    changes.push.timeout = Some(300);
+                    changes.push.sign = sign;
+                    changes.push.sign_timeout = Some(120);
+                    for n in 0..4 {
+                        let _ = ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(420.0, 620.0),
+                                )),
+                                events: if n == 3 {
+                                    vec![egui::Event::Key {
+                                        key: egui::Key::Escape,
+                                        physical_key: None,
+                                        pressed: true,
+                                        repeat: false,
+                                        modifiers: egui::Modifiers::NONE,
+                                    }]
+                                } else {
+                                    vec![]
+                                },
+                                ..Default::default()
                             },
-                            ..Default::default()
-                        },
-                        |ctx| changes.push_dialog(ctx),
-                    );
+                            |ctx| changes.push_dialog(ctx),
+                        );
+                    }
+                    assert!(!changes.push.confirm);
+                    assert_eq!(changes.push.timeout, Some(300));
+                    assert!(changes.push.applying.is_none());
                 }
-                assert!(!changes.push.confirm);
-                assert_eq!(changes.push.timeout, Some(300));
-                assert!(changes.push.applying.is_none());
             }
         }
     }
@@ -350,6 +358,7 @@ fn native_review_narrow_themes_displays_exact_target_and_never_starts_worker() {
                 destination: "refs/heads/master".into(),
                 endpoint: "git@example.invalid:team/repo".into(),
                 explicit_target: false,
+                signing_config: Vec::new(),
             });
             let workspace = Workspace {
                 root: "/fixture".into(),

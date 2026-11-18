@@ -23,15 +23,46 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Vec<u8> {
     bytes
 }
 
-// Setup writes only the disposable fixture's index using existing local objects.
-// No commits, network, checkout, or changes to the source repository/index.
+// A tiny immutable seed decouples index/status deadlines from the live Pui
+// checkout's file count and history. Build it once, entirely in disposable
+// storage; tests still exercise real Git objects, merge ancestry and indexes.
 pub(crate) fn fixture() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root = history_fixture();
+        fs::write(
+            root.join("README.md"),
+            (0..80)
+                .map(|line| format!("fixture baseline line {line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        git(&root, &["add", "--", "README.md"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "--quiet",
+                "-m",
+                "bounded index fixture",
+            ],
+        );
+        root
+    });
     let root = std::env::temp_dir().join(format!("pui-git-review-{}", uuid::Uuid::new_v4()));
     assert!(
         read_only::run(
             read_only::command(&std::env::current_dir().unwrap())
                 .args(["clone", "--quiet", "--shared", "--no-checkout"])
-                .arg(std::env::current_dir().unwrap())
+                .arg(seed)
                 .arg(&root),
             &AtomicBool::new(false),
             Instant::now() + DEADLINE,
@@ -43,8 +74,7 @@ pub(crate) fn fixture() -> PathBuf {
         .1
         .success()
     );
-    // Parent validation may be on a detached worktree. Seed a private local
-    // branch using its existing object id so the branch fixture stays local.
+    // Give each disposable clone an independent writable branch/ref.
     let oid = git(&root, &["rev-parse", "HEAD"]);
     fs::write(root.join(".git/refs/heads/pui-fixture-root"), oid).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/pui-fixture-root\n").unwrap();

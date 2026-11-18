@@ -9,9 +9,12 @@ pub(crate) struct Detail {
     pub time: i64,
     pub parents: Vec<String>,
     pub message: String,
+    /// Empty when unsigned, P when an embedded signature is present but unverified.
+    pub signature: String,
 }
 fn command(root: &Path, hash: &str) -> Command {
     let mut command = super::command(root);
+    // Never use %G?/%GS here: they can launch a configured external verifier.
     command.args([
         "show",
         "--no-patch",
@@ -22,7 +25,7 @@ fn command(root: &Path, hash: &str) -> Command {
         "--no-ext-diff",
         "--no-textconv",
         "--encoding=UTF-8",
-        "--format=%H%x00%ct%x00%P%x00%B%x00",
+        "--format=%H%x00%ct%x00%P%x00N%x00%x00%B%x00",
         "--end-of-options",
         hash,
         "--",
@@ -66,6 +69,23 @@ fn parse(bytes: &[u8], expected: &str) -> Result<Detail, String> {
         result.shrink_to_fit();
         result
     };
+    let sig_status = fields.next().ok_or("Missing signature status.")?;
+    let sig_status = sig_status.trim();
+    if sig_status.len() != 1 || !sig_status.is_ascii() {
+        return Err("Invalid signature status.".into());
+    }
+    let signer = fields.next().ok_or("Missing signature signer.")?;
+    let signature = if sig_status == "N" {
+        String::new()
+    } else {
+        // U=unknown, X/B/R/E=bad/expired/revoked/error, G/Y=good/trusted.
+        let signer = if signer.chars().any(char::is_control) {
+            String::new()
+        } else {
+            signer.to_owned()
+        };
+        format!("{sig_status} {signer}").trim().to_owned()
+    };
     let message = fields
         .next()
         .filter(|message| {
@@ -85,6 +105,7 @@ fn parse(bytes: &[u8], expected: &str) -> Result<Detail, String> {
         time,
         parents,
         message: message.into(),
+        signature,
     })
 }
 pub(crate) fn read(root: &Path, hash: &str, cancel: &AtomicBool) -> Result<Detail, String> {
@@ -102,7 +123,28 @@ pub(crate) fn read(root: &Path, hash: &str, cancel: &AtomicBool) -> Result<Detai
     if !status.success() {
         return Err("Selected local commit is unavailable. No network fetch was attempted.".into());
     }
-    parse(&bytes, hash)
+    let mut detail = parse(&bytes, hash)?;
+    let (raw, status) = read_only::run(
+        super::command(root).args(["cat-file", "commit", hash]),
+        cancel,
+        Instant::now() + DEADLINE,
+        128 * 1024,
+        "Embedded signature inspection",
+        "Commit object exceeds signature inspection limit",
+    )?;
+    if !status.success() {
+        return Err("Local commit object unavailable; no verifier was run.".into());
+    }
+    let headers = raw
+        .split(|b| *b == b'\n')
+        .take_while(|line| !line.is_empty());
+    if headers
+        .into_iter()
+        .any(|line| line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 "))
+    {
+        detail.signature = "P".into();
+    }
+    Ok(detail)
 }
 #[cfg(test)]
 mod tests;

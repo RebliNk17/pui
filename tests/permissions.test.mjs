@@ -266,3 +266,16 @@ test('mode changes invalidate outstanding approval',async()=>{
   const h=host('manual',{approve:true});h.ctx.ui.confirm=async()=>{h.control.update('plan',h.ctx);return true;};
   assert.equal((await h.gate('write',{path:'src/file'})).block,true);
 });
+
+test('Plan workflow handoff only opens native review; it never grants tool permissions', async () => {
+  const h = host('plan', { approve: true, decision:'allow' });
+  assert.equal(await h.gate('pui_workflow', {plan:{steps:['Inspect then fix'], checks:{criteria:[{id:'C1',description:'Pass tests',command:'npm test'}]}}}), undefined);
+  assert.equal(h.calls.length,0); assert.equal(h.prompts.length,0);
+  assert.equal((await h.gate('pui_workflow', {})).block,true);
+  assert.equal((await h.gate('write', {path:'src/file', content:'blocked'})).block,true);
+  assert.equal((await h.events.get('user_bash')({command:'npm test'},h.ctx)).result.exitCode,1);
+  const readonly=host('plan',{readonly:true});
+  assert.equal((await readonly.gate('pui_workflow',{plan:{steps:['x']}})).block,true);
+  const noAsk=host('dontAsk');
+  assert.equal((await noAsk.gate('pui_workflow',{plan:{steps:['x']}})).block,true);
+});

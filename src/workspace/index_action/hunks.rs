@@ -1,5 +1,6 @@
 //! Whole-hunk extraction only; no line splitting, patch synthesis or rename guessing.
 use super::*;
+pub(crate) mod lines;
 pub(crate) mod selection;
 fn ranges(snapshot: &Snapshot) -> Option<(usize, Vec<usize>)> {
     if !match snapshot.action {

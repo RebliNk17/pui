@@ -16,6 +16,14 @@ pub(super) struct IndexActions {
     owner: Option<(PathBuf, String)>,
     pub(super) notice: Option<String>,
     success_notice: Option<String>,
+    /// (root, source path, recovery path) from the last completed discard.
+    pub(super) last_discard: Option<(PathBuf, String, PathBuf)>,
+    pub(super) restore_confirm: bool,
+    recovery_review: Option<workspace::index_action::recovery::Review>,
+    recovery_pending: Option<
+        workspace::read_only::Request<Result<workspace::index_action::recovery::Review, String>>,
+    >,
+    pub(super) restoring: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
     pub(super) fn index_row(
@@ -25,6 +33,7 @@ impl Changes {
         file: &workspace::FileChange,
         loading: bool,
     ) {
+        self.conflict_row(ui, workspace, file);
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::small(ui, format!("Index/worktree: {}", file.status)));
             for action in [Action::Stage, Action::Unstage, Action::Discard] {
@@ -120,6 +129,11 @@ impl Changes {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.index_actions.success_notice = Some(if snapshot.action == Action::Discard {
+            self.index_actions.last_discard = Some((
+                snapshot.root.clone(),
+                snapshot.path.clone(),
+                snapshot.recovery_path(),
+            ));
             format!(
                 "Working file restored from index. Staged changes and HEAD unchanged. Recovery copy: {}",
                 snapshot.recovery_path().display()
@@ -145,7 +159,10 @@ impl Changes {
     }
     pub(in crate::app) fn cancel_index_intent(&mut self) {
         self.commit = Default::default();
+        self.conflict = Default::default();
         self.initialize = Default::default();
+        self.clone = Default::default();
+        self.fetch = Default::default();
         self.identity_setup = Default::default();
         self.push = Default::default();
         self.branch_create = Default::default();
@@ -153,6 +170,11 @@ impl Changes {
         self.index_actions.inspected = None;
         self.index_actions.applying = None;
         self.index_actions.controls.clear();
+        self.index_actions.restore_confirm = false;
+        self.index_actions.recovery_review = None;
+        self.index_actions.recovery_pending = None;
+        self.index_actions.restoring = None;
+        self.index_actions.last_discard = None;
     }
     pub(super) fn index_inputs(&mut self, ctx: &egui::Context, visible: bool) {
         let state = &mut self.index_actions;
@@ -165,8 +187,16 @@ impl Changes {
         {
             state.pending = None;
             state.inspected = None;
+            state.restore_confirm = false;
+            state.recovery_review = None;
+            state.recovery_pending = None;
+            state.restoring = None;
+            if state.owner.as_ref() != Some(&self.identity) {
+                state.last_discard = None;
+            }
             if state.owner.as_ref() != Some(&self.identity) || !self.index_writable {
                 state.applying = None;
+                state.restoring = None;
             }
             state.controls.clear();
         }
@@ -201,12 +231,44 @@ impl Changes {
             });
             self.refresh = true;
         }
+        if let Some(result) = state.restoring.as_ref().and_then(|r| match r.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err("Restore ended; inspect the file.".into())),
+        }) {
+            state.restoring = None;
+            state.notice = Some(match result {
+                Ok(()) => {
+                    "Discarded content restored to the working file. Recovery copy retained.".into()
+                }
+                Err(e) => e,
+            });
+            self.refresh = true;
+        }
         let own = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("git-index-confirm"));
         if ctx.memory(|m| m.top_modal_layer().is_some_and(|l| l != own))
             || egui::Popup::is_any_open(ctx)
         {
             state.inspected = None;
             return;
+        }
+        if let Some(result) = state
+            .recovery_pending
+            .as_ref()
+            .and_then(|r| match r.try_recv() {
+                Ok(r) => Some(r),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(Err("Recovery review ended.".into())),
+            })
+        {
+            state.recovery_pending = None;
+            match result {
+                Ok(review) => {
+                    state.recovery_review = Some(review);
+                    state.restore_confirm = true;
+                }
+                Err(e) => state.notice = Some(e),
+            }
         }
         let focused = ctx.memory(|m| m.focused());
         let pointer = ctx.input(|i| {
@@ -263,7 +325,13 @@ impl Changes {
             self.index_actions.inspected = None;
             return;
         }
-        let title = if snapshot.hunk.0.is_some() {
+        let title = if snapshot.lines.active && snapshot.lines.count() > 0 {
+            if snapshot.action == Action::Stage {
+                "Stage selected lines"
+            } else {
+                "Unstage selected lines"
+            }
+        } else if snapshot.hunk.0.is_some() {
             if snapshot.action == Action::Stage {
                 "Stage selected hunks"
             } else {
@@ -282,9 +350,7 @@ impl Changes {
             confirmations::Dialog::new("git-index-confirm", title, description, "Cancel", title)
                 .destructive(destructive)
                 .enabled(
-                    snapshot
-                        .hunk
-                        .valid(workspace::index_action::hunks::count(snapshot)),
+                    if snapshot.lines.active {workspace::index_action::hunks::lines::synthesize(snapshot).is_some()}else{snapshot.hunk.valid(workspace::index_action::hunks::count(snapshot))},
                 )
                 .show(ctx, |ui| {
                     ui.add(
@@ -324,10 +390,11 @@ impl Changes {
                     if count > 0 {
                         ui.horizontal_wrapped(|ui| {
                             if ui
-                                .selectable_label(snapshot.hunk.0.is_none(), "Whole file")
+                                .selectable_label(snapshot.hunk.0.is_none()&&!snapshot.lines.active, "Whole file")
                                 .clicked()
                             {
                                 snapshot.hunk = Default::default();
+                                snapshot.lines = Default::default();
                             }
                             for n in 0..count {
                                 let response = ui.selectable_label(
@@ -336,6 +403,7 @@ impl Changes {
                                 );
                                 if response.clicked() {
                                     snapshot.hunk.toggle(n);
+                                    snapshot.lines = Default::default();
                                 }
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| {
@@ -348,12 +416,57 @@ impl Changes {
                             }
                         });
                     }
+                    // Per-line selection: pick individual target-side changes.
+                    let line_sets = workspace::index_action::hunks::lines::parse(snapshot);
+                    if let Some(line_sets) = line_sets {
+                        let line_mode = ui
+                            .checkbox(&mut snapshot.lines.active, "Select individual lines")
+                            .on_hover_text(
+                                "Choose specific added (or staged-to-remove) lines instead of whole hunks. Only changes that form a cleanly applicable patch are accepted.",
+                            );
+                        if line_mode.changed() {
+                            snapshot.hunk = Default::default();
+                            snapshot.lines.lines = vec![Vec::new();line_sets.len()];
+                        }
+                        if snapshot.lines.active {
+                            if snapshot.lines.lines.len() != line_sets.len() {
+                                snapshot.lines.lines = vec![Vec::new();line_sets.len()];
+                            }
+
+                            let labels=workspace::index_action::hunks::lines::labels(snapshot);
+                            for (hunk_index, set) in line_sets.iter().enumerate() {
+                                ui.label(theme::small(
+                                    ui,
+                                    format!("Hunk {} — {} lines", hunk_index + 1, set.len()),
+                                ));
+                                ui.horizontal_wrapped(|ui| {
+                                    let sel = &mut snapshot.lines.lines[hunk_index];
+                                    for (pos, &ord) in set.iter().enumerate() {
+                                        let on = sel.contains(&ord);
+                                        let response = ui.selectable_label(
+                                            on,
+                                            format!("Change {}: {}", pos+1,labels.get(ord).map_or("",String::as_str)),
+                                        );
+                                        if response.clicked() {
+                                            if on {
+                                                sel.retain(|n|*n!=ord);
+                                            } else {
+                                                sel.push(ord);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
                     let selected = if snapshot.hunk.0.is_some() {
                         workspace::index_action::hunks::extract_selection(snapshot)
+                    } else if snapshot.lines.active {
+                        workspace::index_action::hunks::lines::synthesize(snapshot)
                     } else {
                         None
                     };
-                    let preview = if snapshot.hunk.0 == Some(0) {
+                    let preview = if snapshot.lines.active&&selected.is_none(){"(select at least one valid changed line)"}else if snapshot.hunk.0 == Some(0) {
                         "(select at least one hunk or Whole file)"
                     } else {
                         selected.as_deref().unwrap_or(&snapshot.preview)
@@ -388,6 +501,134 @@ impl Changes {
             let snapshot = self.index_actions.inspected.take().unwrap();
             if choice == confirmations::Choice::Confirm {
                 self.apply_index(ctx, snapshot);
+            }
+        }
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                !matches!(
+                    e,
+                    egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_)
+                )
+            })
+        });
+    }
+    pub(super) fn recovery_control(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+        let Some((root, path, recovery)) = self.index_actions.last_discard.clone() else {
+            return;
+        };
+        if root != workspace.root || self.index_actions.owner.as_ref() != Some(&self.identity) {
+            return;
+        }
+        let enabled = self.index_writable
+            && self.index_actions.applying.is_none()
+            && self.index_actions.pending.is_none()
+            && self.index_actions.restoring.is_none()
+            && self.index_actions.recovery_pending.is_none()
+            && !self.index_actions.restore_confirm
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.memory(|m| m.top_modal_layer().is_none());
+        let b = prompt_ui::button(
+            ui,
+            "Review discarded-content restore…",
+            prompt_ui::Button::Secondary,
+            enabled,
+        );
+        self.index_actions.controls.push(b.id);
+        if b.clicked() {
+            let Some(permit) = branches::permit(ui.ctx()) else {
+                return;
+            };
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            self.index_actions.recovery_pending =
+                Some(workspace::read_only::Request::new(rx, cancel.clone()));
+            let ctx = ui.ctx().clone();
+            if std::thread::Builder::new()
+                .name("pui-recovery-review".into())
+                .spawn(move || {
+                    let result = workspace::index_action::recovery::inspect(
+                        &root, &path, &recovery, &cancel,
+                    );
+                    drop(permit);
+                    if !cancel.load(Ordering::Acquire) {
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
+                    }
+                })
+                .is_err()
+            {
+                self.index_actions.recovery_pending = None;
+                self.index_actions.notice = Some("Cannot review recovery.".into());
+            }
+        }
+    }
+    pub(super) fn restore_dialog(&mut self, ctx: &egui::Context) {
+        if !self.index_actions.restore_confirm {
+            return;
+        }
+        let own = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("recovery-restore-confirm"),
+        );
+        if !self.index_writable
+            || self.index_actions.owner.as_ref() != Some(&self.identity)
+            || egui::Popup::is_any_open(ctx)
+            || prompt_ui::modal_owns_current_pass(ctx)
+            || ctx.memory(|m| m.top_modal_layer().is_some_and(|l| l != own))
+            || self.index_actions.restoring.is_some()
+        {
+            self.index_actions.restore_confirm = false;
+            return;
+        }
+        let Some(review) = self.index_actions.recovery_review.clone() else {
+            self.index_actions.restore_confirm = false;
+            return;
+        };
+        let (root, path, recovery) = (
+            review.root.clone(),
+            review.path.clone(),
+            review.recovery.clone(),
+        );
+        let Some(_) = self.index_actions.last_discard.as_ref() else {
+            self.index_actions.restore_confirm = false;
+            return;
+        };
+        let choice = confirmations::Dialog::new(
+            "recovery-restore-confirm",
+            "Restore discarded content?",
+            "Copies the retained recovery copy back to this file, overwriting its current working content. Staged changes and HEAD are unchanged. The recovery copy is retained. No commit or push.",
+            "Cancel",
+            "Restore",
+        )
+        .destructive(true)
+        .show(ctx, |ui| {
+            ui.add(egui::Label::new(theme::small(ui, format!("{}\n{}\nRecovery: {}", root.display(),path, recovery.display()))).wrap());
+        });
+        if let Some(choice) = choice {
+            self.index_actions.restore_confirm = false;
+            if choice == confirmations::Choice::Confirm {
+                let Some(permit) = branches::permit(ctx) else {
+                    self.index_actions.notice = Some("Git busy; inspect again.".into());
+                    return;
+                };
+                let (tx, rx) = mpsc::channel();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.index_actions.restoring =
+                    Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                let ctx = ctx.clone();
+                if std::thread::Builder::new()
+                    .name("pui-recovery-restore".into())
+                    .spawn(move || {
+                        let result = workspace::index_action::recovery::apply(review, &cancel);
+                        drop(permit);
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
+                    })
+                    .is_err()
+                {
+                    self.index_actions.restoring = None;
+                    self.index_actions.notice = Some("Cannot start restore worker.".into());
+                }
             }
         }
         ctx.input_mut(|i| {

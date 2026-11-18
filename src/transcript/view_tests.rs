@@ -54,7 +54,7 @@ fn draw(
 }
 
 #[test]
-fn action_runs_break_at_thinking_and_prose_in_both_views_and_streaming_states() {
+fn normal_groups_actions_across_hidden_thinking_while_verbose_preserves_chronology() {
     for theme in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
         for width in [320.0, 800.0] {
             for running in [false, true] {
@@ -101,21 +101,23 @@ fn action_runs_break_at_thinking_and_prose_in_both_views_and_streaming_states() 
                             .position(|row| row.contains(needle))
                             .unwrap_or_else(|| panic!("missing {needle}: {rows:?}"))
                     };
-                    assert!(pos("REASONING_BOUNDARY") < pos("PROGRESS_BOUNDARY"));
-                    assert!(pos("PROGRESS_BOUNDARY") < pos("LAST_THOUGHT"));
-                    assert!(pos("LAST_THOUGHT") < pos("FINAL_REPLY"));
-                    assert!(!rows.iter().any(|row| row == "Thinking"));
+                    assert!(pos("PROGRESS_BOUNDARY") < pos("FINAL_REPLY"));
                     if view == View::Normal {
+                        for hidden in ["Thinking", "REASONING_BOUNDARY", "LAST_THOUGHT"] {
+                            assert!(!rows.iter().any(|row| row.contains(hidden)), "{rows:?}");
+                        }
                         assert_eq!(
                             rows.iter().filter(|row| row.starts_with("ran ")).count(),
-                            2,
+                            1,
                             "{rows:?}"
                         );
-                        assert!(pos("ran 2") < pos("REASONING_BOUNDARY"));
-                        assert!(pos("REASONING_BOUNDARY") < pos("ran 1"));
-                        assert!(pos("ran 1") < pos("PROGRESS_BOUNDARY"));
+                        assert!(pos("ran 3 commands") < pos("PROGRESS_BOUNDARY"));
                         assert!(!rows.iter().any(|row| row.contains("RESULT_")));
                     } else {
+                        assert!(pos("REASONING_BOUNDARY") < pos("PROGRESS_BOUNDARY"));
+                        assert!(pos("PROGRESS_BOUNDARY") < pos("LAST_THOUGHT"));
+                        assert!(pos("LAST_THOUGHT") < pos("FINAL_REPLY"));
+                        assert_eq!(rows.iter().filter(|row| *row == "Thinking").count(), 2);
                         assert!(!rows.iter().any(|row| row.starts_with("ran ")));
                         assert!(pos("RESULT_0") < pos("RESULT_1"));
                         assert!(pos("RESULT_1") < pos("REASONING_BOUNDARY"));
@@ -129,7 +131,7 @@ fn action_runs_break_at_thinking_and_prose_in_both_views_and_streaming_states() 
 }
 
 #[test]
-fn legacy_reasoning_is_visible_before_reply_and_empty_blocks_do_not_split_actions() {
+fn normal_hides_legacy_reasoning_without_hiding_reply_or_splitting_actions() {
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
     let messages = vec![
@@ -162,10 +164,8 @@ fn legacy_reasoning_is_visible_before_reply_and_empty_blocks_do_not_split_action
         },
     ];
     let rows = draw(&ctx, &messages, View::Normal, false, 800.0);
-    let thought = rows
-        .iter()
-        .position(|row| row.contains("LEGACY_THOUGHT"))
-        .unwrap();
+    assert!(!rows.iter().any(|row| row.contains("LEGACY_THOUGHT")));
+    assert!(!rows.iter().any(|row| row == "Thinking"));
     let reply = rows
         .iter()
         .position(|row| row.contains("LEGACY_REPLY"))
@@ -174,7 +174,108 @@ fn legacy_reasoning_is_visible_before_reply_and_empty_blocks_do_not_split_action
         .iter()
         .position(|row| row.contains("read 2 files"))
         .unwrap();
-    assert!(thought < reply && reply < actions, "{rows:?}");
+    assert!(reply < actions, "{rows:?}");
+    let verbose = draw(&ctx, &messages, View::Verbose, false, 800.0);
+    let thought = verbose
+        .iter()
+        .position(|row| row.contains("LEGACY_THOUGHT"))
+        .unwrap();
+    let reply = verbose
+        .iter()
+        .position(|row| row.contains("LEGACY_REPLY"))
+        .unwrap();
+    assert!(thought < reply, "{verbose:?}");
+}
+
+#[test]
+fn normal_summarizes_recorded_actions_not_reasoning_and_preserves_failures_and_replies() {
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    let tools = vec![
+        Tool {
+            id: "read".into(),
+            name: "read".into(),
+            finished: true,
+            ..Default::default()
+        },
+        Tool {
+            id: "edit".into(),
+            name: "edit".into(),
+            finished: true,
+            ..Default::default()
+        },
+        Tool {
+            id: "test".into(),
+            name: "bash".into(),
+            finished: true,
+            failed: true,
+            ..Default::default()
+        },
+    ];
+    let source = "PRIVATE_REASONING ".repeat(2000);
+    let messages = vec![Message {
+        role: "assistant".into(),
+        thinking: source.clone(),
+        tools,
+        blocks: vec![
+            Block::Tool("read".into()),
+            Block::Thinking(source.clone()),
+            Block::Tool("edit".into()),
+            Block::Thinking(source.clone()),
+            Block::Tool("test".into()),
+            Block::Text("FINAL_ANSWER_WITH_BLOCKER".into()),
+        ],
+        ..Default::default()
+    }];
+    for width in [280.0, 800.0] {
+        let rows = draw(&ctx, &messages, View::Normal, false, width);
+        assert!(!rows.iter().any(|row| row.contains("PRIVATE_REASONING")));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.starts_with("read 1 file"))
+                .count(),
+            1
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("edited 1 file") && row.contains("ran 1 command"))
+        );
+        assert!(rows.iter().any(|row| row == "1 failed"));
+        assert!(rows.iter().any(|row| row == "FINAL_ANSWER_WITH_BLOCKER"));
+    }
+    assert_eq!(messages[0].thinking, source);
+    assert!(matches!(&messages[0].blocks[1], Block::Thinking(text) if text == &source));
+}
+
+#[test]
+fn thinking_only_stream_stays_quiet_in_normal_and_short_progress_is_not_hidden() {
+    let ctx = egui::Context::default();
+    crate::theme::install(&ctx);
+    for length in [1, 100, 2000] {
+        let messages = vec![Message {
+            role: "assistant".into(),
+            blocks: vec![Block::Thinking("HIDDEN_THOUGHT ".repeat(length))],
+            ..Default::default()
+        }];
+        let rows = draw(&ctx, &messages, View::Normal, true, 320.0);
+        assert!(
+            !rows.iter().any(|row| row.contains("HIDDEN_THOUGHT")
+                || row == "Thinking"
+                || row == "Show more")
+        );
+    }
+    let messages = vec![Message {
+        role: "assistant".into(),
+        blocks: vec![Block::Text(
+            "Let me think. This is a progress update.".into(),
+        )],
+        ..Default::default()
+    }];
+    let rows = draw(&ctx, &messages, View::Normal, true, 320.0);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("This is a progress update."))
+    );
 }
 
 #[test]

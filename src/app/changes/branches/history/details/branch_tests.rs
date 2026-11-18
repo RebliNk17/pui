@@ -19,6 +19,7 @@ fn history_branch_action_exact_loaded_oid_only_and_disabled_demo_no_handoff() {
                     time: 1700000000,
                     parents: vec![],
                     message: "selected commit".into(),
+                    signature: String::new(),
                 }));
                 let draw = |history: &mut History, demo: bool| {
                     ctx.run(
@@ -59,6 +60,7 @@ fn history_branch_action_exact_loaded_oid_only_and_disabled_demo_no_handoff() {
                     time: 0,
                     parents: vec![],
                     message: "mismatch".into(),
+                    signature: String::new(),
                 }));
                 history.detail.branch_key = Some(id);
                 draw(&mut history, false);

@@ -144,6 +144,7 @@ fn detail_owner_change_receiver_drop_disconnect_and_mismatched_delivery_never_ad
         time: 1,
         parents: vec![],
         message: "wrong".into(),
+        signature: String::new(),
     }))
     .unwrap();
     details.poll();

@@ -430,3 +430,137 @@ fn native_row_pointer_starts_inspection_not_write_and_hide_cancels_confirmation(
     assert!(changes.index_actions.inspected.is_none());
     assert!(changes.index_actions.applying.is_none());
 }
+#[test]
+fn line_selection_confirmation_themes_zoom_escape_no_apply() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let root = std::env::temp_dir().join(format!("pui-lines-ui-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();
+            workspace::tests::git(&root, &["init", "--initial-branch=main"]);
+            let content = (0..12).map(|n| format!("base {n}\n")).collect::<String>();
+            std::fs::write(root.join("README.md"), &content).unwrap();
+            workspace::tests::git(&root, &["add", "README.md"]);
+            workspace::tests::git(
+                &root,
+                &[
+                    "-c",
+                    "user.name=T",
+                    "-c",
+                    "user.email=t@e.i",
+                    "commit",
+                    "-qm",
+                    "base",
+                ],
+            );
+            std::fs::write(
+                root.join("README.md"),
+                content
+                    .replace("base 3\n", "selected A\n")
+                    .replace("base 9\n", "selected B\n"),
+            )
+            .unwrap();
+            let root = std::fs::canonicalize(root).unwrap();
+            let mut snapshot = workspace::index_action::prepare(
+                &root,
+                "README.md",
+                " M",
+                Action::Stage,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            snapshot.lines.active = true;
+            snapshot.lines.lines = vec![vec![0], vec![]];
+            let mut changes = Changes {
+                index_writable: true,
+                ..Default::default()
+            };
+            changes.index_actions.inspected = Some(snapshot);
+            let before = std::fs::read(root.join(".git/index")).unwrap();
+            for n in 0..4 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(420.0, 620.0),
+                        )),
+                        events: if n == 3 {
+                            vec![key(egui::Key::Escape)]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                    |ctx| changes.index_dialog(ctx),
+                );
+            }
+            assert!(changes.index_actions.inspected.is_none());
+            assert!(changes.index_actions.applying.is_none());
+            assert_eq!(before, std::fs::read(root.join(".git/index")).unwrap());
+        }
+    }
+}
+#[test]
+fn restore_dialog_themes_zoom_escape_no_write() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut changes = Changes {
+                index_writable: true,
+                ..Default::default()
+            };
+            let (root, snapshot) = prepared();
+            let recovery = snapshot.recovery_path();
+            workspace::index_action::apply(
+                workspace::index_action::prepare(
+                    &root,
+                    "README.md",
+                    " M",
+                    Action::Discard,
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let review = workspace::index_action::recovery::inspect(
+                &root,
+                "README.md",
+                &recovery,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let before = std::fs::read(root.join("README.md")).unwrap();
+            changes.index_actions.owner = Some(changes.identity.clone());
+            changes.index_actions.last_discard = Some((root.clone(), "README.md".into(), recovery));
+            changes.index_actions.recovery_review = Some(review);
+            changes.index_actions.restore_confirm = true;
+            for n in 0..4 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(420.0, 620.0),
+                        )),
+                        events: if n == 3 {
+                            vec![key(egui::Key::Escape)]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                    |ctx| changes.restore_dialog(ctx),
+                );
+            }
+            assert!(!changes.index_actions.restore_confirm);
+            assert!(changes.index_actions.restoring.is_none());
+            assert_eq!(std::fs::read(root.join("README.md")).unwrap(), before);
+        }
+    }
+}
