@@ -114,6 +114,7 @@ impl Pui {
     pub(in crate::app) fn automation_panel(&mut self, ctx: &egui::Context) {
         let colors = theme::palette(ctx);
         let writable = self.automation.writable() && !self.demo;
+        let deletable = self.can_delete_scheduled_job();
         let mut action = None;
         let mut creator = None;
         let mut reschedule = None;
@@ -138,7 +139,10 @@ impl Pui {
                     ui.label(theme::small(ui, "Design preview · fixture jobs only · no commands or provider calls"));
                 }
                 if self.automation.lock.is_none() && self.automation.home.is_some() && !self.automation.failed {
-                    ui.add(egui::Label::new(RichText::new("Read-only · Another Pui window owns the scheduler. Manage jobs in that window; this window takes over when it closes.").color(colors.amber)).wrap());
+                    ui.add(egui::Label::new(RichText::new("Another Pui window owns scheduling. You can delete jobs here; other changes must be made in that window. This window takes over when it closes.").color(colors.amber)).wrap());
+                }
+                if self.automation.deleting.is_some() {
+                    ui.label(theme::small(ui, "Deleting job in the scheduler’s window…"));
                 }
                 if let Some(error) = &self.automation.error {
                     ui.add(egui::Label::new(RichText::new(error).color(colors.red)).wrap());
@@ -190,7 +194,7 @@ impl Pui {
                                         if matches!(job.trigger,Trigger::Monitor{..})&&ui.add_enabled(writable&&!job.enabled&&job.pending.is_none()&&!job.dispatching&&self.automation.precheck.is_none(),egui::Button::new("Test once…")).clicked(){test=Some(job.id.clone());}
                                         ui.menu_button("•••", |ui| {
                                             theme::menu_controls(ui);
-                                            if ui.add_enabled(writable, egui::Button::new("Delete…")).clicked() {
+                                            if ui.add_enabled(deletable, egui::Button::new("Delete…")).clicked() {
                                                 self.automation.delete = Some(job.id.clone());
                                                 ui.close();
                                             }
@@ -300,7 +304,7 @@ impl Pui {
                 "Cancel",
                 "Delete job",
             )
-            .enabled(writable)
+            .enabled(deletable)
             .show(ctx, |ui| {
                 if let Some(job) = self.automation.jobs.iter().find(|job| job.id == id) {
                     ui.add(egui::Label::new(RichText::new(&job.name).strong()).wrap());
@@ -313,7 +317,7 @@ impl Pui {
             match choice {
                 Some(confirmations::Choice::Cancel) => self.automation.delete = None,
                 Some(confirmations::Choice::Confirm) => {
-                    if let Err(error) = self.change_job(&id, "delete") {
+                    if let Err(error) = self.request_scheduled_job_delete(&id) {
                         self.automation.error = Some(error);
                     }
                     self.automation.delete = None;

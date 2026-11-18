@@ -215,6 +215,57 @@ fn expanded_actions_preserve_demo_and_read_only_guards() {
 }
 
 #[test]
+fn orphan_delete_is_available_in_observer_window_and_confirmation_cancel_sends_nothing() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        mode.apply(&ctx);
+        ctx.set_zoom_factor(1.25);
+        app.demo = false;
+        app.agents.nodes.clear();
+        app.client = None;
+        let home = std::env::temp_dir().join(format!("pui-delete-ui-{}", uuid::Uuid::new_v4()));
+        let _owner = store::lock(&home).unwrap();
+        store::save(&home, &app.automation.jobs).unwrap();
+        app.automation.home = Some(home.clone());
+        app.sync = sync::WindowSync::new_at(&ctx, false, Some(home.join("registry")));
+        app.automation.jobs[0].error = Some("Creator agent is unavailable".into());
+        assert!(app.can_delete_scheduled_job());
+        assert!(!app.automation.writable());
+        let size = Vec2::new(900.0, 1000.0);
+        let text = frame(&mut app, &ctx, size, vec![]);
+        click(
+            &mut app,
+            &ctx,
+            size,
+            position(&text, "Morning release review"),
+        );
+        let text = frame(&mut app, &ctx, size, vec![]);
+        click(&mut app, &ctx, size, position(&text, "•••"));
+        let text = frame(&mut app, &ctx, size, vec![]);
+        click(&mut app, &ctx, size, position(&text, "Delete…"));
+        assert!(app.automation.delete.is_some());
+        let text = frame(&mut app, &ctx, size, vec![]);
+        assert!(text.iter().any(|(label, _)| label == "Delete job"));
+        click(&mut app, &ctx, size, position(&text, "Cancel"));
+        assert!(app.automation.delete.is_none());
+        assert!(app.automation.deleting.is_none());
+        assert_eq!(store::load(&home).unwrap().len(), 4);
+        assert!(app.agents.nodes.is_empty());
+        // Confirming in an observer queues exactly one request, with no direct write.
+        app.automation.delete = Some(app.automation.jobs[0].id.clone());
+        for _ in 0..3 {
+            frame(&mut app, &ctx, size, vec![]);
+        }
+        let text = frame(&mut app, &ctx, size, vec![]);
+        click(&mut app, &ctx, size, position(&text, "Delete job"));
+        assert!(app.automation.delete.is_none());
+        assert!(app.automation.deleting.is_some());
+        assert_eq!(store::load(&home).unwrap().len(), 4);
+    }
+}
+
+#[test]
 fn scheduled_tasks_use_the_shared_breadcrumb_to_return_to_chat() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

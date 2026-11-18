@@ -319,7 +319,7 @@ fn inspector_keeps_terminal_workflows_visible_and_history_accessible() {
 }
 
 #[test]
-fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selection() {
+fn workflow_card_and_picker_use_session_ownership_not_workspace_or_global_selection() {
     let mut app = app();
     proposal(&mut app);
     app.tasks.current_mut().unwrap().objective = "First session only".into();
@@ -330,7 +330,8 @@ fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selecti
     let second = app.tasks.selected.clone().unwrap();
     app.tasks.open = false;
     app.state.session_file = Some("/fixture/task-parent.jsonl".into());
-    app.toggle_chat_tasks();
+    let id = app.inspector_workflow().unwrap().id.clone();
+    app.open_task_from_board(id, None);
     assert_eq!(app.tasks.selected.as_deref(), Some(first.as_str()));
     for _ in 0..3 {
         render(&mut app, vec![], true);
@@ -348,11 +349,12 @@ fn task_toolbar_and_picker_use_session_ownership_not_workspace_or_global_selecti
     assert!(!text.iter().any(|(s, _)| s.contains("Second session only")));
     app.tasks.open = false;
     app.state.session_file = Some("/fixture/second-parent.jsonl".into());
-    app.toggle_chat_tasks();
+    let id = app.inspector_workflow().unwrap().id.clone();
+    app.open_task_from_board(id, None);
     assert_eq!(app.tasks.selected.as_deref(), Some(second.as_str()));
     app.tasks.open = false;
     app.state.session_file = Some("/fixture/no-tasks.jsonl".into());
-    app.toggle_chat_tasks();
+    assert!(app.inspector_workflow().is_none());
     assert_eq!(app.tasks.records.len(), 2);
     assert_eq!(app.tasks.selected.as_deref(), Some(second.as_str()));
     assert!(!app.tasks.open);
@@ -399,7 +401,7 @@ fn unsaved_chats_have_distinct_workflows_and_foreign_live_work_does_not_hijack_n
     assert!(app.workflow_task().is_none());
     app.tasks.live = Some(first.clone());
     app.tasks.live_mut().unwrap().phase = Phase::Building;
-    app.toggle_chat_tasks();
+    assert!(app.inspector_workflow().is_none());
     assert!(!app.tasks.open);
     assert!(app.workflow_task().is_none());
     assert_eq!(app.tasks.records.len(), 1);

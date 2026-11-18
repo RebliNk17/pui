@@ -102,19 +102,6 @@ impl Pui {
         }
     }
 
-    pub(in crate::app) fn toggle_chat_tasks(&mut self) {
-        if !self.tasks.open && self.task_for_chat().is_none() {
-            return;
-        }
-        self.kanban.open = false;
-        self.automation.open = false;
-        if self.tasks.open {
-            self.task_parent_chat();
-        } else if let Some(id) = self.task_for_chat().map(|t| t.id.clone()) {
-            self.open_task_from_board(id, None);
-        }
-    }
-
     pub(in crate::app) fn chat_task_cards(&self) -> Vec<ChatCard> {
         self.tasks
             .records
