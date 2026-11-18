@@ -293,7 +293,7 @@ pub(crate) fn apply_timed(
     );
     match result{Ok((bytes,status))=>outcome(&bytes,status.success()),Err(_)=>Err("Push cancelled, timed out or unavailable; remote completion may be uncertain. Inspect remote state before retrying. No automatic retry.".into())}
 }
-fn network_command(root: &Path) -> std::process::Command {
+pub(crate) fn network_command(root: &Path) -> std::process::Command {
     let mut command = read_only::command(root);
     command
         .env_remove("GIT_SSH")
