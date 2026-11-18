@@ -488,7 +488,7 @@ impl Pui {
                         egui::WidgetType::Button,
                         true,
                         self.updates.open,
-                        label,
+                        &label,
                     )
                 });
                 if response
