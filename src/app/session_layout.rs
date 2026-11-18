@@ -123,6 +123,7 @@ impl Pui {
         if !had_memory_layout {
             self.restore_workspace_layout();
         }
+        self.open_queued_previews();
     }
 
     fn set_layout_panels(&self, panels: &[Option<PanelState>]) {

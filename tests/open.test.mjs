@@ -28,6 +28,16 @@ test('pui_open waits for host acknowledgment and resolves workspace paths withou
   assert.match(h.tool.promptGuidelines[0], /instead of only printing/);
   assert.equal(h.tool.executionMode, 'sequential');
 });
+test('background previews report queued, not opened, and explain chat selection without parent retry', async () => {
+  const h = host(async () => JSON.stringify({ queued: true }));
+  const result = await h.run('/tmp/preview.html');
+  assert.deepEqual(result.details, { target: '/tmp/preview.html', queued: true, opening: false });
+  assert.match(result.content[0].text, /when the user selects this chat/);
+  assert.match(result.content[0].text, /visible workspace was not changed/);
+  assert.doesNotMatch(result.content[0].text, /Opened viewer/);
+  assert.match(h.tool.description, /parent or child/);
+  assert.match(h.tool.promptGuidelines[0], /do not claim it is already visible/);
+});
 test('absolute tmp reports, @paths, and localhost URLs are passed to the viewer', async () => {
   const h = host();
   for (const [target, expected] of [['/tmp/review.md', '/tmp/review.md'], ['@src/main.rs', '/workspace/src/main.rs'], ['http://localhost:3000', 'http://localhost:3000/']]) {
@@ -40,7 +50,7 @@ test('invalid schemes and embedded URL credentials never reach the host', async 
   assert.equal(h.requests.length, 0);
 });
 test('host errors, missing app, timeout and malformed acknowledgments are not success', async () => {
-  for (const value of [undefined, '{}', 'not JSON', JSON.stringify({ error: 'Blocked sensitive file' })]) await assert.rejects(host(async () => value).run('/tmp/report.md'));
+  for (const value of [undefined, '{}', 'not JSON', JSON.stringify({ error: 'Blocked sensitive file' }), JSON.stringify({ queued: 'true' }), JSON.stringify({ opening: true, queued: true }), JSON.stringify({ opening: true, queued: 'yes' }), JSON.stringify({ opening: 'yes', queued: true })]) await assert.rejects(host(async () => value).run('/tmp/report.md'));
   const h = host();
   h.ctx.mode = 'tui';
   await assert.rejects(h.run('report.md'), /native Pui/);

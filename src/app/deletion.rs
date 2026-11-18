@@ -674,6 +674,7 @@ impl Pui {
         }
         self.forget_deleted_agent_ids(ids);
         if active {
+            self.preview_opens.clear();
             self.files = Default::default();
             self.changes.stale_review_comments();
             let review_comments = std::mem::take(&mut self.changes.review_comments);

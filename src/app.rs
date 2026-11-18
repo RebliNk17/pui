@@ -207,6 +207,7 @@ pub struct Pui {
     output_revision: u64,
     inspector_panel: bool,
     files: files::Browser,
+    preview_opens: Vec<String>,
     session_layouts: session_layout::SessionLayouts,
     terminals: terminal::Terminals,
     changes: changes::Changes,
@@ -356,6 +357,7 @@ impl Pui {
             output_revision: u64::MAX,
             inspector_panel: false,
             files: Default::default(),
+            preview_opens: Vec::new(),
             session_layouts: Default::default(),
             terminals: Default::default(),
             changes: Default::default(),
@@ -800,6 +802,7 @@ impl Pui {
         self.completion_run = Default::default();
         self.attention_observed = Default::default();
         self.dialog_text.clear();
+        self.preview_opens.clear();
         self.questions = Default::default();
         self.current_dialog.clear();
         self.pending_dialog = None;

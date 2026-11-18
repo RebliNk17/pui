@@ -69,6 +69,7 @@ pub(super) struct Chat {
     pub(super) connected: bool,
     loading: bool,
     pub(super) pending: Option<PathBuf>,
+    preview_opens: Vec<String>,
     preview: Option<Receiver<Result<crate::history::Preview, String>>>,
     partial: bool,
     pub(super) draft: String,
@@ -365,6 +366,7 @@ impl Pui {
             connected: std::mem::take(&mut self.connected),
             loading: std::mem::take(&mut self.loading_chat),
             pending: self.pending_session.take(),
+            preview_opens: std::mem::take(&mut self.preview_opens),
             preview: self.preview_rx.take(),
             partial: std::mem::take(&mut self.preview_partial),
             draft: std::mem::take(&mut self.draft),
@@ -396,6 +398,7 @@ impl Pui {
         self.connected = chat.connected;
         self.loading_chat = chat.loading;
         self.pending_session = chat.pending;
+        self.preview_opens = chat.preview_opens;
         self.preview_rx = chat.preview;
         self.preview_partial = chat.partial;
         self.draft = chat.draft;

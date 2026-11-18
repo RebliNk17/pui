@@ -5,6 +5,8 @@ mod delimited;
 mod image_preview;
 mod line_target;
 mod loader;
+#[cfg(test)]
+mod open_tests;
 mod quick_paths;
 mod svg;
 mod table_preferences;
@@ -648,14 +650,9 @@ impl Browser {
         root: &Path,
         target: &str,
     ) -> Result<(), String> {
-        if target.is_empty() || target.len() > 8192 || target.chars().any(char::is_control) {
-            return Err("Invalid file path or URL.".into());
-        }
+        let resolved = preview_target(root, target)?;
         self.workspace(ctx, root);
         if super::webview::web_url(target) {
-            if !cfg!(target_os = "macos") {
-                return Err("Bundled Chromium is currently packaged for macOS only.".into());
-            }
             self.activate_restored_tabs(ctx);
             if !self.urls.iter().any(|url| url == target) {
                 if self.urls.len() >= MAX_TABS {
@@ -667,29 +664,7 @@ impl Browser {
             self.browser_mode = true;
             self.selected_url = Some(target.into());
         } else {
-            if target.contains("://")
-                || target.starts_with("javascript:")
-                || target.starts_with("data:")
-                || target.starts_with("mailto:")
-            {
-                return Err("Only HTTP/HTTPS pages and local file paths are supported.".into());
-            }
-            let path = if let Some(relative) = target.strip_prefix("~/") {
-                dirs::home_dir()
-                    .ok_or("Cannot resolve home directory.")?
-                    .join(relative)
-            } else {
-                root.join(target.strip_prefix('@').unwrap_or(target))
-            };
-            if path.components().any(|part| {
-                matches!(part, Component::ParentDir)
-                    || matches!(part, Component::Normal(name) if sensitive(name))
-            }) {
-                return Err(
-                    "Sensitive files and parent-directory traversal cannot be previewed.".into(),
-                );
-            }
-            self.select_file(ctx, path, true);
+            self.select_file(ctx, PathBuf::from(resolved), true);
         }
         self.open = true;
         self.address = target.into();
@@ -1354,33 +1329,57 @@ impl Pui {
         {
             return false;
         }
-        let result = if self.agents.background {
-            Err("Cannot open a viewer from a background chat. Ask the parent to present the deliverable.".into())
-        } else {
-            serde_json::from_str::<Value>(protocol::string(record, "placeholder"))
-                .map_err(|_| "Invalid open request.".to_owned())
-                .and_then(|request| {
-                    if request["version"] != 1 {
-                        return Err("Unsupported open request version.".into());
+        let result = serde_json::from_str::<Value>(protocol::string(record, "placeholder"))
+            .map_err(|_| "Invalid open request.".to_owned())
+            .and_then(|request| {
+                if request["version"] != 1 {
+                    return Err("Unsupported open request version.".into());
+                }
+                let target = request["target"]
+                    .as_str()
+                    .ok_or("Missing file path or URL.")?;
+                let target = preview_target(&self.prefs.cwd, target)?;
+                if self.agents.background {
+                    // Background means non-selected, not necessarily a child agent.
+                    // Keep intent with the owning Chat, never the visible Browser.
+                    if !self.preview_opens.contains(&target) {
+                        if self.preview_opens.len() >= MAX_TABS {
+                            return Err(
+                                "This chat has 16 queued previews. Select it before opening more."
+                                    .into(),
+                            );
+                        }
+                        self.preview_opens.push(target);
                     }
-                    let target = request["target"]
-                        .as_str()
-                        .ok_or("Missing file path or URL.")?;
-                    self.files.open_target(&self.ctx, &self.prefs.cwd, target)
-                })
-        };
-        let value = match result {
-            Ok(()) => {
-                self.settings_open = false;
-                self.inspector_panel = false;
-                json!({"opening":true})
-            }
-            Err(error) => json!({"error":error}),
-        };
+                    Ok(json!({"queued":true}))
+                } else {
+                    self.present_preview(&target)?;
+                    Ok(json!({"opening":true}))
+                }
+            });
+        let value = result.unwrap_or_else(|error| json!({"error":error}));
         self.send(
             json!({"type":"extension_ui_response","id":record["id"],"value":value.to_string()}),
         );
         true
+    }
+
+    fn present_preview(&mut self, target: &str) -> Result<(), String> {
+        self.files.open_target(&self.ctx, &self.prefs.cwd, target)?;
+        self.settings_open = false;
+        self.inspector_panel = false;
+        Ok(())
+    }
+
+    pub(super) fn open_queued_previews(&mut self) {
+        if self.agents.background {
+            return;
+        }
+        for target in std::mem::take(&mut self.preview_opens) {
+            if let Err(error) = self.present_preview(&target) {
+                self.state.notice = Some(error);
+            }
+        }
     }
 
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
@@ -1422,6 +1421,41 @@ impl Pui {
             ctx.request_repaint();
         }
     }
+}
+
+// Validate without touching viewer state or starting reads/Chromium. Queued and
+// immediate opens use the same policy; deferred paths resolve in the owner's cwd.
+fn preview_target(root: &Path, target: &str) -> Result<String, String> {
+    if target.is_empty() || target.len() > 8192 || target.chars().any(char::is_control) {
+        return Err("Invalid file path or URL.".into());
+    }
+    if super::webview::web_url(target) {
+        if !cfg!(target_os = "macos") {
+            return Err("Bundled Chromium is currently packaged for macOS only.".into());
+        }
+        return Ok(target.into());
+    }
+    if target.contains("://")
+        || target.starts_with("javascript:")
+        || target.starts_with("data:")
+        || target.starts_with("mailto:")
+    {
+        return Err("Only HTTP/HTTPS pages and local file paths are supported.".into());
+    }
+    let path = if let Some(relative) = target.strip_prefix("~/") {
+        dirs::home_dir()
+            .ok_or("Cannot resolve home directory.")?
+            .join(relative)
+    } else {
+        root.join(target.strip_prefix('@').unwrap_or(target))
+    };
+    if path.components().any(|part| {
+        matches!(part, Component::ParentDir)
+            || matches!(part, Component::Normal(name) if sensitive(name))
+    }) {
+        return Err("Sensitive files and parent-directory traversal cannot be previewed.".into());
+    }
+    Ok(path.display().to_string())
 }
 
 fn sensitive(name: &std::ffi::OsStr) -> bool {

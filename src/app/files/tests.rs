@@ -1,6 +1,6 @@
 use super::*;
 
-fn fixture() -> PathBuf {
+pub(super) fn fixture() -> PathBuf {
     let root = std::env::temp_dir().join(format!("pui-files-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(root.join("src/nested")).unwrap();
     fs::create_dir(root.join(".git")).unwrap();
@@ -932,6 +932,13 @@ fn background_open_does_not_steal_foreground_workspace() {
     assert!(app.open_request(&request));
     assert!(!app.files.open);
     assert!(app.state.dialogs.is_empty());
+    assert_eq!(
+        app.preview_opens,
+        [app.prefs.cwd.join("README.md").display().to_string()]
+    );
+    app.open_queued_previews();
+    assert!(!app.files.open); // background processing cannot drain the intent
+    assert_eq!(app.preview_opens.len(), 1);
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
