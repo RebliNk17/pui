@@ -8,12 +8,12 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 struct Pool {
     used: AtomicUsize,
 }
-pub(super) struct Lease {
+pub(crate) struct Lease {
     pool: Arc<Pool>,
     bytes: AtomicUsize,
 }
 impl Lease {
-    pub(super) fn new(ctx: &egui::Context) -> Arc<Self> {
+    pub(crate) fn new(ctx: &egui::Context) -> Arc<Self> {
         let pool = ctx.data_mut(|data| {
             data.get_temp_mut_or_default::<Arc<Pool>>(egui::Id::new("file-preview-budget"))
                 .clone()

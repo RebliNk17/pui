@@ -1,8 +1,8 @@
 //! Docked, read-only file and page viewer. Retained visible tabs restore automatically.
-mod budget;
+pub(crate) mod budget;
 mod chrome;
 mod delimited;
-mod image_preview;
+pub(crate) mod image_preview;
 mod line_target;
 mod loader;
 #[cfg(test)]

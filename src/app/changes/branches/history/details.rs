@@ -435,7 +435,13 @@ impl History {
                             ui.add(egui::Label::new(RichText::new(label).monospace().size(10.5).color(theme::palette(ui.ctx()).dim)).wrap().selectable(false)).on_hover_text("Parent inspection limit reached (32 steps). Back returns to the retained list; no objects are fetched.");
                         }
                     }
-                    self.detail.patch.show_result(ui);
+                    self.detail.patch.show_result(
+                        ui,
+                        self.owner.as_ref(),
+                        detail,
+                        demo,
+                        self.detail.comparison.base,
+                    );
                     ui.add(
                         egui::Label::new(theme::small(
                             ui,

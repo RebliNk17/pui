@@ -18,7 +18,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed))
 }
 
-pub(super) fn decode(
+pub(crate) fn decode(
     bytes: &[u8],
     budget: Option<&budget::Lease>,
     cancel: Option<&AtomicBool>,

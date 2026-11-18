@@ -1,5 +1,6 @@
 //! One explicit literal patch per selected detail. No persisted intent.
 use super::*;
+mod image;
 mod viewer;
 #[derive(Default)]
 pub(super) struct Patch {
@@ -9,9 +10,11 @@ pub(super) struct Patch {
     pub(super) key: Option<egui::Id>,
     path: Option<String>,
     pub(super) viewer: viewer::Viewer,
+    image: image::Image,
 }
 impl Patch {
     pub(super) fn poll(&mut self) {
+        self.image.poll();
         let Some(pending) = &self.pending else {
             return;
         };
@@ -140,7 +143,19 @@ impl Patch {
     pub(super) fn pending(&self) -> bool {
         self.pending.is_some()
     }
-    pub(super) fn show_result(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn show_result(
+        &mut self,
+        ui: &mut egui::Ui,
+        owner: Option<&Owner>,
+        detail: &workspace::history::details::Detail,
+        demo: bool,
+        base: usize,
+    ) {
+        if let Some(path) = &self.path {
+            if let Some(owner) = owner {
+                self.image.show(ui, owner, detail, demo, path, base);
+            }
+        }
         if self.pending.is_some() {
             ui.label(theme::small(ui, "Reading local commit patch…"));
         } else if let Some(result) = &self.result {
