@@ -1,0 +1,20 @@
+# Bounded, provider-independent reasoning preview
+
+## Behavior
+
+- Structured thinking remains chronological between action groups, but is labeled Thinking with a subtle side border. Ordinary progress/final reply text is unchanged.
+- Reasoning longer than 600 Unicode characters or 12 source lines defaults to a five-row plain-text preview (at most 600 characters). This bounds collapsed layout work as well as vertical space. Short thinking retains full Markdown formatting.
+- Show more expands original Markdown; Show less restores the preview. Disclosure identity is scoped to turn/message/block, not model or text content; streaming growth retains state and unrelated blocks stay independent. Disclosure changes invalidate the containing turn's cached height.
+- Applies consistently to Normal and Verbose views, DeepSeek, Claude and GPT. Legacy messages with a separate thinking field also use this renderer. No model-name heuristics, prose classification, protocol mutation or hidden/recovered reasoning inference.
+- The installed Pi OpenAI-compatible adapter was inspected: reasoning_content/reasoning/reasoning_text are normalized to thinking_delta events. Pui already handles structured thinking deltas, indexed snapshots and history. No provider adapter changes were needed. This is not live-provider acceptance evidence or proof that every third-party endpoint labels reasoning correctly.
+
+## Validation
+
+Isolated branch/worktree `bounded-reasoning-preview`, based on `be6c2baa`. Main checkout was undergoing user-requested history reconciliation and unrelated task edits; those were not changed or included.
+
+- Complete `scripts/test-rust.sh` with supported `PUI_TEST_THREADS=1`: **1,929 binary + 10 integration = 1,939 passed**, 2 existing ignored, zero failures. Every bulk/serial group included once. `/tmp/pui-bounded-reasoning-full.log`.
+- Transcript focused checks: **32 passed**, 1 existing benchmark ignored. `/tmp/pui-bounded-reasoning-focused.log`.
+- Strict all-target Clippy, full formatting and diff whitespace checks passed: `/tmp/pui-bounded-reasoning-{clippy,fmt}.log`.
+- Native egui checks cover light/dark themes, 320/800 widths, bounded geometry, Unicode, expansion/collapse via pointer input, independent blocks, streaming-state retention and idle settling. Provider fixtures cover DeepSeek/Claude/GPT structured history in live/completed and Normal/Verbose rendering, while ordinary prose remains text. Existing streamed-delta and retry tests passed as part of the full suite.
+
+No provider calls, manual installed-app acceptance, push, packaging, installation or restart. This commit is local to the isolated feature branch; master integration remains separate.

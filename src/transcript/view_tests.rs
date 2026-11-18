@@ -104,7 +104,7 @@ fn action_runs_break_at_thinking_and_prose_in_both_views_and_streaming_states() 
                     assert!(pos("REASONING_BOUNDARY") < pos("PROGRESS_BOUNDARY"));
                     assert!(pos("PROGRESS_BOUNDARY") < pos("LAST_THOUGHT"));
                     assert!(pos("LAST_THOUGHT") < pos("FINAL_REPLY"));
-                    assert!(!rows.iter().any(|row| row == "Thinking"));
+                    assert_eq!(rows.iter().filter(|row| *row == "Thinking").count(), 2);
                     if view == View::Normal {
                         assert_eq!(
                             rows.iter().filter(|row| row.starts_with("ran ")).count(),
