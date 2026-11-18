@@ -1,4 +1,5 @@
-//! Account budget, distinct from session cost and context usage. No credential handling in Rust.
+//! Account budget and per-provider subscription limits, distinct from session cost and context
+//! usage. No credential handling in Rust: the Node helper returns aggregates only.
 use crate::icons::{self, Icon};
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense, Stroke, Vec2};
 use serde::Deserialize;
@@ -35,6 +36,55 @@ pub struct AccountUsage {
     #[serde(default)]
     pub days: Vec<DaySpend>,
 }
+/// One rate-limit window such as a 5-hour session, weekly cap or per-model quota.
+#[derive(Clone, Deserialize, Default, Debug, PartialEq)]
+pub struct UsageWindow {
+    pub label: String,
+    /// Percent of the window consumed, 0–100.
+    pub used: f64,
+    /// Reset time, Unix milliseconds.
+    #[serde(default)]
+    pub resets: Option<f64>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+#[derive(Clone, Deserialize, Default, Debug)]
+pub struct ProviderUsage {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub models: Vec<UsageWindow>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+#[derive(Deserialize, Default)]
+struct Report {
+    #[serde(default)]
+    providers: Vec<ProviderUsage>,
+    #[serde(default)]
+    unsupported: Vec<String>,
+    #[serde(default)]
+    litellm: Option<AccountUsage>,
+    #[serde(default)]
+    litellm_error: Option<String>,
+}
+impl ProviderUsage {
+    /// Most constrained headline window (models excluded unless there are no general windows).
+    fn peak(&self) -> Option<&UsageWindow> {
+        let list = if self.windows.is_empty() {
+            &self.models
+        } else {
+            &self.windows
+        };
+        list.iter().max_by(|a, b| a.used.total_cmp(&b.used))
+    }
+}
 impl AccountUsage {
     fn ratio(&self) -> Option<f32> {
         self.max
@@ -44,8 +94,12 @@ impl AccountUsage {
 }
 #[derive(Default)]
 pub struct Usage {
+    /// LiteLLM gateway budget, when that provider is configured.
     pub data: Option<AccountUsage>,
-    rx: Option<Receiver<Result<AccountUsage, String>>>,
+    pub providers: Vec<ProviderUsage>,
+    pub unsupported: Vec<String>,
+    litellm_error: Option<String>,
+    rx: Option<Receiver<Result<Report, String>>>,
     pub error: Option<String>,
     last: Option<Instant>,
 }
@@ -90,12 +144,105 @@ impl Usage {
                     },
                 ],
             }),
+            providers: vec![
+                ProviderUsage {
+                    id: "anthropic".into(),
+                    name: "Claude".into(),
+                    plan: Some("Max".into()),
+                    windows: vec![
+                        demo_window(
+                            "5-hour session",
+                            68.0,
+                            DEMO_NOW + 2.0 * HOUR + 14.0 * MINUTE,
+                        ),
+                        demo_window(
+                            "Weekly · all models",
+                            8.0,
+                            DEMO_NOW + 4.0 * DAY + 6.0 * HOUR,
+                        ),
+                    ],
+                    models: vec![demo_window(
+                        "Weekly · Opus",
+                        21.0,
+                        DEMO_NOW + 4.0 * DAY + 6.0 * HOUR,
+                    )],
+                    ..Default::default()
+                },
+                ProviderUsage {
+                    id: "openai-codex".into(),
+                    name: "ChatGPT · Codex".into(),
+                    plan: Some("pro".into()),
+                    windows: vec![
+                        demo_window("5-hour session", 34.0, DEMO_NOW + 3.0 * HOUR),
+                        demo_window("Weekly", 52.0, DEMO_NOW + 2.0 * DAY),
+                    ],
+                    ..Default::default()
+                },
+                ProviderUsage {
+                    id: "antigravity".into(),
+                    name: "Google Antigravity".into(),
+                    models: vec![
+                        demo_window("Gemini 3 Pro", 40.0, DEMO_NOW + 5.0 * HOUR),
+                        demo_window("Claude Sonnet 4.5", 12.0, DEMO_NOW + 5.0 * HOUR),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            unsupported: vec!["Google (API key)".into()],
             ..Default::default()
+        }
+    }
+    /// A reset time has passed since the last fetch, so cached percentages are stale.
+    fn reset_elapsed(&self) -> bool {
+        let now = now_ms();
+        self.providers
+            .iter()
+            .flat_map(|p| p.windows.iter().chain(&p.models))
+            .any(|w| w.resets.is_some_and(|r| r <= now))
+    }
+    /// Highest headline usage across subscriptions and the gateway budget.
+    fn headline(&self) -> Option<(String, f32)> {
+        let mut best = self
+            .providers
+            .iter()
+            .filter_map(|p| p.peak().map(|w| (p.name.clone(), (w.used / 100.0) as f32)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some(ratio) = self.data.as_ref().and_then(AccountUsage::ratio)
+            && best.as_ref().is_none_or(|b| ratio > b.1)
+        {
+            best = Some(("LiteLLM".into(), ratio));
+        }
+        best
+    }
+    fn summary(&self) -> String {
+        let now = now_ms();
+        let mut lines = Vec::new();
+        for provider in &self.providers {
+            for w in &provider.windows {
+                lines.push(format!(
+                    "{} · {}: {:.0}%{}",
+                    provider.name,
+                    w.label,
+                    w.used,
+                    w.resets
+                        .map(|r| format!(" · resets {}", until(r, now)))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        if let Some(ratio) = self.data.as_ref().and_then(AccountUsage::ratio) {
+            lines.push(format!("LiteLLM budget: {:.0}%", ratio * 100.0));
+        }
+        if lines.is_empty() {
+            "Account and subscription usage · separate from chat context and session cost".into()
+        } else {
+            lines.join("\n")
         }
     }
     pub fn refresh(&mut self, ctx: &egui::Context, force: bool) {
         if self.rx.is_some()
             || (!force
+                && !self.reset_elapsed()
                 && self
                     .last
                     .is_some_and(|t| t.elapsed() < Duration::from_secs(300)))
@@ -115,8 +262,11 @@ impl Usage {
     pub fn poll(&mut self) {
         if let Some(result) = self.rx.as_ref().and_then(|r| r.try_recv().ok()) {
             match result {
-                Ok(data) => {
-                    self.data = Some(data);
+                Ok(report) => {
+                    self.data = report.litellm;
+                    self.providers = report.providers;
+                    self.unsupported = report.unsupported;
+                    self.litellm_error = report.litellm_error;
                     self.error = None;
                 }
                 Err(error) => self.error = Some(error),
@@ -130,7 +280,7 @@ impl Usage {
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
         let response = response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Account budget · separate from chat context and session cost");
+            .on_hover_text(self.summary());
         let p = ui.painter();
         let logo = egui::Rect::from_center_size(
             rect.left_center() + egui::vec2(12.0, 0.0),
@@ -144,14 +294,22 @@ impl Usage {
             FontId::proportional(17.0),
             colors.accent,
         );
-        p.text(
-            rect.left_center() + egui::vec2(32.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            "Local account",
-            FontId::proportional(11.0),
+        let headline = self.headline();
+        let title = match &headline {
+            Some((name, _)) if !self.providers.is_empty() => name.clone(),
+            _ => "Local account".into(),
+        };
+        let title = p.layout_no_wrap(title, FontId::proportional(11.0), colors.text);
+        let clip = egui::Rect::from_min_max(
+            rect.left_top() + egui::vec2(32.0, 0.0),
+            egui::pos2(rect.right() - 70.0, rect.bottom()),
+        );
+        p.with_clip_rect(clip).galley(
+            egui::pos2(clip.left(), rect.center().y - title.size().y / 2.0),
+            title,
             colors.text,
         );
-        let ratio = self.data.as_ref().and_then(AccountUsage::ratio);
+        let ratio = headline.map(|(_, ratio)| ratio);
         let label = ratio
             .map(|ratio| format!("{:.0}%", ratio * 100.0))
             .unwrap_or_else(|| "—".into());
@@ -174,7 +332,7 @@ impl Usage {
                     egui::vec2(track.width() * ratio.clamp(0.0, 1.0), 3.0),
                 ),
                 2,
-                colors.accent,
+                level(&colors, ratio),
             );
         }
         if response.clicked() && !demo {
@@ -204,7 +362,26 @@ impl Usage {
                 }
             });
         });
+        // Reset countdowns are relative to now; keep them current while the panel is open.
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
+        let now = if demo { DEMO_NOW } else { now_ms() };
+        for (index, provider) in self.providers.iter().enumerate() {
+            if index > 0 {
+                ui.separator();
+            }
+            ui.push_id(&provider.id, |ui| provider_section(ui, provider, now));
+        }
+        if let Some(error) = &self.litellm_error {
+            if !self.providers.is_empty() {
+                ui.separator();
+            }
+            ui.label(RichText::new("LiteLLM").size(12.0).strong());
+            ui.label(RichText::new(error).size(10.0).color(colors.muted));
+        }
         if let Some(data) = &self.data {
+            if !self.providers.is_empty() {
+                ui.separator();
+            }
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
                 ring(ui, rect.center(), 22.0, data.ratio());
@@ -314,15 +491,27 @@ impl Usage {
                 .size(10.0)
                 .color(colors.dim),
             );
-        } else {
+        } else if self.providers.is_empty() && self.litellm_error.is_none() {
             ui.label(crate::theme::small(
                 ui,
                 if self.rx.is_some() {
-                    "Loading LiteLLM usage…"
+                    "Loading account usage…"
+                } else if self.last.is_some() && self.error.is_none() {
+                    "No subscription usage found. Connect Claude, ChatGPT, Copilot or Antigravity in Settings → Providers."
                 } else {
                     "No account usage reported yet."
                 },
             ));
+        }
+        if !self.unsupported.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Usage not reported by: {}",
+                    self.unsupported.join(", ")
+                ))
+                .size(10.0)
+                .color(colors.dim),
+            );
         }
         if let Some(error) = &self.error {
             ui.label(RichText::new(error).size(10.0).color(colors.muted));
@@ -334,6 +523,116 @@ fn money(n: f64) -> String {
         format!("${n:.0}")
     } else {
         format!("${n:.2}")
+    }
+}
+const MINUTE: f64 = 60_000.0;
+const HOUR: f64 = 60.0 * MINUTE;
+const DAY: f64 = 24.0 * HOUR;
+/// Fixed clock for demo/screenshot fixtures so countdowns are deterministic.
+const DEMO_NOW: f64 = 1_795_000_000_000.0;
+fn demo_window(label: &str, used: f64, resets: f64) -> UsageWindow {
+    UsageWindow {
+        label: label.into(),
+        used,
+        resets: Some(resets),
+        detail: None,
+    }
+}
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0)
+}
+/// Relative reset countdown: "in 2h 14m", "in 4d 6h", or "now" once elapsed.
+fn until(resets: f64, now: f64) -> String {
+    let left = resets - now;
+    if left <= 0.0 {
+        return "now · refresh".into();
+    }
+    let minutes = (left / MINUTE).ceil() as u64;
+    let (d, h, m) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    if d > 0 {
+        format!("in {d}d {h}h")
+    } else if h > 0 {
+        format!("in {h}h {m}m")
+    } else {
+        format!("in {m}m")
+    }
+}
+fn absolute(resets: f64) -> Option<String> {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_millis_opt(resets as i64)
+        .single()
+        .map(|t| t.format("Resets %a %b %-d, %H:%M").to_string())
+}
+fn level(colors: &crate::theme::Palette, ratio: f32) -> egui::Color32 {
+    if ratio >= 0.9 {
+        colors.red
+    } else if ratio >= 0.75 {
+        colors.amber
+    } else {
+        colors.accent
+    }
+}
+fn meter(ui: &mut egui::Ui, window: &UsageWindow, now: f64) {
+    let colors = crate::theme::palette(ui.ctx());
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.spacing_mut().interact_size.y = 16.0;
+        let row = ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let reset = window
+                    .resets
+                    .map(|r| format!(" · resets {}", until(r, now)))
+                    .unwrap_or_default();
+                ui.label(crate::theme::small(
+                    ui,
+                    format!("{:.0}%{reset}", window.used),
+                ));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(&window.label).size(12.0)).truncate());
+                });
+            });
+        });
+        if let Some(text) = window.resets.and_then(absolute) {
+            row.response.on_hover_text(text);
+        }
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+        ui.painter().rect_filled(rect, 2, colors.hover);
+        let ratio = (window.used / 100.0).clamp(0.0, 1.0) as f32;
+        let mut fill = rect;
+        fill.set_width(rect.width() * ratio);
+        ui.painter().rect_filled(fill, 2, level(&colors, ratio));
+        if let Some(detail) = &window.detail {
+            ui.label(RichText::new(detail).size(10.0).color(colors.dim));
+        }
+    });
+}
+fn provider_section(ui: &mut egui::Ui, provider: &ProviderUsage, now: f64) {
+    let colors = crate::theme::palette(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&provider.name).size(12.0).strong());
+        if let Some(plan) = &provider.plan {
+            ui.label(RichText::new(plan).size(10.0).color(colors.muted));
+        }
+    });
+    for window in &provider.windows {
+        meter(ui, window, now);
+    }
+    if !provider.models.is_empty() {
+        ui.label(crate::theme::caption(ui, "BY MODEL"));
+        for window in &provider.models {
+            meter(ui, window, now);
+        }
+    }
+    for note in &provider.notes {
+        ui.label(RichText::new(note).size(10.0).color(colors.muted));
+    }
+    if let Some(error) = &provider.error {
+        ui.label(RichText::new(error).size(10.0).color(colors.muted));
     }
 }
 fn ring(ui: &egui::Ui, center: egui::Pos2, radius: f32, ratio: Option<f32>) {
@@ -363,7 +662,7 @@ fn ring(ui: &egui::Ui, center: egui::Pos2, radius: f32, ratio: Option<f32>) {
 pub(crate) fn sdk() -> Option<PathBuf> {
     crate::runtime::sdk()
 }
-fn fetch() -> Result<AccountUsage, String> {
+fn fetch() -> Result<Report, String> {
     let sdk = sdk()
         .filter(|p| p.is_file())
         .ok_or("Pi SDK not found. Set PUI_PI_SDK to its dist/index.js.")?;
@@ -411,8 +710,10 @@ fn fetch() -> Result<AccountUsage, String> {
     if let Some(error) = record["error"].as_str() {
         return Err(error.into());
     }
-    serde_json::from_value(record["usage"].clone())
-        .map_err(|_| "Usage data was not recognized.".into())
+    parse_report(&record["usage"])
+}
+fn parse_report(value: &serde_json::Value) -> Result<Report, String> {
+    serde_json::from_value(value.clone()).map_err(|_| "Usage data was not recognized.".into())
 }
 
 #[cfg(test)]
@@ -444,6 +745,58 @@ mod tests {
         }))
         .unwrap();
         assert!(data.days.is_empty());
+    }
+    #[test]
+    fn helper_report_parses_subscriptions_and_optional_gateway() {
+        let report = parse_report(&serde_json::json!({
+            "providers": [{ "id": "anthropic", "name": "Claude",
+                "windows": [{ "label": "5-hour session", "used": 68, "resets": 1795038599647.0 }],
+                "models": [{ "label": "Weekly · Opus", "used": 10 }], "notes": [] },
+                { "id": "openai-codex", "name": "ChatGPT · Codex", "error": "ChatGPT usage unavailable (HTTP 401)." }],
+            "unsupported": ["Google (API key)"], "litellm": null, "litellm_error": null
+        }))
+        .unwrap();
+        assert_eq!(report.providers.len(), 2);
+        assert_eq!(report.providers[0].windows[0].resets, Some(1795038599647.0));
+        assert_eq!(report.providers[0].models[0].resets, None);
+        assert!(report.providers[1].windows.is_empty());
+        assert!(report.litellm.is_none());
+        assert_eq!(report.unsupported, ["Google (API key)"]);
+    }
+    #[test]
+    fn reset_countdowns_are_compact_and_flag_elapsed_windows() {
+        let now = DEMO_NOW;
+        assert_eq!(until(now + 14.0 * MINUTE, now), "in 14m");
+        assert_eq!(until(now + 2.0 * HOUR + 14.0 * MINUTE, now), "in 2h 14m");
+        assert_eq!(until(now + 4.0 * DAY + 6.0 * HOUR, now), "in 4d 6h");
+        assert_eq!(until(now - 1.0, now), "now · refresh");
+        let mut usage = Usage::default();
+        usage.providers = vec![ProviderUsage {
+            windows: vec![demo_window("5-hour session", 50.0, now_ms() - 1.0)],
+            ..Default::default()
+        }];
+        assert!(
+            usage.reset_elapsed(),
+            "an elapsed reset bypasses the refresh throttle"
+        );
+    }
+    #[test]
+    fn footer_headline_is_most_constrained_subscription_or_budget() {
+        let usage = Usage::demo();
+        let (name, ratio) = usage.headline().unwrap();
+        assert_eq!(name, "Claude");
+        assert!((ratio - 0.68).abs() < 0.001);
+        let only_models = ProviderUsage {
+            name: "Google Antigravity".into(),
+            models: vec![demo_window("Gemini 3 Pro", 40.0, DEMO_NOW)],
+            ..Default::default()
+        };
+        assert_eq!(only_models.peak().unwrap().used, 40.0);
+        let gateway = Usage {
+            data: Usage::demo().data,
+            ..Default::default()
+        };
+        assert_eq!(gateway.headline().unwrap().0, "LiteLLM");
     }
     fn painted_labels(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
         match shape {
@@ -479,7 +832,7 @@ mod tests {
                             egui::RawInput {
                                 screen_rect: Some(egui::Rect::from_min_size(
                                     egui::Pos2::ZERO,
-                                    Vec2::new(width, 800.0),
+                                    Vec2::new(width, 1400.0),
                                 )),
                                 ..Default::default()
                             },
@@ -501,6 +854,14 @@ mod tests {
                             .any(|(s, _)| s == "BY DAY, MONTH TO DATE · UTC")
                     );
                     assert!(labels.iter().any(|(s, _)| s == "395 req"));
+                    assert!(labels.iter().any(|(s, _)| s == "68% · resets in 2h 14m"));
+                    assert!(labels.iter().any(|(s, _)| s == "Weekly · Opus"));
+                    assert!(labels.iter().any(|(s, _)| s == "Gemini 3 Pro"));
+                    assert!(
+                        labels
+                            .iter()
+                            .any(|(s, _)| s == "Usage not reported by: Google (API key)")
+                    );
                     for (label, bounds) in &labels {
                         assert!(
                             bounds.right() <= ctx.screen_rect().right() + 1.0,

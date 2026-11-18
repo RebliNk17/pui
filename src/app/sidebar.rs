@@ -2891,7 +2891,8 @@ mod tests {
                     if t.galley.job.text.starts_with("make sure") {
                         *last = last.max(t.pos.y);
                     }
-                    if t.galley.job.text == "Local account" {
+                    // Demo usage titles the footer with its most constrained subscription.
+                    if t.galley.job.text == "Local account" || t.galley.job.text == "Claude" {
                         *footer = t.pos.y;
                     }
                 }
