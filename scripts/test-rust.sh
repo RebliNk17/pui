@@ -5,6 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
+# /usr/bin/git is a macOS developer-tool launcher, not the Git executable.
+# Avoid repeating launcher resolution for every subprocess in bounded real-Git
+# fixtures. Preserve explicitly selected Git installs and all production limits.
+if [[ "$(uname -s)" == Darwin && "$(command -v git)" == /usr/bin/git ]]; then
+  developer_git=$(xcrun --find git)
+  [[ -x "$developer_git" ]] || { echo "Developer Git is unavailable." >&2; exit 1; }
+  export PATH="$(dirname "$developer_git"):$PATH"
+fi
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
 lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery

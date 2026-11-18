@@ -81,3 +81,16 @@ User requested pushing only after a completely green suite. Continued on latest 
 - Earlier unsuccessful full runs remain recorded above/in logs; the green run follows actual fixture/lint changes, not retries masked as stability. This is one complete passing run, not a measured zero-flake-rate guarantee.
 
 Remote master advanced again during final validation (scheduled-job deletion and removal of a restored legacy Workflows header button). Those changes will be integrated normally and validated before any push; no force-push or original-checkout reset is authorized or used.
+
+## Latest-master integration accepted for push
+
+Merged `origin/master` at `dcae7a06` normally (includes scheduled-job deletion and removal of the legacy Workflows header button), preserving those changes. The first combined run still hit a Git-hunk inspection deadline. A bounded launch diagnostic measured the macOS `/usr/bin/git` developer-tool shim at roughly 41 ms per trivial invocation versus about 19–21 ms for the developer Git executable; these multi-command three-second snapshots amplify that avoidable cost. The test runner now resolves `xcrun --find git` only when the caller selected `/usr/bin/git`, preserving other Git installations. This changes test-process PATH only, not production executable selection or any deadline/assertion.
+
+Accepted combined validation after that runner fix:
+
+- Complete `scripts/test-rust.sh`, supported `PUI_TEST_THREADS=1`: **1,941 binary + 10 integration = 1,951 passed**, **0 failed**, **2 pre-existing ignored**. Every bulk/serial group executed once without retries/omissions in this run. `/tmp/pui-conversational-direct-git-full.log`.
+- Full JS: **101 passed**, 0 failed, 1 pre-existing skipped. `/tmp/pui-conversational-integrated-js.log`.
+- Whole-checkout formatting, whitespace checks and strict all-target Clippy passed. `/tmp/pui-conversational-integrated-clippy.log`.
+- `bash -n scripts/test-rust.sh` passed. No OS agents, security software or other applications were stopped or reconfigured.
+
+The earlier failures remain part of the record; no claim of proven zero flake rate or paid provider/native installed-app validation is made. User explicitly authorized a normal push to master only after a green complete suite; that condition is now met for this snapshot. No force-push, installation or provider-backed workflow execution is included.
