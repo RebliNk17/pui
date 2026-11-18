@@ -122,7 +122,7 @@ GUI/Settings integration test.
 It hashes the payload before/after and fails on runtime writes. No model prompt
 or provider request is made. CI runs it after signing and before packaging.
 
-CircleCI caches the official archives and npm downloads; dependency keys cover
+GitHub Actions caches the official archives and npm downloads; dependency keys cover
 the runtime pins/lock/scripts/notices. Each app receives fresh runtime extraction
 and a locked npm install so executable caches cannot silently change shipped
 runtime contents. Existing compiled-cache retention/snapshot limits remain in

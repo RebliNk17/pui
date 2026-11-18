@@ -1,4 +1,4 @@
-# CircleCI is the active macOS builder. Opt in only after GitLab-hosted
+# GitHub Actions is the active macOS builder. Opt in only after GitLab-hosted
 # macOS runner access is available; otherwise pushes fail before jobs start.
 workflow:
   rules:

@@ -1,29 +1,24 @@
 # macOS CI and releases
 
-## Active builder: CircleCI
+## Active builder: GitHub Actions
 
-GitLab-hosted macOS was unavailable for this project's namespace. CircleCI now
-provides the active Apple Silicon build via `.circleci/config.yml`:
+GitHub Actions provides the active Apple Silicon build via `.github/workflows/macos.yml`:
 
-- Native `m4pro.medium`, pinned Xcode `26.4.1` (override the `xcode-version`
-  pipeline parameter when CircleCI retires the image).
+- Native Apple Silicon runner (`macos-15`).
 - One macOS VM performs validation and release-profile packaging, avoiding two
   CEF/toolchain setup downloads. Three cache layers restore the exact Rust
   toolchain, Cargo/npm downloads plus pinned CEF runtime, and compiled Rust/CEF
   debug/release output. Final ZIP/DMG files and credentials are never cached.
 - Cache keys include architecture, Xcode build, macOS version, Rust pin, Cargo
   lock/manifest, CEF pin, runtime pins/npm lock/notices, CI scripts and vendored Rust. Dependency/build caches
-  are branch-isolated; Cargo still checks source fingerprints before reuse.
+  are branch-isolated with fallback to `master`; Cargo still checks source fingerprints before reuse.
   App-source changes can reuse compatible compiled dependencies.
-- Caches save **even after validation failures**, so repairs do not rebuild
+- Caches save **even after validation failures** (`if: always()`), so repairs do not rebuild
   everything. Compiled snapshots are capped at **one per branch/environment per
-  UTC day** with a compatible fallback; caches expire after **3 days**. This
-  trades some incremental freshness for lower cache storage/upload cost. Bump
+  UTC day** with a compatible fallback. Bump
   key prefixes to invalidate caches. Signed release jobs must use a separate
   trusted namespace—these executable caches are for ad-hoc builds only.
-- Push/MR triggers are configured in CircleCI's GitLab integration. Configure
-  **Build Push and Merge Requests** initially; custom tag triggers may also
-  select `vX.Y.Z`. Workflow tag filters allow only stable version tags.
+- Workflow runs on `master` pushes, pull requests, and stable version tags (`vX.Y.Z`).
 - Rust tests all remain required via `scripts/test-rust.sh`: bounded bulk tests,
   serial cross-window sync/table projection/table export groups, then the
   automation restart/OS-lock regression separately. No test groups are omitted
@@ -33,84 +28,12 @@ provides the active Apple Silicon build via `.circleci/config.yml`:
   No developer Pi installation or provider key is used. A post-bundle smoke
   checks Node/npm, RPC, SDK, core search and Settings resources offline using
   a fresh HOME and relocated runtime; the payload must remain unchanged.
-- Branch builds expose ZIP/DMG, checksums, metadata and notes under **Artifacts →
-  macos-arm64**. Stable protected `vX.Y.Z` tags additionally run **gitlab-release**
-  after all build checks pass, uploading durable Generic Package assets and
-  creating the matching **GitLab Release** with changelog notes.
-- **Ad-hoc builds:** the macOS builder has no secret context; signing/notary and
-  publication variables are removed. Apple signing remains separately configured.
-  A small Linux publisher receives only `dist/releases` through a workspace,
-  executes no app/runtime code, restores no caches, and uses the dedicated
-  `pui-gitlab-releases` context. Release jobs are serialized per CircleCI project.
-- The publisher checks GitLab's project identity, live protected tag, exact built
-  commit and default-branch ancestry before uploads; artifact provenance and
-  checksums must agree. Branch/MR jobs cannot publish. Circle tag names alone
-  never imply GitLab protection. Existing differing assets/releases are not
-  overwritten. No automatic tag creation or version bump occurs.
-
-The CircleCI organization **Pui** and project **pui** are connected to the GitLab
-repository `RebliNk17/pui`. The pipeline uses `.circleci/config.yml` from the
-**triggering branch** (not a permanently pinned config branch). The initial
-`circleci-macos` implementation was merged into `master` through MR !1. The setup wizard also created `create-circleci-config`
-with a config-only commit; it is not the implementation branch and its initial
-run was canceled. CircleCI's GitLab
-OAuth integration requests account-level `api` access; authorization must be
-reviewed by the account owner. Do not put its OAuth token in repository files.
-
-Free-plan macOS access and credits must be confirmed in the CircleCI account.
-At the published M4 Pro Medium rate of 200 credits/minute, 30,000 monthly free
-credits would cover at most 150 macOS minutes if nothing else consumed credits;
-other jobs/storage reduce that allowance. No automatic paid top-ups are enabled
-by this repository configuration.
-
-## CircleCI publication setup
-
-This project's publication destination is pinned in `scripts/ci/publish-gitlab.py`:
-GitLab.com **RebliNk17/pui**, project **88726373**. Moving projects requires an
-explicit reviewed code change, not a pipeline environment override.
-
-1. Protect `v*` tags in GitLab with **Maintainers** allowed to create. Review all
-   CI/config/script changes before tagging. Only tag revisions already merged into
-   the default branch (`master`); the publisher checks ancestry with GitLab's API.
-2. Create a dedicated project access token with **api** scope and a 30-day expiry.
-   GitLab requires permission to create the protected tag to publish its release,
-   even if the tag exists, so this token uses **Maintainer**, not Developer.
-   This grants broad project API access: it is not a release-only permission.
-   Do not reuse the CircleCI integration/trigger token or a personal access token.
-3. Before adding the secret, create the CircleCI context `pui-gitlab-releases`
-   with a **project restriction** to Pui's project
-   `7a9da67d-bf7f-406f-867e-af29eb280f8e`, plus an **expression restriction**:
-
-   ```text
-   pipeline.git.tag starts-with "v" and pipeline.git.branch == "" and not job.ssh.enabled
-   ```
-
-   This is an external security boundary, not merely a filter in mutable YAML.
-   The workflow and Python gate additionally require exact stable `vX.Y.Z` tags.
-   Never remove restrictions while the context contains a secret. A missing
-   expression value fails closed. Restricted-tag maintainers control the CI code
-   receiving this token; runtime checks cannot make malicious CI config safe.
-4. Add **PUI_GITLAB_RELEASE_TOKEN** only to that restricted context. Never add it
-   to project-wide variables, build caches, macOS jobs, artifacts, app resources or
-   logs. SSH reruns are denied context access. Rotate the token and update the
-   context before expiry; revoke old tokens once replaced.
-5. In CircleCI **Project Settings → Triggers**, ensure the GitLab trigger includes
-   **Tag Push** events as well as ordinary push events. YAML tag filters alone do
-   not enable GitLab webhook triggers. The current push trigger includes both
-   `push` and `tag_push`, excluding fork merge requests.
-6. Enable GitLab's Generic Package Registry and Releases; exclude released `pui`
-   package versions from cleanup and disable duplicate filenames where available.
-   CircleCI serializes its own publisher jobs, but GitLab's GET-before-PUT API is
-   not atomic against other publishers. Do not run the optional GitLab publisher
-   or manual uploads concurrently for the same version. The script refuses
-   observed conflicts and treats redirected storage 404s as failures, not missing
-   files. Private-project downloads require GitLab authorization.
-
-Configured on 2026-11-15 with explicit approval: maintainer-only `v*` protection,
-project/tag/SSH-restricted context, and dedicated token expiring **2026-12-15**.
-This setup does not itself create a tag or publish a release. The first real tag
-pipeline is still required to validate live uploads and GitLab release permissions.
-No billing/plan or Apple account changes are involved.
+- Builds expose ZIP/DMG, checksums, metadata and notes under **Artifacts →
+  macos-arm64**. Stable `vX.Y.Z` tags additionally run **github-release**
+  after all build checks pass, creating the matching **GitHub Release** with
+  changelog notes and uploaded release assets.
+- `PUI_GITHUB_REPOSITORY` is set at build time so Pui's in-app GitHub update
+  checker points to the repository's published releases.
 
 ## Optional GitLab pipeline
 
@@ -118,8 +41,7 @@ The retained GitLab pipeline is **disabled by default** to avoid the immediate
 “no matching runner” failures. Set project CI variable
 `PUI_ENABLE_GITLAB_MACOS=true` only after eligible GitLab-hosted macOS runners
 are available. The sections below describe this optional pipeline, including
-its protected-tag publication and Apple credential setup; they do not apply
-to CircleCI's separate publisher/context.
+its protected-tag publication and Apple credential setup.
 
 ## GitLab pipeline
 
@@ -183,7 +105,7 @@ initialization before installing the exact requested toolchain.
 Rust is pinned to `1.88.0` (the project's current minimum) using `RUST_VERSION`.
 CEF is fetched before Cargo to reuse the existing pinned archive/hash validation.
 Only Cargo registry/git downloads are cached; no build products, keychains, or
-credential files are cached or included in artifacts. CEF is fetched afresh per GitLab job. CircleCI additionally caches verified
+credential files are cached or included in artifacts. CEF is fetched afresh per GitLab job. GitHub Actions additionally caches verified
 Node/search-tool archives under `target/agent-runtime-cache`; npm dependency
 integrity is rechecked by locked `npm ci` into every fresh staged bundle.
 
@@ -265,7 +187,7 @@ command tests do not certify Gatekeeper behavior or future CEF entitlement needs
 4. Review/commit/push through your normal process. After the default-branch checks
    pass, an authorized maintainer creates and pushes the matching protected
    `vX.Y.Z` tag. **No tag, commit, push or upload is performed by local scripts.**
-5. Inspect the CircleCI tag pipeline (`macos-build` → `gitlab-release`) and GitLab Release. Verify `SHA256SUMS`, download/mount
+5. Inspect the GitHub Actions tag workflow (`macos-build` → `github-release`) and GitHub Release. Verify `SHA256SUMS`, download/mount
    the DMG, and launch from a clean Mac, including Browser and DevTools.
 
 Manual local packaging (ad-hoc, no publication):
@@ -283,14 +205,14 @@ overlaying stale CEF resources. Retained bundles consume disk; remove them manua
 when no longer needed. Local signing alone does not imply notarization; the CI
 wrapper performs the complete sequence.
 
-Retrying the CircleCI **gitlab-release** job (or optional GitLab **release:gitlab**)
+Retrying the optional GitLab **release:gitlab** job
 with the original workspace/artifacts reuses byte-identical package files and an identical
 release, so a partial upload can finish without rebuilding. Rebuilding signed
 assets usually changes bytes (secure timestamps); do not overwrite a published
 version. If an upload conflicts, investigate and issue a new version. Package
 uploads can remain if later release creation fails. No automatic deletion/rollback
 is attempted. Private GitLab projects require authorized users for downloads;
-Neither `CI_JOB_TOKEN` nor the CircleCI project token is ever shipped in the
+`CI_JOB_TOKEN` is never shipped in the
 application or release manifest. Public
 update discovery for a private project requires a separate distribution/auth design.
 

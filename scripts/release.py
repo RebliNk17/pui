@@ -147,7 +147,7 @@ class GitLab:
 
 
 def publish(root=ROOT, *, api=None, project_id=None, tag=None, commit=None):
-    # CircleCI supplies an API only after live tag/project/revision verification.
+    # External callers supply an API after live tag/project/revision verification.
     # The retained GitLab pipeline keeps its existing protected-ref gate.
     if api is None:
         if os.environ.get("CI_COMMIT_REF_PROTECTED") != "true":

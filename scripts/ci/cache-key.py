@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write CircleCI cache keys before restore; never read environment secrets.
+"""Write CI cache keys before restore; never read environment secrets.
 
 The download/build key covers ABI/tooling/dependencies, not app source. Cargo
 fingerprints still decide what must rebuild after checkout. A daily build cache
@@ -18,7 +18,7 @@ def fingerprints(root, sdk, arch, system):
     for value in ("cache-v1", sdk, arch, system):
         toolchain.update(value.encode() + b"\0")
     dependencies = toolchain.copy()
-    paths = [root / "Cargo.toml", root / "Cargo.lock", root / ".circleci/config.yml"]
+    paths = [root / "Cargo.toml", root / "Cargo.lock", root / ".github/workflows/macos.yml"]
     paths += sorted((root / "scripts/ci").glob("*"))
     paths += [root / "scripts/fetch-chromium-macos.py", root / "scripts/bundle-runtime-macos.py"]
     paths += sorted((root / "packaging/runtime").rglob("*"))
@@ -35,11 +35,11 @@ def main():
     root = Path(__file__).resolve().parent.parent.parent
     sdk = subprocess.check_output(["xcodebuild", "-version"], text=True)
     system = subprocess.check_output(["sw_vers", "-productVersion"], text=True)
-    config = (root / ".circleci/config.yml").read_text()
+    config = (root / ".github/workflows/macos.yml").read_text()
     # Include the checked-in Rust pin in the toolchain key, not unrelated edits.
     rust = next(line.strip() for line in config.splitlines() if line.strip().startswith("RUST_VERSION:"))
     toolchain, dependencies = fingerprints(root, sdk + rust, os.uname().machine, system)
-    output = root / ".circleci-cache"
+    output = root / ".ci-cache"
     output.mkdir(exist_ok=True)
     for name, value in (("toolchain", toolchain), ("dependencies", dependencies),
                         ("day", datetime.now(timezone.utc).strftime("%Y-%m-%d"))):

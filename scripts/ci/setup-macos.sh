@@ -27,7 +27,7 @@ toolchain="$HOME/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin/bin"
 if [[ -x "$toolchain/cargo" && -x "$toolchain/rustfmt" && -x "$toolchain/cargo-clippy" ]]; then
   echo "Reusing cached Rust $RUST_VERSION."
 else
-  # CircleCI images may already contain rustup. Otherwise use Homebrew rather
+  # CI images may already contain rustup. Otherwise use Homebrew rather
   # than curl-pipe-shell, without its redundant default-toolchain postinstall.
   if ! command -v rustup >/dev/null; then
     brew install --skip-post-install rustup
