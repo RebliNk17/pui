@@ -96,6 +96,11 @@ pub(super) struct Settings {
     pub permission: PermissionMode,
     pub compact_percent: u32,
     pub keep_recent_tokens: u32,
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
+}
+fn default_auto_check_updates() -> bool {
+    true
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -104,6 +109,7 @@ impl Default for Settings {
             permission: PermissionMode::Auto,
             compact_percent: 85,
             keep_recent_tokens: 20000,
+            auto_check_updates: true,
         }
     }
 }
