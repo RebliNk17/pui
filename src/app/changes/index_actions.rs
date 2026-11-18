@@ -264,7 +264,13 @@ impl Changes {
             self.index_actions.inspected = None;
             return;
         }
-        let title = if snapshot.hunk.0.is_some() {
+        let title = if snapshot.lines.active && snapshot.lines.count() > 0 {
+            if snapshot.action == Action::Stage {
+                "Stage selected lines"
+            } else {
+                "Unstage selected lines"
+            }
+        } else if snapshot.hunk.0.is_some() {
             if snapshot.action == Action::Stage {
                 "Stage selected hunks"
             } else {
@@ -283,9 +289,8 @@ impl Changes {
             confirmations::Dialog::new("git-index-confirm", title, description, "Cancel", title)
                 .destructive(destructive)
                 .enabled(
-                    snapshot
-                        .hunk
-                        .valid(workspace::index_action::hunks::count(snapshot)),
+                    snapshot.hunk.valid(workspace::index_action::hunks::count(snapshot))
+                        || (snapshot.lines.active && snapshot.lines.count() > 0),
                 )
                 .show(ctx, |ui| {
                     ui.add(
@@ -329,6 +334,7 @@ impl Changes {
                                 .clicked()
                             {
                                 snapshot.hunk = Default::default();
+                                snapshot.lines = Default::default();
                             }
                             for n in 0..count {
                                 let response = ui.selectable_label(
@@ -337,6 +343,7 @@ impl Changes {
                                 );
                                 if response.clicked() {
                                     snapshot.hunk.toggle(n);
+                                    snapshot.lines = Default::default();
                                 }
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| {
@@ -349,8 +356,63 @@ impl Changes {
                             }
                         });
                     }
+                    // Per-line selection: pick individual target-side changes.
+                    let line_sets = workspace::index_action::hunks::lines::parse(snapshot);
+                    if let Some(line_sets) = line_sets {
+                        let line_mode = ui
+                            .checkbox(&mut snapshot.lines.active, "Select individual lines")
+                            .on_hover_text(
+                                "Choose specific added (or staged-to-remove) lines instead of whole hunks. Only changes that form a cleanly applicable patch are accepted.",
+                            );
+                        if line_mode.changed() {
+                            snapshot.hunk = Default::default();
+                            snapshot.lines.lines = line_sets
+                                .iter()
+                                .map(|s| std::iter::repeat_n(0, s.len()).collect())
+                                .collect();
+                        }
+                        if snapshot.lines.active {
+                            if snapshot.lines.lines.len() != line_sets.len() {
+                                snapshot.lines.lines = line_sets
+                                    .iter()
+                                    .map(|s| std::iter::repeat_n(0, s.len()).collect())
+                                    .collect();
+                            }
+                            let target_label = match snapshot.action {
+                                Action::Stage => "added",
+                                Action::Unstage => "removed",
+                                Action::Discard => "",
+                            };
+                            for (hunk_index, set) in line_sets.iter().enumerate() {
+                                ui.label(theme::small(
+                                    ui,
+                                    format!("Hunk {} — {} lines", hunk_index + 1, set.len()),
+                                ));
+                                ui.horizontal_wrapped(|ui| {
+                                    let sel = &mut snapshot.lines.lines[hunk_index];
+                                    for (pos, &ord) in set.iter().enumerate() {
+                                        let on = sel.len() > pos && sel[pos] != usize::MAX;
+                                        let response = ui.selectable_label(
+                                            on,
+                                            format!("line {pos}"),
+                                        );
+                                        if response.clicked() {
+                                            if on {
+                                                sel[pos] = usize::MAX;
+                                            } else {
+                                                sel[pos] = ord;
+                                            }
+                                        }
+                                        let _ = target_label;
+                                    }
+                                });
+                            }
+                        }
+                    }
                     let selected = if snapshot.hunk.0.is_some() {
                         workspace::index_action::hunks::extract_selection(snapshot)
+                    } else if snapshot.lines.any() {
+                        workspace::index_action::hunks::lines::synthesize(snapshot)
                     } else {
                         None
                     };

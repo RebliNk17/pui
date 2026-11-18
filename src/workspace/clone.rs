@@ -24,7 +24,8 @@ pub(crate) fn inspect(
     branch: Option<&str>,
     cancel: &AtomicBool,
 ) -> Result<Review, String> {
-    let _ = cancel;    if !super::push::remote::valid_url(url) {
+    let _ = cancel;
+    if !super::push::remote::valid_url(url) {
         return Err(
             "Use a supported credential-free repository URL (HTTPS/SSH or git@host:path).".into(),
         );

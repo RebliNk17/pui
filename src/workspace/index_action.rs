@@ -23,7 +23,7 @@ impl Action {
         }
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub root: PathBuf,
     pub path: String,
@@ -31,6 +31,7 @@ pub(crate) struct Snapshot {
     pub action: Action,
     pub preview: String,
     pub hunk: hunks::selection::Selection,
+    pub lines: hunks::lines::LineSelection,
     index_path: PathBuf,
     index: Vec<u8>,
     head: String,
@@ -233,6 +234,7 @@ fn prepare_at(
         action,
         preview,
         hunk: Default::default(),
+        lines: Default::default(),
         index_path,
         index,
         head,
@@ -330,8 +332,14 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
         deadline,
     )?;
     fresh.hunk = snapshot.hunk;
+    fresh.lines = snapshot.lines.clone();
     let hunk_patch = if snapshot.hunk.0.is_some() {
         Some(hunks::extract_selection(&snapshot).ok_or("Select at least one supported hunk.")?)
+    } else if snapshot.lines.any() {
+        Some(
+            hunks::lines::synthesize(&snapshot)
+                .ok_or("Selected lines do not form a valid patch; adjust selection.")?,
+        )
     } else {
         None
     };
@@ -397,6 +405,48 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
         file.write_all(patch.as_bytes())
             .map_err(|_| "Cannot write selected hunk.")?;
         drop(file);
+        if snapshot.lines.any() {
+            // Dry-run against the private index: refuse if the selection cannot
+            // apply cleanly. Never risk corrupting the real index.
+            let mut check = read_only::command(&snapshot.root);
+            literal(&mut check);
+            check.args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.splitIndex=false",
+            ]);
+            check
+                .env("GIT_INDEX_FILE", &temp)
+                .env("GIT_NO_REPLACE_OBJECTS", "1");
+            if snapshot.action == Action::Unstage {
+                check.arg("apply").arg("--reverse");
+            } else {
+                check.arg("apply");
+            }
+            check
+                .args([
+                    "--cached",
+                    "--recount",
+                    "--whitespace=nowarn",
+                    "--check",
+                    "--",
+                ])
+                .arg(&patch_path);
+            let (_, check_status) = read_only::run(
+                &mut check,
+                cancel,
+                deadline,
+                1024,
+                "Line selection check",
+                "Unexpected line check output.",
+            )?;
+            if !check_status.success() {
+                return Err(
+                    "Selected lines do not apply cleanly to the current index. Nothing staged; adjust the selection.".into(),
+                );
+            }
+        }
         if snapshot.action == Action::Unstage {
             cmd.arg("apply").arg("--reverse");
         } else {
@@ -445,6 +495,7 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
         deadline,
     )?;
     after.hunk = snapshot.hunk;
+    after.lines = snapshot.lines.clone();
     if after != snapshot {
         return Err(
             "File, HEAD or index changed during preparation. Original index unchanged.".into(),
