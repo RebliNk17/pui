@@ -1,4 +1,6 @@
 //! Small, resolution-independent line icons (no platform-specific glyph fonts).
+#[cfg(test)]
+mod tests;
 use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 
 #[derive(Clone, Copy)]
@@ -269,20 +271,20 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             ));
         }
         Icon::Refresh => {
+            // A finely sampled circular arc, not the old seven-point polygon.
+            // Vector tessellation stays smooth at Retina and fractional UI scales.
+            let arc = (0..=48)
+                .map(|step| {
+                    let angle = std::f32::consts::FRAC_PI_4
+                        + step as f32 / 48.0 * 1.5 * std::f32::consts::PI;
+                    pt(6.0 * angle.cos(), 6.0 * angle.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, s));
             p.add(egui::Shape::line(
-                vec![
-                    pt(5.0, -3.0),
-                    pt(2.0, -6.0),
-                    pt(-3.0, -5.0),
-                    pt(-6.0, -1.0),
-                    pt(-4.0, 4.0),
-                    pt(1.0, 6.0),
-                    pt(5.0, 3.0),
-                ],
+                vec![pt(0.0, -4.25), pt(4.25, -4.25), pt(4.25, -8.0)],
                 s,
             ));
-            line((5.0, -3.0), (1.0, -3.0));
-            line((5.0, -3.0), (5.0, -7.0));
         }
         Icon::Rewind => {
             line((-6.0, -6.0), (-6.0, -1.0));

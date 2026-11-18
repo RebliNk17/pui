@@ -94,9 +94,13 @@ fn numbered_tabs_hidden_roots_and_empty_final_close_round_trip_without_execution
         target.context_inputs(&ctx, true);
         target.close(&ctx);
     }
-    assert!(inert(&target));
-    assert_eq!(target.total_tabs(), 5);
-    assert!(!target.running());
+    assert!(target.projects[root].tabs[1].demo.is_some());
+    assert!(target.projects[root].tabs[0].restored && target.projects[root].tabs[2].restored);
+    assert!(target.projects[hidden].active().unwrap().demo.is_some());
+    assert_eq!(target.projects[empty].tabs.len(), 1);
+    assert!(target.projects[empty].tabs[0].demo.is_some());
+    assert_eq!(target.total_tabs(), 6);
+    assert!(!target.running(), "demo fixtures never start processes");
 }
 
 #[test]
@@ -312,9 +316,13 @@ fn rehydration_never_overwrites_running_or_deliberately_closed_in_memory_tabs() 
     }
     terminal.restore_tabs(&saved);
     terminal.workspace(&ctx, root, true);
+    assert!(terminal.projects[root].tabs.is_empty());
     terminal.close(&ctx);
     terminal.toggle(&ctx, root, true);
-    assert!(terminal.projects[root].tabs.is_empty());
+    assert_eq!(terminal.projects[root].tabs.len(), 1);
+    assert!(terminal.projects[root].tabs[0].demo.is_some());
+    let id = terminal.projects[root].tabs[0].id;
+    terminal.close_tab(&ctx, root, id);
     let mut reopened = Terminals::default();
     reopened.restore_tabs(&terminal.saved_tabs());
     reopened.restore_saved_layout(&ctx, root, (true, false));

@@ -182,6 +182,7 @@ impl Terminals {
         self.open = !self.open;
         if self.open {
             self.workspace(ctx, root, demo);
+            self.open_shell(ctx, demo);
             self.focus = true;
         } else {
             capture::clear(ctx);
@@ -198,6 +199,24 @@ impl Terminals {
         if !self.projects.contains_key(root)
             && !self.restored_roots.contains(root)
             && !self.restore_guard
+        {
+            self.start(ctx, demo);
+        }
+    }
+    fn open_shell(&mut self, ctx: &egui::Context, demo: bool) {
+        // Opening Terminal is the launch action. Hydrating a saved layout is not.
+        // Reuse the selected placeholder instead of adding a duplicate shell tab.
+        if self
+            .projects
+            .get(&self.root)
+            .and_then(Project::active)
+            .is_some_and(|tab| tab.restored)
+        {
+            self.activate_restored(ctx, demo);
+        } else if self
+            .projects
+            .get(&self.root)
+            .is_none_or(|project| project.tabs.is_empty())
         {
             self.start(ctx, demo);
         }
@@ -347,9 +366,13 @@ impl Terminals {
             return;
         }
         let colors = theme::palette(ui.ctx());
-        let mut restart = false;
         let mut capture_button = None;
         self.controls.clear();
+        let running = self
+            .projects
+            .get(&self.root)
+            .and_then(Project::active)
+            .is_some_and(Tab::running);
         let heading = ui.horizontal(|ui| {
             ui.spacing_mut().interact_size.y = 26.0;
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -366,8 +389,9 @@ impl Terminals {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or(&path);
+            let actions = if running { 4.0 } else { 3.0 };
             let width =
-                (ui.available_width() - 4.0 * 26.0 - 4.0 * ui.spacing().item_spacing.x).max(8.0);
+                (ui.available_width() - actions * (26.0 + ui.spacing().item_spacing.x)).max(8.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(width, 26.0),
                 Layout::left_to_right(Align::Center),
@@ -435,11 +459,6 @@ impl Terminals {
                 if let Some(button) = &capture_button {
                     self.controls.push(button.id);
                 }
-                let running = self
-                    .projects
-                    .get(&self.root)
-                    .and_then(Project::active)
-                    .is_some_and(Tab::running);
                 if running {
                     let stop = icons::button(ui, Icon::Stop, "Stop terminal…");
                     self.controls.push(stop.id);
@@ -449,13 +468,6 @@ impl Terminals {
                             .get(&self.root)
                             .and_then(Project::active)
                             .map(|tab| (self.root.clone(), tab.id));
-                    }
-                } else {
-                    let new = icons::button(ui, Icon::Refresh, "Start a new terminal");
-                    self.controls.push(new.id);
-                    if new.clicked() {
-                        tabs::consume_activation(ui.ctx());
-                        restart = true;
                     }
                 }
             });
@@ -469,10 +481,6 @@ impl Terminals {
         });
         let _ = heading;
         ui.add_space(4.0);
-        if restart {
-            self.start(ui.ctx(), demo);
-            self.focus = true;
-        }
         let rail_width = (ui.available_width() * 0.22).clamp(104.0, 128.0);
         let rail = egui::SidePanel::left("terminal-shell-rail")
             .exact_width(rail_width)
@@ -1111,6 +1119,8 @@ fn paint(
     }
 }
 
+#[cfg(test)]
+mod auto_open_tests;
 #[cfg(test)]
 mod restore_tests;
 #[cfg(test)]

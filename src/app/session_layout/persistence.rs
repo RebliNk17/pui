@@ -99,7 +99,8 @@ impl Pui {
         self.changes.set_expanded(layout.changes_expanded);
         self.prefs.hide_inspector = layout.hide_inspector;
         self.prefs.hide_sidebar = layout.hide_sidebar;
-        // Presentation only: no PTY is created. show() offers an explicit Start shell action.
+        // Presentation only: no PTY is created. Explicitly opening Terminal starts
+        // its selected shell; checkpoint hydration alone never launches a process.
         self.terminals
             .restore_saved_layout(&self.ctx, &self.prefs.cwd, layout.terminal);
         self.set_layout_panels(&layout.panels);

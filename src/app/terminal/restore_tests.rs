@@ -2,7 +2,7 @@ use super::*;
 use crate::app::files::tests::{app, click, frame, text};
 
 #[test]
-fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
+fn restored_terminal_stays_inert_until_opening_then_starts_without_another_button() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);
@@ -16,10 +16,6 @@ fn restored_terminal_does_not_start_after_frames_or_hide_reopen() {
         assert!(app.terminals.projects.is_empty());
         app.terminals.close(&ctx);
         app.terminals.toggle(&ctx, &root, true);
-        let output = frame(&ctx, &mut app, vec![]);
-        assert!(app.terminals.projects.is_empty());
-        let start = text(&output, "Start shell");
-        click(&ctx, &mut app, start);
         frame(&ctx, &mut app, vec![]);
         assert_eq!(app.terminals.projects.len(), 1);
         assert!(
