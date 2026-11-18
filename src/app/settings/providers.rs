@@ -476,7 +476,7 @@ for (const ep of ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcod
       headers: {
         Authorization: `Bearer ${access}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'antigravity/1.21.9 darwin/arm64',
+        'User-Agent': 'antigravity/2.23.0 darwin/arm64',
         'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
       },
       body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' } }),

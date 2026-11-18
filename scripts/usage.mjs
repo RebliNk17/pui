@@ -166,7 +166,7 @@ const SUBSCRIPTIONS = {
   antigravity: { name: "Google Antigravity", oauthOnly: true, needsAuth: false, async fetch({ stored }) {
     const token = await googleToken(stored || {});
     const platform = process.platform === "darwin" ? "MACOS" : process.platform === "win32" ? "WINDOWS" : "LINUX";
-    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/1.21.9 ${process.platform}/${process.arch}`,
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/2.23.0 ${process.platform}/${process.arch}`,
       "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1", "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY", platform, pluginType: "GEMINI" }) };
     const body = JSON.stringify(typeof stored?.projectId === "string" && stored.projectId ? { project: stored.projectId } : {});
     let usage;

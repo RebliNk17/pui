@@ -15,8 +15,14 @@ export const ANTIGRAVITY_API = "antigravity-api";
 export const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
   DEFAULT_ENDPOINT,
+  // Production endpoint used by the agy CLI.
+  "https://daily-cloudcode-pa.googleapis.com",
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ];
+// Google rejects outdated clients with a normal-looking reply ("This version of Antigravity is no
+// longer supported"), so keep this at a current Antigravity release. ANTIGRAVITY_USER_AGENT overrides.
+export const ANTIGRAVITY_VERSION = "2.23.0";
+const UNSUPPORTED_VERSION = "This version of Antigravity is no longer supported";
 export const REDIRECT_URI = "http://localhost:51121/oauth-callback";
 export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 export const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -63,187 +69,188 @@ const thinkingLevelMaps = {
     xhigh: null,
     max: null,
   },
-  lowHigh: {
-    off: null,
-    minimal: null,
-    low: "low",
-    medium: null,
-    high: "high",
-    xhigh: null,
-    max: null,
-  },
-  thinking: {
-    off: null,
-    minimal: null,
-    low: null,
-    medium: null,
-    high: "high",
-    xhigh: null,
-    max: null,
-  },
-  medium: {
-    off: null,
-    minimal: null,
-    low: null,
-    medium: "medium",
-    high: null,
-    xhigh: null,
-    max: null,
-  },
 };
 
+const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const EFFORT_SUFFIX = /^(.*)-(minimal|low|medium|high|xhigh|max)$/;
+
+/**
+ * Effort variants (claude-opus-5-5-low/-medium/-high) become one Pi model whose thinkingLevelMap
+ * values are the request model IDs. The mapping is persisted with the model, so routing survives
+ * catalog caching without a separate table. Unavailable levels are null (Pi clamps to the nearest).
+ */
+function variantLevels(requestIds: Record<string, string>): Record<string, string | null> {
+  const map: Record<string, string | null> = { off: null };
+  for (const level of EFFORTS) map[level] = requestIds[level] ?? null;
+  return map;
+}
+
+function variantModel(
+  id: string,
+  name: string,
+  levels: string[],
+  options: { images?: boolean; contextWindow: number; maxTokens: number },
+) {
+  return {
+    id,
+    name: `${name} (Antigravity)`,
+    reasoning: true,
+    thinkingLevelMap: variantLevels(Object.fromEntries(levels.map((l) => [l, `${id}-${l}`]))),
+    input: options.images === false ? ["text"] : ["text", "image"],
+    cost: freeCost,
+    contextWindow: options.contextWindow,
+    maxTokens: options.maxTokens,
+  };
+}
+
+// Offline fallback, refreshed from fetchAvailableModels once signed in (refreshAntigravityModels).
 export const ANTIGRAVITY_MODELS = [
+  variantModel("claude-opus-5-5", "Claude Opus 5.5", ["low", "medium", "high"], {
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  }),
+  variantModel("claude-sonnet-5-5", "Claude Sonnet 5.5", ["low", "medium", "high"], {
+    contextWindow: 1_000_000,
+    maxTokens: 128_000,
+  }),
   {
-    id: "gemini-3.7-flash",
-    name: "Gemini 3.7 Flash (Antigravity)",
+    id: "gemini-3.8-flash-tiered",
+    name: "Gemini 3.8 Flash Auto (Antigravity)",
     reasoning: true,
     thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
     input: ["text", "image"],
     cost: freeCost,
-    contextWindow: 1048576,
-    maxTokens: 65536,
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
   },
   {
-    id: "gemini-3.6-flash",
-    name: "Gemini 3.6 Flash (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
+    id: "gemini-3-flash",
+    name: "Gemini 3 Flash (Antigravity)",
+    reasoning: false,
     input: ["text", "image"],
     cost: freeCost,
-    contextWindow: 1048576,
-    maxTokens: 65536,
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
   },
-  {
-    id: "gemini-3.1-pro",
-    name: "Gemini 3.1 Pro (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.lowHigh,
-    input: ["text", "image"],
-    cost: freeCost,
-    contextWindow: 1048576,
-    maxTokens: 65535,
-  },
-  {
-    id: "claude-opus-4-6",
-    name: "Claude Opus 4.6 (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.thinking,
-    input: ["text", "image"],
-    cost: freeCost,
-    contextWindow: 250000,
-    maxTokens: 64000,
-  },
-  {
-    id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6 (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.thinking,
-    input: ["text", "image"],
-    cost: freeCost,
-    contextWindow: 200000,
-    maxTokens: 64000,
-  },
-  {
-    id: "gemini-3.5-flash",
-    name: "Gemini 3.5 Flash (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
-    input: ["text", "image"],
-    cost: freeCost,
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "gpt-oss-120b",
-    name: "GPT-OSS 120B (Antigravity)",
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMaps.medium,
-    input: ["text"],
-    cost: freeCost,
-    contextWindow: 131072,
-    maxTokens: 32768,
-  },
+  variantModel("gpt-oss-120b", "GPT-OSS 120B", ["medium"], {
+    images: false,
+    contextWindow: 131_072,
+    maxTokens: 32_768,
+  }),
 ];
 
-const ANTIGRAVITY_ROUTING: Record<
-  string,
-  { off?: string; routing?: Record<string, string>; defaultRequestId?: string }
-> = {
-  "claude-opus-4-6": {
-    routing: {
-      minimal: "claude-opus-4-6-thinking",
-      low: "claude-opus-4-6-thinking",
-      medium: "claude-opus-4-6-thinking",
-      high: "claude-opus-4-6-thinking",
-    },
-    defaultRequestId: "claude-opus-4-6-thinking",
-  },
-  "claude-sonnet-4-6": {
-    off: "claude-sonnet-4-6",
-    routing: {
-      minimal: "claude-sonnet-4-6",
-      low: "claude-sonnet-4-6",
-      medium: "claude-sonnet-4-6",
-      high: "claude-sonnet-4-6",
-      xhigh: "claude-sonnet-4-6",
-    },
-    defaultRequestId: "claude-sonnet-4-6",
-  },
-  "gemini-3.1-pro": {
-    off: "gemini-3.1-pro-low",
-    routing: {
-      minimal: "gemini-3.1-pro-low",
-      low: "gemini-3.1-pro-low",
-      medium: "gemini-3.1-pro-low",
-      high: "gemini-pro-agent",
-      xhigh: "gemini-pro-agent",
-    },
-    defaultRequestId: "gemini-3.1-pro-low",
-  },
-  "gemini-3.7-flash": {
-    off: "gemini-3.7-flash-tiered",
-    routing: {
-      minimal: "gemini-3.7-flash-tiered",
-      low: "gemini-3.7-flash-tiered",
-      medium: "gemini-3.7-flash-tiered",
-      high: "gemini-3.7-flash-tiered",
-      xhigh: "gemini-3.7-flash-tiered",
-    },
-    defaultRequestId: "gemini-3.7-flash-tiered",
-  },
-  "gemini-3.6-flash": {
-    off: "gemini-3.6-flash-low",
-    routing: {
-      minimal: "gemini-3.6-flash-low",
-      low: "gemini-3.6-flash-low",
-      medium: "gemini-3.6-flash-medium",
-      high: "gemini-3.6-flash-high",
-      xhigh: "gemini-3.6-flash-high",
-    },
-    defaultRequestId: "gemini-3.6-flash-low",
-  },
-  "gemini-3.5-flash": {
-    off: "gemini-3.5-flash-extra-low",
-    routing: {
-      minimal: "gemini-3.5-flash-extra-low",
-      low: "gemini-3.5-flash-low",
-      medium: "gemini-3.5-flash-low",
-      high: "gemini-3-flash-agent",
-      xhigh: "gemini-3-flash-agent",
-    },
-    defaultRequestId: "gemini-3.5-flash-extra-low",
-  },
-  "gpt-oss-120b": {
-    off: "gpt-oss-120b-medium",
-    routing: {
-      minimal: "gpt-oss-120b-medium",
-      low: "gpt-oss-120b-medium",
-      medium: "gpt-oss-120b-medium",
-      high: "gpt-oss-120b-medium",
-    },
-    defaultRequestId: "gpt-oss-120b-medium",
-  },
-};
+const prettyId = (id: string) =>
+  id
+    .replace(/-tiered$/, "")
+    .split("-")
+    .map((part) => (/^gpt|oss$/.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1)))
+    .join(" ");
+
+/** Chat models from v1internal:fetchAvailableModels, grouped by effort variant. */
+export function parseAvailableModels(data: any): any[] {
+  const entries = data?.models && typeof data.models === "object" ? Object.entries<any>(data.models) : [];
+  const excluded = new Set<string>(
+    ["tabModelIds", "imageGenerationModelIds", "audioTranscriptionModelIds"].flatMap((key) =>
+      Array.isArray(data?.[key]) ? data[key] : [],
+    ),
+  );
+  const chat = entries.filter(
+    ([id, info]) =>
+      info &&
+      !info.isInternal &&
+      info.apiProvider !== "API_PROVIDER_INTERNAL" &&
+      !excluded.has(id) &&
+      !/^(tab_|chat_)|image/.test(id) &&
+      (info.displayName || /-tiered$/.test(id)),
+  );
+  // Some deprecated IDs reuse another model's display name; fall back to the ID for those.
+  const nameCount = new Map<string, number>();
+  for (const [, info] of chat) {
+    const base = String(info.displayName || "").replace(/\s*\((Minimal|Low|Medium|High|XHigh|Max)\)$/i, "");
+    nameCount.set(base, (nameCount.get(base) || 0) + 1);
+  }
+  const groups = new Map<string, { name: string; info: any; levels: Record<string, string> }>();
+  const models: any[] = [];
+  for (const [id, info] of chat) {
+    const display = String(info.displayName || "");
+    const variant = id.match(EFFORT_SUFFIX);
+    const limits = {
+      images: info.supportsImages !== false && info.supportsImages !== undefined,
+      contextWindow: Number(info.maxTokens) > 0 ? Number(info.maxTokens) : 1_048_576,
+      maxTokens: Number(info.maxOutputTokens) > 0 ? Number(info.maxOutputTokens) : 65_536,
+    };
+    if (variant) {
+      const [, base, level] = variant;
+      const name = display.replace(/\s*\((Minimal|Low|Medium|High|XHigh|Max)\)$/i, "") || prettyId(base);
+      const group = groups.get(base) || { name, info: limits, levels: {} };
+      group.levels[level] = id;
+      groups.set(base, group);
+      continue;
+    }
+    const tiered = /-tiered$/.test(id);
+    const name = display && nameCount.get(display) === 1 ? display : prettyId(id);
+    models.push({
+      id,
+      // Tiered models let Antigravity pick the tier; distinguish them from effort-variant groups.
+      name: `${name}${tiered ? " Auto" : ""} (Antigravity)`,
+      reasoning: tiered,
+      ...(tiered ? { thinkingLevelMap: thinkingLevelMaps.lowMediumHigh } : {}),
+      input: limits.images ? ["text", "image"] : ["text"],
+      cost: freeCost,
+      contextWindow: limits.contextWindow,
+      maxTokens: limits.maxTokens,
+    });
+  }
+  for (const [base, group] of groups) {
+    models.push({
+      id: base,
+      name: `${group.name} (Antigravity)`,
+      reasoning: true,
+      thinkingLevelMap: variantLevels(group.levels),
+      input: group.info.images ? ["text", "image"] : ["text"],
+      cost: freeCost,
+      contextWindow: group.info.contextWindow,
+      maxTokens: group.info.maxTokens,
+    });
+  }
+  // Antigravity's recommended agent ordering first, then alphabetical.
+  const order = new Map<string, number>();
+  let rank = 0;
+  for (const sort of Array.isArray(data?.agentModelSorts) ? data.agentModelSorts : [])
+    for (const group of sort?.groups || [])
+      for (const id of group?.modelIds || []) {
+        const base = String(id).replace(EFFORT_SUFFIX, "$1");
+        if (!order.has(base)) order.set(base, rank++);
+      }
+  return models.sort(
+    (a, b) =>
+      (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9) || a.name.localeCompare(b.name),
+  );
+}
+
+export async function refreshAntigravityModels(context: any): Promise<any[]> {
+  const credential = context?.credential;
+  if (!context?.allowNetwork || credential?.type !== "oauth" || !credential.access) {
+    return ANTIGRAVITY_MODELS;
+  }
+  const body = JSON.stringify(credential.projectId ? { project: credential.projectId } : {});
+  for (const endpoint of ENDPOINT_FALLBACKS) {
+    try {
+      const res = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: { ...antigravityHeaders(credential.access), Accept: "application/json" },
+        body,
+        signal: AbortSignal.any([context.signal, AbortSignal.timeout(15000)].filter(Boolean)),
+      });
+      if (!res.ok) continue;
+      const models = parseAvailableModels(await res.json());
+      if (models.length) return models;
+    } catch {
+      if (context.signal?.aborted) break;
+    }
+  }
+  return ANTIGRAVITY_MODELS;
+}
 
 export function stableProjectId(seed: string): string {
   const bytes = createHash("sha1").update(`antigravity:${seed}`).digest().subarray(0, 16);
@@ -271,7 +278,7 @@ export function antigravityHeaders(token: string): Record<string, string> {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     Accept: "text/event-stream",
-    "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/1.21.9 ${os}/${arch}`,
+    "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/${ANTIGRAVITY_VERSION} ${os}/${arch}`,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": JSON.stringify({
       ideType: "ANTIGRAVITY",
@@ -702,21 +709,14 @@ function convertTools(tools: any[] | undefined, useLegacyParameters = false): an
   ];
 }
 
-export function getAntigravityRequestModelId(modelId: string, effort: string | undefined): string {
-  const r = ANTIGRAVITY_ROUTING[modelId];
-  if (!r) return modelId;
-  if (!effort || effort === "off") {
-    return r.off ?? r.routing?.minimal ?? r.routing?.low ?? r.defaultRequestId ?? modelId;
-  }
-  return (
-    r.routing?.[effort] ??
-    r.routing?.high ??
-    r.routing?.low ??
-    r.routing?.minimal ??
-    r.off ??
-    r.defaultRequestId ??
-    modelId
-  );
+/** Request model for the selected effort: a variant ID from thinkingLevelMap, else the model ID. */
+export function getAntigravityRequestModelId(model: any, effort: string | undefined): string {
+  const map = model?.thinkingLevelMap || {};
+  const variant = (level: string) =>
+    typeof map[level] === "string" && map[level].startsWith(`${model.id}-`) ? map[level] : undefined;
+  if (effort && effort !== "off" && variant(effort)) return variant(effort)!;
+  for (const level of EFFORTS) if (variant(level)) return variant(level)!;
+  return model.id;
 }
 
 const ANTIGRAVITY_SYSTEM_INSTRUCTION =
@@ -753,7 +753,7 @@ export function buildRequest(
   };
   const generationConfig: any = {};
   if (options?.temperature !== undefined) generationConfig.temperature = options.temperature;
-  if (runtimeModel === "gemini-3.7-flash-tiered") {
+  if (/-tiered$/.test(runtimeModel)) {
     const effort = options?.reasoning ?? "off";
     generationConfig.thinkingConfig = {
       thinkingLevel:
@@ -981,11 +981,7 @@ export function streamAntigravity(model: any, context: any, options: any = {}): 
       const projectId =
         creds.projectId || (await loadCodeAssist(creds.token)) || defaultProjectId();
       const effort = options.reasoning ?? "off";
-      const runtimeModel = getAntigravityRequestModelId(model.id, effort);
-      const candidates = [runtimeModel];
-      if (runtimeModel === "gemini-3.7-flash-tiered") {
-        candidates.push(getAntigravityRequestModelId("gemini-3.6-flash", effort));
-      }
+      const candidates = [getAntigravityRequestModelId(model, effort)];
       const isClaudeReasoning = model.id.startsWith("claude-") && model.reasoning;
       const headers: Record<string, string> = {
         ...antigravityHeaders(creds.token),
@@ -1010,12 +1006,20 @@ export function streamAntigravity(model: any, context: any, options: any = {}): 
       }
       if (!response?.ok) {
         throw new Error(
-          `Antigravity API error (${response?.status ?? "no response"}): ${lastText.slice(0, 400)}`,
+          response?.status === 429
+            ? "Antigravity quota exhausted (HTTP 429). Your individual or per-model limit is used up; agy reports when it resets. Try another model or wait."
+            : `Antigravity API error (${response?.status ?? "no response"}): ${lastText.slice(0, 400)}`,
         );
       }
       const received = await consumeStream(response, stream, output);
       if (!received) {
         throw new Error("Antigravity API returned an empty response.");
+      }
+      const reply = output.content.find((block: any) => block.type === "text")?.text || "";
+      if (reply.startsWith(UNSUPPORTED_VERSION)) {
+        throw new Error(
+          `Google rejected Pui's Antigravity client version (${ANTIGRAVITY_VERSION}) as outdated. Set ANTIGRAVITY_USER_AGENT to a current "antigravity/<version> <os>/<arch>" or update Pui.`,
+        );
       }
       stream.push({ type: "done", reason: output.stopReason, message: output });
       stream.end();
@@ -1036,6 +1040,7 @@ export function installAntigravity(pi: any): void {
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
     models: ANTIGRAVITY_MODELS,
+    refreshModels: refreshAntigravityModels,
     oauth: {
       name: PROVIDER_NAME,
       isSubscription: true,
