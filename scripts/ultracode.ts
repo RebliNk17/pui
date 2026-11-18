@@ -8,6 +8,7 @@ import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
 import { installWorkflows } from "./workflows.ts";
+import { installAntigravity } from "./antigravity.ts";
 
 export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
 Do not launch delegated agents through Bash, Python subprocesses, detached pi --print/--mode json, or another CLI: those processes are not registered with Pui and cannot be opened as live child chats. If managed spawning is unavailable or denied, report the blocker instead of silently falling back to an invisible process. Never claim a worker launched until pui_spawn_agent succeeds.
@@ -35,6 +36,7 @@ export default function puiExtension(pi: any) {
   installOpen(pi);
   installWorkflows(pi);
   installContext(pi);
+  installAntigravity(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",
     handler: (args: string, ctx: any) => {

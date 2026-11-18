@@ -1,5 +1,6 @@
-//! Native provider management: Claude Pro/Max subscription OAuth, API keys,
-//! and OpenAI-compatible local/custom endpoints with automatic `/v1/models` discovery.
+//! Native provider management: Claude Pro/Max subscription OAuth, Google Antigravity
+//! OAuth, Google Gemini & Vertex AI credentials, API keys, and OpenAI/Anthropic/Google
+//! compatible endpoints with automatic model discovery.
 use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
@@ -13,19 +14,29 @@ const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_COPY_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
-const APIS: [(&str, &str); 3] = [
+const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
+const ANTIGRAVITY_SCOPES: &str = "https://www.googleapis.com/auth/aicode https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
+
+const APIS: [(&str, &str); 5] = [
     (
         "openai-completions",
         "OpenAI Chat Completions (/v1/chat/completions)",
     ),
     ("openai-responses", "OpenAI Responses (/v1/responses)"),
     ("anthropic-messages", "Anthropic Messages (/v1/messages)"),
+    (
+        "google-generative-ai",
+        "Google Generative AI / Gemini (/v1beta/models)",
+    ),
+    ("google-vertex", "Google Vertex AI (/v1)"),
 ];
 
 const BUILTIN_KEY_PROVIDERS: [(&str, &str); 6] = [
+    ("google", "Google Gemini (GEMINI_API_KEY)"),
     ("anthropic", "Anthropic (Claude API Key)"),
     ("openai", "OpenAI"),
-    ("google", "Google Gemini"),
     ("openrouter", "OpenRouter"),
     ("deepseek", "DeepSeek"),
     ("xai", "xAI (Grok)"),
@@ -56,6 +67,7 @@ pub(in crate::app) struct CustomProviderSummary {
 pub(in crate::app) struct AuthSummary {
     pub provider: String,
     pub kind: String, // "oauth" or "api_key"
+    pub detail: Option<String>,
 }
 
 #[derive(Default)]
@@ -67,6 +79,45 @@ struct ClaudeSubscriptionFlow {
     exchanging: bool,
     rx: Option<Receiver<Result<(), String>>>,
     error: Option<String>,
+}
+
+#[derive(Default)]
+struct AntigravitySubscriptionFlow {
+    open: bool,
+    client_id: String,
+    client_secret: String,
+    verifier: String,
+    challenge: String,
+    state: String,
+    callback_input: String,
+    exchanging: bool,
+    listening: bool,
+    rx: Option<Receiver<Result<String, String>>>,
+    error: Option<String>,
+}
+
+struct VertexModal {
+    open: bool,
+    mode: usize, // 0 = ADC, 1 = API Key, 2 = Service Account JSON
+    project_id: String,
+    location: String,
+    api_key: String,
+    credentials_path: String,
+    error: Option<String>,
+}
+
+impl Default for VertexModal {
+    fn default() -> Self {
+        Self {
+            open: false,
+            mode: 0,
+            project_id: String::new(),
+            location: "us-central1".into(),
+            api_key: String::new(),
+            credentials_path: String::new(),
+            error: None,
+        }
+    }
 }
 
 struct EndpointModal {
@@ -120,6 +171,8 @@ pub(in crate::app) struct ProvidersManager {
     pub(in crate::app) custom_providers: Vec<CustomProviderSummary>,
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
     claude: ClaudeSubscriptionFlow,
+    antigravity: AntigravitySubscriptionFlow,
+    vertex: VertexModal,
     endpoint: EndpointModal,
     api_key_modal: ApiKeyModal,
     pub(in crate::app) status_notice: Option<String>,
@@ -203,13 +256,28 @@ fn build_claude_authorize_url(challenge: &str, state: &str) -> String {
     url.to_string()
 }
 
+fn build_antigravity_authorize_url(client_id: &str, challenge: &str, state: &str) -> String {
+    let mut url = url::Url::parse(ANTIGRAVITY_AUTHORIZE_URL).expect("valid google authorize url");
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id.trim())
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", ANTIGRAVITY_REDIRECT_URI)
+        .append_pair("scope", ANTIGRAVITY_SCOPES)
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent");
+    url.to_string()
+}
+
 pub(in crate::app) fn parse_oauth_code_input(
     input: &str,
     expected_state: &str,
 ) -> Result<(String, String), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("Paste the authorization code shown by Claude after signing in.".into());
+        return Err("Paste the authorization code or callback URL after signing in.".into());
     }
     let (code, state) = if let Ok(parsed) = url::Url::parse(trimmed) {
         let mut c = None;
@@ -222,6 +290,23 @@ pub(in crate::app) fn parse_oauth_code_input(
             }
         }
         (c, s)
+    } else if trimmed.contains("code=") {
+        let qs = trimmed.trim_start_matches('?');
+        let fake_url = format!("http://localhost/callback?{qs}");
+        if let Ok(parsed) = url::Url::parse(&fake_url) {
+            let mut c = None;
+            let mut s = None;
+            for (k, v) in parsed.query_pairs() {
+                if k == "code" {
+                    c = Some(v.into_owned());
+                } else if k == "state" {
+                    s = Some(v.into_owned());
+                }
+            }
+            (c, s)
+        } else {
+            (Some(trimmed.to_owned()), None)
+        }
     } else if let Some((c, s)) = trimmed.split_once('#') {
         (Some(c.trim().to_owned()), Some(s.trim().to_owned()))
     } else {
@@ -232,10 +317,7 @@ pub(in crate::app) fn parse_oauth_code_input(
         .ok_or("Authorization code is missing.")?;
     if let Some(state) = &state {
         if !expected_state.is_empty() && state != expected_state {
-            return Err(
-                "OAuth state mismatch. Click Open Claude Sign-In again to generate a fresh code."
-                    .into(),
-            );
+            return Err("OAuth state mismatch. Click Sign In again to start a fresh flow.".into());
         }
     }
     let final_state = state.unwrap_or_else(|| expected_state.to_owned());
@@ -310,6 +392,225 @@ process.stdout.write(JSON.stringify({ ok: response.ok, status: response.status, 
     write_json_atomic(&auth_path, &auth, true)
 }
 
+fn exchange_antigravity_oauth_code(
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+    verifier: &str,
+) -> Result<String, String> {
+    let client_id = client_id.trim();
+    let client_secret = client_secret.trim();
+    if client_id.is_empty() {
+        return Err("Enter your Google OAuth Client ID.".into());
+    }
+    let script = r#"
+import { createHash } from 'node:crypto';
+const [tokenUrl, clientId, clientSecret, redirectUri, code, verifier] = process.argv.slice(-6);
+const params = {
+  client_id: clientId,
+  code,
+  grant_type: 'authorization_code',
+  redirect_uri: redirectUri,
+  code_verifier: verifier,
+};
+if (clientSecret) params.client_secret = clientSecret;
+const tokenRes = await fetch(tokenUrl, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: new URLSearchParams(params).toString(),
+  signal: AbortSignal.timeout(20000),
+});
+const tokenText = await tokenRes.text();
+if (!tokenRes.ok) {
+  process.stdout.write(JSON.stringify({ ok: false, status: tokenRes.status, error: tokenText.slice(0, 300) }));
+  process.exit(0);
+}
+const tokenData = JSON.parse(tokenText);
+const access = tokenData.access_token;
+const refresh = tokenData.refresh_token;
+const expiresIn = tokenData.expires_in || 3600;
+let email;
+try {
+  const userRes = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+    headers: { Authorization: `Bearer ${access}` },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (userRes.ok) {
+    const u = await userRes.json();
+    email = u.email;
+  }
+} catch {}
+let projectId;
+for (const ep of ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com']) {
+  try {
+    const res = await fetch(`${ep}/v1internal:loadCodeAssist`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${access}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'antigravity/1.21.9 darwin/arm64',
+        'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
+      },
+      body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY', platform: 'PLATFORM_UNSPECIFIED', pluginType: 'GEMINI' } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.ok) {
+      const d = await res.json();
+      const p = d.antigravityProjectId || d.projectId || d.backendProjectId || d.cloudaicompanionProject || (d.cloudaicompanionProject && d.cloudaicompanionProject.id);
+      if (typeof p === 'string' && p) { projectId = p; break; }
+    }
+  } catch {}
+}
+if (!projectId) {
+  const bytes = createHash('sha1').update(`antigravity:${email || 'antigravity-default'}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  projectId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+process.stdout.write(JSON.stringify({ ok: true, access, refresh, expiresIn, email, projectId }));
+"#;
+    let mut command = std::process::Command::new(crate::runtime::node_binary());
+    command
+        .args(["--input-type=module", "--eval", script])
+        .arg(ANTIGRAVITY_TOKEN_URL)
+        .arg(client_id)
+        .arg(client_secret)
+        .arg(ANTIGRAVITY_REDIRECT_URI)
+        .arg(code)
+        .arg(verifier)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    crate::runtime::configure(&mut command);
+    let output = command
+        .output()
+        .map_err(|_| "Cannot launch Node runtime to exchange Google OAuth code.")?;
+    if !output.status.success() {
+        return Err("Google OAuth token exchange process failed.".into());
+    }
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Invalid response from Google OAuth token exchange.")?;
+    if parsed["ok"] != true {
+        let status = parsed["status"].as_u64().unwrap_or(0);
+        return Err(format!(
+            "Google OAuth rejected the authorization code (HTTP {status}). Try signing in again."
+        ));
+    }
+    let access = parsed["access"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("Google token response is missing access_token.")?;
+    let refresh = parsed["refresh"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("Google token response is missing refresh_token.")?;
+    let expires_in = parsed["expiresIn"].as_i64().unwrap_or(3600);
+    let project_id = parsed["projectId"]
+        .as_str()
+        .unwrap_or("antigravity-default");
+    let email = parsed["email"].as_str().unwrap_or_default().to_owned();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expires = now_ms + expires_in * 1000 - 5 * 60 * 1000;
+
+    let auth_path = auth_json_path().ok_or("Cannot resolve ~/.pi/agent/auth.json path.")?;
+    let mut auth = read_json_object(&auth_path);
+    let mut entry = json!({
+        "type": "oauth",
+        "access": access,
+        "refresh": refresh,
+        "expires": expires,
+        "projectId": project_id,
+        "clientId": client_id,
+    });
+    if !client_secret.is_empty() {
+        entry["clientSecret"] = json!(client_secret);
+    }
+    if !email.is_empty() {
+        entry["email"] = json!(email.clone());
+    }
+    auth["antigravity"] = entry;
+    write_json_atomic(&auth_path, &auth, true)?;
+    Ok(email)
+}
+
+fn run_antigravity_browser_login(
+    client_id: &str,
+    client_secret: &str,
+    authorize_url: &str,
+    expected_state: &str,
+    verifier: &str,
+) -> Result<String, String> {
+    let script = r#"
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+const [authUrl, expectedState] = process.argv.slice(-2);
+const server = createServer((req, res) => {
+  const url = new URL(req.url || '', 'http://localhost:51121');
+  if (url.pathname !== '/oauth-callback') {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Not found');
+    return;
+  }
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const error = url.searchParams.get('error');
+  if (error || !code || state !== expectedState) {
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<h3>Google Antigravity sign-in failed.</h3><p>Return to Pui and try again.</p>');
+    process.stdout.write(JSON.stringify({ ok: false, error: error || 'Invalid state or missing code' }));
+    setTimeout(() => process.exit(0), 100);
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<h3>Google Antigravity connected!</h3><p>You can close this tab and return to Pui.</p>');
+  process.stdout.write(JSON.stringify({ ok: true, code }));
+  setTimeout(() => process.exit(0), 100);
+});
+server.on('error', (err) => {
+  process.stdout.write(JSON.stringify({ ok: false, error: String(err.message || err) }));
+  process.exit(0);
+});
+server.listen(51121, '127.0.0.1', () => {
+  try {
+    spawn('/usr/bin/open', [authUrl], { detached: true, stdio: 'ignore' }).unref();
+  } catch {}
+});
+setTimeout(() => {
+  process.stdout.write(JSON.stringify({ ok: false, error: 'Timed out waiting for browser sign-in. You can also paste the callback URL manually.' }));
+  process.exit(0);
+}, 180000);
+"#;
+    let mut command = std::process::Command::new(crate::runtime::node_binary());
+    command
+        .args(["--input-type=module", "--eval", script])
+        .arg(authorize_url)
+        .arg(expected_state)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    crate::runtime::configure(&mut command);
+    let output = command.output().map_err(|_| {
+        "Cannot start local OAuth callback listener. Paste the callback URL below instead."
+            .to_owned()
+    })?;
+    let reply: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        "Browser callback listener exited before completing sign-in. Paste the callback URL below if you signed in."
+            .to_owned()
+    })?;
+    if reply["ok"] != true {
+        let err = reply["error"]
+            .as_str()
+            .unwrap_or("Local callback failed. Paste the callback URL below.");
+        return Err(err.to_owned());
+    }
+    let code = reply["code"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("Callback did not contain an authorization code.")?;
+    exchange_antigravity_oauth_code(client_id, client_secret, code, verifier)
+}
+
 pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredModel> {
     let list = data["data"]
         .as_array()
@@ -321,36 +622,58 @@ pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredMod
     let mut models = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for item in items {
-        let id = item["id"]
+        let raw_id = item["id"]
             .as_str()
             .or_else(|| item["name"].as_str())
             .or_else(|| item["model"].as_str())
             .map(str::trim)
             .unwrap_or_default();
+        // Google /v1beta/models returns names like "models/gemini-2.5-pro"; strip the leading "models/" prefix.
+        let id = raw_id.strip_prefix("models/").unwrap_or(raw_id);
         if id.is_empty() || !seen.insert(id.to_owned()) {
             continue;
         }
-        let name = item["display_name"]
+        // If Google's supportedGenerationMethods is present, skip pure embedding/attributed models.
+        if let Some(methods) = item["supportedGenerationMethods"].as_array() {
+            let can_generate = methods.iter().any(|m| {
+                matches!(
+                    m.as_str(),
+                    Some("generateContent") | Some("streamGenerateContent")
+                )
+            });
+            if !can_generate {
+                continue;
+            }
+        }
+        let name = item["displayName"]
             .as_str()
+            .or_else(|| item["display_name"].as_str())
             .or_else(|| item["name"].as_str())
+            .map(|n| n.strip_prefix("models/").unwrap_or(n))
             .unwrap_or(id)
             .trim()
             .to_owned();
         let lower = id.to_ascii_lowercase();
-        let reasoning = item["reasoning"].as_bool().unwrap_or_else(|| {
-            lower.contains("r1")
-                || lower.contains("qwq")
-                || lower.contains("thinking")
-                || lower.contains("reason")
-                || lower.contains("o1")
-                || lower.contains("o3")
-                || lower.contains("o4")
-                || lower.contains("claude-3-7")
-                || lower.contains("claude-4")
-                || lower.contains("claude-sonnet-4")
-                || lower.contains("claude-opus-4")
-                || lower.contains("gpt-5")
-        });
+        let reasoning = item["reasoning"]
+            .as_bool()
+            .or_else(|| item["thinking"].as_bool())
+            .unwrap_or_else(|| {
+                lower.contains("r1")
+                    || lower.contains("qwq")
+                    || lower.contains("thinking")
+                    || lower.contains("reason")
+                    || lower.contains("o1")
+                    || lower.contains("o3")
+                    || lower.contains("o4")
+                    || lower.contains("claude-3-7")
+                    || lower.contains("claude-4")
+                    || lower.contains("claude-sonnet-4")
+                    || lower.contains("claude-opus-4")
+                    || lower.contains("gpt-5")
+                    || lower.contains("gemini-2.5")
+                    || lower.contains("gemini-3")
+                    || lower.contains("gemini-4")
+            });
         let vision = lower.contains("vl")
             || lower.contains("vision")
             || lower.contains("gpt-4o")
@@ -358,16 +681,19 @@ pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredMod
             || lower.contains("claude")
             || lower.contains("gemini")
             || lower.contains("pixtral")
-            || lower.contains("gemma-3");
+            || lower.contains("gemma-3")
+            || lower.contains("gemma-4");
         let context_window = item["context_window"]
             .as_u64()
             .or_else(|| item["context_length"].as_u64())
             .or_else(|| item["max_model_len"].as_u64())
+            .or_else(|| item["inputTokenLimit"].as_u64())
             .map(|v| (v as u32).clamp(4096, 2_000_000))
             .unwrap_or(128_000);
         let max_tokens = item["max_tokens"]
             .as_u64()
             .or_else(|| item["max_completion_tokens"].as_u64())
+            .or_else(|| item["outputTokenLimit"].as_u64())
             .map(|v| (v as u32).clamp(1024, 128_000))
             .unwrap_or(16_384);
         models.push(DiscoveredModel {
@@ -401,7 +727,10 @@ fn discover_models_from_endpoint(
     } else {
         format!("{trimmed}/models")
     };
-    let fallback_url = if !trimmed.ends_with("/v1") && !trimmed.ends_with("/models") {
+    let fallback_url = if !trimmed.ends_with("/v1")
+        && !trimmed.ends_with("/v1beta")
+        && !trimmed.ends_with("/models")
+    {
         Some(format!("{trimmed}/v1/models"))
     } else {
         None
@@ -410,11 +739,13 @@ fn discover_models_from_endpoint(
 const [primaryUrl, fallbackUrl, apiKey] = process.argv.slice(-3);
 async function tryFetch(target) {
   const headers = { 'Accept': 'application/json' };
+  let url = target;
   if (apiKey && !apiKey.startsWith('$') && !apiKey.startsWith('!')) {
     headers['Authorization'] = `Bearer ${apiKey}`;
     headers['x-api-key'] = apiKey;
+    headers['x-goog-api-key'] = apiKey;
   }
-  const res = await fetch(target, { headers, signal: AbortSignal.timeout(10000) });
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
   const text = await res.text();
   return { ok: res.ok, status: res.status, body: text };
 }
@@ -484,7 +815,7 @@ process.stdout.write(JSON.stringify(result));
     let models = parse_discovered_models(&body);
     if models.is_empty() {
         return Err(
-            "Connected to endpoint, but its /models response returned 0 models. Load a model in your server or add a model ID below."
+            "Connected to endpoint, but its /models response returned 0 chat models. Load a model in your server or add a model ID below."
                 .into(),
         );
     }
@@ -525,9 +856,20 @@ impl ProvidersManager {
             if let Some(obj) = root.as_object() {
                 for (provider, entry) in obj {
                     let kind = entry["type"].as_str().unwrap_or("api_key").to_owned();
+                    let detail = if let Some(email) = entry["email"].as_str() {
+                        Some(email.to_owned())
+                    } else if let Some(project) = entry["env"]["GOOGLE_CLOUD_PROJECT"].as_str() {
+                        let loc = entry["env"]["GOOGLE_CLOUD_LOCATION"]
+                            .as_str()
+                            .unwrap_or("global");
+                        Some(format!("ADC: {project} ({loc})"))
+                    } else {
+                        None
+                    };
                     self.saved_auth.push(AuthSummary {
                         provider: provider.clone(),
                         kind,
+                        detail,
                     });
                 }
             }
@@ -603,6 +945,37 @@ impl ProvidersManager {
             }
         }
         if let Some(result) = self
+            .antigravity
+            .rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.antigravity.rx = None;
+            self.antigravity.exchanging = false;
+            self.antigravity.listening = false;
+            match result {
+                Ok(email) => {
+                    self.antigravity.open = false;
+                    self.antigravity.callback_input.clear();
+                    self.antigravity.error = None;
+                    self.reload_from_disk();
+                    self.status_error = None;
+                    let suffix = if email.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({email})")
+                    };
+                    self.status_notice = Some(format!(
+                        "Google Antigravity subscription connected{suffix}! Reloading model catalog…"
+                    ));
+                    self.reload_requested = true;
+                }
+                Err(error) => {
+                    self.antigravity.error = Some(error);
+                }
+            }
+        }
+        if let Some(result) = self
             .endpoint
             .discover_rx
             .as_ref()
@@ -642,16 +1015,87 @@ impl ProvidersManager {
         };
     }
 
-    pub(in crate::app) fn open_add_endpoint(&mut self, preset: Option<(&str, &str, &str)>) {
-        let (id, name, base_url) =
-            preset.unwrap_or(("local-openai", "Local OpenAI", "http://localhost:11434/v1"));
+    pub(in crate::app) fn open_antigravity_subscription(&mut self) {
+        let (verifier, challenge) = generate_pkce();
+        let state = generate_pkce().0;
+        let mut client_id = std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_default();
+        let mut client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET").unwrap_or_default();
+        if let Some(path) = auth_json_path() {
+            let root = read_json_object(&path);
+            if client_id.trim().is_empty() {
+                if let Some(cid) = root["antigravity"]["clientId"].as_str() {
+                    client_id = cid.to_owned();
+                }
+            }
+            if client_secret.trim().is_empty() {
+                if let Some(csec) = root["antigravity"]["clientSecret"].as_str() {
+                    client_secret = csec.to_owned();
+                }
+            }
+        }
+        self.antigravity = AntigravitySubscriptionFlow {
+            open: true,
+            client_id,
+            client_secret,
+            verifier,
+            challenge,
+            state,
+            callback_input: String::new(),
+            exchanging: false,
+            listening: false,
+            rx: None,
+            error: None,
+        };
+    }
+
+    pub(in crate::app) fn open_vertex_modal(&mut self) {
+        let mut modal = VertexModal {
+            open: true,
+            ..VertexModal::default()
+        };
+        if let Some(path) = auth_json_path() {
+            let root = read_json_object(&path);
+            let entry = &root["google-vertex"];
+            if entry.is_object() {
+                if let Some(key) = entry["key"].as_str() {
+                    modal.mode = 1;
+                    modal.api_key = key.to_owned();
+                } else if let Some(env) = entry["env"].as_object() {
+                    if let Some(p) = env.get("GOOGLE_CLOUD_PROJECT").and_then(Value::as_str) {
+                        modal.project_id = p.to_owned();
+                    }
+                    if let Some(l) = env.get("GOOGLE_CLOUD_LOCATION").and_then(Value::as_str) {
+                        modal.location = l.to_owned();
+                    }
+                    if let Some(cred) = env
+                        .get("GOOGLE_APPLICATION_CREDENTIALS")
+                        .and_then(Value::as_str)
+                    {
+                        modal.mode = 2;
+                        modal.credentials_path = cred.to_owned();
+                    } else {
+                        modal.mode = 0;
+                    }
+                }
+            }
+        }
+        self.vertex = modal;
+    }
+
+    pub(in crate::app) fn open_add_endpoint(&mut self, preset: Option<(&str, &str, &str, usize)>) {
+        let (id, name, base_url, api_index) = preset.unwrap_or((
+            "local-openai",
+            "Local OpenAI",
+            "http://localhost:11434/v1",
+            0,
+        ));
         self.endpoint = EndpointModal {
             open: true,
             editing_id: None,
             id: id.into(),
             name: name.into(),
             base_url: base_url.into(),
-            api_index: 0,
+            api_index,
             api_key: String::new(),
             manual_model_id: String::new(),
             models: Vec::new(),
@@ -738,6 +1182,56 @@ impl ProvidersManager {
             }
             Err(err) => self.status_error = Some(err),
         }
+    }
+
+    fn save_vertex_to_disk(&mut self) -> Result<(), String> {
+        let path = auth_json_path().ok_or("Cannot resolve ~/.pi/agent/auth.json.")?;
+        let mut root = read_json_object(&path);
+        if self.vertex.mode == 1 {
+            let key = self.vertex.api_key.trim();
+            if key.is_empty() {
+                return Err("Enter a Google Cloud Vertex AI API key.".into());
+            }
+            root["google-vertex"] = json!({
+                "type": "api_key",
+                "key": key,
+            });
+        } else {
+            let project = self.vertex.project_id.trim();
+            let location = self.vertex.location.trim();
+            if project.is_empty() {
+                return Err("Enter your Google Cloud Project ID.".into());
+            }
+            if location.is_empty() {
+                return Err(
+                    "Enter a Google Cloud Location (for example us-central1 or global).".into(),
+                );
+            }
+            let mut env = json!({
+                "GOOGLE_CLOUD_PROJECT": project,
+                "GOOGLE_CLOUD_LOCATION": location,
+            });
+            if self.vertex.mode == 2 {
+                let cred_path = self.vertex.credentials_path.trim();
+                if cred_path.is_empty() {
+                    return Err("Enter the path to your service account JSON file.".into());
+                }
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = json!(cred_path);
+            }
+            root["google-vertex"] = json!({
+                "type": "api_key",
+                "env": env,
+            });
+        }
+        write_json_atomic(&path, &root, true)?;
+        self.vertex.open = false;
+        self.vertex.api_key.clear();
+        self.reload_from_disk();
+        self.status_error = None;
+        self.status_notice =
+            Some("Saved Google Vertex AI configuration to ~/.pi/agent/auth.json.".into());
+        self.reload_requested = true;
+        Ok(())
     }
 
     fn save_endpoint_to_disk(&mut self) -> Result<(), String> {
@@ -844,7 +1338,7 @@ impl ProvidersManager {
             BUILTIN_KEY_PROVIDERS
                 .get(self.api_key_modal.provider_index)
                 .map(|(id, _)| (*id).to_owned())
-                .unwrap_or_else(|| "anthropic".into())
+                .unwrap_or_else(|| "google".into())
         };
         let key = self.api_key_modal.api_key.trim();
         if key.is_empty() {
@@ -870,6 +1364,8 @@ impl ProvidersManager {
 
     pub(in crate::app) fn show_modals(&mut self, ctx: &egui::Context) {
         self.show_claude_modal(ctx);
+        self.show_antigravity_modal(ctx);
+        self.show_vertex_modal(ctx);
         self.show_endpoint_modal(ctx);
         self.show_api_key_modal(ctx);
     }
@@ -986,6 +1482,318 @@ impl ProvidersManager {
         }
     }
 
+    fn show_antigravity_modal(&mut self, ctx: &egui::Context) {
+        if !self.antigravity.open {
+            return;
+        }
+        let mut start_browser_flow = false;
+        let mut submit_manual = false;
+        let response = prompt_ui::modal(
+            ctx,
+            egui::Id::new("pui-antigravity-subscription-modal"),
+            480.0,
+            |ui| {
+                let mut close = prompt_ui::close(ui);
+                prompt_ui::badge(ui, Icon::Spark, false);
+                prompt_ui::heading(
+                    ui,
+                    "Connect Google Antigravity",
+                    "Sign in with Google OAuth to unlock Antigravity / Cloud Code Assist models (Gemini 3.7/3.6/3.5 Flash, Gemini 3.1 Pro, Claude Opus/Sonnet 4.6, GPT-OSS 120B).",
+                );
+                ui.add_space(10.0);
+                ui.columns(2, |cols| {
+                    cols[0].label(theme::small(
+                        &cols[0],
+                        "Google OAuth Client ID (or ANTIGRAVITY_CLIENT_ID):",
+                    ));
+                    cols[0].add_enabled(
+                        !self.antigravity.exchanging,
+                        theme::text_field(
+                            &mut self.antigravity.client_id,
+                            "….apps.googleusercontent.com",
+                        )
+                        .id_salt("antigravity-client-id-input")
+                        .desired_width(cols[0].available_width()),
+                    );
+                    cols[1].label(theme::small(
+                        &cols[1],
+                        "Client Secret (optional · or ANTIGRAVITY_CLIENT_SECRET):",
+                    ));
+                    cols[1].add_enabled(
+                        !self.antigravity.exchanging,
+                        theme::text_field(&mut self.antigravity.client_secret, "Optional")
+                            .id_salt("antigravity-client-secret-input")
+                            .password(true)
+                            .desired_width(cols[1].available_width()),
+                    );
+                });
+                ui.add_space(10.0);
+                prompt_ui::note(
+                    ui,
+                    "Click Sign In with Google below. Pui starts a local callback listener on localhost:51121 and completes sign-in automatically once you approve in your browser.\n\nIf you are on a remote browser, you can also paste the final http://localhost:51121/oauth-callback?… URL below.",
+                );
+                ui.add_space(10.0);
+                let has_client_id = !self.antigravity.client_id.trim().is_empty();
+                if prompt_ui::button(
+                    ui,
+                    if self.antigravity.listening {
+                        "Waiting for Google Sign-In in Browser…"
+                    } else {
+                        "Sign In with Google in Browser"
+                    },
+                    prompt_ui::Button::Primary,
+                    !self.antigravity.exchanging && has_client_id,
+                )
+                .clicked()
+                {
+                    start_browser_flow = true;
+                }
+                ui.add_space(12.0);
+                ui.label(theme::small(
+                    ui,
+                    "Or paste callback URL manually (http://localhost:51121/oauth-callback?…):",
+                ));
+                let edit = ui.add_enabled(
+                    !self.antigravity.exchanging || self.antigravity.listening,
+                    theme::text_field(
+                        &mut self.antigravity.callback_input,
+                        "http://localhost:51121/oauth-callback?state=…&code=…",
+                    )
+                    .id_salt("antigravity-oauth-callback-input")
+                    .desired_width(ui.available_width()),
+                );
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit_manual = true;
+                }
+                if let Some(error) = &self.antigravity.error {
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(error)
+                                .size(11.5)
+                                .color(theme::palette(ui.ctx()).red),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(18.0);
+                prompt_ui::footer(ui, |ui| {
+                    if prompt_ui::button(
+                        ui,
+                        if self.antigravity.exchanging && !self.antigravity.listening {
+                            "Connecting…"
+                        } else {
+                            "Connect Pasted URL"
+                        },
+                        prompt_ui::Button::Secondary,
+                        has_client_id && !self.antigravity.callback_input.trim().is_empty(),
+                    )
+                    .clicked()
+                    {
+                        submit_manual = true;
+                    }
+                    close |= prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true)
+                        .clicked();
+                });
+                close
+            },
+        );
+        if start_browser_flow && !self.antigravity.exchanging {
+            let client_id = self.antigravity.client_id.trim().to_owned();
+            if client_id.is_empty() {
+                self.antigravity.error = Some("Enter your Google OAuth Client ID first.".into());
+            } else {
+                self.antigravity.exchanging = true;
+                self.antigravity.listening = true;
+                self.antigravity.error = None;
+                let client_secret = self.antigravity.client_secret.trim().to_owned();
+                let auth_url = build_antigravity_authorize_url(
+                    &client_id,
+                    &self.antigravity.challenge,
+                    &self.antigravity.state,
+                );
+                let state = self.antigravity.state.clone();
+                let verifier = self.antigravity.verifier.clone();
+                let (tx, rx) = mpsc::channel();
+                self.antigravity.rx = Some(rx);
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_antigravity_browser_login(
+                        &client_id,
+                        &client_secret,
+                        &auth_url,
+                        &state,
+                        &verifier,
+                    ));
+                    ctx.request_repaint();
+                });
+            }
+        }
+        if submit_manual {
+            match parse_oauth_code_input(&self.antigravity.callback_input, &self.antigravity.state)
+            {
+                Ok((code, _)) => {
+                    let client_id = self.antigravity.client_id.trim().to_owned();
+                    let client_secret = self.antigravity.client_secret.trim().to_owned();
+                    self.antigravity.exchanging = true;
+                    self.antigravity.listening = false;
+                    self.antigravity.error = None;
+                    let verifier = self.antigravity.verifier.clone();
+                    let (tx, rx) = mpsc::channel();
+                    self.antigravity.rx = Some(rx);
+                    let ctx = ctx.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(exchange_antigravity_oauth_code(
+                            &client_id,
+                            &client_secret,
+                            &code,
+                            &verifier,
+                        ));
+                        ctx.request_repaint();
+                    });
+                }
+                Err(err) => {
+                    self.antigravity.error = Some(err);
+                }
+            }
+        }
+        if response.should_close() || response.inner {
+            self.antigravity.open = false;
+            self.antigravity.rx = None;
+            self.antigravity.exchanging = false;
+            self.antigravity.listening = false;
+        }
+    }
+
+    fn show_vertex_modal(&mut self, ctx: &egui::Context) {
+        if !self.vertex.open {
+            return;
+        }
+        let mut save = false;
+        let response = prompt_ui::modal(
+            ctx,
+            egui::Id::new("pui-google-vertex-modal"),
+            450.0,
+            |ui| {
+                let mut close = prompt_ui::close(ui);
+                prompt_ui::badge(ui, Icon::Globe, false);
+                prompt_ui::heading(
+                    ui,
+                    "Configure Google Vertex AI",
+                    "Connect Google Vertex AI using Application Default Credentials (gcloud auth application-default login), a Google Cloud API key, or a service account file.",
+                );
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (idx, label) in [
+                        (0, "Application Default Credentials (ADC)"),
+                        (1, "Google Cloud API Key"),
+                        (2, "Service Account JSON"),
+                    ] {
+                        if prompt_ui::button(
+                            ui,
+                            label,
+                            if self.vertex.mode == idx {
+                                prompt_ui::Button::Primary
+                            } else {
+                                prompt_ui::Button::Secondary
+                            },
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.vertex.mode = idx;
+                            self.vertex.error = None;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                if self.vertex.mode == 1 {
+                    ui.label(theme::small(
+                        ui,
+                        "Google Cloud API Key (GOOGLE_CLOUD_API_KEY):",
+                    ));
+                    let is_cmd = self.vertex.api_key.trim_start().starts_with('!');
+                    ui.add(
+                        theme::text_field(&mut self.vertex.api_key, "AIza… or !command")
+                            .id_salt("vertex-api-key-input")
+                            .password(!is_cmd)
+                            .desired_width(ui.available_width()),
+                    );
+                } else {
+                    if self.vertex.mode == 0 {
+                        prompt_ui::note(
+                            ui,
+                            "Uses ~/.config/gcloud/application_default_credentials.json from `gcloud auth application-default login`.",
+                        );
+                        ui.add_space(8.0);
+                    }
+                    ui.columns(2, |cols| {
+                        cols[0].label(theme::small(
+                            &cols[0],
+                            "Google Cloud Project ID (GOOGLE_CLOUD_PROJECT)",
+                        ));
+                        cols[0].add(
+                            theme::text_field(&mut self.vertex.project_id, "my-gcp-project")
+                                .id_salt("vertex-project-id")
+                                .desired_width(cols[0].available_width()),
+                        );
+                        cols[1].label(theme::small(&cols[1], "Location (GOOGLE_CLOUD_LOCATION)"));
+                        cols[1].add(
+                            theme::text_field(&mut self.vertex.location, "us-central1 or global")
+                                .id_salt("vertex-location")
+                                .desired_width(cols[1].available_width()),
+                        );
+                    });
+                    if self.vertex.mode == 2 {
+                        ui.add_space(8.0);
+                        ui.label(theme::small(
+                            ui,
+                            "Service Account JSON Path (GOOGLE_APPLICATION_CREDENTIALS):",
+                        ));
+                        ui.add(
+                            theme::text_field(
+                                &mut self.vertex.credentials_path,
+                                "/path/to/service-account.json",
+                            )
+                            .id_salt("vertex-sa-path")
+                            .desired_width(ui.available_width()),
+                        );
+                    }
+                }
+                if let Some(error) = &self.vertex.error {
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(error)
+                                .size(11.5)
+                                .color(theme::palette(ui.ctx()).red),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(18.0);
+                prompt_ui::footer(ui, |ui| {
+                    if prompt_ui::button(ui, "Save Vertex AI", prompt_ui::Button::Primary, true)
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    close |= prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true)
+                        .clicked();
+                });
+                close
+            },
+        );
+        if save {
+            if let Err(err) = self.save_vertex_to_disk() {
+                self.vertex.error = Some(err);
+            }
+        }
+        if response.should_close() || response.inner {
+            self.vertex.open = false;
+        }
+    }
+
     fn show_endpoint_modal(&mut self, ctx: &egui::Context) {
         if !self.endpoint.open {
             return;
@@ -997,46 +1805,57 @@ impl ProvidersManager {
         let response = prompt_ui::modal(
             ctx,
             egui::Id::new("pui-openai-endpoint-modal"),
-            520.0,
+            530.0,
             |ui| {
                 let mut close = prompt_ui::close(ui);
                 prompt_ui::badge(ui, Icon::Globe, false);
                 prompt_ui::heading(
                     ui,
                     if self.endpoint.editing_id.is_some() {
-                        "Edit OpenAI-Compatible Endpoint"
+                        "Edit Compatible Endpoint"
                     } else {
-                        "Add OpenAI-Compatible Endpoint"
+                        "Add Compatible Endpoint"
                     },
-                    "Connect a local or custom OpenAI/Anthropic-compatible server (Ollama, LM Studio, vLLM, llama.cpp, LiteLLM) and automatically discover its models.",
+                    "Connect a local or custom OpenAI, Anthropic, or Google Gemini/Vertex-compatible server and automatically discover its models.",
                 );
                 ui.add_space(10.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(theme::small(ui, "Quick presets:"));
-                    for (label, pid, pname, url) in [
+                    for (label, pid, pname, url, api_idx) in [
                         (
                             "Ollama (:11434)",
                             "ollama",
                             "Ollama",
                             "http://localhost:11434/v1",
+                            0,
                         ),
                         (
                             "LM Studio (:1234)",
                             "lmstudio",
                             "LM Studio",
                             "http://localhost:1234/v1",
+                            0,
                         ),
                         (
                             "vLLM / Local (:8000)",
                             "local-openai",
                             "Local OpenAI",
                             "http://localhost:8000/v1",
+                            0,
                         ),
                         (
                             "llama.cpp (:8080)",
                             "llamacpp",
                             "llama.cpp",
                             "http://localhost:8080/v1",
+                            0,
+                        ),
+                        (
+                            "Google Gemini",
+                            "google-custom",
+                            "Google Gemini Custom",
+                            "https://generativelanguage.googleapis.com/v1beta",
+                            3,
                         ),
                     ] {
                         if prompt_ui::button(
@@ -1052,6 +1871,7 @@ impl ProvidersManager {
                                 self.endpoint.name = pname.into();
                             }
                             self.endpoint.base_url = url.into();
+                            self.endpoint.api_index = api_idx;
                         }
                     }
                 });
@@ -1133,7 +1953,7 @@ impl ProvidersManager {
                     let edit = ui.add(
                         theme::text_field(
                             &mut self.endpoint.manual_model_id,
-                            "Or type a model ID manually (e.g. qwen2.5-coder:32b)…",
+                            "Or type a model ID manually (e.g. qwen2.5-coder:32b or gemini-2.5-pro)…",
                         )
                         .id_salt("endpoint-manual-model")
                         .desired_width(width),
@@ -1181,7 +2001,7 @@ impl ProvidersManager {
                         if self.endpoint.models.is_empty() {
                             ui.label(theme::small(
                                 ui,
-                                "Click Discover Models to fetch models from /v1/models, or add a model ID above.",
+                                "Click Discover Models to fetch models from /models, or add a model ID above.",
                             ));
                         } else {
                             egui::ScrollArea::vertical()
@@ -1248,8 +2068,11 @@ impl ProvidersManager {
                         enabled: true,
                         reasoning: lower.contains("r1")
                             || lower.contains("qwq")
-                            || lower.contains("thinking"),
-                        vision: lower.contains("vl") || lower.contains("vision"),
+                            || lower.contains("thinking")
+                            || lower.contains("gemini"),
+                        vision: lower.contains("vl")
+                            || lower.contains("vision")
+                            || lower.contains("gemini"),
                         context_window: 128_000,
                         max_tokens: 16_384,
                     });
@@ -1338,7 +2161,7 @@ impl ProvidersManager {
                 ui.label(theme::small(ui, "API Key (or !command)"));
                 let is_command = self.api_key_modal.api_key.trim_start().starts_with('!');
                 let edit = ui.add(
-                    theme::text_field(&mut self.api_key_modal.api_key, "sk-…")
+                    theme::text_field(&mut self.api_key_modal.api_key, "AIza… / sk-…")
                         .id_salt("api-key-secret-value")
                         .password(!is_command)
                         .desired_width(ui.available_width()),
@@ -1386,12 +2209,27 @@ impl ProvidersManager {
     }
 
     pub(in crate::app) fn any_modal_open(&self) -> bool {
-        self.claude.open || self.endpoint.open || self.api_key_modal.open
+        self.claude.open
+            || self.antigravity.open
+            || self.vertex.open
+            || self.endpoint.open
+            || self.api_key_modal.open
     }
 
     pub(in crate::app) fn escape(&mut self) -> bool {
         if self.claude.open && !self.claude.exchanging {
             self.claude.open = false;
+            return true;
+        }
+        if self.antigravity.open {
+            self.antigravity.open = false;
+            self.antigravity.rx = None;
+            self.antigravity.exchanging = false;
+            self.antigravity.listening = false;
+            return true;
+        }
+        if self.vertex.open {
+            self.vertex.open = false;
             return true;
         }
         if self.endpoint.open && !self.endpoint.discovering {
@@ -1426,19 +2264,69 @@ impl Pui {
             ui.label(RichText::new(error).size(12.0).color(colors.red));
         }
 
-        // 1. Quick Add / Connect section
+        // 1. Subscriptions & Cloud Accounts
         page::section(
             ui,
             "Add or connect provider",
-            "Connect your Claude Code subscription, a local OpenAI-compatible server with auto model discovery, or a provider API key.",
+            "Connect your Google Antigravity or Claude Code subscription, configure Google Gemini / Vertex AI, or add a compatible endpoint with automatic model discovery.",
         );
+        let antigravity_auth = self
+            .settings_view
+            .providers
+            .saved_auth
+            .iter()
+            .find(|a| a.provider == "antigravity" && a.kind == "oauth")
+            .cloned();
         let claude_connected = self
             .settings_view
             .providers
             .saved_auth
             .iter()
             .any(|a| a.provider == "anthropic" && a.kind == "oauth");
+        let google_key_connected = self
+            .settings_view
+            .providers
+            .saved_auth
+            .iter()
+            .any(|a| a.provider == "google");
+        let vertex_auth = self
+            .settings_view
+            .providers
+            .saved_auth
+            .iter()
+            .find(|a| a.provider == "google-vertex")
+            .cloned();
+
         page::card(ui, |ui| {
+            let agy_desc = if let Some(auth) = &antigravity_auth {
+                if let Some(email) = &auth.detail {
+                    format!(
+                        "Connected via Google OAuth ({email}). Antigravity models (Gemini 3.7/3.6/3.5, 3.1 Pro, Claude 4.6) are available."
+                    )
+                } else {
+                    "Connected via Google OAuth in ~/.pi/agent/auth.json. Antigravity models are available in the model picker.".into()
+                }
+            } else {
+                "Sign in with your Google account via OAuth to use Antigravity / Cloud Code Assist models (Gemini 3.7/3.6 Flash, 3.1 Pro, Claude 4.6).".into()
+            };
+            page::row(
+                ui,
+                "Google Antigravity / Gemini CLI (OAuth Subscription)",
+                &agy_desc,
+                |ui| {
+                    if ui
+                        .button(if antigravity_auth.is_some() {
+                            "Reconnect Antigravity…"
+                        } else {
+                            "Connect Antigravity…"
+                        })
+                        .clicked()
+                    {
+                        self.settings_view.providers.open_antigravity_subscription();
+                    }
+                },
+            );
+            page::separator(ui);
             page::row(
                 ui,
                 "Claude Code Subscription (Claude Pro / Max)",
@@ -1461,10 +2349,33 @@ impl Pui {
                 },
             );
             page::separator(ui);
+            let google_desc = match (&vertex_auth, google_key_connected) {
+                (Some(v), true) => format!(
+                    "Gemini API key + Vertex AI ({}) configured.",
+                    v.detail.as_deref().unwrap_or("API key")
+                ),
+                (Some(v), false) => format!(
+                    "Vertex AI configured ({}).",
+                    v.detail.as_deref().unwrap_or("API key")
+                ),
+                (None, true) => "Google Gemini API key saved in ~/.pi/agent/auth.json.".into(),
+                (None, false) => "Connect a Google Gemini API key (GEMINI_API_KEY) or Google Cloud Vertex AI (gcloud ADC / project & location).".into(),
+            };
+            page::row(ui, "Google Gemini & Vertex AI", &google_desc, |ui| {
+                if ui.button("Vertex AI (ADC / Project)…").clicked() {
+                    self.settings_view.providers.open_vertex_modal();
+                }
+                if ui.button("Gemini API Key…").clicked() {
+                    self.settings_view
+                        .providers
+                        .open_api_key_modal(Some("google"));
+                }
+            });
+            page::separator(ui);
             page::row(
                 ui,
-                "OpenAI-Compatible Endpoint (Local / Custom)",
-                "Connect Ollama, LM Studio, vLLM, llama.cpp or any /v1/models OpenAI-compatible server with automatic model discovery.",
+                "OpenAI / Google / Anthropic-Compatible Endpoint (Local / Custom)",
+                "Connect Ollama, LM Studio, vLLM, llama.cpp, or custom Google Generative AI / Vertex endpoints with automatic model discovery.",
                 |ui| {
                     if ui.button("Add Endpoint…").clicked() {
                         self.settings_view.providers.open_add_endpoint(None);
@@ -1475,7 +2386,7 @@ impl Pui {
             page::row(
                 ui,
                 "Provider API Key",
-                "Store an API key for Anthropic, OpenAI, Google Gemini, OpenRouter, DeepSeek or xAI.",
+                "Store an API key for Google Gemini, Anthropic, OpenAI, OpenRouter, DeepSeek or xAI.",
                 |ui| {
                     if ui.button("Add API Key…").clicked() {
                         self.settings_view.providers.open_api_key_modal(None);
@@ -1484,12 +2395,12 @@ impl Pui {
             );
         });
 
-        // 2. Custom & Local OpenAI-Compatible Endpoints
+        // 2. Custom & Local Compatible Endpoints
         let custom_list = self.settings_view.providers.custom_providers.clone();
         if !custom_list.is_empty() {
             page::section(
                 ui,
-                "OpenAI-compatible & custom endpoints",
+                "OpenAI, Google & custom endpoints",
                 "Configured in ~/.pi/agent/models.json. Edit or re-run auto model discovery anytime.",
             );
             let mut edit_target = None;
@@ -1582,14 +2493,13 @@ impl Pui {
                     let auth_badge = saved_auth
                         .iter()
                         .find(|a| &a.provider == provider)
-                        .map(|a| {
-                            if a.kind == "oauth" {
-                                " · OAuth subscription"
-                            } else {
-                                " · Stored API key"
-                            }
+                        .map(|a| match (&a.detail, a.kind.as_str()) {
+                            (Some(d), "oauth") => format!(" · OAuth ({d})"),
+                            (None, "oauth") => " · OAuth subscription".to_owned(),
+                            (Some(d), _) => format!(" · {d}"),
+                            (None, _) => " · Stored API key".to_owned(),
                         })
-                        .unwrap_or("");
+                        .unwrap_or_default();
                     page::row(
                         ui,
                         provider,
@@ -1619,12 +2529,17 @@ impl Pui {
                         page::separator(ui);
                     }
                     rows_drawn += 1;
-                    let kind_label = if auth.kind == "oauth" {
-                        "OAuth subscription saved · reload chat to load models"
-                    } else {
-                        "API key saved · reload chat to load models"
+                    let kind_label = match (&auth.detail, auth.kind.as_str()) {
+                        (Some(d), "oauth") => {
+                            format!("OAuth subscription ({d}) · reload chat to load models")
+                        }
+                        (None, "oauth") => {
+                            "OAuth subscription saved · reload chat to load models".into()
+                        }
+                        (Some(d), _) => format!("{d} · reload chat to load models"),
+                        (None, _) => "API key saved · reload chat to load models".into(),
                     };
-                    page::row(ui, &auth.provider, kind_label, |ui| {
+                    page::row(ui, &auth.provider, &kind_label, |ui| {
                         if ui.button("Sign out").clicked() {
                             remove_auth = Some(auth.provider.clone());
                         }
@@ -1657,7 +2572,7 @@ impl Pui {
             page::row(
                 ui,
                 "Terminal sign-in (All Pi providers)",
-                "For other OAuth providers (GitHub Copilot, OpenAI ChatGPT/Codex, Radius, Google Vertex), you can also run Pi's interactive /login in your terminal.",
+                "For other OAuth providers (GitHub Copilot, OpenAI ChatGPT/Codex, Radius), you can also run Pi's interactive /login in your terminal.",
                 |ui| {
                     let command = if crate::runtime::active_bundle().is_some() {
                         format!(
@@ -1716,7 +2631,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_claude_oauth_code_and_verifies_state() {
+    fn parses_google_v1beta_models_payload_and_filters_embeddings() {
+        let payload = json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-pro",
+                    "displayName": "Gemini 2.5 Pro",
+                    "inputTokenLimit": 1048576,
+                    "outputTokenLimit": 65536,
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "displayName": "Text Embedding 004",
+                    "supportedGenerationMethods": ["embedContent"]
+                }
+            ]
+        });
+        let models = parse_discovered_models(&payload);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-2.5-pro");
+        assert_eq!(models[0].name, "Gemini 2.5 Pro");
+        assert_eq!(models[0].context_window, 1_048_576);
+        assert_eq!(models[0].max_tokens, 65_536);
+        assert!(models[0].reasoning);
+        assert!(models[0].vision);
+    }
+
+    #[test]
+    fn parses_claude_and_antigravity_oauth_code_and_verifies_state() {
         let (code, state) = parse_oauth_code_input("abc123code#state999", "state999").unwrap();
         assert_eq!(code, "abc123code");
         assert_eq!(state, "state999");
@@ -1725,6 +2668,11 @@ mod tests {
         let (code2, state2) = parse_oauth_code_input(url, "state999").unwrap();
         assert_eq!(code2, "urlcode");
         assert_eq!(state2, "state999");
+
+        let agy_url = "http://localhost:51121/oauth-callback?state=agystate&code=4/0AeanS0123";
+        let (code3, state3) = parse_oauth_code_input(agy_url, "agystate").unwrap();
+        assert_eq!(code3, "4/0AeanS0123");
+        assert_eq!(state3, "agystate");
 
         assert!(parse_oauth_code_input("abc#wrongstate", "state999").is_err());
         assert!(parse_oauth_code_input("   ", "state999").is_err());
