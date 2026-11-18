@@ -209,7 +209,8 @@ fn reply_separators_only_between_top_level_ordered_siblings_and_tool_style_is_un
         .find(|section| section.format.font_id.family == egui::FontFamily::Monospace)
         .unwrap();
     assert_eq!(code.format.line_height, Some(22.0));
-    assert_eq!(code.format.background, theme::palette(&ctx).surface);
+    assert_eq!(code.format.background, theme::palette(&ctx).inline_code_bg);
+    assert_eq!(code.format.color, theme::palette(&ctx).inline_code_text);
 }
 
 #[test]

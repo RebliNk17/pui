@@ -52,6 +52,9 @@ pub struct Palette {
     pub blue: Color32,
     pub amber: Color32,
     pub code_bg: Color32,
+    pub code_text: Color32,
+    pub inline_code_bg: Color32,
+    pub inline_code_text: Color32,
     pub user_bg: Color32,
     pub accent_bg: Color32,
     pub error_bg: Color32,
@@ -80,7 +83,10 @@ const NEUTRAL_DARK: Palette = Palette {
     red: Color32::from_rgb(239, 122, 112),
     blue: Color32::from_rgb(63, 141, 224),
     amber: Color32::from_rgb(231, 177, 82),
-    code_bg: Color32::from_rgb(22, 22, 22),
+    code_bg: Color32::from_rgb(30, 28, 38),
+    code_text: Color32::from_rgb(229, 225, 239),
+    inline_code_bg: Color32::from_rgb(41, 35, 57),
+    inline_code_text: Color32::from_rgb(199, 185, 255),
     user_bg: Color32::from_rgb(39, 39, 39),
     accent_bg: Color32::from_rgb(44, 40, 80),
     error_bg: Color32::from_rgb(49, 30, 34),
@@ -109,7 +115,10 @@ const NEUTRAL_LIGHT: Palette = Palette {
     red: Color32::from_rgb(185, 57, 49),
     blue: Color32::from_rgb(34, 106, 184),
     amber: Color32::from_rgb(147, 98, 15),
-    code_bg: Color32::from_rgb(241, 241, 238),
+    code_bg: Color32::from_rgb(244, 241, 249),
+    code_text: Color32::from_rgb(51, 43, 64),
+    inline_code_bg: Color32::from_rgb(238, 232, 248),
+    inline_code_text: Color32::from_rgb(96, 64, 165),
     user_bg: Color32::from_rgb(235, 235, 231),
     accent_bg: Color32::from_rgb(237, 232, 252),
     error_bg: Color32::from_rgb(253, 235, 233),
@@ -600,6 +609,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn all_eight_code_palettes_are_readable_and_distinct_from_links() {
+        let mut inline_colors = Vec::new();
+        for (mode, styles) in all_styles() {
+            let colors = styles.palette(mode);
+            assert_ne!(colors.inline_code_text, colors.accent);
+            assert_ne!(colors.inline_code_bg, colors.code_bg);
+            inline_colors.push(colors.inline_code_text);
+            for (foreground, background) in [
+                (colors.inline_code_text, colors.inline_code_bg),
+                (colors.code_text, colors.code_bg),
+                (colors.accent, colors.inline_code_bg),
+                // Composer selections use regular text on the selection surface.
+                (colors.text, colors.selection_bg),
+            ] {
+                let (a, b) = (luminance(foreground), luminance(background));
+                let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
+                assert!(
+                    contrast >= 4.5,
+                    "{styles:?}: {foreground:?} on {background:?}: {contrast}"
+                );
+            }
+        }
+        inline_colors.sort_by_key(|c| c.to_array());
+        inline_colors.dedup();
+        assert_eq!(inline_colors.len(), 8);
     }
 
     #[test]

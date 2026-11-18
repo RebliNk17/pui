@@ -62,13 +62,40 @@ impl Presentation {
         let mut in_code = false;
         for (event, range) in events {
             match event {
-                Event::Start(Tag::CodeBlock(_)) => {
+                Event::Start(Tag::CodeBlock(kind)) => {
                     literal.push(range.clone());
                     result.blocks.push(range.clone());
-                    result.apply(range, |s| {
+                    result.apply(range.clone(), |s| {
                         s.code = true;
                         s.block = true;
                     });
+                    if matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)) {
+                        let value = &source[range.clone()];
+                        let opening_end = value.find('\n').unwrap_or(value.len());
+                        let opening = range.start..range.start + opening_end;
+                        let trimmed = value.trim_end_matches(['\n', '\r']);
+                        let closing_start = trimmed.rfind('\n').map(|i| i + 1);
+                        let marker = value.trim_start().as_bytes().first().copied();
+                        let opening_width = value
+                            .trim_start()
+                            .bytes()
+                            .take_while(|b| Some(*b) == marker)
+                            .count();
+                        if !editing(&opening, selection.clone()) {
+                            result.hide(opening);
+                        }
+                        if let Some(start) = closing_start {
+                            let line = trimmed[start..].trim();
+                            if line.len() >= opening_width
+                                && line.bytes().all(|b| Some(b) == marker)
+                            {
+                                let closing = range.start + start..range.start + trimmed.len();
+                                if !editing(&closing, selection.clone()) {
+                                    result.hide(closing);
+                                }
+                            }
+                        }
+                    }
                     in_code = true;
                 }
                 Event::End(TagEnd::CodeBlock) => in_code = false,
@@ -278,12 +305,16 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
             },
             color: if style.link {
                 colors.accent
+            } else if style.block {
+                colors.code_text
+            } else if style.code {
+                colors.inline_code_text
             } else {
                 colors.text
             },
             line_height: style.block.then_some(28.0),
             background: if style.code && !style.block && !style.hidden {
-                colors.code_bg
+                colors.inline_code_bg
             } else {
                 Color32::TRANSPARENT
             },

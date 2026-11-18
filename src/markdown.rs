@@ -150,9 +150,15 @@ fn format(
                 },
             )
         },
-        color: if link { colors.accent } else { colors.text },
+        color: if link {
+            colors.accent
+        } else if code {
+            colors.inline_code_text
+        } else {
+            colors.text
+        },
         background: if code {
-            colors.surface
+            colors.inline_code_bg
         } else {
             Color32::TRANSPARENT
         },
@@ -307,7 +313,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
             }
             Event::End(TagEnd::CodeBlock) => {
                 egui::Frame::new()
-                    .fill(colors.sidebar)
+                    .fill(colors.code_bg)
                     .stroke(egui::Stroke::new(1.0, colors.border))
                     .corner_radius(8)
                     .inner_margin(12)
@@ -337,7 +343,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                                     egui::Label::new(
                                         RichText::new(text)
                                             .font(FontId::monospace(12.0))
-                                            .color(colors.text),
+                                            .color(colors.code_text),
                                     )
                                     .selectable(true),
                                 );

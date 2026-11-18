@@ -31,6 +31,103 @@ fn inline_markdown_is_rich_and_editing_reveals_its_syntax() {
 }
 
 #[test]
+fn all_themes_render_code_colors_with_original_unicode_source_mapping() {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let source = "Use `asdz`\n```python\nprint('שלום')\n```";
+    let themes = theme::DarkStyle::ALL
+        .into_iter()
+        .map(|dark| {
+            (
+                theme::Theme::Dark,
+                theme::Styles {
+                    dark,
+                    ..Default::default()
+                },
+            )
+        })
+        .chain(theme::LightStyle::ALL.into_iter().map(|light| {
+            (
+                theme::Theme::Light,
+                theme::Styles {
+                    light,
+                    ..Default::default()
+                },
+            )
+        }));
+    for (mode, styles) in themes {
+        styles.apply(&ctx, mode);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let galley = super::galley(ctx, source, 300.0);
+            assert_eq!(
+                galley.job.text, source,
+                "source retained for selection/copy"
+            );
+            let colors = theme::palette(ctx);
+            for (needle, color, background) in [
+                ("asdz", colors.inline_code_text, colors.inline_code_bg),
+                ("print", colors.code_text, Color32::TRANSPARENT),
+            ] {
+                let byte = source.find(needle).unwrap();
+                let format = &galley
+                    .job
+                    .sections
+                    .iter()
+                    .find(|s| s.byte_range.contains(&byte))
+                    .unwrap()
+                    .format;
+                assert_eq!(format.color, color);
+                assert_eq!(format.background, background);
+            }
+            assert_eq!(
+                galley
+                    .rows
+                    .iter()
+                    .map(|r| r.char_count_including_newline())
+                    .sum::<usize>(),
+                source.chars().count()
+            );
+        });
+    }
+}
+
+#[test]
+fn fenced_code_hides_syntax_but_keeps_source_indices_and_delimiter_editing() {
+    for source in [
+        "```asdasd",
+        "```python\nprint('שלום')\n```",
+        "~~~rust\nlet ready = true;\n~~~\n",
+        "````md\n```literal\n````",
+        "```\nasdasd\n",
+    ] {
+        let preview = Presentation::new(source, None);
+        assert!(preview.styles[0].hidden, "{source:?}");
+        assert_eq!(preview.styles.len(), source.len());
+        let editing_fence = Presentation::new(source, Some(1..1));
+        assert!(!editing_fence.styles[0].hidden);
+        if let Some(start) = source.find('\n') {
+            let body = start + 1;
+            if body < source.len() {
+                let editing_body = Presentation::new(source, Some(body..body));
+                assert!(
+                    editing_body.styles[0].hidden,
+                    "body editing must not reveal the opening fence: {source:?}"
+                );
+                assert!(!editing_body.styles[body].hidden);
+            }
+        }
+        let selected = Presentation::new(source, Some(0..source.len()));
+        assert!(!selected.styles.iter().any(|s| s.hidden));
+    }
+    let source = "```\nbody\n```";
+    let preview = Presentation::new(source, None);
+    assert!(preview.styles[source.len() - 1].hidden);
+    let editing_close = Presentation::new(source, Some(source.len() - 1..source.len() - 1));
+    assert!(!editing_close.styles[source.len() - 1].hidden);
+    assert!(editing_close.styles[0].hidden);
+}
+
+#[test]
 fn nested_formatting_unicode_escapes_and_code_remain_literal_where_needed() {
     let source =
         "***שלום*** **é *nested*** \\*literal* `**raw**`\n```md\n* not a list\n```\n---\n* ";
