@@ -5,6 +5,7 @@ mod branch_create;
 mod branches;
 mod clone;
 mod commit;
+mod conflict;
 mod fetch;
 pub(super) mod git_files;
 mod git_modes;
@@ -42,6 +43,7 @@ pub(super) struct Changes {
     refresh: bool,
     index_actions: index_actions::IndexActions,
     commit: commit::Commit,
+    conflict: conflict::Conflict,
     initialize: initialize::Initialize,
     clone: clone::Clone,
     fetch: fetch::Fetch,
@@ -108,6 +110,7 @@ impl Changes {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
         self.commit_inputs(ctx, visible);
+        self.conflict_inputs(visible);
         self.initialize_inputs(ctx, visible);
         self.clone_inputs(ctx, visible);
         self.fetch_inputs(ctx, visible);
@@ -161,6 +164,7 @@ impl Changes {
         let session_changed = self.identity.1 != session;
         if self.identity.0 != cwd || session_changed {
             self.commit = Default::default();
+            self.conflict = Default::default();
             self.initialize = Default::default();
             self.clone = Default::default();
             self.fetch = Default::default();
@@ -261,6 +265,7 @@ impl Changes {
         self.index_dialog(ctx);
         self.restore_dialog(ctx);
         self.commit_dialog(ctx);
+        self.conflict_dialog(ctx);
         self.initialize_dialog(ctx);
         self.clone_dialog(ctx);
         self.fetch_dialog(ctx);

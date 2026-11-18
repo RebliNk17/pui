@@ -33,6 +33,7 @@ impl Changes {
         file: &workspace::FileChange,
         loading: bool,
     ) {
+        self.conflict_row(ui, workspace, file);
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::small(ui, format!("Index/worktree: {}", file.status)));
             for action in [Action::Stage, Action::Unstage, Action::Discard] {
@@ -158,6 +159,7 @@ impl Changes {
     }
     pub(in crate::app) fn cancel_index_intent(&mut self) {
         self.commit = Default::default();
+        self.conflict = Default::default();
         self.initialize = Default::default();
         self.clone = Default::default();
         self.fetch = Default::default();
