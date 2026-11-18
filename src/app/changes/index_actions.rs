@@ -16,6 +16,10 @@ pub(super) struct IndexActions {
     owner: Option<(PathBuf, String)>,
     pub(super) notice: Option<String>,
     success_notice: Option<String>,
+    /// (root, source path, recovery path) from the last completed discard.
+    pub(super) last_discard: Option<(PathBuf, String, PathBuf)>,
+    pub(super) restore_confirm: bool,
+    pub(super) restoring: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
     pub(super) fn index_row(
@@ -120,6 +124,11 @@ impl Changes {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.index_actions.success_notice = Some(if snapshot.action == Action::Discard {
+            self.index_actions.last_discard = Some((
+                snapshot.root.clone(),
+                snapshot.path.clone(),
+                snapshot.recovery_path(),
+            ));
             format!(
                 "Working file restored from index. Staged changes and HEAD unchanged. Recovery copy: {}",
                 snapshot.recovery_path().display()
@@ -166,8 +175,10 @@ impl Changes {
         {
             state.pending = None;
             state.inspected = None;
+            state.restore_confirm = false;
             if state.owner.as_ref() != Some(&self.identity) || !self.index_writable {
                 state.applying = None;
+                state.restoring = None;
             }
             state.controls.clear();
         }
@@ -198,6 +209,20 @@ impl Changes {
                     .success_notice
                     .take()
                     .unwrap_or_else(|| "Git action finished. Inspect refreshed status.".into()),
+                Err(e) => e,
+            });
+            self.refresh = true;
+        }
+        if let Some(result) = state.restoring.as_ref().and_then(|r| match r.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err("Restore ended; inspect the file.".into())),
+        }) {
+            state.restoring = None;
+            state.notice = Some(match result {
+                Ok(()) => {
+                    "Discarded content restored to the working file. Recovery copy retained.".into()
+                }
                 Err(e) => e,
             });
             self.refresh = true;
@@ -451,6 +476,75 @@ impl Changes {
             let snapshot = self.index_actions.inspected.take().unwrap();
             if choice == confirmations::Choice::Confirm {
                 self.apply_index(ctx, snapshot);
+            }
+        }
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                !matches!(
+                    e,
+                    egui::Event::Key { .. } | egui::Event::Text(_) | egui::Event::Paste(_)
+                )
+            })
+        });
+    }
+    pub(super) fn restore_dialog(&mut self, ctx: &egui::Context) {
+        if !self.index_actions.restore_confirm {
+            return;
+        }
+        let own = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("recovery-restore-confirm"),
+        );
+        if egui::Popup::is_any_open(ctx)
+            || prompt_ui::modal_owns_current_pass(ctx)
+            || ctx.memory(|m| m.top_modal_layer().is_some_and(|l| l != own))
+            || self.index_actions.restoring.is_some()
+        {
+            self.index_actions.restore_confirm = false;
+            return;
+        }
+        let Some((root, path, recovery)) = self.index_actions.last_discard.clone() else {
+            self.index_actions.restore_confirm = false;
+            return;
+        };
+        let choice = confirmations::Dialog::new(
+            "recovery-restore-confirm",
+            "Restore discarded content?",
+            "Copies the retained recovery copy back to this file, overwriting its current working content. Staged changes and HEAD are unchanged. The recovery copy is retained. No commit or push.",
+            "Cancel",
+            "Restore",
+        )
+        .destructive(false)
+        .show(ctx, |ui| {
+            ui.add(egui::Label::new(theme::small(ui, format!("{}\n→ {}", path, recovery.display()))).wrap());
+        });
+        if let Some(choice) = choice {
+            self.index_actions.restore_confirm = false;
+            if choice == confirmations::Choice::Confirm {
+                let Some(permit) = branches::permit(ctx) else {
+                    self.index_actions.notice = Some("Git busy; inspect again.".into());
+                    return;
+                };
+                let (tx, rx) = mpsc::channel();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.index_actions.restoring =
+                    Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                let ctx = ctx.clone();
+                let (root, path, recovery) = (root, path, recovery);
+                if std::thread::Builder::new()
+                    .name("pui-recovery-restore".into())
+                    .spawn(move || {
+                        let result =
+                            workspace::index_action::restore(&root, &path, &recovery, &cancel);
+                        drop(permit);
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
+                    })
+                    .is_err()
+                {
+                    self.index_actions.restoring = None;
+                    self.index_actions.notice = Some("Cannot start restore worker.".into());
+                }
             }
         }
         ctx.input_mut(|i| {

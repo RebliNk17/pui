@@ -527,6 +527,20 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
     drop(temp_guard);
     Ok(())
 }
+/// Whether a retained recovery copy exists for a file snapshot.
+#[cfg(test)]
+pub(crate) fn recovery_available(snapshot: &Snapshot) -> bool {
+    snapshot.recovery_path().try_exists().unwrap_or(false)
+}
+/// Restore a retained discard recovery copy to the working file.
+pub(crate) fn restore(
+    root: &Path,
+    path: &str,
+    recovery: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    discard::restore(root, path, recovery, cancel)
+}
 mod discard;
 pub(crate) mod hunks;
 #[cfg(test)]

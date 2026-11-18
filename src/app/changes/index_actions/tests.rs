@@ -503,3 +503,43 @@ fn line_selection_confirmation_themes_zoom_escape_no_apply() {
         }
     }
 }
+#[test]
+fn restore_dialog_themes_zoom_escape_no_write() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [0.8, 1.4] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let mut changes = Changes {
+                index_writable: true,
+                ..Default::default()
+            };
+            changes.index_actions.last_discard = Some((
+                PathBuf::from("/fixture"),
+                "f.txt".into(),
+                PathBuf::from("/fixture/.git/pui-discard-recovery-x"),
+            ));
+            changes.index_actions.restore_confirm = true;
+            for n in 0..4 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(420.0, 620.0),
+                        )),
+                        events: if n == 3 {
+                            vec![key(egui::Key::Escape)]
+                        } else {
+                            vec![]
+                        },
+                        ..Default::default()
+                    },
+                    |ctx| changes.restore_dialog(ctx),
+                );
+            }
+            assert!(!changes.index_actions.restore_confirm);
+            assert!(changes.index_actions.restoring.is_none());
+        }
+    }
+}
