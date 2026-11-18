@@ -6,6 +6,25 @@ pub(super) struct Pending {
     run: Running,
 }
 impl Pui {
+    pub(super) fn cancel_deleted_monitor_test(&mut self, id: &str) {
+        if self
+            .automation
+            .precheck
+            .as_ref()
+            .is_some_and(|pending| pending.job == id)
+        {
+            self.automation.precheck = None;
+        }
+        if self
+            .automation
+            .test_confirm
+            .as_ref()
+            .is_some_and(|(job, _)| job == id)
+        {
+            self.automation.test_confirm = None;
+        }
+    }
+
     pub(super) fn request_monitor_test(&mut self, id: &str) -> Result<(), String> {
         if self.active_permission() == settings::PermissionMode::Plan
             || self.demo
