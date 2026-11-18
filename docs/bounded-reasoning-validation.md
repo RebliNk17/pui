@@ -17,4 +17,12 @@ Isolated branch/worktree `bounded-reasoning-preview`, based on `be6c2baa`. Main 
 - Strict all-target Clippy, full formatting and diff whitespace checks passed: `/tmp/pui-bounded-reasoning-{clippy,fmt}.log`.
 - Native egui checks cover light/dark themes, 320/800 widths, bounded geometry, Unicode, expansion/collapse via pointer input, independent blocks, streaming-state retention and idle settling. Provider fixtures cover DeepSeek/Claude/GPT structured history in live/completed and Normal/Verbose rendering, while ordinary prose remains text. Existing streamed-delta and retry tests passed as part of the full suite.
 
-No provider calls, manual installed-app acceptance, push, packaging, installation or restart. This commit is local to the isolated feature branch; master integration remains separate.
+No provider calls, manual installed-app acceptance, packaging, installation or restart.
+
+## Latest remote master integration
+
+User requested pushing the fix onto latest master. Created an isolated integration branch from fetched `origin/master` at `f7e9f855`, then cherry-picked only this feature as `93a75dd0`. Unrelated local history-reconciliation/task changes are not included.
+
+Complete validation of that latest-master snapshot passed: **1,923 binary + 10 integration = 1,933 tests**, 2 existing ignored, zero failures, all runner groups included once using `PUI_TEST_THREADS=1`. `/tmp/pui-bounded-reasoning-master-full.log`. Strict all-target Clippy, full formatting and whitespace checks passed (`/tmp/pui-bounded-reasoning-master-{clippy,fmt}.log`). The lower count than the original feature-branch run reflects excluding unrelated local-only commits, not skipped tests.
+
+Push uses a normal fast-forward update of remote master, with no force push or rewriting history. No application build/install is included in this request.
