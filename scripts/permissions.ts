@@ -90,7 +90,7 @@ export function installPermissions(pi: any, initial: any = {}) {
   pi.on("input", (e: any) => { if (e.source !== "extension") remember(e.text); });
   pi.on("before_agent_start", (e: any) => {
     if (e.prompt) remember(e.prompt);
-    if (mode === "plan") return { systemPrompt: `${e.systemPrompt}\n\nPui Plan mode: inspect and produce a written plan only. No writes, execution of scripts, network tools, delegation or mutations. Ask the user to approve the plan and change permission mode in Pui before implementing it.` };
+    if (mode === "plan") return { systemPrompt: `${e.systemPrompt}\n\nPui Plan mode: inspect and produce a written plan only. No writes, execution of scripts, network tools, delegation or mutations. When the user asks to implement, submit the concrete steps and exact checks using pui_workflow plan. Pui can explicitly ask to approve that plan and switch this conversation to Manual; until that host approval, remain read-only. Do not change permission mode yourself.` };
   });
   async function gate(e: any, ctx: any) {
     const version = revision;
@@ -101,7 +101,7 @@ export function installPermissions(pi: any, initial: any = {}) {
     if (name === "pui_ask_questions") return; // User decisions, never a permission grant.
     // The host always asks once for this exact workflow, even in bypass mode.
     // Avoid a redundant generic tool approval; worker commands retain their gates.
-    if (name === "pui_workflow" && !initial.readonly && mode !== "plan" && mode !== "dontAsk") return;
+    if (name === "pui_workflow" && !initial.readonly && mode !== "dontAsk" && (mode !== "plan" || (args.plan && typeof args.plan === "object" && !Array.isArray(args.plan)))) return;
     // Native previews enforce their own path/format limits; pages can execute
     // network requests, so URL opens still pass the normal permission gate.
     if (!initial.readonly && name === "pui_open" && typeof args.target === "string" && !/^[a-z][a-z\d+.-]*:/i.test(args.target)) return;

@@ -86,3 +86,24 @@ test('read-only and role workers cannot directly execute workflows', async () =>
   }
   assert.equal(h.requests.length, 0);
 });
+
+const concretePlan = { steps: ['Inspect focus handling', 'Add a regression'], checks: {criteria: [
+  {id:'C1', description:'Keyboard retains the draft', command:'cargo test keyboard'}
+]}};
+test('concrete plan is forwarded intact for native approval without running it', async () => {
+  const h = host();
+  await h.tool.execute('', {...args, plan: concretePlan}, undefined, null, h.ctx);
+  const request = JSON.parse(h.requests[0][1]);
+  assert.deepEqual(request.plan, concretePlan);
+  assert.equal(request.approved, undefined);
+  assert.match(h.tool.promptGuidelines[0], /no redundant proposal agent/);
+});
+test('invalid or oversized plans fail before any host request', async () => {
+  const h = host();
+  for (const plan of [null, {}, {...concretePlan, steps: []}, {...concretePlan, steps:['x'.repeat(2001)]},
+    {...concretePlan, approved:true}, {...concretePlan, checks:{criteria:[{id:'C1',description:'inspection only',command:''}]}},
+    {...concretePlan, checks:{criteria:[concretePlan.checks.criteria[0],concretePlan.checks.criteria[0]]}}]) {
+    await assert.rejects(h.tool.execute('', {...args, plan}, undefined, null, h.ctx), /plan|check|criteria/i);
+  }
+  assert.equal(h.requests.length, 0);
+});

@@ -8,6 +8,8 @@ pub mod apply;
 #[path = "tasks/apply_unsupported.rs"]
 pub mod apply;
 pub mod checkpoints;
+pub mod outcome;
+pub mod plan;
 #[cfg(test)]
 pub mod proposal;
 pub mod recovery;
@@ -244,6 +246,9 @@ pub struct Task {
     /// Initial user consent for this objective; absent on legacy manual tasks.
     #[serde(default)]
     pub initial_approved: bool,
+    /// Optional lead-authored plan shown in the initial host consent.
+    #[serde(default)]
+    pub execution_plan: Option<plan::ExecutionPlan>,
     pub workspace: Option<PathBuf>,
     pub isolated: bool,
     pub provider: String,
@@ -291,6 +296,7 @@ impl Task {
             source,
             parent_session: None,
             initial_approved: false,
+            execution_plan: None,
             workspace: None,
             isolated: false,
             provider,

@@ -230,6 +230,13 @@ impl Pui {
     }
 
     fn work_item_overview(&mut self, ui: &mut egui::Ui, task: &Task, view: &mut View) {
+        if let Some(plan) = &task.execution_plan {
+            ui.label(RichText::new("Reviewed implementation plan").strong());
+            for (index, step) in plan.steps.iter().enumerate() {
+                ui.add(egui::Label::new(format!("{}. {step}", index + 1)).wrap());
+            }
+            ui.add_space(12.0);
+        }
         ui.label(RichText::new("The finish line").strong());
         let contract = task.approved.as_ref().unwrap_or(&task.proposed);
         if contract.criteria.is_empty() {
