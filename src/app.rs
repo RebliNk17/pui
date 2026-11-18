@@ -1029,6 +1029,11 @@ impl Pui {
             .maybe_auto_check(&self.ctx, self.prefs.settings.auto_check_updates, self.demo);
         self.updates.poll();
         self.settings_view.resources.poll();
+        self.settings_view.providers.poll();
+        if self.settings_view.providers.reload_requested {
+            self.settings_view.providers.reload_requested = false;
+            self.refresh_providers_catalog();
+        }
         self.poll_chat_folder();
         self.poll_tasks();
         self.poll_rpc();

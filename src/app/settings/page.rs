@@ -66,7 +66,9 @@ impl Page {
             Self::Shortcuts => "keyboard shortcuts keys command control enter escape",
             Self::Permissions => "manual auto accept edits plan dont ask classifier safety tools",
             Self::Models => "model reasoning effort thinking pricing context provider",
-            Self::Providers => "provider authentication login credentials catalog",
+            Self::Providers => {
+                "provider authentication login credentials catalog claude code subscription anthropic openai compatible endpoint local ollama lm studio vllm discover models"
+            }
             Self::Resources => {
                 "skills mcp servers extensions packages install remove prompts templates themes plugins"
             }
@@ -167,7 +169,12 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
         (
             "Provider authentication",
             "Providers",
-            "login credentials connected model catalog",
+            "login credentials connected model catalog claude code subscription anthropic",
+        ),
+        (
+            "OpenAI-compatible endpoint & auto model discovery",
+            "Providers",
+            "local openai ollama lm studio vllm llamacpp models.json discover",
         ),
         (
             "Skills and extensions",
@@ -195,6 +202,7 @@ pub(in crate::app) struct View {
     search: String,
     scale: super::scale::Scale,
     pub(in crate::app) resources: resources::Resources,
+    pub(in crate::app) providers: super::providers::ProvidersManager,
 }
 
 impl View {
@@ -206,7 +214,7 @@ impl View {
         }
     }
     pub(in crate::app) fn navigation_blocked(&self) -> bool {
-        self.resources.navigation_blocked()
+        self.resources.navigation_blocked() || self.providers.any_modal_open()
     }
     pub(in crate::app) fn select(&mut self, name: &str) {
         if let Some(view) = name.strip_prefix("Resources/") {
@@ -432,6 +440,7 @@ impl Pui {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
             && (self.settings_view.page != Page::Resources
                 || !self.settings_view.resources.escape())
+            && !self.settings_view.providers.escape()
         {
             self.settings_open = false;
             self.focus_composer = true;
@@ -559,6 +568,7 @@ impl Pui {
             ctx.request_repaint();
         }
         self.propagate_settings(&before);
+        self.settings_view.providers.show_modals(ctx);
     }
     fn settings_general(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
@@ -1079,77 +1089,6 @@ impl Pui {
                     },
                 );
             }
-        });
-    }
-    fn settings_providers(&self, ui: &mut egui::Ui) {
-        section(
-            ui,
-            "Configured providers",
-            "Pui uses Pi's existing authentication. Credentials never appear here.",
-        );
-        let mut providers = std::collections::BTreeMap::<&str, usize>::new();
-        for model in &self.state.models {
-            *providers.entry(&model.provider).or_default() += 1;
-        }
-        if providers.is_empty() {
-            card(ui, |ui| {
-                row(
-                    ui,
-                    "No catalog loaded",
-                    "Connect to Pi in a workspace to discover providers.",
-                    |_| {},
-                )
-            });
-        } else {
-            card(ui, |ui| {
-                for (index, (provider, count)) in providers.into_iter().enumerate() {
-                    if index > 0 {
-                        separator(ui);
-                    }
-                    row(
-                        ui,
-                        provider,
-                        &format!("{count} models available from Pi"),
-                        |ui| {
-                            ui.label(theme::small(
-                                ui,
-                                if provider == self.state.provider {
-                                    "Current provider"
-                                } else {
-                                    "Available"
-                                },
-                            ));
-                        },
-                    );
-                }
-            });
-        }
-        section(ui, "Authentication", "");
-        card(ui, |ui| {
-            row(
-                ui,
-                "Manage sign-in with Pi",
-                "Use Pi's /login in your terminal. Pui does not store API keys or change provider configuration.",
-                |ui| {
-                    let command = if crate::runtime::active_bundle().is_some() {
-                        format!(
-                            "'{}' /login",
-                            crate::runtime::pi_binary()
-                                .to_string_lossy()
-                                .replace('\'', "'\\''")
-                        )
-                    } else {
-                        "pi /login".into()
-                    };
-                    if ui
-                        .button("Copy sign-in command")
-                        .on_hover_text(&command)
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(command);
-                    }
-                },
-            )
         });
     }
 }
