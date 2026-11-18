@@ -194,24 +194,28 @@ fn outcome(bytes: &[u8], success: bool) -> Result<Outcome, String> {
     }
     match(flag,success){(Some(b'='),true)=>Ok(Outcome::UpToDate),(Some(b' '|b'*'),true)=>Ok(Outcome::Updated),(Some(b'!'),_)=>Err("Push rejected for the reviewed branch. Remote was not updated by this refspec. Remote details are hidden; inspect its state and policy before retrying. No automatic retry.".into()),_=>Err("Push failed or response unavailable. Authentication/connection or remote policy may be responsible; inspect remote state before retrying. Remote details hidden; no automatic retry.".into())}
 }
+#[cfg(test)]
 pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, String> {
     apply_with_hooks(snapshot, false, cancel)
 }
+#[cfg(test)]
 pub(crate) fn apply_with_hooks(
     snapshot: Snapshot,
     hooks: bool,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
-    apply_diagnostics(snapshot, hooks, false, cancel)
+    apply_signed(snapshot, hooks, false, false, 30, 30, cancel)
 }
+#[cfg(test)]
 pub(crate) fn apply_diagnostics(
     snapshot: Snapshot,
     hooks: bool,
     details: bool,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
-    apply_timed(snapshot, hooks, details, 30, cancel)
+    apply_signed(snapshot, hooks, details, false, 30, 30, cancel)
 }
+#[cfg(test)]
 pub(crate) fn apply_timed(
     snapshot: Snapshot,
     hooks: bool,
@@ -219,6 +223,20 @@ pub(crate) fn apply_timed(
     seconds: u64,
     cancel: &AtomicBool,
 ) -> Result<Outcome, String> {
+    apply_signed(snapshot, hooks, details, false, seconds, 30, cancel)
+}
+pub(crate) fn apply_signed(
+    snapshot: Snapshot,
+    hooks: bool,
+    details: bool,
+    sign: bool,
+    seconds: u64,
+    sign_timeout: u64,
+    cancel: &AtomicBool,
+) -> Result<Outcome, String> {
+    if !(1..=300).contains(&sign_timeout) {
+        return Err("Push signing timeout must be 1–300 seconds.".into());
+    }
     if !(1..=300).contains(&seconds) {
         return Err("Push timeout must be 1–300 seconds.".into());
     }
@@ -229,6 +247,31 @@ pub(crate) fn apply_timed(
         return Err("Push source or destination changed; inspect again.".into());
     }
     let mut command = network_command(&snapshot.root);
+    if sign {
+        // Signer availability check under its own fresh budget before any network.
+        let (signing, st) = read_only::run(
+            read_only::command(&snapshot.root).args([
+                "config",
+                "--includes",
+                "--null",
+                "--get-regexp",
+                "^(gpg\\.|user\\.signingkey$|push\\.gpgSign$)",
+            ]),
+            cancel,
+            Instant::now() + std::time::Duration::from_secs(sign_timeout),
+            16384,
+            "Push signing configuration",
+            "Push signing configuration exceeds 16 KiB",
+        )?;
+        if !(st.success() || st.code() == Some(1) && signing.is_empty()) {
+            return Err(
+                "Cannot inspect push signing configuration. Configure a signing key before requesting a signed push.".into(),
+            );
+        }
+        command.args(["-c", "push.gpgSign=yes"]);
+    } else {
+        command.args(["-c", "push.gpgSign=false"]);
+    }
     if !hooks {
         command.args(["-c", "core.hooksPath=/dev/null"]);
     }
@@ -237,13 +280,14 @@ pub(crate) fn apply_timed(
         "push.followTags=false",
         "-c",
         "push.recurseSubmodules=no",
-        "-c",
-        "push.gpgSign=false",
         "push",
         "--porcelain",
         "--no-follow-tags",
         "--recurse-submodules=no",
     ]);
+    if sign {
+        command.arg("--signed=yes");
+    }
     if !hooks {
         command.arg("--no-verify");
     }

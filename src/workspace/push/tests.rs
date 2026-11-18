@@ -454,3 +454,51 @@ fn transport_policy_refuses_helpers_queries_and_passwords() {
         assert_eq!(endpoint(good).unwrap(), good);
     }
 }
+#[test]
+fn signed_push_requires_configured_signer_and_refuses_bad_timeout() {
+    let root = fixture();
+    let remote = root.with_extension("sign-bare");
+    std::fs::create_dir(&remote).unwrap();
+    super::super::tests::git(&remote, &["init", "--bare"]);
+    super::super::tests::git(
+        &root,
+        &["config", "remote.origin.url", remote.to_str().unwrap()],
+    );
+    let cancel = AtomicBool::new(false);
+    // No signing key configured: signing must refuse without publishing or
+    // silently falling back to an unsigned push.
+    let snapshot = prepare(&root, &cancel).unwrap();
+    let err = apply_signed(snapshot, false, false, true, 30, 30, &cancel).unwrap_err();
+    // A signed push without a working signer must fail rather than fall back.
+    assert!(!err.is_empty());
+    assert!(!remote.join("refs/heads/master").exists());
+    // The same ref pushes fine unsigned, proving signing was the differentiator.
+    assert_eq!(
+        apply_signed(
+            prepare(&root, &cancel).unwrap(),
+            false,
+            false,
+            false,
+            30,
+            30,
+            &cancel
+        )
+        .unwrap(),
+        Outcome::Updated
+    );
+    for bad in [0, 301] {
+        assert!(
+            apply_signed(
+                prepare(&root, &cancel).unwrap(),
+                false,
+                false,
+                true,
+                30,
+                bad,
+                &cancel
+            )
+            .unwrap_err()
+            .contains("1–300")
+        );
+    }
+}

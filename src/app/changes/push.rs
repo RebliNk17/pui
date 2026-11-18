@@ -18,6 +18,8 @@ pub(super) struct Push {
     confirm: bool,
     hooks: bool,
     diagnostics: bool,
+    sign: bool,
+    sign_timeout: Option<u64>,
     timeout: Option<u64>,
     upstream: upstream::Upstream,
     create: create::Form,
@@ -53,6 +55,8 @@ impl Changes {
                     self.push.hooks = false;
                     self.push.diagnostics = false;
                     self.push.timeout = None;
+                    self.push.sign = false;
+                    self.push.sign_timeout = None;
                 }
                 Err(e) => self.push.notice = Some(e),
             }
@@ -348,7 +352,30 @@ impl Changes {
         {
             self.push.applying = None;
             self.push.snapshot = None;
-            self.push.notice=Some(match result{Ok(workspace::push::Outcome::Updated)=>"Push updated the reviewed branch. No tags or force. Hook mode was explicitly selected at confirmation.".into(),Ok(workspace::push::Outcome::UpToDate)=>"Reviewed remote branch is already up to date. No tags or force. Hook mode was explicitly selected at confirmation.".into(),Err(e)=>e});
+            self.push.notice = Some(match result {
+                Ok(workspace::push::Outcome::Updated) => format!(
+                    "Push updated the reviewed branch. No tags or force.{} {}",
+                    if self.push.sign {
+                        "Signed certificate published."
+                    } else {
+                        "No push signing."
+                    },
+                    if self.push.hooks {
+                        "Hooks ran."
+                    } else {
+                        "No hooks ran."
+                    }
+                ),
+                Ok(workspace::push::Outcome::UpToDate) => format!(
+                    "Reviewed remote branch is already up to date. No tags or force.{}",
+                    if self.push.sign {
+                        " Signed certificate was requested."
+                    } else {
+                        " No push signing."
+                    }
+                ),
+                Err(e) => e,
+            });
             self.refresh = true;
         }
         let focus = ctx.memory(|m| m.focused());
@@ -408,7 +435,13 @@ impl Changes {
             return;
         };
         self.push.controls.truncate(4);
-        let description = if self.push.hooks {
+        let description = if self.push.sign {
+            if self.push.hooks {
+                "Pushes a GPG-signed certificate with configured pre-push hooks. Hooks execute local code; signing failure stops Push with no unsigned fallback. No force/tags. Credentials may be used; remote completion can be uncertain."
+            } else {
+                "Pushes a GPG-signed certificate without pre-push hooks. Signing failure stops Push with no unsigned fallback. No force/tags. Credentials may be used; remote completion can be uncertain."
+            }
+        } else if self.push.hooks {
             "Pushes reviewed commit with configured pre-push hooks. Hooks execute local code with your OS permissions; they may modify files/contact services. Hook failure stops Push, no bypass fallback. No force/tags/push signing. Credentials may be used; remote completion can be uncertain."
         } else {
             "Pushes reviewed commit without pre-push hooks or push signing. No force/tags. Existing credentials may be used; interactive login and unknown SSH hosts refuse. Remote completion can be uncertain."
@@ -455,6 +488,24 @@ impl Changes {
                 "Show failure diagnostics (may expose secrets from remote/hooks)",
             );
             self.push.controls.push(details.id);
+            let sign = ui.checkbox(
+                &mut self.push.sign,
+                "Sign this push (GPG push certificate; no unsigned fallback)",
+            );
+            self.push.controls.push(sign.id);
+            if self.push.sign {
+                ui.add(
+                    egui::Label::new(theme::small(
+                        ui,
+                        "Push signing timeout (seconds, signer before network)",
+                    ))
+                    .wrap(),
+                );
+                let sign_timeout = ui.add(
+                    egui::DragValue::new(self.push.sign_timeout.get_or_insert(30)).range(1..=300),
+                );
+                self.push.controls.push(sign_timeout.id);
+            }
         });
         if let Some(choice) = choice {
             self.push.confirm = false;
@@ -463,6 +514,8 @@ impl Changes {
                 let hooks = self.push.hooks;
                 let details = self.push.diagnostics;
                 let seconds = self.push.timeout.unwrap_or(30);
+                let sign = self.push.sign;
+                let sign_timeout = self.push.sign_timeout.unwrap_or(30);
                 let Some(permit) = branches::permit(ctx) else {
                     self.push.notice = Some("Git busy; inspect again.".into());
                     return;
@@ -474,15 +527,15 @@ impl Changes {
                 if std::thread::Builder::new()
                     .name("pui-confirmed-push".into())
                     .spawn(move || {
-                        let result = if seconds != 30 {
-                            workspace::push::apply_timed(snapshot, hooks, details, seconds, &cancel)
-                        } else if details {
-                            workspace::push::apply_diagnostics(snapshot, hooks, true, &cancel)
-                        } else if hooks {
-                            workspace::push::apply_with_hooks(snapshot, true, &cancel)
-                        } else {
-                            workspace::push::apply(snapshot, &cancel)
-                        };
+                        let result = workspace::push::apply_signed(
+                            snapshot,
+                            hooks,
+                            details,
+                            sign,
+                            seconds,
+                            sign_timeout,
+                            &cancel,
+                        );
                         drop(permit);
                         let _ = tx.send(result);
                         ctx.request_repaint();
