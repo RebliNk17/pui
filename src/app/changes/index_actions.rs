@@ -160,6 +160,7 @@ impl Changes {
         self.commit = Default::default();
         self.initialize = Default::default();
         self.clone = Default::default();
+        self.fetch = Default::default();
         self.identity_setup = Default::default();
         self.push = Default::default();
         self.branch_create = Default::default();

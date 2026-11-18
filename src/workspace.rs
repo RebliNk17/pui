@@ -7,6 +7,7 @@ use std::{
 pub(crate) mod branches;
 pub(crate) mod clone;
 pub(crate) mod commit;
+pub(crate) mod fetch;
 pub(crate) mod history;
 pub(crate) mod index_action;
 pub(crate) mod initialize;

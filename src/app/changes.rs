@@ -5,6 +5,7 @@ mod branch_create;
 mod branches;
 mod clone;
 mod commit;
+mod fetch;
 pub(super) mod git_files;
 mod git_modes;
 mod identity_setup;
@@ -43,6 +44,7 @@ pub(super) struct Changes {
     commit: commit::Commit,
     initialize: initialize::Initialize,
     clone: clone::Clone,
+    fetch: fetch::Fetch,
     identity_setup: identity_setup::Setup,
     push: push::Push,
     branch_create: branch_create::Create,
@@ -108,6 +110,7 @@ impl Changes {
         self.commit_inputs(ctx, visible);
         self.initialize_inputs(ctx, visible);
         self.clone_inputs(ctx, visible);
+        self.fetch_inputs(ctx, visible);
         self.identity_setup_inputs(ctx, visible);
         self.push_inputs(ctx, visible);
         self.create_branch_inputs(ctx, visible);
@@ -160,6 +163,7 @@ impl Changes {
             self.commit = Default::default();
             self.initialize = Default::default();
             self.clone = Default::default();
+            self.fetch = Default::default();
             self.identity_setup = Default::default();
             self.push = Default::default();
             self.branch_create = Default::default();
@@ -259,6 +263,7 @@ impl Changes {
         self.commit_dialog(ctx);
         self.initialize_dialog(ctx);
         self.clone_dialog(ctx);
+        self.fetch_dialog(ctx);
         self.identity_setup_dialog(ctx);
         self.push_dialog(ctx);
         self.create_branch_dialog(ctx);
@@ -439,6 +444,7 @@ impl Changes {
         if self.source == Source::Git {
             self.initialize_ui(ui, workspace, loading);
             self.clone_ui(ui, workspace, loading);
+            self.fetch_ui(ui, workspace);
             self.identity_setup_ui(ui, workspace);
             self.git_mode_controls(ui);
             self.commit_control(ui, workspace, loading);
