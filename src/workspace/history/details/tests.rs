@@ -3,7 +3,7 @@ fn hash() -> String {
     "a".repeat(40)
 }
 fn encoded(oid: &str, time: &str, message: &str) -> Vec<u8> {
-    format!("{oid}\0{time}\0\0{message}\0\n").into_bytes()
+    format!("{oid}\0{time}\0\0N\0\0{message}\0\n").into_bytes()
 }
 #[test]
 fn exact_message_unicode_newlines_empty_literal_markup_and_sha256_are_preserved() {
@@ -44,8 +44,11 @@ fn parent_topology_preserves_order_root_linear_merge_sha256_and_whole_refusal() 
             let parents = (0..count)
                 .map(|index| format!("{index:0width$x}"))
                 .collect::<Vec<_>>();
-            let bytes =
-                format!("{selected}\x001\x00{}\x00message\x00\n", parents.join(" ")).into_bytes();
+            let bytes = format!(
+                "{selected}\x001\x00{}\x00N\x00\x00message\x00\n",
+                parents.join(" ")
+            )
+            .into_bytes();
             assert_eq!(parse(&bytes, &selected).unwrap().parents, parents);
         }
     }
@@ -63,7 +66,7 @@ fn parent_topology_preserves_order_root_linear_merge_sha256_and_whole_refusal() 
     ] {
         assert!(
             parse(
-                format!("{selected}\x001\x00{parents}\x00message\x00\n").as_bytes(),
+                format!("{selected}\x001\x00{parents}\x00N\x00\x00message\x00\n").as_bytes(),
                 &selected
             )
             .is_err()
@@ -107,7 +110,6 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     for flag in [
         "show",
         "--no-patch",
-        "--no-show-signature",
         "--no-notes",
         "--no-use-mailmap",
         "--no-ext-diff",
@@ -116,6 +118,9 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     ] {
         assert!(args.contains(&flag));
     }
+    // Signature status and signer come from the format string, which git parses
+    // from the embedded signature without invoking an external gpg helper.
+    assert!(args.contains(&"--format=%H%x00%ct%x00%P%x00%G?%x00%GS%x00%B%x00"));
     assert_eq!(args[args.len() - 2], oid);
     assert_eq!(args.last(), Some(&"--"));
     assert!(
@@ -243,4 +248,25 @@ fn maximum_message_parse_has_bounded_owned_capacity_and_no_partial_output() {
         start.elapsed(),
         bytes.len()
     );
+}
+#[test]
+fn signature_status_signer_parsed_and_unsigned_is_empty() {
+    let oid = hash();
+    for (status, signer, expected) in [
+        ("N", "", ""),
+        (
+            "G",
+            "Alice <a@example.invalid>",
+            "G Alice <a@example.invalid>",
+        ),
+        ("B", "Bad", "B Bad"),
+        ("X", "Expired", "X Expired"),
+    ] {
+        let bytes = format!("{oid}\x001\x00\x00{status}\x00{signer}\x00msg\x00\n").into_bytes();
+        let detail = parse(&bytes, &oid).unwrap();
+        assert_eq!(detail.signature, expected);
+    }
+    // Malformed signer with controls is stripped to status-only.
+    let bytes = format!("{oid}\x001\x00\x00G\x00al\x1bice\x00msg\x00\n").into_bytes();
+    assert_eq!(parse(&bytes, &oid).unwrap().signature, "G");
 }

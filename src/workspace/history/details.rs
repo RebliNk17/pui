@@ -9,20 +9,23 @@ pub(crate) struct Detail {
     pub time: i64,
     pub parents: Vec<String>,
     pub message: String,
+    /// "%G?" signature status (N/G/B/U/X/Y/R/E), "%GS" signer; empty when unsigned.
+    pub signature: String,
 }
 fn command(root: &Path, hash: &str) -> Command {
     let mut command = super::command(root);
+    // Signature fields are read from the object without invoking external gpg
+    // helpers; git parses the embedded signature itself.
     command.args([
         "show",
         "--no-patch",
         "--no-decorate",
-        "--no-show-signature",
         "--no-notes",
         "--no-use-mailmap",
         "--no-ext-diff",
         "--no-textconv",
         "--encoding=UTF-8",
-        "--format=%H%x00%ct%x00%P%x00%B%x00",
+        "--format=%H%x00%ct%x00%P%x00%G?%x00%GS%x00%B%x00",
         "--end-of-options",
         hash,
         "--",
@@ -66,6 +69,23 @@ fn parse(bytes: &[u8], expected: &str) -> Result<Detail, String> {
         result.shrink_to_fit();
         result
     };
+    let sig_status = fields.next().ok_or("Missing signature status.")?;
+    let sig_status = sig_status.trim();
+    if sig_status.len() != 1 || !sig_status.is_ascii() {
+        return Err("Invalid signature status.".into());
+    }
+    let signer = fields.next().ok_or("Missing signature signer.")?;
+    let signature = if sig_status == "N" {
+        String::new()
+    } else {
+        // U=unknown, X/B/R/E=bad/expired/revoked/error, G/Y=good/trusted.
+        let signer = if signer.chars().any(char::is_control) {
+            String::new()
+        } else {
+            signer.to_owned()
+        };
+        format!("{sig_status} {signer}").trim().to_owned()
+    };
     let message = fields
         .next()
         .filter(|message| {
@@ -85,6 +105,7 @@ fn parse(bytes: &[u8], expected: &str) -> Result<Detail, String> {
         time,
         parents,
         message: message.into(),
+        signature,
     })
 }
 pub(crate) fn read(root: &Path, hash: &str, cancel: &AtomicBool) -> Result<Detail, String> {

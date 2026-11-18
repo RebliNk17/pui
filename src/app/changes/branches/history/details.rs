@@ -57,7 +57,7 @@ impl Details {
         self.selected = Some(hash.into());
         if demo {
             self.result = Some(Ok(workspace::history::details::Detail {oid:hash.into(),time:1_700_000_000,parents:if hash=="a".repeat(40){vec!["b".repeat(40),"c".repeat(40)]}else{vec![]},
-                message:"Synthetic read-only history preview\n\nInspect the original local commit message.\nNo checkout, patch, rebase, context capture or send.\n".into()}));
+                signature:String::new(),message:"Synthetic read-only history preview\n\nInspect the original local commit message.\nNo checkout, patch, rebase, context capture or send.\n".into()}));
             return;
         }
         #[cfg(test)]
@@ -371,6 +371,38 @@ impl History {
                         .map(|date| date.format("%Y-%m-%d %H:%M:%S UTC").to_string())
                         .unwrap_or_else(|| "Unknown date".into());
                     ui.label(theme::small(ui, format!("Committer date · {date}")));
+                    if !detail.signature.is_empty() {
+                        let (status, signer) = detail
+                            .signature
+                            .split_once(' ')
+                            .map_or((detail.signature.as_str(), ""), |(s, r)| (s, r));
+                        let label = match status {
+                            "G" => format!(
+                                "Signature · good{}{}",
+                                if signer.is_empty() { "" } else { " · " },
+                                signer
+                            ),
+                            "Y" => format!(
+                                "Signature · trusted{}{}",
+                                if signer.is_empty() { "" } else { " · " },
+                                signer
+                            ),
+                            "U" => "Signature · unknown validity (check manually)".into(),
+                            "X" => "Signature · expired".into(),
+                            "B" => "Signature · bad (does not verify)".into(),
+                            "R" => "Signature · revoked".into(),
+                            "E" => "Signature · cannot verify (error)".into(),
+                            _ => "Signature · cannot verify".into(),
+                        };
+                        let color = match status {
+                            "G" | "Y" => theme::palette(ui.ctx()).green,
+                            "B" | "R" | "X" | "E" => theme::palette(ui.ctx()).red,
+                            _ => theme::palette(ui.ctx()).dim,
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(label).size(10.5).color(color)).wrap(),
+                        );
+                    }
                     ui.label(theme::small(
                         ui,
                         match detail.parents.len() {
