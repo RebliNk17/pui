@@ -48,6 +48,7 @@ export default function puiExtension(pi: any) {
     },
   });
   const pending = new Map<string, AbortController>();
+  let refreshController: AbortController | undefined;
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
@@ -58,8 +59,28 @@ export default function puiExtension(pi: any) {
     const controls = taskRole ? [] : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
     pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
   };
-  pi.on("session_start", (_event: any, ctx: any) => {setMode(false);announce(ctx);});
-  pi.on("session_shutdown", () => { for (const controller of pending.values()) controller.abort(); pending.clear(); });
+  pi.on("session_start", (_event: any, ctx: any) => {
+    setMode(false);
+    announce(ctx);
+    if (typeof ctx?.modelRegistry?.refresh === "function") {
+      refreshController?.abort();
+      const controller = new AbortController();
+      refreshController = controller;
+      // Pi's RPC mode only runs offline catalog refresh at startup; refresh dynamic catalogs here.
+      void ctx.modelRegistry.refresh({ allowNetwork: true, signal: controller.signal })
+        .then(() => {
+          if (!controller.signal.aborted) {
+            ctx.ui.setStatus("pui-models", JSON.stringify({ refreshed: true }));
+          }
+        })
+        .catch(() => {});
+    }
+  });
+  pi.on("session_shutdown", () => {
+    refreshController?.abort();
+    for (const controller of pending.values()) controller.abort();
+    pending.clear();
+  });
   pi.on("turn_end", async (_event: any, ctx: any) => {
     if (!ctx.signal?.aborted) await ctx.ui.input("Pui steering window", "", { signal: ctx.signal, timeout: 30000 });
   });

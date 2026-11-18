@@ -5,6 +5,19 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-19
+
+### Added
+
+- Multi-account provider support with automatic quota fallback (`accounts.ts`) and live Antigravity model catalog refresh (`refreshAntigravityModels`).
+- Persistent usage cache across app relaunches (`CachedUsage`) and grouped Antigravity quota summary (`retrieveUserQuotaSummary`).
+
+### Fixed
+
+- Antigravity `agy` CLI endpoint/User-Agent compatibility so Gemini 4 Neon, Argon, Hydrogen, and Orchestrator models and quota groups load properly.
+- Avoided HTTP 429 false-positives by sanitizing Pi harness markers from `systemInstruction` and distinguishing model capacity exhaustion from quota exhaustion.
+- Reserved scrollbar gutter margin in the usage popover so the scrollbar no longer overlaps countdown text.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added

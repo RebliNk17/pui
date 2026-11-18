@@ -97,19 +97,46 @@ export function copilotUsage(data) {
   return { plan: data.copilot_plan ? label(data.copilot_plan) : null, windows, models: [], notes };
 }
 
-// Google Antigravity / Cloud Code Assist: per-model remaining quota fractions.
+// Google Antigravity / Cloud Code Assist: grouped quota summary (preferred) or per-model remaining fractions.
 export function antigravityUsage(data) {
+  const windows = [];
   const models = [];
+  if (Array.isArray(data.groups) && data.groups.length) {
+    for (const group of data.groups) {
+      const groupName = typeof group?.displayName === "string" ? group.displayName.trim() : "";
+      for (const bucket of Array.isArray(group?.buckets) ? group.buckets : []) {
+        const fraction = typeof bucket?.remainingFraction === "number"
+          ? bucket.remainingFraction
+          : (bucket?.resetTime || bucket?.disabled ? 0 : null);
+        if (fraction === null) continue;
+        const bucketName = String(bucket?.displayName || bucket?.bucketId || "Quota").replace(/\s*Remaining$/i, "").trim();
+        const name = groupName ? `${groupName} · ${bucketName}` : bucketName;
+        const entry = window(name, (1 - fraction) * 100, bucket.resetTime);
+        if (entry) windows.push(entry);
+      }
+    }
+    if (windows.length) return { windows, models: [], notes: [] };
+  }
+  const excluded = new Set(
+    ["tabModelIds", "imageGenerationModelIds", "audioTranscriptionModelIds"].flatMap((k) =>
+      Array.isArray(data?.[k]) ? data[k] : [],
+    ),
+  );
   const entries = data.models && typeof data.models === "object" ? Object.entries(data.models) : [];
   for (const [id, model] of entries) {
+    if (!model || model.isInternal || model.apiProvider === "API_PROVIDER_INTERNAL" || excluded.has(id) || /^(tab_|chat_)|image/.test(id)) continue;
     const fraction = model?.quotaInfo?.remainingFraction;
     if (typeof fraction !== "number") continue;
     const entry = window(model.displayName || id, (1 - fraction) * 100, model.quotaInfo.resetTime);
     if (entry) models.push(entry);
   }
   for (const bucket of Array.isArray(data.buckets) ? data.buckets : []) {
-    if (typeof bucket?.remainingFraction !== "number") continue;
-    const entry = window(`${bucket.modelId || "Model"}${bucket.tokenType ? ` · ${bucket.tokenType.toLowerCase()}` : ""}`, (1 - bucket.remainingFraction) * 100, bucket.resetTime);
+    const fraction = typeof bucket?.remainingFraction === "number"
+      ? bucket.remainingFraction
+      : (bucket?.resetTime || bucket?.disabled ? 0 : null);
+    if (fraction === null) continue;
+    const name = bucket.displayName || `${bucket.modelId || bucket.bucketId || "Model"}${bucket.tokenType ? ` · ${bucket.tokenType.toLowerCase()}` : ""}`;
+    const entry = window(name, (1 - fraction) * 100, bucket.resetTime);
     if (entry) models.push(entry);
   }
   models.sort((a, b) => b.used - a.used || a.label.localeCompare(b.label));
@@ -168,14 +195,25 @@ const SUBSCRIPTIONS = {
   } },
   antigravity: { name: "Google Antigravity", oauthOnly: true, needsAuth: false, async fetch({ stored }) {
     const token = await googleToken(stored || {});
-    const platform = process.platform === "darwin" ? "MACOS" : process.platform === "win32" ? "WINDOWS" : "LINUX";
-    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/2.23.0 ${process.platform}/${process.arch}`,
-      "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1", "Client-Metadata": JSON.stringify({ ideType: "ANTIGRAVITY", platform, pluginType: "GEMINI" }) };
+    const os = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
+    const arch = process.arch === "x64" ? "amd64" : process.arch;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/cli/1.5.11 (aidev_client; os_type=${os}; arch=${arch}; cl=1024248524; auth_method=consumer)`,
+    };
     const body = JSON.stringify(typeof stored?.projectId === "string" && stored.projectId ? { project: stored.projectId } : {});
     let usage;
-    try { usage = antigravityUsage(await getJson("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", { method: "POST", headers, body }, "Antigravity")); } catch (error) { if (!(error instanceof UsageError)) throw error; }
-    if (!usage?.models.length) usage = antigravityUsage(await getJson("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", { method: "POST", headers, body }, "Antigravity"));
-    if (!usage.models.length) usage.notes.push("No model quota reported.");
+    for (const endpoint of ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"]) {
+      for (const rpc of ["retrieveUserQuotaSummary", "fetchAvailableModels", "retrieveUserQuota"]) {
+        try {
+          const parsed = antigravityUsage(await getJson(`${endpoint}/v1internal:${rpc}`, { method: "POST", headers, body }, "Antigravity"));
+          if (parsed.windows.length || parsed.models.length) { usage = parsed; break; }
+        } catch (error) { if (!(error instanceof UsageError)) throw error; }
+      }
+      if (usage) break;
+    }
+    if (!usage) usage = { windows: [], models: [], notes: ["No model quota reported."] };
     return usage;
   } },
   openrouter: { name: "OpenRouter", async fetch({ auth }) {

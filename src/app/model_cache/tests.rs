@@ -121,3 +121,25 @@ fn worker_metadata_cannot_replace_the_root_chat_hint() {
     app.seed_model_catalog();
     assert_eq!(app.state.model_hint, "Cached model · High");
 }
+
+#[test]
+fn pui_models_status_requests_refreshed_catalog() {
+    let mut app = app();
+    let (client, events, commands) = rpc::Client::stub_with_commands();
+    app.client = Some(client);
+    events
+        .send(rpc::Event::Record(json!({
+            "type": "extension_ui_request",
+            "method": "setStatus",
+            "statusKey": "pui-models",
+            "statusText": "{\"refreshed\":true}"
+        })))
+        .unwrap();
+    app.poll_rpc();
+    assert_eq!(
+        commands
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()["type"],
+        "get_available_models"
+    );
+}

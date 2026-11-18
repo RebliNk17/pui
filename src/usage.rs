@@ -2,7 +2,7 @@
 //! usage. No credential handling in Rust: the Node helper returns aggregates only.
 use crate::icons::{self, Icon};
 use eframe::egui::{self, Align, FontId, Layout, RichText, Sense, Stroke, Vec2};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
@@ -10,18 +10,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ModelSpend {
     pub name: String,
     pub spend: f64,
 }
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DaySpend {
     pub date: String,
     pub spend: f64,
     pub requests: u64,
 }
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct AccountUsage {
     pub provider: String,
     pub spend: f64,
@@ -37,7 +37,7 @@ pub struct AccountUsage {
     pub days: Vec<DaySpend>,
 }
 /// One rate-limit window such as a 5-hour session, weekly cap or per-model quota.
-#[derive(Clone, Deserialize, Default, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct UsageWindow {
     pub label: String,
     /// Percent of the window consumed, 0–100.
@@ -48,7 +48,7 @@ pub struct UsageWindow {
     #[serde(default)]
     pub detail: Option<String>,
 }
-#[derive(Clone, Deserialize, Default, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct ProviderUsage {
     pub id: String,
     pub name: String,
@@ -92,6 +92,14 @@ impl AccountUsage {
             .map(|max| (self.spend / max).max(0.0) as f32)
     }
 }
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CachedUsage {
+    pub data: Option<AccountUsage>,
+    pub providers: Vec<ProviderUsage>,
+    pub unsupported: Vec<String>,
+    pub litellm_error: Option<String>,
+}
 #[derive(Default)]
 pub struct Usage {
     /// LiteLLM gateway budget, when that provider is configured.
@@ -104,6 +112,26 @@ pub struct Usage {
     last: Option<Instant>,
 }
 impl Usage {
+    pub fn from_cached(cached: CachedUsage) -> Self {
+        Self {
+            data: cached.data,
+            providers: cached.providers,
+            unsupported: cached.unsupported,
+            litellm_error: cached.litellm_error,
+            ..Default::default()
+        }
+    }
+    pub fn cached(&self) -> Option<CachedUsage> {
+        if self.data.is_none() && self.providers.is_empty() && self.unsupported.is_empty() {
+            return None;
+        }
+        Some(CachedUsage {
+            data: self.data.clone(),
+            providers: self.providers.clone(),
+            unsupported: self.unsupported.clone(),
+            litellm_error: self.litellm_error.clone(),
+        })
+    }
     pub fn demo() -> Self {
         Self {
             data: Some(AccountUsage {
@@ -348,7 +376,18 @@ impl Usage {
                 egui::ScrollArea::vertical()
                     .id_salt("usage_panel")
                     .max_height((ui.ctx().screen_rect().height() - 32.0).max(80.0))
-                    .show(ui, |ui| self.panel(ui, demo));
+                    .show(ui, |ui| {
+                        let gutter = (ui.spacing().scroll.bar_width
+                            + ui.spacing().scroll.bar_inner_margin
+                            + 2.0)
+                            .ceil() as i8;
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin {
+                                right: gutter,
+                                ..Default::default()
+                            })
+                            .show(ui, |ui| self.panel(ui, demo));
+                    });
             });
     }
     fn panel(&mut self, ui: &mut egui::Ui, demo: bool) {

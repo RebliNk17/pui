@@ -35,7 +35,10 @@ pub(super) fn model_label(state: &State) -> String {
         > 1;
     if ambiguous && !state.provider.is_empty() {
         // Several accounts offer the same model; name the account (`anthropic · Work`).
-        format!("{name} · {}", crate::accounts::display_provider(&state.provider))
+        format!(
+            "{name} · {}",
+            crate::accounts::display_provider(&state.provider)
+        )
     } else {
         name.into()
     }
@@ -91,7 +94,9 @@ fn provider_filter(
             visuals.bg_stroke = Stroke::NONE;
             visuals.weak_bg_fill = Color32::TRANSPARENT;
         }
-        let response = egui::ComboBox::from_id_salt("provider-filter")
+        // ponytail: egui Areas remember their last size and clamp the next frame to it,
+        // so a popup first measured with fewer providers would stay clipped. Re-key on count.
+        let response = egui::ComboBox::from_id_salt(("provider-filter", providers.len()))
             .width(width)
             .truncate()
             .selected_text(
@@ -492,7 +497,7 @@ impl Pui {
                             let provider_width = (ui.available_width() * 0.44).clamp(44.0, 115.0);
                             let search_width = (ui.available_width() - provider_width - 2.0 * ui.spacing().item_spacing.x - 1.0).max(8.0);
                             let search = ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search")
-                                .font(FontId::proportional(11.0)).frame(false).margin(0).hint_text("Search models…").desired_width(search_width).min_size(egui::vec2(0.0, 20.0)));
+                                .font(FontId::proportional(11.0)).frame(false).margin(0).hint_text("Search models…").vertical_align(Align::Center).desired_width(search_width).min_size(egui::vec2(0.0, 20.0)));
                             let (divider, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
                             ui.painter().line_segment([divider.center_top(), divider.center_bottom()], Stroke::new(1.0, colors.border));
                             provider_filter(ui, &mut self.model_provider, &providers, provider_width);

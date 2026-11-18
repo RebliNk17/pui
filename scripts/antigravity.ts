@@ -12,16 +12,15 @@ import {
 export const PROVIDER_ID = "antigravity";
 export const PROVIDER_NAME = "Google Antigravity";
 export const ANTIGRAVITY_API = "antigravity-api";
-export const DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+export const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ENDPOINT_FALLBACKS = [
   DEFAULT_ENDPOINT,
-  // Production endpoint used by the agy CLI.
-  "https://daily-cloudcode-pa.googleapis.com",
+  "https://cloudcode-pa.googleapis.com",
   "https://daily-cloudcode-pa.sandbox.googleapis.com",
 ];
-// Google rejects outdated clients with a normal-looking reply ("This version of Antigravity is no
-// longer supported"), so keep this at a current Antigravity release. ANTIGRAVITY_USER_AGENT overrides.
-export const ANTIGRAVITY_VERSION = "2.23.0";
+// Google gates newer models (e.g. Gemini 4 Neon/Argon/Hydrogen) and quota buckets on the agy CLI
+// User-Agent; ANTIGRAVITY_USER_AGENT overrides.
+export const ANTIGRAVITY_VERSION = "1.5.11";
 const UNSUPPORTED_VERSION = "This version of Antigravity is no longer supported";
 export const REDIRECT_URI = "http://localhost:51121/oauth-callback";
 export const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -157,6 +156,7 @@ export function parseAvailableModels(data: any): any[] {
   const chat = entries.filter(
     ([id, info]) =>
       info &&
+      !info.disabled &&
       !info.isInternal &&
       info.apiProvider !== "API_PROVIDER_INTERNAL" &&
       !excluded.has(id) &&
@@ -268,23 +268,13 @@ export function antigravityHeaders(token: string): Record<string, string> {
   const os =
     process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
   const arch = process.arch === "x64" ? "amd64" : process.arch;
-  const platform =
-    process.platform === "darwin"
-      ? "MACOS"
-      : process.platform === "win32"
-        ? "WINDOWS"
-        : "LINUX";
   return {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
     Accept: "text/event-stream",
-    "User-Agent": process.env.ANTIGRAVITY_USER_AGENT || `antigravity/${ANTIGRAVITY_VERSION} ${os}/${arch}`,
-    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": JSON.stringify({
-      ideType: "ANTIGRAVITY",
-      platform,
-      pluginType: "GEMINI",
-    }),
+    "User-Agent":
+      process.env.ANTIGRAVITY_USER_AGENT ||
+      `antigravity/cli/${ANTIGRAVITY_VERSION} (aidev_client; os_type=${os}; arch=${arch}; cl=1024248524; auth_method=consumer)`,
   };
 }
 
@@ -720,12 +710,17 @@ export function getAntigravityRequestModelId(model: any, effort: string | undefi
   return model.id;
 }
 
-const ANTIGRAVITY_SYSTEM_INSTRUCTION =
-  "You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. " +
-  "You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware.";
-
 const ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION =
   'CRITICAL: NEVER output rule checks, formatting guidelines, constraint checklists (e.g. "No emdashes"), or your thinking/personality preambles in the final response. Output only the final response.';
+
+/** Strip Pi harness identifiers that Google's Cloud Code endpoint rejects with HTTP 429. */
+function sanitizeSystemPrompt(prompt: string): string {
+  return sanitizeText(prompt)
+    .replace(/\s*running inside pi,\s*a coding agent harness/gi, "")
+    .replace(/<docs>[\s\S]*?<\/docs>\s*/gi, "")
+    .replace(/pi-coding-agent/gi, "coding-agent")
+    .trim();
+}
 
 export function buildRequest(
   model: any,
@@ -738,6 +733,7 @@ export function buildRequest(
     typeof context.systemPrompt === "string"
       ? context.systemPrompt
       : getCurrentSystemPrompt(context.messages || []);
+  const cleanedSystemPrompt = systemPrompt ? sanitizeSystemPrompt(systemPrompt) : "";
   const currentTools = Array.isArray(context.tools)
     ? context.tools
     : getCurrentTools(context.messages || []);
@@ -746,9 +742,8 @@ export function buildRequest(
     systemInstruction: {
       role: "user",
       parts: [
-        { text: ANTIGRAVITY_SYSTEM_INSTRUCTION },
         { text: ANTIGRAVITY_NO_PREAMBLE_INSTRUCTION },
-        ...(systemPrompt ? [{ text: sanitizeText(systemPrompt) }] : []),
+        ...(cleanedSystemPrompt ? [{ text: cleanedSystemPrompt }] : []),
       ],
     },
   };
@@ -952,6 +947,42 @@ async function consumeStream(response: Response, stream: any, output: any): Prom
   return hasContent;
 }
 
+export function formatAntigravityError(status: number | undefined, body: string): string {
+  let message = "";
+  let reason = "";
+  let reset = "";
+  try {
+    const parsed = JSON.parse(body);
+    const err = parsed?.error ?? parsed;
+    if (typeof err?.message === "string") message = err.message.trim();
+    const details = Array.isArray(err?.details) ? err.details : [];
+    const info = details.find((d: any) => typeof d?.reason === "string");
+    if (info) {
+      reason = info.reason;
+      const meta = info.metadata;
+      if (typeof meta?.quotaResetTimeStamp === "string") reset = meta.quotaResetTimeStamp;
+      else if (typeof meta?.quotaResetDelay === "string") reset = meta.quotaResetDelay;
+    }
+  } catch {
+    // non-JSON error body
+  }
+  const summary = message || body.trim().slice(0, 400);
+  if (status === 429) {
+    if (
+      reason === "MODEL_CAPACITY_EXHAUSTED" ||
+      reason === "PREFILL_QUEUE_OVERLOADED" ||
+      /capacity|overload/i.test(message)
+    ) {
+      return `Antigravity model capacity exhausted (HTTP 429)${summary ? `: ${summary}` : ". Try again shortly or switch models."}`;
+    }
+    if (reason === "QUOTA_EXHAUSTED" || reason === "GEMINI_ENTERPRISE_USER_QUOTA_EXHAUSTED") {
+      return `Antigravity quota exhausted (HTTP 429${reset ? `, resets ${reset}` : ""})${summary ? `: ${summary}` : "."}`;
+    }
+    return `Antigravity rate limit (HTTP 429)${summary ? `: ${summary}` : "."}`;
+  }
+  return `Antigravity API error (${status ?? "no response"}): ${summary}`;
+}
+
 export function streamAntigravity(model: any, context: any, options: any = {}): any {
   const stream = createAssistantMessageEventStream();
   void (async () => {
@@ -1006,11 +1037,7 @@ export function streamAntigravity(model: any, context: any, options: any = {}): 
         if (response?.ok) break;
       }
       if (!response?.ok) {
-        throw new Error(
-          response?.status === 429
-            ? "Antigravity quota exhausted (HTTP 429). Your individual or per-model limit is used up; agy reports when it resets. Try another model or wait."
-            : `Antigravity API error (${response?.status ?? "no response"}): ${lastText.slice(0, 400)}`,
-        );
+        throw new Error(formatAntigravityError(response?.status, lastText));
       }
       const received = await consumeStream(response, stream, output);
       if (!received) {

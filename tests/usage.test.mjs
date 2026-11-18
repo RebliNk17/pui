@@ -112,9 +112,21 @@ test("ChatGPT, Copilot, Antigravity and OpenRouter payloads normalize to percent
   assert.deepEqual(copilot.windows, [{ label: "Premium requests · monthly", used: 75, resets: Date.parse("2026-12-01"), detail: "75 of 300 left" }]);
   assert.deepEqual(copilot.notes, ["Chat: unlimited"]);
 
-  const google = antigravityUsage({ models: { a: { displayName: "Gemini 3 Pro", quotaInfo: { remainingFraction: 0.6, resetTime: "2026-11-19T00:00:00Z" } }, b: { displayName: "No quota" }, c: { displayName: "Claude Sonnet 4.5", quotaInfo: { remainingFraction: 0.9 } } } });
+  const google = antigravityUsage({ models: { a: { displayName: "Gemini 3 Pro", quotaInfo: { remainingFraction: 0.6, resetTime: "2026-11-19T00:00:00Z" } }, b: { displayName: "No quota" }, c: { displayName: "Claude Sonnet 4.5", quotaInfo: { remainingFraction: 0.9 } }, chat_20706: { quotaInfo: { remainingFraction: 1 } } } });
   assert.deepEqual(google.models.map(w => [w.label, Math.round(w.used)]), [["Gemini 3 Pro", 40], ["Claude Sonnet 4.5", 10]]);
   assert.equal(google.models[0].resets, Date.parse("2026-11-19T00:00:00Z"));
+
+  const googleSummary = antigravityUsage({
+    groups: [
+      { displayName: "GEMINI MODELS", buckets: [{ displayName: "Weekly Limit Remaining", remainingFraction: 0.8887, resetTime: "2026-11-25T00:00:00Z" }, { displayName: "Five Hour Limit Remaining", remainingFraction: 0.9431 }] },
+      { displayName: "GEMINI 4 ARGON", buckets: [{ displayName: "Gemini 4 Argon Weekly Limit", resetTime: "2026-11-25T00:00:00Z" }] },
+    ],
+  });
+  assert.deepEqual(googleSummary.windows.map(w => [w.label, Math.round(w.used)]), [
+    ["GEMINI MODELS · Weekly Limit", 11],
+    ["GEMINI MODELS · Five Hour Limit", 6],
+    ["GEMINI 4 ARGON · Gemini 4 Argon Weekly Limit", 100],
+  ]);
 
   const router = openrouterUsage({ data: { limit: 20, limit_remaining: 15, limit_reset: "monthly", usage_daily: 1, usage_weekly: 2, usage_monthly: 5 } });
   assert.deepEqual(router.windows, [{ label: "Key limit · monthly", used: 25, resets: null, detail: "$15.00 of $20.00 left" }]);

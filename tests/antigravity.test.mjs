@@ -44,6 +44,7 @@ const AVAILABLE = {
     "gemini-2.5-flash": { displayName: "Gemini 3.5 Flash Lite", maxTokens: 1048576, maxOutputTokens: 65535 },
     "gemini-3.5-flash-lite": { displayName: "Gemini 3.5 Flash Lite", maxTokens: 1048576, maxOutputTokens: 65535 },
     "gemini-3.1-flash-image": { displayName: "Gemini 3.1 Flash Image", maxTokens: 65536 },
+    "gemini-4-carbon-disabled": { displayName: "Gemini 4 Carbon", disabled: true, maxTokens: 1048576 },
     chat_20706: { maxTokens: 16384, apiProvider: "API_PROVIDER_INTERNAL", isInternal: true },
     tab_flash_lite_preview: { maxTokens: 16384 },
   },
@@ -85,13 +86,26 @@ test("model refresh uses the signed-in credential and falls back to the static c
     };
     const models = await refreshAntigravityModels({ allowNetwork: true, credential: { type: "oauth", access: "tok", projectId: "proj" }, signal });
     assert.equal(models[0].id, "claude-opus-5-5");
-    assert.deepEqual(calls.map(c => c[0]), ["https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"]);
+    assert.deepEqual(calls.map(c => c[0]), ["https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"]);
     assert.equal(calls[0][1], "Bearer tok");
-    assert.match(calls[0][2], new RegExp(`^antigravity/${ANTIGRAVITY_VERSION.replaceAll(".", "\\.")} `));
+    assert.match(calls[0][2], new RegExp(`^antigravity/cli/${ANTIGRAVITY_VERSION.replaceAll(".", "\\.")} `));
     assert.equal(calls[0][3], JSON.stringify({ project: "proj" }));
     globalThis.fetch = async () => new Response(JSON.stringify({ models: {} }));
     assert.equal(await refreshAntigravityModels({ allowNetwork: true, credential: { type: "oauth", access: "tok" }, signal }), ANTIGRAVITY_MODELS);
   } finally { globalThis.fetch = original; }
   for (const model of ANTIGRAVITY_MODELS) for (const value of Object.values(model.thinkingLevelMap || {}))
     if (typeof value === "string" && value.includes("-")) assert.ok(value.startsWith(`${model.id}-`), `${model.id} routes to ${value}`);
+});
+
+test("429 errors distinguish model capacity exhaustion from quota exhaustion", async () => {
+  const { formatAntigravityError } = await adapter();
+  const capacity = JSON.stringify({
+    error: { code: 429, message: "No capacity available for model claude-opus-5-5-medium", details: [{ reason: "MODEL_CAPACITY_EXHAUSTED" }] },
+  });
+  const quota = JSON.stringify({
+    error: { code: 429, message: "Quota exhausted", details: [{ reason: "QUOTA_EXHAUSTED", metadata: { quotaResetDelay: "2h53m" } }] },
+  });
+  assert.match(formatAntigravityError(429, capacity), /capacity exhausted.*No capacity available/i);
+  assert.doesNotMatch(formatAntigravityError(429, capacity), /individual or per-model limit is used up/i);
+  assert.match(formatAntigravityError(429, quota), /quota exhausted.*resets 2h53m/i);
 });
