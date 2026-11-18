@@ -49,7 +49,10 @@ impl View {
         ui.menu_button("Transcript view", |ui| {
             crate::theme::menu_controls(ui);
             for (label, view) in [("Normal", Self::Normal), ("Verbose", Self::Verbose)] {
-                if ui.selectable_value(self, view, label).clicked() {
+                if ui.selectable_value(self, view, label).on_hover_text(match view {
+                    Self::Normal => "Action summaries, progress updates and replies; raw thinking stays hidden.",
+                    Self::Verbose => "Include expandable thinking and detailed tool calls/results.",
+                }).clicked() {
                     ui.close();
                 }
             }
@@ -914,8 +917,10 @@ fn assistant(
     let mut group_index = 0;
     for (message_index, message) in messages.iter().enumerate() {
         if message.blocks.is_empty() {
-            // Legacy messages have no interleaving metadata: reasoning precedes the reply.
-            if !message.thinking.is_empty() {
+            // Normal summarizes recorded actions, never internal reasoning. Hidden
+            // thinking must not split one action run into many summary rows.
+            // Verbose retains legacy reasoning before the reply.
+            if view == View::Verbose && !message.thinking.is_empty() {
                 if !pending.is_empty() {
                     changed |= action_run(ui, &pending, group_index, false, expand, view);
                     pending.clear();
@@ -959,7 +964,7 @@ fn assistant(
                             markdown::show_reply(ui, text, (message_index, "block", block_index));
                         }
                     }
-                    Block::Thinking(text) if !text.is_empty() => {
+                    Block::Thinking(text) if view == View::Verbose && !text.is_empty() => {
                         if !pending.is_empty() {
                             changed |= action_run(ui, &pending, group_index, false, expand, view);
                             pending.clear();
@@ -2398,7 +2403,7 @@ mod tests {
         assert!((keyboard_expanded - expanded).abs() < 0.1);
     }
     #[test]
-    fn short_thinking_renders_markdown_with_a_label() {
+    fn verbose_short_thinking_renders_markdown_with_a_label() {
         fn collect(shape: &egui::Shape, text: &mut Vec<egui::epaint::TextShape>) {
             match shape {
                 egui::Shape::Text(t) => text.push(t.clone()),
@@ -2439,7 +2444,7 @@ mod tests {
                                         }],
                                         "model",
                                         "high",
-                                        (running, false, false, View::Normal),
+                                        (running, false, false, View::Verbose),
                                         false,
                                         &mut crate::media::Gallery::default(),
                                     )

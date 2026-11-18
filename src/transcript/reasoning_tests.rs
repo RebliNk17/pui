@@ -156,8 +156,22 @@ fn structured_reasoning_is_provider_independent_and_plain_reply_is_not_reclassif
                         text_shapes(&shape.shape, &mut rows);
                     }
                 }
-                assert!(rows.iter().any(|(s, _)| s == "Thinking"), "{provider}");
-                assert!(rows.iter().any(|(s, _)| s == "Show more"), "{provider}");
+                assert_eq!(
+                    rows.iter().any(|(s, _)| s == "Thinking"),
+                    view == View::Verbose,
+                    "{provider}"
+                );
+                assert_eq!(
+                    rows.iter().any(|(s, _)| s == "Show more"),
+                    view == View::Verbose,
+                    "{provider}"
+                );
+                if view == View::Normal {
+                    assert!(
+                        !rows.iter().any(|(s, _)| s.contains("provider reasoning")),
+                        "{provider}"
+                    );
+                }
                 assert!(
                     rows.iter().any(|(s, _)| s.contains("FINAL_ANSWER")),
                     "{provider}"
