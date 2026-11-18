@@ -15,6 +15,7 @@ cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip app::changes::commit::tests:: --skip app::changes::git_files::modes::tests:: \
   --skip app::files::loader::svg_tests:: \
   --skip workspace::commit::tests:: --skip svg_preview::process::lifecycle_tests:: \
+  --skip app::changes::index_actions::tests:: \
   --skip "$lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
@@ -31,6 +32,7 @@ cargo test --offline --locked --bin pui app::files::delimited::export:: -- --tes
 cargo test --offline --locked --bin pui app::changes::commit::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::changes::git_files::modes::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui app::files::loader::svg_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::changes::index_actions::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui workspace::commit::tests:: -- --test-threads=1
 cargo test --offline --locked --bin pui svg_preview::process::lifecycle_tests:: -- --test-threads=1
 # Ownership lock handoff assertions must not overlap fork/exec in other tests.
