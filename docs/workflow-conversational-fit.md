@@ -108,4 +108,11 @@ Validation of this slice before latest-master integration:
 - Earlier attempts are not hidden: one full invocation failed to link (`library 'System' not found`); selecting developer-tool PATH also bypasses Apple's compiler SDK shim, so the runner now preserves caller SDKROOT or selects the active SDK. A subsequent full run stopped at the inherited projection lease fixture; `Weak::upgrade()==None` can precede completion of `Lease::drop`, so that fixture now waits for the worker's existing Release/Acquire permit after input drop, preserving the five-second deadline, 64 MiB assertion and production code. Focused development also exposed/fixed a reply-filter assumption and test-only private-method calls. A development rebuild and an overlapping JS/build-lock attempt timed out; these were not passes or accepted suite runs.
 - New managed independent review was again refused by the 128 retained-session limit. No hidden reviewer was launched and no independent-review claim is made. No paid-provider or installed-app validation occurred.
 
-Remote master advanced to `613610bd` (Normal-view transcript action summaries) during validation; combined integration must also pass before the next push.
+Remote master advanced to `613610bd` (Normal-view transcript action summaries) during validation. Committed the validated revision slice as `b2c2f565` and merged that master normally as `5484cdaa`, preserving incoming behavior. Final combined validation:
+
+- Complete runner: **1,957 Rust/integration passed**, 0 failed, 2 pre-existing ignored. Every one of the 22 groups ran once, without retries or omissions. `/tmp/pui-plan-revision-integrated-full.log`.
+- Full JS: **102 passed**, 0 failed, 1 pre-existing skipped. `/tmp/pui-plan-revision-integrated-js.log`.
+- Strict all-target Clippy, formatting, whitespace and shell syntax passed. `/tmp/pui-plan-revision-integrated-clippy.log`.
+- Remote master remained `613610bd` at the final pre-push check; the normal push is therefore a fast-forward. Original checkout/worktrees, running app, permissions and retained sessions were not reset or replaced.
+
+The user’s green-suite condition is met for this combined snapshot. This remains provider-free validation without independent review, installed-app exercise or proven zero-flake-rate claims.
