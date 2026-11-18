@@ -23,6 +23,7 @@ pub struct Transcript {
     pub rendered: usize,
     pub view_revision: u64,
     pub expand_activity: bool,
+    pub view: View,
     pub gallery: crate::media::Gallery,
     positions: Vec<(usize, f32)>,
     restore: Option<(usize, f32)>,
@@ -32,6 +33,28 @@ pub struct Transcript {
     pub task_output: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     progress_phase: Option<(Progress, f64)>,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum View {
+    #[default]
+    Normal,
+    Verbose,
+}
+
+impl View {
+    pub fn menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Transcript view", |ui| {
+            crate::theme::menu_controls(ui);
+            for (label, view) in [("Normal", Self::Normal), ("Verbose", Self::Verbose)] {
+                if ui.selectable_value(self, view, label).clicked() {
+                    ui.close();
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +320,7 @@ impl Transcript {
         let revision = self.view_revision;
         let mut layout_changed = false;
         let expand = self.expand_activity;
+        let view = self.view;
         let task_output = self.task_output;
         let gallery = &mut self.gallery;
         let mut message_action = None;
@@ -328,6 +352,8 @@ impl Transcript {
                 }
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 revision.hash(&mut hasher);
+                view.hash(&mut hasher);
+                expand.hash(&mut hasher);
                 task_output.hash(&mut hasher);
                 for m in group {
                     m.role.hash(&mut hasher);
@@ -407,7 +433,12 @@ impl Transcript {
                                         group,
                                         model,
                                         thinking,
-                                        (busy && index == messages.len(), expand, actions_enabled),
+                                        (
+                                            busy && index == messages.len(),
+                                            expand,
+                                            actions_enabled,
+                                            view,
+                                        ),
                                         task_output,
                                         gallery,
                                     );
@@ -836,12 +867,12 @@ fn assistant(
     messages: &[Message],
     model: &str,
     thinking: &str,
-    flags: (bool, bool, bool),
+    flags: (bool, bool, bool, View),
     task_output: bool,
     gallery: &mut crate::media::Gallery,
 ) -> (bool, bool) {
     let colors = crate::theme::palette(ui.ctx());
-    let (running, expand, actions_enabled) = flags;
+    let (running, expand, actions_enabled, view) = flags;
     let mut fork = false;
     let first = &messages[0];
     ui.horizontal(|ui| {
@@ -879,13 +910,22 @@ fn assistant(
     });
     ui.add_space(6.0);
     let mut changed = false;
-    let mut pending: Vec<ActivityItem<'_>> = Vec::new();
+    let mut pending: Vec<&crate::protocol::Tool> = Vec::new();
     let mut group_index = 0;
     for (message_index, message) in messages.iter().enumerate() {
         if message.blocks.is_empty() {
+            // Legacy messages have no interleaving metadata: reasoning precedes the reply.
+            if !message.thinking.is_empty() {
+                if !pending.is_empty() {
+                    changed |= action_run(ui, &pending, group_index, false, expand, view);
+                    pending.clear();
+                    group_index += 1;
+                }
+                thinking_text(ui, &message.thinking);
+            }
             if !message.text.is_empty() {
                 if !pending.is_empty() {
-                    changed |= activity(ui, &pending, group_index, false, expand);
+                    changed |= action_run(ui, &pending, group_index, false, expand, view);
                     pending.clear();
                     group_index += 1;
                 }
@@ -893,19 +933,17 @@ fn assistant(
                     markdown::show_reply(ui, &message.text, (message_index, "text"));
                 }
             }
-            if !message.thinking.is_empty() {
-                pending.push(ActivityItem::Thinking(&message.thinking));
-            }
+
             for tool in &message.tools {
                 if let Some(answers) = &tool.answers {
                     if !pending.is_empty() {
-                        changed |= activity(ui, &pending, group_index, false, expand);
+                        changed |= action_run(ui, &pending, group_index, false, expand, view);
                         pending.clear();
                         group_index += 1;
                     }
                     crate::tool_view::answers::show(ui, answers);
                 } else {
-                    pending.push(ActivityItem::Tool(tool));
+                    pending.push(tool);
                 }
             }
         } else {
@@ -913,7 +951,7 @@ fn assistant(
                 match block {
                     Block::Text(text) if !text.is_empty() => {
                         if !pending.is_empty() {
-                            changed |= activity(ui, &pending, group_index, false, expand);
+                            changed |= action_run(ui, &pending, group_index, false, expand, view);
                             pending.clear();
                             group_index += 1;
                         }
@@ -921,18 +959,26 @@ fn assistant(
                             markdown::show_reply(ui, text, (message_index, "block", block_index));
                         }
                     }
-                    Block::Thinking(text) => pending.push(ActivityItem::Thinking(text)),
+                    Block::Thinking(text) if !text.is_empty() => {
+                        if !pending.is_empty() {
+                            changed |= action_run(ui, &pending, group_index, false, expand, view);
+                            pending.clear();
+                            group_index += 1;
+                        }
+                        thinking_text(ui, text);
+                    }
                     Block::Tool(id) => {
                         if let Some(tool) = message.tools.iter().find(|t| t.id == *id) {
                             if let Some(answers) = &tool.answers {
                                 if !pending.is_empty() {
-                                    changed |= activity(ui, &pending, group_index, false, expand);
+                                    changed |=
+                                        action_run(ui, &pending, group_index, false, expand, view);
                                     pending.clear();
                                     group_index += 1;
                                 }
                                 crate::tool_view::answers::show(ui, answers);
                             } else {
-                                pending.push(ActivityItem::Tool(tool));
+                                pending.push(tool);
                             }
                         }
                     }
@@ -941,15 +987,15 @@ fn assistant(
             }
         }
     }
+    if !pending.is_empty() {
+        changed |= action_run(ui, &pending, group_index, running, expand, view);
+    }
     // Failed attempts remain available in history, but a later assistant message
     // supersedes them. While Pi is still working it may retry or compact first.
     if !running {
         if let Some(error) = messages.last().and_then(|message| message.error.as_ref()) {
             ui.colored_label(colors.red, error);
         }
-    }
-    if !pending.is_empty() {
-        changed |= activity(ui, &pending, group_index, running, expand);
     }
     let images: Vec<_> = messages
         .iter()
@@ -1056,9 +1102,30 @@ fn assistant(
     (changed, fork)
 }
 
-enum ActivityItem<'a> {
-    Thinking(&'a str),
-    Tool(&'a crate::protocol::Tool),
+fn thinking_text(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(6.0);
+    markdown::show(ui, text);
+    ui.add_space(6.0);
+}
+
+fn action_run(
+    ui: &mut egui::Ui,
+    tools: &[&crate::protocol::Tool],
+    index: usize,
+    running: bool,
+    expand: bool,
+    view: View,
+) -> bool {
+    if view == View::Normal {
+        activity(ui, tools, index, running, expand)
+    } else {
+        ui.push_id(("verbose-actions", index), |ui| {
+            for tool in tools {
+                crate::tool_view::row_verbose(ui, tool);
+            }
+        });
+        false
+    }
 }
 fn earlier_actions(ui: &mut egui::Ui, id: egui::Id, count: usize, expanded: &mut bool) -> bool {
     let colors = crate::theme::palette(ui.ctx());
@@ -1102,7 +1169,7 @@ fn earlier_actions(ui: &mut egui::Ui, id: egui::Id, count: usize, expanded: &mut
 }
 fn activity(
     ui: &mut egui::Ui,
-    items: &[ActivityItem<'_>],
+    items: &[&crate::protocol::Tool],
     index: usize,
     running: bool,
     expand: bool,
@@ -1117,10 +1184,8 @@ fn activity(
     let before = open;
     let mut earlier_changed = false;
     let mut summary = Summary::default();
-    for item in items {
-        if let ActivityItem::Tool(tool) = item {
-            summary.add(tool);
-        }
+    for tool in items {
+        summary.add(tool);
     }
     egui::Frame::new()
         .stroke(if open {
@@ -1234,18 +1299,7 @@ fn activity(
                 }
                 let hidden = if running && !all { earlier } else { 0 };
                 for (i, item) in items.iter().enumerate().skip(hidden) {
-                    ui.push_id(i, |ui| match item {
-                        ActivityItem::Thinking(text) => {
-                            let response = crate::section::Section::new("Thinking")
-                                .grouped()
-                                .icon(Icon::Spark)
-                                .show(ui, |ui| {
-                                    markdown::show(ui, text);
-                                });
-                            earlier_changed |= response.changed();
-                        }
-                        ActivityItem::Tool(tool) => crate::tool_view::row(ui, tool),
-                    });
+                    ui.push_id(i, |ui| crate::tool_view::row(ui, item));
                     if i + 1 < items.len() {
                         ui.add(egui::Separator::default().spacing(1.0));
                     }
@@ -1276,6 +1330,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
         })
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "transcript/view_tests.rs"]
+mod view_tests;
 
 #[cfg(test)]
 #[path = "transcript/retry_tests.rs"]
@@ -1330,7 +1388,7 @@ mod tests {
                                 &messages,
                                 "model",
                                 "off",
-                                (false, false, true),
+                                (false, false, true, View::Normal),
                                 false,
                                 &mut gallery,
                             );
@@ -1644,7 +1702,7 @@ mod tests {
                                 &messages,
                                 "model",
                                 "high",
-                                (running, false, false),
+                                (running, false, false, View::Normal),
                                 false,
                                 &mut gallery,
                             );
@@ -2203,7 +2261,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let items: Vec<_> = tools.iter().map(ActivityItem::Tool).collect();
+        let items: Vec<_> = tools.iter().collect();
         let draw = |events: Vec<egui::Event>| {
             let mut changed = false;
             let mut height = 0.0;
@@ -2284,7 +2342,7 @@ mod tests {
         assert!((keyboard_expanded - expanded).abs() < 0.1);
     }
     #[test]
-    fn thinking_renders_markdown_and_preserves_disclosure() {
+    fn thinking_renders_markdown_always_open() {
         fn collect(shape: &egui::Shape, text: &mut Vec<egui::epaint::TextShape>) {
             match shape {
                 egui::Shape::Text(t) => text.push(t.clone()),
@@ -2316,13 +2374,20 @@ mod tests {
                             },
                             |ctx| {
                                 egui::CentralPanel::default().show(ctx, |ui| {
-                                    changed = activity(
+                                    changed = assistant(
                                         ui,
-                                        &[ActivityItem::Thinking(source)],
-                                        0,
-                                        running,
-                                        true,
-                                    );
+                                        &[Message {
+                                            role: "assistant".into(),
+                                            blocks: vec![Block::Thinking(source.into())],
+                                            ..Default::default()
+                                        }],
+                                        "model",
+                                        "high",
+                                        (running, false, false, View::Normal),
+                                        false,
+                                        &mut crate::media::Gallery::default(),
+                                    )
+                                    .0;
                                 });
                             },
                         );
@@ -2334,35 +2399,12 @@ mod tests {
                     };
                     draw(vec![]);
                     let (text, _) = draw(vec![]);
-                    assert!(!text.iter().any(|t| t.galley.job.text.contains("Research")));
-                    let pos = text
-                        .iter()
-                        .rev()
-                        .find(|t| t.galley.job.text == "Thinking")
-                        .unwrap()
-                        .pos
-                        + egui::vec2(5.0, 5.0);
-                    let pointer = |pressed| {
-                        vec![
-                            egui::Event::PointerMoved(pos),
-                            egui::Event::PointerButton {
-                                pos,
-                                button: egui::PointerButton::Primary,
-                                pressed,
-                                modifiers: egui::Modifiers::NONE,
-                            },
-                        ]
-                    };
-                    draw(pointer(true));
-                    let (_, changed) = draw(pointer(false));
-                    assert!(changed, "expansion must invalidate the turn height");
-                    let (text, changed) = draw(vec![]);
-                    assert!(
-                        !changed,
-                        "focused Thinking disclosure must settle without repainting"
-                    );
+                    assert!(!text.iter().any(|t| t.galley.job.text == "Thinking"));
                     for _ in 0..5 {
-                        assert!(!draw(vec![]).1, "idle focus must not cause a repaint loop");
+                        assert!(
+                            !draw(vec![]).1,
+                            "idle thinking must not cause a repaint loop"
+                        );
                     }
                     for expected in [
                         "Research",
@@ -2389,10 +2431,6 @@ mod tests {
                         .collect();
                     assert!(formats.contains(&&egui::FontFamily::Name("body-bold".into())));
                     assert!(formats.contains(&&egui::FontFamily::Monospace));
-                    draw(pointer(true));
-                    let (text, changed) = draw(pointer(false));
-                    assert!(changed, "collapse must invalidate the turn height");
-                    assert!(!text.iter().any(|t| t.galley.job.text.contains("Research")));
                 }
             }
         }
@@ -2423,13 +2461,7 @@ mod tests {
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let before = ui.cursor().top();
-                    activity(
-                        ui,
-                        &tools.iter().map(ActivityItem::Tool).collect::<Vec<_>>(),
-                        0,
-                        false,
-                        true,
-                    );
+                    activity(ui, &tools.iter().collect::<Vec<_>>(), 0, false, true);
                     height = ui.cursor().top() - before;
                 });
             },
@@ -2488,13 +2520,7 @@ mod tests {
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let before = ui.cursor().top();
-                        activity(
-                            ui,
-                            &tools.iter().map(ActivityItem::Tool).collect::<Vec<_>>(),
-                            0,
-                            false,
-                            false,
-                        );
+                        activity(ui, &tools.iter().collect::<Vec<_>>(), 0, false, false);
                         heights.push(ui.cursor().top() - before);
                     });
                 },

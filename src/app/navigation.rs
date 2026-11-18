@@ -607,6 +607,7 @@ impl Pui {
                 self.terminals.toggle(&self.ctx, &self.prefs.cwd, self.demo);
                 ui.close();
             }
+            self.prefs.transcript_view.menu(ui);
             if ui.button("Session details").clicked() {
                 self.files.close();
                 self.inspector_panel = false;

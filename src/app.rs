@@ -95,6 +95,7 @@ struct Preferences {
     workspace_layouts: Vec<session_layout::Saved>,
     table_headers: files::TableHeaders,
     diff_wrap: bool,
+    transcript_view: crate::transcript::View,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
     session_order: sidebar_order::Options,

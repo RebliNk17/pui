@@ -1223,6 +1223,7 @@ impl Pui {
                 ui.ctx().copy_text(path.display().to_string());
                 ui.close();
             }
+            self.prefs.transcript_view.menu(ui);
             if ui.button("Export as Markdown").clicked() {
                 action = Some(Action::Export(path.clone()));
                 ui.close();

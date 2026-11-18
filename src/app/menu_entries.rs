@@ -44,6 +44,8 @@ pub(super) enum Command {
     Bold,
     Italic,
     Underline,
+    TranscriptNormal,
+    TranscriptVerbose,
 }
 impl Command {
     #[cfg(any(target_os = "macos", test))]
@@ -88,6 +90,8 @@ impl Command {
         Self::Bold,
         Self::Italic,
         Self::Underline,
+        Self::TranscriptNormal,
+        Self::TranscriptVerbose,
     ];
     #[cfg(any(target_os = "macos", test))]
     pub fn from_tag(tag: isize) -> Option<Self> {
@@ -228,6 +232,13 @@ pub(super) const GROUPS: &[(&str, &[Entry])] = &[
             A("Browser", Command::Browser),
             A("Changes", Command::Changes),
             A("Terminal", Command::Terminal),
+            M(
+                "Transcript view",
+                &[
+                    A("Normal", Command::TranscriptNormal),
+                    A("Verbose", Command::TranscriptVerbose),
+                ],
+            ),
             S,
             A("Actual Size", Command::ZoomReset),
             A("Zoom In", Command::ZoomIn),
@@ -266,10 +277,13 @@ pub(super) struct MenuState {
     pub text_selected: bool,
     pub fullscreen: bool,
     pub zoom: f32,
+    pub transcript_view: crate::transcript::View,
 }
 impl MenuState {
     pub fn checked(self, command: Command) -> Option<bool> {
         Some(match command {
+            Command::TranscriptNormal => self.transcript_view == crate::transcript::View::Normal,
+            Command::TranscriptVerbose => self.transcript_view == crate::transcript::View::Verbose,
             Command::DarkTheme => self.theme == theme::Theme::Dark,
             Command::LightTheme => self.theme == theme::Theme::Light,
             Command::CompletionSound => self.alerts.sound,

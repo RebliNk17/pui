@@ -110,6 +110,7 @@ impl Pui {
             .and_then(|id| egui::text_edit::TextEditState::load(ctx, id));
         MenuState {
             theme: self.prefs.theme,
+            transcript_view: self.prefs.transcript_view,
             alerts: self.prefs.notifications,
             delivery: self.prefs.settings.delivery,
             sidebar: !self.prefs.hide_sidebar,
@@ -284,6 +285,8 @@ impl Pui {
                 self.context_chips.clear();
                 composer_text::format(ctx, &mut self.draft, format);
             }
+            TranscriptNormal => self.prefs.transcript_view = crate::transcript::View::Normal,
+            TranscriptVerbose => self.prefs.transcript_view = crate::transcript::View::Verbose,
             Sidebar => self.prefs.hide_sidebar = !self.prefs.hide_sidebar,
             Inspector => {
                 self.kanban.open = false;
@@ -594,6 +597,32 @@ mod tests {
             assert!(view_actions.contains(&command));
         }
     }
+    #[test]
+    fn transcript_modes_are_checked_persisted_and_presentation_only() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        app.state.busy = true;
+        app.draft = "Keep draft".into();
+        app.state.dialogs.push_back(questions::demo_dialog());
+        let defaults: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.transcript_view, crate::transcript::View::Normal);
+        for (command, view) in [
+            (Command::TranscriptVerbose, crate::transcript::View::Verbose),
+            (Command::TranscriptNormal, crate::transcript::View::Normal),
+        ] {
+            app.menu_command(&ctx, command);
+            assert_eq!(app.prefs.transcript_view, view);
+            assert_eq!(app.menu_state(&ctx).checked(command), Some(true));
+            let saved = serde_json::to_string(&app.prefs).unwrap();
+            let restored: Preferences = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.transcript_view, view);
+            assert!(app.state.busy);
+            assert_eq!(app.draft, "Keep draft");
+            assert_eq!(app.state.dialogs.len(), 1);
+            assert!(app.deliveries.is_empty());
+        }
+    }
+
     #[test]
     fn quick_settings_are_live_checked_persisted_and_leave_active_chat_untouched() {
         let ctx = egui::Context::default();

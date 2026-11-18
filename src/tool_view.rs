@@ -44,15 +44,24 @@ fn duration(ms: u64) -> String {
 }
 
 pub fn row(ui: &mut egui::Ui, tool: &Tool) {
+    row_with_view(ui, tool, false);
+}
+
+pub fn row_verbose(ui: &mut egui::Ui, tool: &Tool) {
+    row_with_view(ui, tool, true);
+}
+
+fn row_with_view(ui: &mut egui::Ui, tool: &Tool, verbose: bool) {
     let colors = crate::theme::palette(ui.ctx());
     let id = ui.make_persistent_id((&tool.id, "detail"));
     let kind = detail(tool);
     let expandable = kind != Detail::None;
     let small_diff = kind == Detail::Diff && tool.added + tool.removed <= 12;
-    let mut open = ui
-        .ctx()
-        .data(|d| d.get_temp::<bool>(id))
-        .unwrap_or(small_diff);
+    let mut open = verbose
+        || ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(id))
+            .unwrap_or(small_diff);
     let command = matches!(tool.name.as_str(), "bash" | "powershell");
     let icon = match tool.name.as_str() {
         "bash" | "powershell" => Icon::Command,
@@ -62,7 +71,7 @@ pub fn row(ui: &mut egui::Ui, tool: &Tool) {
     };
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), 22.0),
-        if expandable {
+        if expandable && !verbose {
             Sense::click()
         } else {
             Sense::hover()
@@ -160,7 +169,7 @@ pub fn row(ui: &mut egui::Ui, tool: &Tool) {
     } else if !tool.finished {
         p.circle_filled(status, 2.0, colors.accent);
     }
-    if expandable {
+    if expandable && !verbose {
         icons::chevron(
             ui,
             Rect::from_center_size(
@@ -183,7 +192,7 @@ pub fn row(ui: &mut egui::Ui, tool: &Tool) {
             Detail::Error => code_block(ui, id, &tool.output),
             Detail::Script => {
                 for child in &tool.children {
-                    row(ui, child);
+                    row_with_view(ui, child, verbose);
                 }
                 if !tool.code.is_empty() {
                     code_block(ui, id.with("script"), &tool.code);
@@ -195,6 +204,14 @@ pub fn row(ui: &mut egui::Ui, tool: &Tool) {
             Detail::None => {}
         });
         ui.add_space(5.0);
+    }
+    if verbose {
+        if kind == Detail::None && !tool.args.is_empty() {
+            code_block(ui, id.with("arguments"), &tool.args);
+        }
+        if !tool.output.is_empty() && !matches!(kind, Detail::Error | Detail::Script) {
+            code_block(ui, id.with("output"), &tool.output);
+        }
     }
 }
 

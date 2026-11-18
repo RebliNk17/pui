@@ -41,7 +41,7 @@ fn render(
                         messages,
                         "fixture",
                         "high",
-                        (running, false, true),
+                        (running, false, true, View::Normal),
                         false,
                         &mut gallery,
                     );
