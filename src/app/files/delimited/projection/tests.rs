@@ -371,12 +371,20 @@ fn closed_preview_keeps_shared_payload_lease_until_worker_drops_original_bodies(
     assert!(weak_lease.upgrade().is_some());
     let other = budget::Lease::new(&ctx);
     assert!(other.reserve(64 * 1024 * 1024).is_err());
+    let busy = ctx.data_mut(|data| {
+        data.get_temp::<Arc<AtomicBool>>(egui::Id::new("table-projection-worker"))
+            .unwrap()
+    });
     release_tx.send(()).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while weak_lease.upgrade().is_some() {
+    // A Weak becoming un-upgradeable only proves the last strong owner began
+    // dropping; Lease::drop may not have subtracted its pool charge yet. The
+    // worker releases this permit after dropping input, so wait for completion.
+    while busy.load(Ordering::Acquire) {
         assert!(std::time::Instant::now() < deadline);
         std::thread::yield_now();
     }
+    assert!(weak_lease.upgrade().is_none());
     assert!(source.upgrade().is_none());
     other.reserve(64 * 1024 * 1024).unwrap();
 }

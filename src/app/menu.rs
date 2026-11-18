@@ -444,6 +444,61 @@ impl Pui {
                     ui.ctx().request_repaint();
                 }
             }
+            if let Some(version) = self.updates.available_version() {
+                let ready = self.updates.ready_to_install();
+                let label = if ready {
+                    format!("Install Pui {version}")
+                } else {
+                    format!("Update to {version}")
+                };
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), theme::COMPACT_HEIGHT),
+                    Sense::click(),
+                );
+                let highlighted = self.updates.open || response.hovered() || response.has_focus();
+                if highlighted {
+                    ui.painter().rect_filled(rect, 7, colors.hover);
+                }
+                let color = if ready { colors.green } else { colors.accent };
+                icons::draw(
+                    ui,
+                    egui::Rect::from_center_size(
+                        rect.left_center() + egui::vec2(16.0, 0.0),
+                        Vec2::splat(16.0),
+                    ),
+                    Icon::Refresh,
+                    color,
+                );
+                let label_pos = rect.left_center() + egui::vec2(34.0, 0.0);
+                let mut layout = egui::text::LayoutJob::simple(
+                    label.clone(),
+                    FontId::proportional(13.0),
+                    color,
+                    (rect.right() - 10.0 - label_pos.x).max(0.0),
+                );
+                layout.wrap.max_rows = 1;
+                let galley = ui.painter().layout_job(layout);
+                ui.painter().galley(
+                    label_pos - egui::vec2(0.0, galley.size().y / 2.0),
+                    galley,
+                    color,
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        true,
+                        self.updates.open,
+                        &label,
+                    )
+                });
+                if response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    self.menu.pending.push(Command::Updates);
+                    ui.ctx().request_repaint();
+                }
+            }
         });
     }
     #[cfg(not(target_os = "macos"))]
@@ -473,7 +528,8 @@ impl Pui {
         }
     }
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
-        self.updates.show(ctx);
+        self.updates
+            .show_with_preference(ctx, &mut self.prefs.settings.auto_check_updates);
         about::show(ctx, &mut self.menu.about);
         self.resource_reload_dialog(ctx);
     }

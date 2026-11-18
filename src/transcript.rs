@@ -49,7 +49,10 @@ impl View {
         ui.menu_button("Transcript view", |ui| {
             crate::theme::menu_controls(ui);
             for (label, view) in [("Normal", Self::Normal), ("Verbose", Self::Verbose)] {
-                if ui.selectable_value(self, view, label).clicked() {
+                if ui.selectable_value(self, view, label).on_hover_text(match view {
+                    Self::Normal => "Action summaries, progress updates and replies; raw thinking stays hidden.",
+                    Self::Verbose => "Include expandable thinking and detailed tool calls/results.",
+                }).clicked() {
                     ui.close();
                 }
             }
@@ -914,14 +917,16 @@ fn assistant(
     let mut group_index = 0;
     for (message_index, message) in messages.iter().enumerate() {
         if message.blocks.is_empty() {
-            // Legacy messages have no interleaving metadata: reasoning precedes the reply.
-            if !message.thinking.is_empty() {
+            // Normal summarizes recorded actions, never internal reasoning. Hidden
+            // thinking must not split one action run into many summary rows.
+            // Verbose retains legacy reasoning before the reply.
+            if view == View::Verbose && !message.thinking.is_empty() {
                 if !pending.is_empty() {
                     changed |= action_run(ui, &pending, group_index, false, expand, view);
                     pending.clear();
                     group_index += 1;
                 }
-                thinking_text(ui, &message.thinking);
+                changed |= thinking_text(ui, &message.thinking, (message_index, "legacy"));
             }
             if !message.text.is_empty() {
                 if !pending.is_empty() {
@@ -959,13 +964,13 @@ fn assistant(
                             markdown::show_reply(ui, text, (message_index, "block", block_index));
                         }
                     }
-                    Block::Thinking(text) if !text.is_empty() => {
+                    Block::Thinking(text) if view == View::Verbose && !text.is_empty() => {
                         if !pending.is_empty() {
                             changed |= action_run(ui, &pending, group_index, false, expand, view);
                             pending.clear();
                             group_index += 1;
                         }
-                        thinking_text(ui, text);
+                        changed |= thinking_text(ui, text, (message_index, block_index));
                     }
                     Block::Tool(id) => {
                         if let Some(tool) = message.tools.iter().find(|t| t.id == *id) {
@@ -1102,10 +1107,62 @@ fn assistant(
     (changed, fork)
 }
 
-fn thinking_text(ui: &mut egui::Ui, text: &str) {
+fn thinking_text(ui: &mut egui::Ui, text: &str, identity: impl Hash) -> bool {
+    let colors = crate::theme::palette(ui.ctx());
+    let id = ui.make_persistent_id(("reasoning-preview", identity));
+    let mut expanded = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(id))
+        .unwrap_or(false);
+    let long = text.chars().take(601).count() > 600 || text.lines().take(13).count() > 12;
+    let mut changed = false;
     ui.add_space(6.0);
-    markdown::show(ui, text);
+    let response = egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 4,
+            top: 2,
+            bottom: 2,
+        })
+        .show(ui, |ui| {
+            ui.label(RichText::new("Thinking").size(11.0).color(colors.muted));
+            if long && !expanded {
+                // Bound layout work and height without replacing the source in history.
+                let preview: String = text.chars().take(600).collect();
+                let mut job = egui::text::LayoutJob::simple(
+                    preview,
+                    FontId::proportional(12.0),
+                    colors.muted,
+                    ui.available_width(),
+                );
+                job.wrap.max_rows = 5;
+                ui.add(egui::Label::new(job).selectable(true));
+            } else {
+                markdown::show(ui, text);
+            }
+            if long
+                && icons::labeled_button(
+                    ui,
+                    Icon::Spark,
+                    if expanded { "Show less" } else { "Show more" },
+                    true,
+                )
+                .clicked()
+            {
+                expanded = !expanded;
+                changed = true;
+                ui.ctx().data_mut(|data| data.insert_temp(id, expanded));
+            }
+        });
+    ui.painter().line_segment(
+        [
+            response.response.rect.left_top(),
+            response.response.rect.left_bottom(),
+        ],
+        Stroke::new(2.0, colors.border),
+    );
     ui.add_space(6.0);
+    changed
 }
 
 fn action_run(
@@ -1330,6 +1387,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
         })
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "transcript/reasoning_tests.rs"]
+mod reasoning_tests;
 
 #[cfg(test)]
 #[path = "transcript/view_tests.rs"]
@@ -2342,7 +2403,7 @@ mod tests {
         assert!((keyboard_expanded - expanded).abs() < 0.1);
     }
     #[test]
-    fn thinking_renders_markdown_always_open() {
+    fn verbose_short_thinking_renders_markdown_with_a_label() {
         fn collect(shape: &egui::Shape, text: &mut Vec<egui::epaint::TextShape>) {
             match shape {
                 egui::Shape::Text(t) => text.push(t.clone()),
@@ -2383,7 +2444,7 @@ mod tests {
                                         }],
                                         "model",
                                         "high",
-                                        (running, false, false, View::Normal),
+                                        (running, false, false, View::Verbose),
                                         false,
                                         &mut crate::media::Gallery::default(),
                                     )
@@ -2399,7 +2460,8 @@ mod tests {
                     };
                     draw(vec![]);
                     let (text, _) = draw(vec![]);
-                    assert!(!text.iter().any(|t| t.galley.job.text == "Thinking"));
+                    assert!(text.iter().any(|t| t.galley.job.text == "Thinking"));
+                    assert!(!text.iter().any(|t| t.galley.job.text == "Show more"));
                     for _ in 0..5 {
                         assert!(
                             !draw(vec![]).1,

@@ -1,14 +1,19 @@
 use super::*;
 #[cfg(unix)]
 fn command(path: &std::path::Path, body: &str) -> Command {
-    let mut command = Command::new("python3");
-    command.args([
-        "-c",
-        &format!(
-            "import os,pathlib;pathlib.Path({:?}).write_text(str(os.getpid()));{body}",
-            path.to_string_lossy()
-        ),
-    ]);
+    // Record the direct child's PID before Python initialization, which may
+    // legitimately take longer than the deliberately short protocol timeout.
+    // exec preserves that PID: the assertion still checks the actual owned
+    // helper, including cancellation before Python finishes starting.
+    let mut command = Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            "printf '%s' \"$$\" > \"$1\"; exec python3 -c \"$2\"",
+            "pui-svg-helper-fixture",
+        ])
+        .arg(path)
+        .arg(body);
     command
 }
 #[cfg(unix)]

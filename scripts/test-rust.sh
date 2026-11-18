@@ -5,6 +5,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
+# /usr/bin/git is a macOS developer-tool launcher, not the Git executable.
+# Avoid repeating launcher resolution for every subprocess in bounded real-Git
+# fixtures. Preserve explicitly selected Git installs and all production limits.
+if [[ "$(uname -s)" == Darwin && "$(command -v git)" == /usr/bin/git ]]; then
+  developer_git=$(xcrun --find git)
+  [[ -x "$developer_git" ]] || { echo "Developer Git is unavailable." >&2; exit 1; }
+  export PATH="$(dirname "$developer_git"):$PATH"
+  # The directory also contains the real compiler, bypassing Apple's /usr/bin
+  # SDK-selecting shim. Preserve a caller SDK or select the active SDK explicitly.
+  if [[ -z "${SDKROOT:-}" ]]; then
+    export SDKROOT="$(xcrun --show-sdk-path)"
+  fi
+fi
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
 lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
@@ -16,6 +29,7 @@ cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip app::files::loader::svg_tests:: \
   --skip workspace::commit::tests:: --skip svg_preview::process::lifecycle_tests:: \
   --skip app::changes::index_actions::tests:: \
+  --skip app::tasks::recovery::tests:: --skip app::tasks::store_safety_tests:: --skip tasks::apply::tests:: \
   --skip "$lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
@@ -37,5 +51,8 @@ cargo test --offline --locked --bin pui workspace::commit::tests:: -- --test-thr
 cargo test --offline --locked --bin pui svg_preview::process::lifecycle_tests:: -- --test-threads=1
 # Ownership lock handoff assertions must not overlap fork/exec in other tests.
 cargo test --offline --locked --bin pui app::tasks::save_conflict_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::tasks::recovery::tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::tasks::store_safety_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui tasks::apply::tests:: -- --test-threads=1
 # Restart/OS-lock test must not overlap any subprocess-spawning group.
 cargo test --offline --locked --bin pui "$lock_test" -- --exact --test-threads=1

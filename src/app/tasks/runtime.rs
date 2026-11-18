@@ -65,6 +65,12 @@ impl Pui {
             self.tasks.error = Some(e);
             return;
         }
+        if let Some(plan) = &t.execution_plan {
+            if serde_json::to_value(&plan.checks).ok() != serde_json::to_value(&t.proposed).ok() {
+                self.tasks.error = Some("Checks changed after plan approval. Nothing was implemented; request approval for a new plan.".into());
+                return;
+            }
+        }
         let id = t.id.clone();
         let source = t.source.clone();
         let head = t.base_head.clone();
@@ -196,8 +202,20 @@ impl Pui {
         task.note = format!("{}\n{}", task.note, note).trim().to_owned();
         match stage {
             environment::Stage::Proposal => {
-                self.tasks.save();
-                self.task_launch(Role::Proposal);
+                if task.execution_plan.is_some() {
+                    // The lead supplied the exact plan/checks shown in consent.
+                    // Do not pay another planner to silently replace them.
+                    let id = task.id.clone();
+                    task.phase = Phase::AwaitingApproval;
+                    self.tasks.save();
+                    self.tasks.live = None;
+                    let selected = self.tasks.selected.replace(id);
+                    self.task_start();
+                    self.tasks.selected = selected;
+                } else {
+                    self.tasks.save();
+                    self.task_launch(Role::Proposal);
+                }
             }
             environment::Stage::Implementation => {
                 task.implementation_pending = false;
@@ -545,8 +563,21 @@ impl Pui {
             .map(|a| serde_json::to_string(a).unwrap())
             .unwrap_or_default();
         format!(
-            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: the separate check runner runs approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations.\nObjective:\n{}\nConstraints:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
-            t.objective, t.constraints, contract, prior
+            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: the separate check runner runs approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations.\nObjective:\n{}\nConstraints:\n{}\nReviewed implementation plan:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
+            t.objective,
+            t.constraints,
+            t.execution_plan
+                .as_ref()
+                .map(|plan| plan
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, step)| format!("{}. {step}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+                .unwrap_or_else(|| "No lead-authored plan; implement the frozen criteria.".into()),
+            contract,
+            prior
         )
     }
     fn task_send_work(&mut self, index: usize) {
