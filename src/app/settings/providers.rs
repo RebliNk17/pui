@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+mod accounts;
+
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -91,6 +93,8 @@ struct ClaudeSubscriptionFlow {
 #[derive(Default)]
 struct AntigravitySubscriptionFlow {
     open: bool,
+    /// auth.json key: `antigravity` or an extra account such as `antigravity~2`.
+    target: String,
     /// Show the custom-client and paste-callback controls.
     advanced: bool,
     /// Custom OAuth client; empty uses the built-in Antigravity client.
@@ -169,6 +173,8 @@ impl Default for EndpointModal {
 #[derive(Default)]
 struct ApiKeyModal {
     open: bool,
+    /// Keep the provider's existing key and save this one as another account.
+    additional: bool,
     provider_index: usize,
     custom_provider: String,
     api_key: String,
@@ -185,6 +191,7 @@ pub(in crate::app) struct ProvidersManager {
     vertex: VertexModal,
     endpoint: EndpointModal,
     api_key_modal: ApiKeyModal,
+    accounts: accounts::AccountsState,
     pub(in crate::app) status_notice: Option<String>,
     pub(in crate::app) status_error: Option<String>,
     pub(in crate::app) reload_requested: bool,
@@ -428,6 +435,7 @@ fn exchange_antigravity_oauth_code(
     client_secret: &str,
     code: &str,
     verifier: &str,
+    target: &str,
 ) -> Result<String, String> {
     let (client_id, client_secret) = antigravity_client(client_id, client_secret);
     let (client_id, client_secret) = (client_id.as_str(), client_secret.as_str());
@@ -557,7 +565,7 @@ process.stdout.write(JSON.stringify({ ok: true, access, refresh, expiresIn, emai
     if !email.is_empty() {
         entry["email"] = json!(email.clone());
     }
-    auth["antigravity"] = entry;
+    auth[target] = entry;
     write_json_atomic(&auth_path, &auth, true)?;
     Ok(email)
 }
@@ -568,6 +576,7 @@ fn run_antigravity_browser_login(
     authorize_url: &str,
     expected_state: &str,
     verifier: &str,
+    target: &str,
 ) -> Result<String, String> {
     let script = r#"
 import { createServer } from 'node:http';
@@ -636,7 +645,7 @@ setTimeout(() => {
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or("Callback did not contain an authorization code.")?;
-    exchange_antigravity_oauth_code(client_id, client_secret, code, verifier)
+    exchange_antigravity_oauth_code(client_id, client_secret, code, verifier, target)
 }
 
 pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredModel> {
@@ -877,6 +886,7 @@ impl ProvidersManager {
     }
 
     pub(in crate::app) fn reload_from_disk(&mut self) {
+        self.accounts.registry = None;
         self.custom_providers.clear();
         self.saved_auth.clear();
         if let Some(auth_path) = auth_json_path() {
@@ -952,6 +962,7 @@ impl ProvidersManager {
     }
 
     pub(in crate::app) fn poll(&mut self) {
+        self.poll_accounts();
         if let Some(result) = self.claude.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.claude.rx = None;
             self.claude.exchanging = false;
@@ -982,6 +993,13 @@ impl ProvidersManager {
             self.antigravity.exchanging = false;
             self.antigravity.listening = false;
             match result {
+                Ok(email) if crate::accounts::is_alias(&self.antigravity.target) => {
+                    self.antigravity.open = false;
+                    self.antigravity.callback_input.clear();
+                    self.antigravity.error = None;
+                    let target = self.antigravity.target.clone();
+                    self.account_signed_in(&target, Some(email.as_str()).filter(|e| !e.is_empty()));
+                }
                 Ok(email) => {
                     self.antigravity.open = false;
                     self.antigravity.callback_input.clear();
@@ -1044,6 +1062,10 @@ impl ProvidersManager {
     }
 
     pub(in crate::app) fn open_antigravity_subscription(&mut self) {
+        self.open_antigravity_for("antigravity");
+    }
+
+    pub(in crate::app) fn open_antigravity_for(&mut self, target: &str) {
         let (verifier, challenge) = generate_pkce();
         let state = generate_pkce().0;
         let mut client_id = std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_default();
@@ -1052,12 +1074,12 @@ impl ProvidersManager {
         if let Some(path) = auth_json_path() {
             let root = read_json_object(&path);
             if client_id.trim().is_empty() {
-                if let Some(cid) = root["antigravity"]["clientId"].as_str() {
+                if let Some(cid) = root[target]["clientId"].as_str() {
                     client_id = cid.to_owned();
                 }
             }
             if client_secret.trim().is_empty() {
-                if let Some(csec) = root["antigravity"]["clientSecret"].as_str() {
+                if let Some(csec) = root[target]["clientSecret"].as_str() {
                     client_secret = csec.to_owned();
                 }
             }
@@ -1068,6 +1090,7 @@ impl ProvidersManager {
         }
         self.antigravity = AntigravitySubscriptionFlow {
             open: true,
+            target: target.to_owned(),
             advanced: !client_id.trim().is_empty(),
             client_id,
             client_secret,
@@ -1172,6 +1195,7 @@ impl ProvidersManager {
             .unwrap_or(0);
         self.api_key_modal = ApiKeyModal {
             open: true,
+            additional: false,
             provider_index: idx,
             custom_provider: String::new(),
             api_key: String::new(),
@@ -1374,12 +1398,21 @@ impl ProvidersManager {
                 .map(|(id, _)| (*id).to_owned())
                 .unwrap_or_else(|| "google".into())
         };
-        let key = self.api_key_modal.api_key.trim();
+        let key = self.api_key_modal.api_key.trim().to_owned();
         if key.is_empty() {
             return Err("Enter an API key (or a !command secret helper).".into());
         }
         let path = auth_json_path().ok_or("Cannot resolve ~/.pi/agent/auth.json.")?;
         let mut root = read_json_object(&path);
+        let additional = self.api_key_modal.additional && root[&provider].is_object();
+        let provider = if additional {
+            let target = self.account_target(&provider);
+            self.registry().add(&target, None)?;
+            self.registry().save()?;
+            target
+        } else {
+            provider
+        };
         root[&provider] = json!({
             "type": "api_key",
             "key": key,
@@ -1402,6 +1435,7 @@ impl ProvidersManager {
         self.show_vertex_modal(ctx);
         self.show_endpoint_modal(ctx);
         self.show_api_key_modal(ctx);
+        self.show_account_modals(ctx);
     }
 
     fn show_claude_modal(&mut self, ctx: &egui::Context) {
@@ -1670,6 +1704,7 @@ impl ProvidersManager {
                 );
                 let state = self.antigravity.state.clone();
                 let verifier = self.antigravity.verifier.clone();
+                let target = self.antigravity.target.clone();
                 let (tx, rx) = mpsc::channel();
                 self.antigravity.rx = Some(rx);
                 let ctx = ctx.clone();
@@ -1680,6 +1715,7 @@ impl ProvidersManager {
                         &auth_url,
                         &state,
                         &verifier,
+                        &target,
                     ));
                     ctx.request_repaint();
                 });
@@ -1695,6 +1731,7 @@ impl ProvidersManager {
                     self.antigravity.listening = false;
                     self.antigravity.error = None;
                     let verifier = self.antigravity.verifier.clone();
+                    let target = self.antigravity.target.clone();
                     let (tx, rx) = mpsc::channel();
                     self.antigravity.rx = Some(rx);
                     let ctx = ctx.clone();
@@ -1704,6 +1741,7 @@ impl ProvidersManager {
                             &client_secret,
                             &code,
                             &verifier,
+                            &target,
                         ));
                         ctx.request_repaint();
                     });
@@ -2213,6 +2251,21 @@ impl ProvidersManager {
                     .id_salt("api-key-custom-provider")
                     .desired_width(ui.available_width()),
                 );
+                let selected = if self.api_key_modal.custom_provider.trim().is_empty() {
+                    BUILTIN_KEY_PROVIDERS[self.api_key_modal.provider_index]
+                        .0
+                        .to_owned()
+                } else {
+                    self.api_key_modal.custom_provider.trim().to_owned()
+                };
+                if self.saved_auth.iter().any(|a| a.provider == selected) {
+                    ui.add_space(6.0);
+                    prompt_ui::compact_toggle_row(
+                        ui,
+                        &mut self.api_key_modal.additional,
+                        "Add as another account (keep the existing key)",
+                    );
+                }
                 ui.add_space(8.0);
                 ui.label(theme::small(ui, "API Key (or !command)"));
                 let is_command = self.api_key_modal.api_key.trim_start().starts_with('!');
@@ -2270,6 +2323,7 @@ impl ProvidersManager {
             || self.vertex.open
             || self.endpoint.open
             || self.api_key_modal.open
+            || self.account_modal_open()
     }
 
     pub(in crate::app) fn escape(&mut self) -> bool {
@@ -2296,7 +2350,7 @@ impl ProvidersManager {
             self.api_key_modal.open = false;
             return true;
         }
-        false
+        self.close_account_modal()
     }
 }
 
@@ -2357,13 +2411,13 @@ impl Pui {
             let agy_desc = if let Some(auth) = &antigravity_auth {
                 if let Some(email) = &auth.detail {
                     format!(
-                        "Connected via Google OAuth ({email}). Antigravity models (Gemini 3.7/3.6/3.5, 3.1 Pro, Claude 4.6) are available."
+                        "Connected via Google OAuth ({email}). Antigravity models load from your account."
                     )
                 } else {
                     "Connected via Google OAuth in ~/.pi/agent/auth.json. Antigravity models are available in the model picker.".into()
                 }
             } else {
-                "Sign in with your Google account via OAuth to use Antigravity / Cloud Code Assist models (Gemini 3.7/3.6 Flash, 3.1 Pro, Claude 4.6).".into()
+                "Sign in with your Google account to use Antigravity models (Gemini, Claude, GPT-OSS).".into()
             };
             page::row(
                 ui,
@@ -2418,10 +2472,20 @@ impl Pui {
                 (None, false) => "Connect a Google Gemini API key (GEMINI_API_KEY) or Google Cloud Vertex AI (gcloud ADC / project & location).".into(),
             };
             page::row(ui, "Google Gemini & Vertex AI", &google_desc, |ui| {
-                if ui.button("Vertex AI (ADC / Project)…").clicked() {
+                if ui
+                    .button("Vertex AI…")
+                    .on_hover_text(
+                        "Vertex AI with gcloud ADC, a project and location, or an API key",
+                    )
+                    .clicked()
+                {
                     self.settings_view.providers.open_vertex_modal();
                 }
-                if ui.button("Gemini API Key…").clicked() {
+                if ui
+                    .button("API key…")
+                    .on_hover_text("Gemini API key")
+                    .clicked()
+                {
                     self.settings_view
                         .providers
                         .open_api_key_modal(Some("google"));
@@ -2450,6 +2514,9 @@ impl Pui {
                 },
             );
         });
+
+        // Several accounts per provider (Claude, ChatGPT, Antigravity, API keys).
+        self.settings_accounts(ui);
 
         // 2. Custom & Local Compatible Endpoints
         let custom_list = self.settings_view.providers.custom_providers.clone();
@@ -2558,7 +2625,7 @@ impl Pui {
                         .unwrap_or_default();
                     page::row(
                         ui,
-                        provider,
+                        &crate::accounts::display_provider(provider),
                         &format!("{count} models available from Pi{auth_badge}"),
                         |ui| {
                             if saved_auth.iter().any(|a| &a.provider == provider)
@@ -2628,7 +2695,7 @@ impl Pui {
             page::row(
                 ui,
                 "Terminal sign-in (All Pi providers)",
-                "For other OAuth providers (GitHub Copilot, OpenAI ChatGPT/Codex, Radius), you can also run Pi's interactive /login in your terminal.",
+                "Claude, ChatGPT and Antigravity sign in under Accounts. For other OAuth providers (GitHub Copilot, Radius), run Pi's interactive /login in your terminal.",
                 |ui| {
                     let command = if crate::runtime::active_bundle().is_some() {
                         format!(

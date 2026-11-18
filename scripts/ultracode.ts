@@ -9,6 +9,7 @@ import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
 import { installWorkflows } from "./workflows.ts";
 import { installAntigravity } from "./antigravity.ts";
+import { installAccounts } from "./accounts.ts";
 
 export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
 Do not launch delegated agents through Bash, Python subprocesses, detached pi --print/--mode json, or another CLI: those processes are not registered with Pui and cannot be opened as live child chats. If managed spawning is unavailable or denied, report the blocker instead of silently falling back to an invisible process. Never claim a worker launched until pui_spawn_agent succeeds.
@@ -132,4 +133,7 @@ export default function puiExtension(pi: any) {
   pi.registerTool({ name: "pui_agents", label: "Agent status", description: "List this agent's descendants and lifecycle status; no transcript polling or messages are generated.", parameters: Type.Object({}), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("list", args, signal, ctx) });
   pi.registerTool({ name: "pui_message_agent", label: "Message agent", description: "Send only a necessary assignment, clarification, blocker or result to a direct parent/descendant. No automatic peer chatter. Steers a running recipient at the next turn/tool boundary without interrupting active tools; starts a turn if idle. Use kind=task only for a new assignment requiring a completion report, not for acknowledgements.", parameters: Type.Object({ agent_id: Type.String(), message: Type.String({ maxLength: 12000 }), kind:Type.Optional(Type.Union([Type.Literal("task"),Type.Literal("clarification"),Type.Literal("blocker"),Type.Literal("result")])) }), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("message", args, signal, ctx) });
   pi.registerTool({ name: "pui_stop_agent", label: "Stop agent", description: "Stop a descendant and its subtree. Does not delete worktrees or session files.", parameters: Type.Object({ agent_id: Type.String() }), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("stop", args, signal, ctx) });
+  // Extra accounts load provider modules asynchronously; Pi waits for the returned promise so
+  // restored sessions can select account models at startup. Failures leave base providers intact.
+  return installAccounts(pi).catch(() => {});
 }

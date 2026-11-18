@@ -150,3 +150,19 @@ test("subscription helper queries only OAuth subscriptions, lists API-key provid
   assert.equal(usage.litellm, null);assert.equal(usage.litellm_error, null);
   assert.ok(!stdout.includes("secret-oauth-token"));assert.ok(!stdout.includes("acct-fixture"));
 });
+
+test("extra accounts get their own usage section, titled by their label, with their own token", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pui-usage-accounts-test-"));
+  const sdk = join(directory, "sdk.mjs"), preload = join(directory, "fetch.mjs");
+  await writeFile(join(directory, "pui-accounts.json"), JSON.stringify({ accounts: [{ id: "anthropic~work", base: "anthropic", label: "work@x.com" }, { id: "openai~2", base: "openai" }] }));
+  await writeFile(sdk, `export const ModelRuntime = { create: async () => ({
+    getModels: () => [], getProvider: id => ({ name: id === "openai" ? "OpenAI" : id }),
+    listCredentials: async () => [{ providerId: "anthropic", type: "oauth" }, { providerId: "anthropic~work", type: "oauth" }, { providerId: "openai~2", type: "api_key" }],
+    getAuth: async id => ({ auth: { apiKey: "token-" + id } }) }) };`);
+  await writeFile(preload, `globalThis.fetch = async (url, init) => new Response(JSON.stringify({ five_hour: { utilization: init.headers.Authorization.endsWith("~work") ? 90 : 10 } }));`);
+  const { stdout } = await exec(process.execPath, ["--import", preload, resolve("scripts/usage.mjs"), sdk], { env: { ...process.env, PI_CODING_AGENT_DIR: directory } });
+  const { usage } = JSON.parse(stdout);
+  assert.deepEqual(usage.providers.map(p => [p.id, p.name, p.windows[0].used]), [["anthropic", "Claude", 10], ["anthropic~work", "Claude · work@x.com", 90]]);
+  assert.deepEqual(usage.unsupported, ["OpenAI · 2 (API key)"]);
+  assert.ok(!stdout.includes("token-"));
+});

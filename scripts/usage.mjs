@@ -1,6 +1,9 @@
 // One-shot local account/subscription usage query. Credentials never leave this process except in
 // Authorization headers to each provider's own HTTPS usage endpoint. Stdout contains aggregates only.
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const deadline = AbortSignal.timeout(18_000);
 const safeNumber = value => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -227,20 +230,53 @@ async function litellm(runtime) {
 // Do not leak exception messages from auth helpers, URLs, response bodies or keys.
 const safeError = (error, fallback) => error instanceof UsageError ? error.message : fallback;
 
+// Extra accounts (`anthropic~2`) from Pui's registry; see scripts/accounts.ts. No credentials here.
+function accountLabels() {
+  try {
+    const raw = JSON.parse(readFileSync(join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "pui-accounts.json"), "utf8"));
+    const labels = { ...(raw.labels && typeof raw.labels === "object" ? raw.labels : {}) };
+    for (const account of Array.isArray(raw.accounts) ? raw.accounts : []) if (typeof account?.id === "string" && typeof account.label === "string") labels[account.id] = account.label;
+    return labels;
+  } catch { return {}; }
+}
+const family = id => String(id).split("~")[0];
+export const accountTitle = (name, id, labels) => {
+  const suffix = labels[id] || (id.includes("~") ? id.split("~")[1] : "");
+  return suffix ? `${name} · ${label(suffix)}` : name;
+};
+
+/** Pi only knows alias IDs once registered; clone the built-in provider so getAuth resolves them. */
+async function registerAliases(runtime, sdkPath, ids) {
+  const aliases = ids.filter(id => id.includes("~") && family(id) !== "antigravity" && !runtime.getProvider?.(id));
+  if (!aliases.length || typeof runtime.registerNativeProvider !== "function") return;
+  try {
+    const all = await import(pathToFileURL(sdkPath.replace(/pi-coding-agent[\\/]dist[\\/]index\.js$/, "pi-ai/dist/providers/all.js")).href);
+    for (const id of aliases) {
+      const base = all.builtinProviders?.().find(p => p.id === family(id));
+      if (!base) continue;
+      const retag = list => list.map(m => ({ ...m, provider: id }));
+      runtime.registerNativeProvider({ ...base, id, getModels: () => retag(base.getModels()), ...(base.getAllModels ? { getAllModels: () => retag(base.getAllModels()) } : {}) });
+    }
+  } catch {}
+}
+
 async function main() {
-  const sdk = await import(pathToFileURL(process.argv.at(-1)).href);
+  const sdkPath = process.argv.at(-1);
+  const sdk = await import(pathToFileURL(sdkPath).href);
   const runtime = await sdk.ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false, signal: deadline });
   const credentials = await Promise.resolve().then(() => runtime.listCredentials?.({ signal: deadline }) ?? []).catch(() => []);
   const read = id => { try { return sdk.readStoredCredential?.(id); } catch { return undefined; } };
+  const labels = accountLabels();
+  await registerAliases(runtime, sdkPath, credentials.map(c => c.providerId));
   const jobs = [], unsupported = [];
   for (const { providerId, type } of credentials) {
-    const spec = SUBSCRIPTIONS[providerId];
+    const spec = SUBSCRIPTIONS[family(providerId)];
     if (!spec || (spec.oauthOnly && type !== "oauth")) {
-      if (providerId !== (process.env.PUI_USAGE_PROVIDER || "litellm")) unsupported.push(`${label(runtime.getProvider?.(providerId)?.name || providerId)}${type === "api_key" ? " (API key)" : ""}`);
+      if (providerId !== (process.env.PUI_USAGE_PROVIDER || "litellm")) unsupported.push(`${accountTitle(label(runtime.getProvider?.(family(providerId))?.name || family(providerId)), providerId, labels)}${type === "api_key" ? " (API key)" : ""}`);
       continue;
     }
     jobs.push((async () => {
-      const base = { id: providerId, name: spec.name };
+      const base = { id: providerId, name: accountTitle(spec.name, providerId, labels) };
       try {
         const stored = read(providerId);
         const auth = spec.needsAuth === false ? null : await runtime.getAuth(providerId, { signal: deadline });

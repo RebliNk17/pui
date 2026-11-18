@@ -585,7 +585,8 @@ export function convertMessages(model: any, context: any, runtimeModel: string):
         if (block.type === "text" && String(block.text || "").trim()) {
           parts.push({ text: sanitizeText(block.text) });
         } else if (block.type === "thinking" && String(block.thinking || "").trim()) {
-          if (msg.provider === PROVIDER_ID && msg.model === model.id) {
+          // Extra accounts (antigravity~2) share the backend, so their signatures stay valid.
+          if (String(msg.provider || "").split("~")[0] === PROVIDER_ID && msg.model === model.id) {
             parts.push({
               thought: true,
               text: sanitizeText(block.thinking),
@@ -958,7 +959,7 @@ export function streamAntigravity(model: any, context: any, options: any = {}): 
       role: "assistant",
       content: [],
       api: ANTIGRAVITY_API,
-      provider: PROVIDER_ID,
+      provider: model.provider || PROVIDER_ID,
       model: model.id,
       usage: {
         input: 0,
@@ -1033,10 +1034,10 @@ export function streamAntigravity(model: any, context: any, options: any = {}): 
   return stream;
 }
 
-export function installAntigravity(pi: any): void {
-  if (typeof pi.registerProvider !== "function") return;
-  pi.registerProvider(PROVIDER_ID, {
-    name: PROVIDER_NAME,
+/** Provider config for the base account or an extra account (scripts/accounts.ts). */
+export function antigravityConfig(name: string = PROVIDER_NAME): any {
+  return {
+    name,
     baseUrl: DEFAULT_ENDPOINT,
     api: ANTIGRAVITY_API,
     models: ANTIGRAVITY_MODELS,
@@ -1049,5 +1050,10 @@ export function installAntigravity(pi: any): void {
       getApiKey,
     },
     streamSimple: streamAntigravity,
-  });
+  };
+}
+
+export function installAntigravity(pi: any): void {
+  if (typeof pi.registerProvider !== "function") return;
+  pi.registerProvider(PROVIDER_ID, antigravityConfig());
 }
