@@ -144,6 +144,10 @@ impl History {
             self.detail.files.row_key = focused;
             return;
         }
+        if self.has_detail() && focused.is_some() && focused == self.detail.patch.image.control {
+            self.detail.patch.image.key = focused;
+            return;
+        }
         if self.has_detail() && focused.is_some() && focused == self.detail.patch.control {
             self.detail.patch.key = focused;
             return;
@@ -377,6 +381,7 @@ impl History {
                             .split_once(' ')
                             .map_or((detail.signature.as_str(), ""), |(s, r)| (s, r));
                         let label = match status {
+                            "P" => "Signature present · not verified (no verifier run)".into(),
                             "G" => format!(
                                 "Signature · good{}{}",
                                 if signer.is_empty() { "" } else { " · " },

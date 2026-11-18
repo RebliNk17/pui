@@ -1,5 +1,7 @@
 # Reviewed terminal-free repository clone
 
+> **Historical report; conflicting safety/completion claims are superseded by `git-safety-corrections.md`.** See that report for actual corrected behavior, evidence and remaining work.
+
 ## Behavior and limits
 
 Changes panel adds **Clone repository…**: URL (credential-free, `push::remote::valid_url` policy), destination folder name (255 bytes, no slashes/controls), optional start branch, and a 1–300s timeout (default 30). Worker review freezes parent/name/URL/branch; confirmation describes destination and default-or-chosen branch. Apply re-inspects, then `git clone --quiet` via the existing conservative `network_command` (SSH BatchMode, no interactive login, askpass false, hooks disabled). No force, push, tags or hooks. On timeout/cancel the destination completion is uncertain; no automatic retry and no automatic cleanup.

@@ -10,7 +10,7 @@ pub(super) struct Patch {
     pub(super) key: Option<egui::Id>,
     path: Option<String>,
     pub(super) viewer: viewer::Viewer,
-    image: image::Image,
+    pub(super) image: image::Image,
 }
 impl Patch {
     pub(super) fn poll(&mut self) {
@@ -126,7 +126,7 @@ impl Patch {
         demo: bool,
         base: usize,
     ) {
-        if self.pending.is_some() {
+        if self.pending() {
             return;
         }
         *self = Self::default();
@@ -141,7 +141,7 @@ impl Patch {
         self.pending = Some(workspace::read_only::Request::new(rx, cancel));
     }
     pub(super) fn pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || self.image.pending()
     }
     pub(super) fn show_result(
         &mut self,
@@ -153,7 +153,9 @@ impl Patch {
     ) {
         if let Some(path) = &self.path {
             if let Some(owner) = owner {
-                self.image.show(ui, owner, detail, demo, path, base);
+                ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                    self.image.show(ui, owner, detail, demo, path, base)
+                });
             }
         }
         if self.pending.is_some() {

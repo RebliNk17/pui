@@ -28,7 +28,7 @@ impl Lease {
     pub(super) fn admit(&self, content: &Content) -> Result<(), String> {
         self.reserve(content.retained_bytes())
     }
-    pub(super) fn reserve(&self, bytes: usize) -> Result<(), String> {
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<(), String> {
         if bytes > MAX_BYTES {
             return Err("This preview exceeds the shared 64 MiB payload limit. Use a smaller image or another viewer. No file was modified.".into());
         }

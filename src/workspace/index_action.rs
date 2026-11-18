@@ -333,9 +333,12 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
     )?;
     fresh.hunk = snapshot.hunk;
     fresh.lines = snapshot.lines.clone();
+    if snapshot.lines.active && (snapshot.hunk.0.is_some() || !snapshot.lines.any()) {
+        return Err("Select at least one valid changed line; empty line intent never stages the whole file.".into());
+    }
     let hunk_patch = if snapshot.hunk.0.is_some() {
         Some(hunks::extract_selection(&snapshot).ok_or("Select at least one supported hunk.")?)
-    } else if snapshot.lines.any() {
+    } else if snapshot.lines.active {
         Some(
             hunks::lines::synthesize(&snapshot)
                 .ok_or("Selected lines do not form a valid patch; adjust selection.")?,
@@ -532,16 +535,18 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
 pub(crate) fn recovery_available(snapshot: &Snapshot) -> bool {
     snapshot.recovery_path().try_exists().unwrap_or(false)
 }
-/// Restore a retained discard recovery copy to the working file.
+/// Compatibility helper for disposable backend tests; UI uses a frozen review.
+#[cfg(test)]
 pub(crate) fn restore(
     root: &Path,
     path: &str,
     recovery: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    discard::restore(root, path, recovery, cancel)
+    recovery::apply(recovery::inspect(root, path, recovery, cancel)?, cancel)
 }
 mod discard;
 pub(crate) mod hunks;
+pub(crate) mod recovery;
 #[cfg(test)]
 mod tests;

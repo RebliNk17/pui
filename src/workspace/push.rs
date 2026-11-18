@@ -11,6 +11,7 @@ pub(crate) struct Snapshot {
     pub destination: String,
     pub endpoint: String,
     pub explicit_target: bool,
+    pub signing_config: Vec<u8>,
 }
 fn run(
     root: &Path,
@@ -169,6 +170,7 @@ pub(crate) fn prepare_target(
         destination: destination.into(),
         endpoint,
         explicit_target: target.is_some(),
+        signing_config: signing_config(root, cancel, deadline)?,
     })
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -193,6 +195,27 @@ fn outcome(bytes: &[u8], success: bool) -> Result<Outcome, String> {
         }
     }
     match(flag,success){(Some(b'='),true)=>Ok(Outcome::UpToDate),(Some(b' '|b'*'),true)=>Ok(Outcome::Updated),(Some(b'!'),_)=>Err("Push rejected for the reviewed branch. Remote was not updated by this refspec. Remote details are hidden; inspect its state and policy before retrying. No automatic retry.".into()),_=>Err("Push failed or response unavailable. Authentication/connection or remote policy may be responsible; inspect remote state before retrying. Remote details hidden; no automatic retry.".into())}
+}
+fn signing_config(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<Vec<u8>, String> {
+    let (bytes, status) = read_only::run(
+        read_only::command(root).args([
+            "config",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            "^(gpg\\.|user\\.signingkey$|push\\.gpgSign$)",
+        ]),
+        cancel,
+        deadline,
+        16384,
+        "Push signing configuration",
+        "Signing configuration exceeds16KiB",
+    )?;
+    if status.success() || (status.code() == Some(1) && bytes.is_empty()) {
+        Ok(bytes)
+    } else {
+        Err("Cannot inspect signing configuration".into())
+    }
 }
 #[cfg(test)]
 pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<Outcome, String> {
@@ -248,7 +271,7 @@ pub(crate) fn apply_signed(
     }
     let mut command = network_command(&snapshot.root);
     if sign {
-        // Signer availability check under its own fresh budget before any network.
+        // Config recheck only, not signer availability. Actual signing occurs during Git push.
         let (signing, st) = read_only::run(
             read_only::command(&snapshot.root).args([
                 "config",
@@ -263,7 +286,9 @@ pub(crate) fn apply_signed(
             "Push signing configuration",
             "Push signing configuration exceeds 16 KiB",
         )?;
-        if !(st.success() || st.code() == Some(1) && signing.is_empty()) {
+        if signing != snapshot.signing_config
+            || !(st.success() || st.code() == Some(1) && signing.is_empty())
+        {
             return Err(
                 "Cannot inspect push signing configuration. Configure a signing key before requesting a signed push.".into(),
             );
@@ -296,6 +321,13 @@ pub(crate) fn apply_signed(
         &snapshot.endpoint,
         &format!("{}:{}", snapshot.head, snapshot.destination),
     ]);
+    // Signing is negotiated over the network; conservatively cap the whole child
+    // by both chosen budgets. This is NOT an independent signer-only deadline.
+    let seconds = if sign {
+        seconds.min(sign_timeout)
+    } else {
+        seconds
+    };
     // No remote aliases/refspec defaults, no '+' or force, one exact reviewed OID/ref.
     if details {
         return match diagnostics::run(

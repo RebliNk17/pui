@@ -118,9 +118,8 @@ fn production_detail_arguments_never_select_refs_patch_helpers_notes_signature_o
     ] {
         assert!(args.contains(&flag));
     }
-    // Signature status and signer come from the format string, which git parses
-    // from the embedded signature without invoking an external gpg helper.
-    assert!(args.contains(&"--format=%H%x00%ct%x00%P%x00%G?%x00%GS%x00%B%x00"));
+    // Passive reads must never use signature verification placeholders.
+    assert!(args.contains(&"--format=%H%x00%ct%x00%P%x00N%x00%x00%B%x00"));
     assert_eq!(args[args.len() - 2], oid);
     assert_eq!(args.last(), Some(&"--"));
     assert!(
@@ -248,6 +247,46 @@ fn maximum_message_parse_has_bounded_owned_capacity_and_no_partial_output() {
         start.elapsed(),
         bytes.len()
     );
+}
+#[test]
+fn signed_object_detection_never_executes_configured_verifier() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = crate::workspace::tests::fixture();
+    let git = crate::workspace::tests::git;
+    let tree = String::from_utf8(git(&root, &["rev-parse", "HEAD^{tree}"])).unwrap();
+    let raw = format!(
+        "tree {}\nauthor Fixture <f@example.invalid> 1700000000 +0000\ncommitter Fixture <f@example.invalid> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n invalid untrusted payload\n -----END PGP SIGNATURE-----\n\nmessage\n",
+        tree.trim()
+    );
+    let marker = root.join("verifier-ran");
+    let script = root.join("verifier");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&root, &["config", "gpg.program", script.to_str().unwrap()]);
+    let mut p = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    p.stdin.take().unwrap().write_all(raw.as_bytes()).unwrap();
+    let out = p.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let oid = String::from_utf8(out.stdout).unwrap();
+    let loaded = read(&root, oid.trim(), &AtomicBool::new(false)).unwrap();
+    assert_eq!(loaded.signature, "P");
+    assert!(!marker.exists());
 }
 #[test]
 fn signature_status_signer_parsed_and_unsigned_is_empty() {

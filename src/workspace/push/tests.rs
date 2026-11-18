@@ -455,6 +455,21 @@ fn transport_policy_refuses_helpers_queries_and_passwords() {
     }
 }
 #[test]
+fn signing_config_drift_refuses_even_when_target_is_unchanged() {
+    let root = fixture();
+    let cancel = AtomicBool::new(false);
+    let review = prepare(&root, &cancel).unwrap();
+    super::super::tests::git(
+        &root,
+        &["config", "user.signingkey", "changed-after-review"],
+    );
+    assert!(
+        apply_signed(review, false, false, true, 30, 30, &cancel)
+            .unwrap_err()
+            .contains("changed")
+    );
+}
+#[test]
 fn signed_push_requires_configured_signer_and_refuses_bad_timeout() {
     let root = fixture();
     let remote = root.with_extension("sign-bare");

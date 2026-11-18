@@ -1,47 +1,37 @@
-//! Bounded before/after image diff for a selected image path in a commit.
+//! Explicit object-only image read/decode on a worker with shared preview leases.
 use super::*;
-type BlobPair = (Vec<u8>, Vec<u8>);
-type ImagePair = (egui::ColorImage, egui::ColorImage);
+use crate::app::files::{budget::Lease, image_preview};
+struct Loaded {
+    images: [Option<egui::ColorImage>; 2],
+    _leases: [Arc<Lease>; 2],
+}
 #[derive(Default)]
-pub(super) struct Image {
-    pending: Option<workspace::read_only::Request<Result<BlobPair, String>>>,
-    result: Option<Result<BlobPair, String>>,
-    decoded: Option<Result<ImagePair, String>>,
-    control: Option<egui::Id>,
-    key: Option<egui::Id>,
-    loading: bool,
-    textures: Vec<egui::TextureHandle>,
+pub(in crate::app::changes::branches::history::details) struct Image {
+    pending: Option<workspace::read_only::Request<Result<Loaded, String>>>,
+    loaded: Option<Loaded>,
+    error: Option<String>,
+    pub(in crate::app::changes::branches::history::details) control: Option<egui::Id>,
+    pub(in crate::app::changes::branches::history::details) key: Option<egui::Id>,
+    textures: [Option<egui::TextureHandle>; 2],
 }
 impl Image {
+    pub(super) fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
     pub(super) fn poll(&mut self) {
-        let result = self.pending.as_ref().and_then(|p| match p.try_recv() {
+        let result = self.pending.as_ref().and_then(|r| match r.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(_) => Some(Err("Image diff worker ended. Back and select again.".into())),
+            Err(_) => Some(Err(
+                "Image worker ended; select the file again to retry.".into()
+            )),
         });
         if let Some(result) = result {
             self.pending = None;
-            self.result = Some(result);
-            self.loading = false;
-        }
-        let decoded = self.result.as_ref().and_then(|r| match r {
-            Ok((before, after)) => {
-                if self.decoded.is_none() {
-                    Some((
-                        crate::app::files::image_preview::decode(before, None, None),
-                        crate::app::files::image_preview::decode(after, None, None),
-                    ))
-                } else {
-                    None
-                }
+            match result {
+                Ok(images) => self.loaded = Some(images),
+                Err(e) => self.error = Some(e),
             }
-            Err(_) => None,
-        });
-        if let Some((before_res, after_res)) = decoded {
-            self.decoded = Some(match (before_res, after_res) {
-                (Ok(before), Ok(after)) => Ok((before, after)),
-                _ => Err("Image blob could not be decoded within pixel limits.".into()),
-            });
         }
     }
     fn start(
@@ -49,42 +39,56 @@ impl Image {
         ctx: &egui::Context,
         owner: &Owner,
         detail: &workspace::history::details::Detail,
-        demo: bool,
         path: &str,
         base: usize,
     ) {
-        if self.pending.is_some() || self.result.is_some() || self.loading {
-            return;
-        }
-        if demo {
-            self.decoded = Some(Err("Demo mode has no image blobs.".into()));
+        if self.pending.is_some() || self.loaded.is_some() || self.error.is_some() {
             return;
         }
         let Some(permit) = permit(ctx) else {
-            self.result = Some(Err(
-                "A local Git inspection is still finishing. Back and select again to retry.".into(),
-            ));
+            self.error = Some("Git busy; select file again explicitly.".into());
             return;
         };
         let root = owner.root.clone();
         let hash = detail.oid.clone();
         let parent = detail.parents.get(base).cloned();
         let path = path.to_owned();
+        let encoded = Lease::new(ctx);
+        let leases = [Lease::new(ctx), Lease::new(ctx)];
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         self.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
         let ctx = ctx.clone();
         if std::thread::Builder::new()
-            .name("pui-image-diff".into())
+            .name("pui-history-images".into())
             .spawn(move || {
-                let result = workspace::history::image::read_image_diff(
-                    &root,
-                    &hash,
-                    parent.as_deref(),
-                    &path,
-                    &cancel,
-                )
-                .map(|d| (d.before, d.after));
+                let result = (|| {
+                    // Reserve both bounded encoded inputs before Git allocates them.
+                    encoded.reserve(32 * 1024 * 1024)?;
+                    let blobs = workspace::history::image::read_image_diff(
+                        &root,
+                        &hash,
+                        parent.as_deref(),
+                        &path,
+                        &cancel,
+                    )?;
+                    let decode = |bytes: &[u8], lease: &Lease| {
+                        if bytes.is_empty() {
+                            Ok(None)
+                        } else {
+                            image_preview::decode(bytes, Some(lease), Some(&cancel)).map(Some)
+                        }
+                    };
+                    let images = [
+                        decode(&blobs.before, &leases[0])?,
+                        decode(&blobs.after, &leases[1])?,
+                    ];
+                    Ok(Loaded {
+                        images,
+                        _leases: leases,
+                    })
+                })();
+                drop(encoded);
                 drop(permit);
                 if !cancel.load(Ordering::Acquire) {
                     let _ = tx.send(result);
@@ -94,9 +98,7 @@ impl Image {
             .is_err()
         {
             self.pending = None;
-            self.result = Some(Err(
-                "Cannot start image diff worker. Back and select again.".into(),
-            ));
+            self.error = Some("Cannot start image worker.".into());
         }
     }
     pub(super) fn show(
@@ -108,68 +110,75 @@ impl Image {
         path: &str,
         base: usize,
     ) {
+        self.control = None;
+        let key = self.key.take();
         if !workspace::history::image::is_image(path) {
             return;
         }
-        let key = self.key.take();
-        let response = ui
-            .push_id(("image-diff", path), |ui| {
-                ui.add_enabled(
-                    self.pending.is_none() && self.result.is_none() && !self.loading,
-                    egui::Button::new(theme::small(ui, "Image diff")).frame(false),
-                )
-            })
+        let enabled =
+            !demo && self.pending.is_none() && self.loaded.is_none() && self.error.is_none();
+        let button = ui
+            .push_id(
+                (
+                    "image-diff",
+                    &owner.identity,
+                    &owner.root,
+                    &detail.oid,
+                    detail.parents.get(base),
+                    path,
+                ),
+                |ui| prompt_ui::button(ui, "Image diff", prompt_ui::Button::Secondary, enabled),
+            )
             .inner;
-        self.control = Some(response.id);
+        self.control = Some(button.id);
         #[cfg(test)]
         ui.ctx().data_mut(|d| {
             d.insert_temp(
                 popup_id().with(("image-diff", path)),
-                (response.id, response.rect, response.enabled()),
+                (button.id, button.rect, button.enabled()),
             )
         });
-        if response.clicked() || key == Some(response.id) {
-            self.loading = true;
-            self.start(ui.ctx(), owner, detail, demo, path, base);
+        if enabled && (button.clicked() || key == Some(button.id)) {
+            self.start(ui.ctx(), owner, detail, path, base);
         }
         if self.pending.is_some() {
-            ui.label(theme::small(ui, "Reading image blobs…"));
-        } else if let Some(Ok((before, after))) = &self.decoded {
+            ui.label(theme::small(ui, "Reading and decoding local image blobs…"));
+        }
+        if let Some(error) = &self.error {
+            ui.add(egui::Label::new(theme::small(ui, error)).wrap());
+        }
+        if let Some(loaded) = &mut self.loaded {
+            for i in 0..2 {
+                if self.textures[i].is_none()
+                    && let Some(pixels) = loaded.images[i].take()
+                {
+                    self.textures[i] = Some(ui.ctx().load_texture(
+                        format!("history-image-{i}"),
+                        pixels,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
             ui.label(theme::small(
                 ui,
-                format!("Image diff · {} (before ← → after)", path.escape_debug()),
+                "Before / After · first frame only · local objects, no fetch",
             ));
-            if self.textures.len() < 2 {
-                self.textures = vec![
-                    ui.ctx().load_texture(
-                        format!("image-diff-before-{path}"),
-                        before.clone(),
-                        egui::TextureOptions::LINEAR,
-                    ),
-                    ui.ctx().load_texture(
-                        format!("image-diff-after-{path}"),
-                        after.clone(),
-                        egui::TextureOptions::LINEAR,
-                    ),
-                ];
-            }
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if let [before_tex, after_tex] = &self.textures[..] {
-                        ui.image((
-                            before_tex.id(),
-                            egui::Vec2::new(before.size[0] as f32, before.size[1] as f32),
-                        ));
-                        ui.add_space(8.0);
-                        ui.image((
-                            after_tex.id(),
-                            egui::Vec2::new(after.size[0] as f32, after.size[1] as f32),
-                        ));
-                    }
-                });
+            let width = (ui.available_width() - 12.0).max(2.0) / 2.0;
+            ui.horizontal_top(|ui| {
+                for (i, label) in ["Before", "After"].iter().enumerate() {
+                    ui.vertical(|ui| {
+                        ui.set_width(width);
+                        ui.label(theme::small(ui, *label));
+                        if let Some(tex) = &self.textures[i] {
+                            let size = tex.size_vec2();
+                            let scale = (width / size.x).min(180.0 / size.y).min(1.0);
+                            ui.image((tex.id(), size * scale));
+                        } else {
+                            ui.label(theme::small(ui, "No image in this tree"));
+                        }
+                    });
+                }
             });
-        } else if let Some(Err(error)) = &self.decoded {
-            ui.add(egui::Label::new(theme::small(ui, error)).wrap());
         }
     }
 }

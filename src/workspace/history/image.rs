@@ -11,7 +11,37 @@ pub(crate) fn is_image(path: &str) -> bool {
     )
 }
 fn blob(root: &Path, treeish: &str, path: &str, cancel: &AtomicBool) -> Result<Vec<u8>, String> {
-    let mut command = read_only::command(root);
+    let (mut entries, ok) = read_only::run(
+        super::command(root)
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .args(["ls-tree", "-z", treeish, "--", path]),
+        cancel,
+        Instant::now() + DEADLINE,
+        8192,
+        "Image tree entry",
+        "Image entry exceeds limit",
+    )?;
+    if !ok.success() {
+        return Err("Cannot inspect local image tree.".into());
+    }
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if entries.pop() != Some(0) || entries.contains(&0) {
+        return Err("Ambiguous image tree entry.".into());
+    }
+    let tab = entries
+        .iter()
+        .position(|b| *b == b'\t')
+        .ok_or("Invalid image tree entry")?;
+    if &entries[tab + 1..] != path.as_bytes() {
+        return Err("Image tree path differs.".into());
+    }
+    let entry = std::str::from_utf8(&entries[..tab]).map_err(|_| "Invalid image tree metadata")?;
+    if !(entry.starts_with("100644 blob ") || entry.starts_with("100755 blob ")) {
+        return Err("Image preview requires an ordinary blob, not a symlink or submodule.".into());
+    }
+    let mut command = super::command(root);
     command
         .env("GIT_LITERAL_PATHSPECS", "1")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -64,6 +94,9 @@ pub(crate) fn read_image_diff(
         None => Vec::new(),
     };
     let after = blob(root, hash, path, cancel)?;
+    if before.is_empty() && after.is_empty() {
+        return Err("Image path absent from both trees.".into());
+    }
     Ok(ImageDiff { before, after })
 }
 #[cfg(test)]

@@ -1,5 +1,7 @@
 # Discard recovery-copy restore
 
+> **Historical report; conflicting safety/completion claims are superseded by `git-safety-corrections.md`.** See that report for actual corrected behavior, evidence and remaining work.
+
 ## Behavior and limits
 
 Discard already retained a path-bound recovery copy. Now the Changes panel offers **Restore discarded content** for the last completed discard while the copy exists. It confirms the source path and recovery location, then copies the recovery file back to the working file, overwriting its current content. Staged changes, HEAD and the recovery copy are unchanged; no commit or push. It is transient, session-local intent (not persisted/restored as executable state) and requires a tracked unstaged status at discard time.

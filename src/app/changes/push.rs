@@ -356,12 +356,12 @@ impl Changes {
                 Ok(workspace::push::Outcome::Updated) => format!(
                     "Push updated the reviewed branch. No tags or force.{} {}",
                     if self.push.sign {
-                        "Signed certificate published."
+                        "Signed push requested; server verification not established."
                     } else {
                         "No push signing."
                     },
                     if self.push.hooks {
-                        "Hooks ran."
+                        "Configured hooks were enabled."
                     } else {
                         "No hooks ran."
                     }
@@ -497,7 +497,7 @@ impl Changes {
                 ui.add(
                     egui::Label::new(theme::small(
                         ui,
-                        "Push signing timeout (seconds, signer before network)",
+                        "Signed-push timeout (seconds; caps whole child including network/signing)",
                     ))
                     .wrap(),
                 );

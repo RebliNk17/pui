@@ -9,23 +9,23 @@ pub(crate) struct Detail {
     pub time: i64,
     pub parents: Vec<String>,
     pub message: String,
-    /// "%G?" signature status (N/G/B/U/X/Y/R/E), "%GS" signer; empty when unsigned.
+    /// Empty when unsigned, P when an embedded signature is present but unverified.
     pub signature: String,
 }
 fn command(root: &Path, hash: &str) -> Command {
     let mut command = super::command(root);
-    // Signature fields are read from the object without invoking external gpg
-    // helpers; git parses the embedded signature itself.
+    // Never use %G?/%GS here: they can launch a configured external verifier.
     command.args([
         "show",
         "--no-patch",
         "--no-decorate",
+        "--no-show-signature",
         "--no-notes",
         "--no-use-mailmap",
         "--no-ext-diff",
         "--no-textconv",
         "--encoding=UTF-8",
-        "--format=%H%x00%ct%x00%P%x00%G?%x00%GS%x00%B%x00",
+        "--format=%H%x00%ct%x00%P%x00N%x00%x00%B%x00",
         "--end-of-options",
         hash,
         "--",
@@ -123,7 +123,28 @@ pub(crate) fn read(root: &Path, hash: &str, cancel: &AtomicBool) -> Result<Detai
     if !status.success() {
         return Err("Selected local commit is unavailable. No network fetch was attempted.".into());
     }
-    parse(&bytes, hash)
+    let mut detail = parse(&bytes, hash)?;
+    let (raw, status) = read_only::run(
+        super::command(root).args(["cat-file", "commit", hash]),
+        cancel,
+        Instant::now() + DEADLINE,
+        128 * 1024,
+        "Embedded signature inspection",
+        "Commit object exceeds signature inspection limit",
+    )?;
+    if !status.success() {
+        return Err("Local commit object unavailable; no verifier was run.".into());
+    }
+    let headers = raw
+        .split(|b| *b == b'\n')
+        .take_while(|line| !line.is_empty());
+    if headers
+        .into_iter()
+        .any(|line| line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 "))
+    {
+        detail.signature = "P".into();
+    }
+    Ok(detail)
 }
 #[cfg(test)]
 mod tests;

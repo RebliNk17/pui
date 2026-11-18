@@ -145,6 +145,7 @@ fn remote_inspect_confirmation_escape_never_contacts_remote() {
             destination: "refs/heads/main".into(),
             endpoint: "https://example.invalid/repo".into(),
             explicit_target: false,
+            signing_config: Vec::new(),
         });
         changes.push.remote_confirm = true;
         for n in 0..4 {
@@ -190,6 +191,7 @@ fn observed_divergence_label_is_read_only_themes_zoom() {
                 destination: "refs/heads/main".into(),
                 endpoint: "https://example.invalid/repo".into(),
                 explicit_target: false,
+                signing_config: Vec::new(),
             };
             let mut changes = Changes::default();
             changes.push.snapshot = Some(s.clone());
@@ -247,6 +249,7 @@ fn upstream_confirmation_escape_never_changes_configuration() {
                 destination: "refs/heads/main".into(),
                 endpoint: "https://example.invalid/repo".into(),
                 explicit_target: true,
+                signing_config: Vec::new(),
             });
             changes.push.upstream.confirm = true;
             for n in 0..4 {
@@ -299,6 +302,7 @@ fn push_confirmation_escape_never_starts_network_worker() {
                         destination: "refs/heads/master".into(),
                         endpoint: "https://example.invalid/repo".into(),
                         explicit_target: false,
+                        signing_config: Vec::new(),
                     });
                     changes.push.confirm = true;
                     changes.push.hooks = hooks;
@@ -354,6 +358,7 @@ fn native_review_narrow_themes_displays_exact_target_and_never_starts_worker() {
                 destination: "refs/heads/master".into(),
                 endpoint: "git@example.invalid:team/repo".into(),
                 explicit_target: false,
+                signing_config: Vec::new(),
             });
             let workspace = Workspace {
                 root: "/fixture".into(),

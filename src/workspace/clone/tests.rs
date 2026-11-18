@@ -48,6 +48,30 @@ fn local_clone_into_absent_destination_checks_out_branch_and_refuses_collisions(
     }
 }
 #[test]
+fn cancelled_clone_or_concurrent_empty_destination_refuses_before_any_git_write() {
+    let root = clone_fixture();
+    let parent = fs::canonicalize(root).unwrap();
+    let source = parent.join("src");
+    let cancel = AtomicBool::new(false);
+    let review = inspect(&parent, "new", source.to_str().unwrap(), None, &cancel).unwrap();
+    fs::create_dir(parent.join("new")).unwrap();
+    assert!(apply(review, 30, &cancel).is_err());
+    assert!(!parent.join("new/.git").exists());
+    assert!(
+        inspect(
+            &parent,
+            "other",
+            source.to_str().unwrap(),
+            None,
+            &AtomicBool::new(true)
+        )
+        .is_err()
+    );
+    for name in ["-option", "a/b", "a\\\\b", "a:b"] {
+        assert!(!valid_dest_name(name));
+    }
+}
+#[test]
 fn clone_refuses_bad_url_dest_name_and_noncanonical_parent_and_times_out() {
     let root = clone_fixture();
     let src = root.join("src");

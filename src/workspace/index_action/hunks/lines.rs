@@ -1,200 +1,181 @@
-//! Per-line stage/unstage selection with a mandatory dry-run validity gate.
-//! Only changed lines (added for Stage, removed for Unstage) are individually
-//! selectable; context and the opposing side are always preserved so a hunk
-//! remains a valid patch. A selection that `git apply --check` cannot apply to
-//! a private index copy is refused rather than risk corrupting the index.
+//! Bounded exact changed-line selections. Empty/invalid active intent never means whole file.
 use super::*;
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LineSelection {
-    /// Per hunk index, selected changed-line ordinals.
     pub(crate) lines: Vec<Vec<usize>>,
     pub(crate) active: bool,
 }
 impl LineSelection {
     pub(crate) fn count(&self) -> usize {
-        self.lines.iter().map(|l| l.len()).sum()
+        self.lines.iter().map(Vec::len).sum()
     }
     pub(crate) fn any(&self) -> bool {
-        self.active && self.lines.iter().any(|l| !l.is_empty())
+        self.active && self.count() > 0
     }
 }
-
-struct Hunk {
-    header: String,
-    body: Vec<(u8, Option<usize>, String)>, // kind, changed ordinal, line text
+struct Hunk<'a> {
+    old: usize,
+    new: usize,
+    body: Vec<&'a str>,
 }
-/// Split the diff into hunks; each changed (+/-) line gets a stable ordinal.
+fn span(s: &str, sign: char) -> Option<(usize, usize)> {
+    let s = s.strip_prefix(sign)?;
+    let (start, count) = s.split_once(',').unwrap_or((s, "1"));
+    Some((start.parse().ok()?, count.parse().ok()?))
+}
+fn hunks(snapshot: &Snapshot) -> Option<(usize, Vec<Hunk<'_>>)> {
+    let (first, _) = super::ranges(snapshot)?;
+    let mut hunks: Vec<Hunk<'_>> = Vec::new();
+    for line in snapshot.preview[first..].split_inclusive('\n') {
+        if line.starts_with("@@ ") {
+            let mut fields = line.split_whitespace();
+            if fields.next() != Some("@@") {
+                return None;
+            }
+            let (old, _) = span(fields.next()?, '-')?;
+            let (new, _) = span(fields.next()?, '+')?;
+            if fields.next() != Some("@@") {
+                return None;
+            }
+            hunks.push(Hunk {
+                old,
+                new,
+                body: Vec::new(),
+            });
+        } else {
+            // Missing-newline markers require paired EOF semantics; refuse rather than guess.
+            if !line.ends_with('\n') || !matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-'))
+            {
+                return None;
+            }
+            hunks.last_mut()?.body.push(line);
+        }
+    }
+    Some((first, hunks))
+}
+/// All +/- lines, in original patch order; ordinal is global, never inferred from row position.
 pub(crate) fn parse(snapshot: &Snapshot) -> Option<Vec<Vec<usize>>> {
-    if !match snapshot.action {
-        Action::Stage => matches!(snapshot.status.as_str(), " M" | "MM"),
-        Action::Unstage => matches!(snapshot.status.as_str(), "M " | "MM"),
-        Action::Discard => false,
-    } {
-        return None;
-    }
-    let target = match snapshot.action {
-        Action::Stage => b'+',
-        Action::Unstage => b'-',
-        Action::Discard => b' ',
-    };
-    let mut ordinal = 0usize;
-    let mut hunks = Vec::new();
-    let mut body = Vec::new();
-    let mut in_hunk = false;
-    let mut header = String::new();
-    for line in snapshot.preview.split_inclusive('\n') {
-        if line.starts_with("@@ ") {
-            if in_hunk {
-                hunks.push(Hunk {
-                    header: std::mem::take(&mut header),
-                    body: std::mem::take(&mut body),
-                });
-            }
-            header = line.to_owned();
-            in_hunk = true;
-            continue;
-        }
-        if !in_hunk {
-            continue;
-        }
-        let kind = line.as_bytes().first().copied()?;
-        let changed = (kind == target).then(|| {
-            let n = ordinal;
-            ordinal += 1;
-            n
-        });
-        body.push((kind, changed, line.to_owned()));
-    }
-    if in_hunk {
-        hunks.push(Hunk { header, body });
-    }
-    if hunks.is_empty() {
-        return None;
-    }
-    let per_hunk = hunks
-        .iter()
-        .map(|h| h.body.iter().filter_map(|(_, c, _)| *c).collect())
-        .collect();
-    Some(per_hunk)
+    let (_, hunks) = hunks(snapshot)?;
+    let mut ordinal = 0;
+    Some(
+        hunks
+            .iter()
+            .map(|h| {
+                h.body
+                    .iter()
+                    .filter(|l| matches!(l.as_bytes()[0], b'+' | b'-'))
+                    .map(|_| {
+                        let n = ordinal;
+                        ordinal += 1;
+                        n
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
 }
-
-/// Build a patch keeping context, the opposing side, and only selected target
-/// lines. Returns None for a selection that is not a clean subset.
+pub(crate) fn labels(snapshot: &Snapshot) -> Vec<String> {
+    snapshot
+        .preview
+        .lines()
+        .skip_while(|l| !l.starts_with("@@ "))
+        .filter(|l| l.starts_with('+') || l.starts_with('-'))
+        .map(|l| l.chars().take(160).collect())
+        .collect()
+}
 pub(crate) fn synthesize(snapshot: &Snapshot) -> Option<String> {
-    if !snapshot.lines.any() {
+    if !snapshot.lines.any() || snapshot.hunk.0.is_some() {
         return None;
     }
-    let mut hunks = Vec::new();
-    let mut body = Vec::new();
-    let mut in_hunk = false;
-    let mut header = String::new();
-    let mut ordinal = 0usize;
-    for line in snapshot.preview.split_inclusive('\n') {
-        if line.starts_with("@@ ") {
-            if in_hunk {
-                hunks.push(Hunk {
-                    header: std::mem::take(&mut header),
-                    body: std::mem::take(&mut body),
-                });
+    let (first, hunks) = hunks(snapshot)?;
+    let available = parse(snapshot)?;
+    if snapshot.lines.lines.len() != hunks.len() {
+        return None;
+    }
+    for (selected, valid) in snapshot.lines.lines.iter().zip(&available) {
+        if selected.len() > valid.len() || selected.iter().any(|n| !valid.contains(n)) {
+            return None;
+        }
+        for (i, n) in selected.iter().enumerate() {
+            if selected[..i].contains(n) {
+                return None;
             }
-            header = line.to_owned();
-            in_hunk = true;
-            continue;
         }
-        if !in_hunk {
-            continue;
-        }
-        let kind = line.as_bytes().first().copied()?;
-        let target = match snapshot.action {
-            Action::Stage => b'+',
-            Action::Unstage => b'-',
-            Action::Discard => b' ',
-        };
-        let changed = (kind == target).then(|| {
-            let n = ordinal;
-            ordinal += 1;
-            n
-        });
-        body.push((kind, changed, line.to_owned()));
     }
-    if in_hunk {
-        hunks.push(Hunk { header, body });
-    }
-    if hunks.is_empty() {
-        return None;
-    }
-    let diff_header = snapshot.preview.split_once("\n@@ ").map_or("", |(h, _)| h);
-    let mut out = diff_header.to_owned();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    let mut emitted = false;
-    for (index, hunk) in hunks.iter().enumerate() {
-        let sel = snapshot
-            .lines
-            .lines
-            .get(index)
-            .map_or(&[][..], |v| v.as_slice());
-        let target = match snapshot.action {
-            Action::Stage => b'+',
-            Action::Unstage => b'-',
-            Action::Discard => b' ',
-        };
-        let mut old = 0usize;
-        let mut new = 0usize;
-        let mut body_text = String::new();
-        let mut target_kept = false;
-        for (kind, changed, text) in &hunk.body {
-            if matches!(kind, b'+' | b'-') {
-                let keep = if *kind == target {
-                    changed.is_some_and(|c| sel.contains(&c))
-                } else {
-                    true
-                };
-                if keep {
-                    if *kind == b'-' {
-                        old += 1;
-                    } else {
-                        new += 1;
-                    }
-                    if *kind == target {
-                        target_kept = true;
-                    }
-                    body_text.push_str(text);
-                }
+    let mut out = snapshot.preview[..first].to_owned();
+    let mut ordinal = 0;
+    let mut delta = 0isize;
+    for (h, selected) in hunks.iter().zip(&snapshot.lines.lines) {
+        let mut body = String::new();
+        let mut old = 0;
+        let mut new = 0;
+        for line in &h.body {
+            let kind = line.as_bytes()[0];
+            let chosen = if kind == b' ' {
+                false
             } else {
-                old += 1;
-                new += 1;
-                body_text.push_str(text);
+                let n = ordinal;
+                ordinal += 1;
+                selected.contains(&n)
+            };
+            let emitted = if chosen || kind == b' ' {
+                Some(kind)
+            } else {
+                match (snapshot.action, kind) {
+                    (Action::Stage, b'-') | (Action::Unstage, b'+') => Some(b' '),
+                    _ => None,
+                }
+            };
+            if let Some(kind) = emitted {
+                if kind != b'+' {
+                    old += 1;
+                }
+                if kind != b'-' {
+                    new += 1;
+                }
+                body.push(char::from(kind));
+                body.push_str(&line[1..]);
             }
         }
-        // Only emit a hunk that actually selects at least one target line.
-        if old == 0 && new == 0 || !target_kept {
+        if selected.is_empty() {
             continue;
         }
-        out.push_str(&recount(&hunk.header, old, new));
-        out.push_str(&body_text);
-        emitted = true;
-    }
-    if !emitted {
-        return None;
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
+        // Anchor to the unchanged source side. Recompute destination offsets after omitted edits.
+        let source_count = if snapshot.action == Action::Stage {
+            h.body.iter().filter(|l| !l.starts_with('+')).count()
+        } else {
+            h.body.iter().filter(|l| !l.starts_with('-')).count()
+        };
+        let start = if snapshot.action == Action::Stage {
+            h.old
+        } else {
+            h.new
+        };
+        let pos = if source_count == 0 {
+            start
+        } else {
+            start.checked_sub(1)?
+        };
+        let (old_pos, new_pos) = if snapshot.action == Action::Stage {
+            (pos, pos.checked_add_signed(delta)?)
+        } else {
+            (pos.checked_add_signed(-delta)?, pos)
+        };
+        let old_start = if old == 0 {
+            old_pos
+        } else {
+            old_pos.checked_add(1)?
+        };
+        let new_start = if new == 0 {
+            new_pos
+        } else {
+            new_pos.checked_add(1)?
+        };
+        out.push_str(&format!("@@ -{old_start},{old} +{new_start},{new} @@\n"));
+        out.push_str(&body);
+        delta += new as isize - old as isize;
     }
     Some(out)
-}
-fn recount(header: &str, old: usize, new: usize) -> String {
-    let trimmed = header
-        .trim_start_matches("@@")
-        .trim_end_matches("@@")
-        .trim();
-    let mut parts = trimmed.split_whitespace();
-    let strip = |s: &str| s.trim_start_matches(['+', '-']).to_owned();
-    let start_a = strip(parts.next().unwrap_or("0").split(',').next().unwrap_or("0"));
-    let start_b = strip(parts.next().unwrap_or("0").split(',').next().unwrap_or("0"));
-    format!("@@ -{start_a},{old} +{start_b},{new} @@\n")
 }
 #[cfg(test)]
 mod tests;

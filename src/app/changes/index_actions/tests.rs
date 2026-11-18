@@ -515,11 +515,31 @@ fn restore_dialog_themes_zoom_escape_no_write() {
                 index_writable: true,
                 ..Default::default()
             };
-            changes.index_actions.last_discard = Some((
-                PathBuf::from("/fixture"),
-                "f.txt".into(),
-                PathBuf::from("/fixture/.git/pui-discard-recovery-x"),
-            ));
+            let (root, snapshot) = prepared();
+            let recovery = snapshot.recovery_path();
+            workspace::index_action::apply(
+                workspace::index_action::prepare(
+                    &root,
+                    "README.md",
+                    " M",
+                    Action::Discard,
+                    &AtomicBool::new(false),
+                )
+                .unwrap(),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let review = workspace::index_action::recovery::inspect(
+                &root,
+                "README.md",
+                &recovery,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let before = std::fs::read(root.join("README.md")).unwrap();
+            changes.index_actions.owner = Some(changes.identity.clone());
+            changes.index_actions.last_discard = Some((root.clone(), "README.md".into(), recovery));
+            changes.index_actions.recovery_review = Some(review);
             changes.index_actions.restore_confirm = true;
             for n in 0..4 {
                 let _ = ctx.run(
@@ -540,6 +560,7 @@ fn restore_dialog_themes_zoom_escape_no_write() {
             }
             assert!(!changes.index_actions.restore_confirm);
             assert!(changes.index_actions.restoring.is_none());
+            assert_eq!(std::fs::read(root.join("README.md")).unwrap(), before);
         }
     }
 }

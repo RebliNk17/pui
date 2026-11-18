@@ -1,5 +1,7 @@
 # Reviewed per-line stage/unstage
 
+> **Historical report; conflicting safety/completion claims are superseded by `git-safety-corrections.md`.** See that report for actual corrected behavior, evidence and remaining work.
+
 ## Behavior and limits
 
 Index confirmation adds **Select individual lines**: instead of whole hunks, pick specific target-side changed lines (added for Stage, removed for Unstage). Context and the opposing side are always preserved so each hunk remains a valid patch. Only hunks that select at least one target line are emitted; unselected hunks are skipped. A synthesized selection must apply cleanly to the private index (`git apply --cached --check --recount`); otherwise the whole action is refused with no index change. This dry-run gate makes line-stage fail closed rather than risk index corruption.

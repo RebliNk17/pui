@@ -1,5 +1,7 @@
 # Reviewed opt-in Push signing
 
+> **Historical report; conflicting safety/completion claims are superseded by `git-safety-corrections.md`.** See that report for actual corrected behavior, evidence and remaining work.
+
 ## Behavior and limits
 
 Push confirmation adds **Sign this push (GPG push certificate; no unsigned fallback)**. Enabling it performs a signer-availability check (`git config --includes --get-regexp '^(gpg\.|user\.signingkey$|push\.gpgSign$)'`) under a separate signing timeout (default 30s, 1–300), then runs `git push --signed=yes` with `push.gpgSign=yes`. Signing failure stops the push with no unsigned fallback and no remote update. Disabled mode keeps `push.gpgSign=false` and no `--signed`. Signing combines with existing hook/diagnostics options; timeout, hooks, diagnostics, no-force/tags behavior, conservative SSH, cancellation and uncertain-completion handling are unchanged.

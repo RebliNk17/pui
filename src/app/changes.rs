@@ -464,16 +464,7 @@ impl Changes {
                             ));
                         });
                         if let Some(notice)=&self.index_actions.notice{ui.add(egui::Label::new(theme::small(ui,notice)).wrap());}
-                        if let Some((root, path, recovery)) = self.index_actions.last_discard.clone() {
-                            if workspace.root == root && recovery.try_exists().unwrap_or(false) {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(theme::small(ui, format!("Discarded content retained for {path}")));
-                                    if prompt_ui::button(ui, "Restore discarded content", prompt_ui::Button::Secondary, self.index_writable && self.index_actions.restoring.is_none()).clicked() {
-                                        self.index_actions.restore_confirm = true;
-                                    }
-                                });
-                            }
-                        }
+                        self.recovery_control(ui,workspace);
                         self.inline_capacity(ui);
                         let query = self.query.trim().to_lowercase();
                         let mut count = 0;
