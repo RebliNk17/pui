@@ -13,3 +13,8 @@ Evidence:
 - Logs: `/tmp/pui-clone-{focused,all,clippy,full2,full3,commit-group,wscommit,projection}.log`.
 
 Committed locally as `065b9c01`. No push/install; installed app unchanged. Live clone to a hosted remote was not exercised.
+## Full-suite validation and environment requirement
+
+After clone + line-stage, the complete Rust runner passes: **1,934 binary + 10 integration tests**, 2 ignored, zero failures (`/tmp/pui-clone-linestage-full4.log`). JS 98 passed / 1 skipped, Python 41 passed, strict Clippy, rustfmt and diff checks.
+
+Validation PATH must keep **Homebrew `python3` first** (the SVG lifecycle helper), **git as the real CommandLineTools binary** (a symlinked git resolves templates oddly and can omit the bare repo `hooks/` dir), and the node/cargo dirs present. The JS streaming test additionally needs `CEF_PATH`, `CARGO_TARGET_DIR`, `--offline`, and `PUI_PI_SDK` exported. These are environment/scheduling notes, not production code changes.
