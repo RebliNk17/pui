@@ -8,16 +8,28 @@ import shutil
 import sys
 
 app, target, profile = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-outputs = sorted((target / profile / "build").glob("cef-dll-sys-*/output"), key=lambda p: p.stat().st_mtime, reverse=True)
+outputs = sorted(
+    list((target / profile / "build").glob("cef-dll-sys-*/output"))
+    + list((target / profile / "build").glob("cef-dll-sys/*/output")),
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+)
 cef = None
+env_cef = os.environ.get("CEF_PATH")
+if env_cef and (Path(env_cef) / "archive.json").is_file():
+    cef = Path(env_cef)
 for output in outputs:
+    if cef:
+        break
     for line in output.read_text().splitlines():
         if line.startswith("cargo::metadata=CEF_DIR="):
             candidate = Path(line.split("=", 2)[2])
             if (candidate / "archive.json").is_file():
                 cef = candidate
                 break
-    if cef:
+if not cef:
+    for candidate in sorted((target / "cef-runtime").glob("*/archive.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        cef = candidate.parent
         break
 if not cef:
     raise SystemExit("Cannot locate the pinned CEF build output; build pui and pui-browser-helper first.")

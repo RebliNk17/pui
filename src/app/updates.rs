@@ -635,6 +635,7 @@ impl Updates {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
         let mut auto_check = self.auto_check;
         self.show_with_preference(ctx, &mut auto_check)
