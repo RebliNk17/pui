@@ -68,3 +68,48 @@ fn reviewed_plan_and_commands_are_readable_inline_without_starting_work() {
         }
     }
 }
+
+#[test]
+fn request_changes_editor_uses_inline_surface_and_preserves_read_only_scope() {
+    for theme in [theme::Theme::Light, theme::Theme::Dark] {
+        for (width, zoom) in [(360.0, 1.0), (760.0, 1.0), (480.0, 1.4)] {
+            let mut app = app();
+            app.prefs.settings.permission = settings::PermissionMode::Plan;
+            theme.apply(&app.ctx);
+            app.ctx.set_zoom_factor(zoom);
+            app.control_request(&planned_request("revision-ui"));
+            app.workflow_answer(&json!({"type":"extension_ui_response","id":"revision-ui","value":"Request changes"}));
+            app.state
+                .dialogs
+                .retain(|dialog| dialog["id"] != "revision-ui");
+            let ctx = app.ctx.clone();
+            let mut text = vec![];
+            for _ in 0..3 {
+                text.clear();
+                let out = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 1000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| app.agent_question(ui));
+                    },
+                );
+                out.shapes
+                    .iter()
+                    .for_each(|shape| labels(&shape.shape, &mut text));
+            }
+            assert!(text.iter().any(|text| text == "Request plan changes"));
+            assert!(text.iter().any(|text| text == "Send answer"));
+            assert!(
+                text.iter()
+                    .any(|text| text.contains("does not approve execution"))
+            );
+            assert!(app.active_permission() == settings::PermissionMode::Plan);
+            assert!(app.tasks.records.is_empty());
+        }
+    }
+}

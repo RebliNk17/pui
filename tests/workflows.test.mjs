@@ -107,3 +107,11 @@ test('invalid or oversized plans fail before any host request', async () => {
   }
   assert.equal(h.requests.length, 0);
 });
+
+test('revision feedback is returned to the lead without approval, execution or hidden retry',async()=>{
+ const h=host();h.ctx.ui.input=async()=>JSON.stringify({approved:false,revision_requested:true,feedback:'Keep public API unchanged',instruction:'Revise only the plan; do not implement'});
+ const result=await h.tool.execute('',{...args,plan:concretePlan},undefined,null,h.ctx);
+ assert.equal(result.details.workflow.approved,false);assert.equal(result.details.workflow.revision_requested,true);
+ assert.equal(result.details.workflow.feedback,'Keep public API unchanged');assert.notEqual(result.terminate,true);
+ assert.equal(h.statuses.length,1);assert.equal(h.requests.length,0);
+});

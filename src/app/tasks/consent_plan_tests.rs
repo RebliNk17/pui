@@ -303,3 +303,172 @@ fn plan_handoff_cancel_wrong_choice_owner_or_mode_drift_cannot_upgrade() {
         );
     }
 }
+
+// Match the inline caller's removal of a successfully answered dialog.
+fn answer(app: &mut Pui, id: &str, mut response: Value) {
+    response["type"] = json!("extension_ui_response");
+    response["id"] = json!(id);
+    assert!(app.workflow_answer(&response));
+    app.state.dialogs.retain(|dialog| dialog["id"] != id);
+}
+
+#[test]
+fn request_changes_returns_feedback_to_original_chat_call_without_approval_or_execution() {
+    let mut app = app();
+    app.prefs.settings.permission = settings::PermissionMode::Plan;
+    let (client, _, replies) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    app.control_request(&planned_request("revision-original"));
+    assert!(
+        app.state.dialogs[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "Request changes")
+    );
+    answer(
+        &mut app,
+        "revision-original",
+        json!({"value":"Request changes"}),
+    );
+    assert!(
+        !app.state
+            .dialogs
+            .iter()
+            .any(|d| d["id"] == "revision-original")
+    );
+    let revision_id = app.state.dialogs.back().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(
+        revision_id, "revision-original",
+        "old approval must not become revision feedback"
+    );
+    assert!(!app.workflow_answer(&json!({"type":"extension_ui_response","id":"revision-original","value":"Approve plan · switch to Manual"})));
+    assert!(replies.try_recv().is_err());
+    answer(
+        &mut app,
+        &revision_id,
+        json!({"value":"Keep public APIs unchanged; add a narrow-window regression."}),
+    );
+    assert!(app.state.dialogs.is_empty());
+    let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        reply["id"], "revision-original",
+        "reply must settle the original waiting tool call"
+    );
+    let result: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+    assert_eq!(result["approved"], false);
+    assert_eq!(result["revision_requested"], true);
+    assert!(result["feedback"].as_str().unwrap().contains("public APIs"));
+    assert!(
+        result["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("Do not implement")
+    );
+    assert!(app.active_permission() == settings::PermissionMode::Plan);
+    assert!(
+        app.tasks.requests.is_empty()
+            && app.tasks.records.is_empty()
+            && app.tasks.job.is_none()
+            && app.tasks.processes.is_empty()
+    );
+}
+#[test]
+fn revised_plan_requires_a_new_native_approval_and_no_plan_has_no_revision_action() {
+    let mut app = app();
+    app.prefs.settings.permission = settings::PermissionMode::Plan;
+    app.control_request(&planned_request("first"));
+    answer(&mut app, "first", json!({"value":"Request changes"}));
+    let id = app.state.dialogs[0]["id"].as_str().unwrap().to_owned();
+    answer(&mut app, &id, json!({"value":"Preserve the public API"}));
+    app.control_request(&planned_request("revised"));
+    assert_eq!(app.state.dialogs[0]["id"], "revised");
+    assert!(app.active_permission() == settings::PermissionMode::Plan);
+    assert!(app.tasks.records.is_empty() && app.tasks.processes.is_empty());
+    assert!(!app.workflow_answer(&json!({"type":"extension_ui_response","id":"first","value":"Approve plan · switch to Manual"})));
+    answer(&mut app, "revised", json!({"cancelled":true}));
+    app.prefs.settings.permission = settings::PermissionMode::Manual;
+    app.control_request(&request("without-plan"));
+    assert!(
+        !app.state.dialogs[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "Request changes")
+    );
+    answer(&mut app, "without-plan", json!({"value":"Request changes"}));
+    assert!(
+        app.tasks.requests.is_empty() && app.tasks.records.is_empty() && app.tasks.job.is_none()
+    );
+}
+
+#[test]
+fn revision_cancel_oversize_context_drift_and_original_call_abort_never_launch() {
+    for scenario in [
+        "cancel", "empty", "nul", "oversize", "drift", "model", "worker", "owner", "abort",
+    ] {
+        let mut app = app();
+        app.prefs.settings.permission = settings::PermissionMode::Plan;
+        let (client, _, replies) = rpc::Client::stub_with_records();
+        app.client = Some(client);
+        app.control_request(&planned_request("revision"));
+        app.workflow_answer(
+            &json!({"type":"extension_ui_response","id":"revision","value":"Request changes"}),
+        );
+        let id = app.state.dialogs.back().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if scenario == "drift" {
+            app.set_permission(settings::PermissionMode::Auto);
+        }
+        if scenario == "model" {
+            app.state.model = "changed-model".into();
+        }
+        if scenario == "worker" {
+            app.agents.nodes.get_mut(&app.agents.active).unwrap().access = "read-only".into();
+        }
+        if scenario == "owner" {
+            let owner = app.agents.active.clone();
+            app.agents.active = "different-chat".into();
+            assert!(!app.workflow_answer(
+                &json!({"type":"extension_ui_response","id":id,"value":"foreign feedback"})
+            ));
+            assert!(replies.try_recv().is_err());
+            app.agents.active = owner;
+        }
+        if scenario == "abort" {
+            app.control_request(&json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-workflow","statusText":json!({"closed":"revision"}).to_string()}));
+            assert!(!app.workflow_answer(
+                &json!({"type":"extension_ui_response","id":id,"value":"old feedback"})
+            ));
+            assert!(!app.state.dialogs.iter().any(|dialog| dialog["id"] == id));
+        } else {
+            let feedback = match scenario {
+                "oversize" => "x".repeat(4001),
+                "empty" => "  ".into(),
+                "nul" => "bad\0feedback".into(),
+                _ => "feedback".into(),
+            };
+            app.workflow_answer(&json!({"type":"extension_ui_response","id":id,"value":feedback,"cancelled":matches!(scenario, "cancel" | "owner")}));
+            let reply = loop {
+                let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+                if reply["type"] == "extension_ui_response" {
+                    break reply;
+                }
+            };
+            let result: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+            assert_ne!(result["approved"], true);
+            assert_ne!(result["revision_requested"], true);
+        }
+        assert!(
+            app.tasks.requests.is_empty()
+                && app.tasks.records.is_empty()
+                && app.tasks.job.is_none()
+        );
+        assert!(app.active_permission() != settings::PermissionMode::Manual);
+    }
+}

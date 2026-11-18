@@ -17,6 +17,7 @@ pub(super) struct Request {
     approval: domain::routing::Approval,
     plan: Option<domain::plan::ExecutionPlan>,
     permission: settings::PermissionMode,
+    revision: bool,
     task: Option<String>,
 }
 
@@ -39,7 +40,7 @@ impl Pui {
                     .collect();
                 for id in ids {
                     if let Some(request) = self.tasks.requests.remove(&id) {
-                        self.state.dialogs.retain(|d| d["id"] != request.rpc_id);
+                        self.state.dialogs.retain(|d| d["id"] != id);
                         if request.task.as_ref() == self.tasks.live.as_ref()
                             && request.task.is_some()
                         {
@@ -147,6 +148,7 @@ impl Pui {
                 approval,
                 plan,
                 permission,
+                revision: false,
                 task: None,
             },
         );
@@ -159,10 +161,15 @@ impl Pui {
         } else {
             ("Use a workflow?", "Use workflow", "")
         };
+        let options = if self.tasks.requests[&rpc_id].plan.is_some() {
+            vec![primary, "Request changes", "Regular development"]
+        } else {
+            vec![primary, "Regular development"]
+        };
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
             "title":title, "message":format!("{reason}\n\n{objective}\n\n{transition}{plan_description}Agent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
-            "options":[primary, "Regular development"]
+            "options":options
         }));
         true
     }
@@ -197,6 +204,43 @@ impl Pui {
         // an agent-supplied approved=true flag or a stale RPC response.
         if !self.state.dialogs.iter().any(|d| d["id"] == id) {
             return false;
+        }
+        if request.revision {
+            let request = self.tasks.requests.remove(&id).unwrap();
+            let feedback = protocol::string(response, "value").trim();
+            let result = if response["cancelled"] == true {
+                json!({"approved":false,"cancelled":true,"note":"Plan revision cancelled. Nothing was approved; wait for the user's next instruction."})
+            } else if context_changed || self.readonly_worker() || self.is_mirror() {
+                json!({"error":"Plan review context changed; no revision or implementation was authorized."})
+            } else if feedback.is_empty() || feedback.len() > 4000 || feedback.contains('\0') {
+                json!({"error":"Plan feedback must contain 1–4,000 bytes. Nothing was approved or started."})
+            } else {
+                json!({"approved":false,"revision_requested":true,"objective":request.objective,"plan":request.plan,"feedback":feedback,
+                    "instruction":"Revise only the plan using this feedback. Do not implement, change permission mode, run checks or replay actions. Submit a fresh concrete plan for a new native approval when ready."})
+            };
+            self.workflow_reply(&request, result);
+            return true;
+        }
+        if response["value"] == "Request changes"
+            && response["cancelled"] != true
+            && request.plan.is_some()
+        {
+            if context_changed || self.readonly_worker() || self.is_mirror() {
+                let request = self.tasks.requests.remove(&id).unwrap();
+                self.workflow_reply(
+                    &request,
+                    json!({"error":"Plan review context changed; nothing was started."}),
+                );
+                return true;
+            }
+            let mut request = self.tasks.requests.remove(&id).unwrap();
+            request.revision = true;
+            let revision_id = uuid::Uuid::new_v4().to_string();
+            self.state.dialogs.push_back(json!({"type":"extension_ui_request","method":"editor","id":revision_id,
+                "title":"Request plan changes", "message":format!("{}\n\n{}\n\nDescribe what should change. This requests planning only, does not approve execution or change permissions. The revised plan needs a new approval.", request.objective, request.plan.as_ref().unwrap().description()),
+                "placeholder":"Changes to scope, implementation steps, or verification (up to 4,000 bytes)"}));
+            self.tasks.requests.insert(revision_id, request);
+            return true;
         }
         let plan_handoff =
             request.permission == settings::PermissionMode::Plan && request.plan.is_some();

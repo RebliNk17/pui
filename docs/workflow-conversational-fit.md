@@ -62,7 +62,7 @@ New managed review could not start because Pui hit its 128 retained-session limi
 
 ## Remaining product work before claiming equivalence
 
-1. Rich plan revisions and resumable plan-review history. The initial explicit Plan → Manual handoff is implemented here; editing an approved plan still requires a fresh review.
+1. Resumable plan-review history. Initial Plan → Manual handoff and inline revision feedback are implemented; every revised plan still needs a fresh review. Pre-approval revision feedback is returned to the creating chat, not a durable executable checkpoint.
 2. A deliberate decision whether to build a reusable script-backed orchestration/runtime layer (using Pi's supported codemode, not another unsafe evaluator), with durable phase/agent identity, resumable boundaries and repeatable saved workflows.
 3. Background parent-chat responsiveness while structured work is running; do not let a sequential tool wait masquerade as a fully independent background workflow.
 4. Real bounded provider-backed usability pilot after separate approval: plan revision, implementation, actual check failure/repair, fresh review, blocked dependency, stop/restart, and reviewed application. Measure user decisions, cost, useful output and misleading completion states, not only test counts.
@@ -94,3 +94,18 @@ Accepted combined validation after that runner fix:
 - `bash -n scripts/test-rust.sh` passed. No OS agents, security software or other applications were stopped or reconfigured.
 
 The earlier failures remain part of the record; no claim of proven zero flake rate or paid provider/native installed-app validation is made. User explicitly authorized a normal push to master only after a green complete suite; that condition is now met for this snapshot. No force-push, installation or provider-backed workflow execution is included.
+
+## Inline plan-change requests
+
+The green handoff snapshot was normally pushed as `ebafae22`. Continued with a bounded review loop: concrete-plan approval now offers **Request changes**. An inline editor returns bounded feedback and the original plan to the existing waiting tool call with `approved:false` and `revision_requested:true`. It does not create a workflow, run a provider/check, change permissions, or silently resubmit a plan. The lead is instructed to revise only the plan and obtain a fresh native approval. A distinct feedback-dialog ID prevents stale original approval responses from being interpreted as feedback; aborting the original tool closes the replacement dialog. Cancellation, empty/NUL/oversized feedback, changed model/permission/owner and read-only contexts fail closed. Objective-only requests retain their prior choices. Review uses the existing shared inline prompt surface, including light/dark, narrow and zoom regression coverage.
+
+Validation of this slice before latest-master integration:
+
+- Focused native consent: **24 passed**; the corrected projection lifecycle fixture also passed.
+- Complete `scripts/test-rust.sh`: **1,955 Rust/integration passed**, 0 failed, 2 pre-existing ignored; all 22 groups ran once with no omitted groups or failure retries in this run. `/tmp/pui-plan-revision-green-candidate.log`.
+- Full JS: **102 passed**, 0 failed, 1 pre-existing skipped. `/tmp/pui-plan-revision-final-js-serial.log`.
+- Strict all-target Clippy, formatting, diff checks and runner shell syntax passed. `/tmp/pui-plan-revision-final-clippy.log`.
+- Earlier attempts are not hidden: one full invocation failed to link (`library 'System' not found`); selecting developer-tool PATH also bypasses Apple's compiler SDK shim, so the runner now preserves caller SDKROOT or selects the active SDK. A subsequent full run stopped at the inherited projection lease fixture; `Weak::upgrade()==None` can precede completion of `Lease::drop`, so that fixture now waits for the worker's existing Release/Acquire permit after input drop, preserving the five-second deadline, 64 MiB assertion and production code. Focused development also exposed/fixed a reply-filter assumption and test-only private-method calls. A development rebuild and an overlapping JS/build-lock attempt timed out; these were not passes or accepted suite runs.
+- New managed independent review was again refused by the 128 retained-session limit. No hidden reviewer was launched and no independent-review claim is made. No paid-provider or installed-app validation occurred.
+
+Remote master advanced to `613610bd` (Normal-view transcript action summaries) during validation; combined integration must also pass before the next push.

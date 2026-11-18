@@ -12,6 +12,11 @@ if [[ "$(uname -s)" == Darwin && "$(command -v git)" == /usr/bin/git ]]; then
   developer_git=$(xcrun --find git)
   [[ -x "$developer_git" ]] || { echo "Developer Git is unavailable." >&2; exit 1; }
   export PATH="$(dirname "$developer_git"):$PATH"
+  # The directory also contains the real compiler, bypassing Apple's /usr/bin
+  # SDK-selecting shim. Preserve a caller SDK or select the active SDK explicitly.
+  if [[ -z "${SDKROOT:-}" ]]; then
+    export SDKROOT="$(xcrun --show-sdk-path)"
+  fi
 fi
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
