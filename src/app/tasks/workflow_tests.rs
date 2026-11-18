@@ -36,7 +36,7 @@ fn no_workflow_renders_nothing_even_with_saved_sessions() {
         labels(&output).is_empty(),
         "no marketing or session-list empty state"
     );
-    app.toggle_chat_tasks();
+    assert!(app.inspector_workflow().is_none());
     assert!(!app.tasks.open);
     assert!(app.tasks.records.is_empty());
     assert!(app.tasks.processes.is_empty());

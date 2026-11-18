@@ -34,6 +34,33 @@ fn explicit_real_test_retains_diagnostic_without_resume_delivery_or_schedule_cha
     assert!(app.automation.running.is_empty());
 }
 #[test]
+fn deleting_a_job_cancels_only_its_one_shot_test_and_pending_confirmation() {
+    let ctx = egui::Context::default();
+    let mut app = super::super::tests::app(&ctx);
+    let id = super::super::tests::create(&mut app, "monitor");
+    let other = super::super::tests::create(&mut app, "monitor");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (_, rx) = mpsc::channel();
+    app.automation.precheck = Some(Pending {
+        job: id.clone(),
+        original: String::new(),
+        run: Running {
+            cancel: cancel.clone(),
+            rx,
+        },
+    });
+    app.automation.test_confirm = Some((id.clone(), String::new()));
+    app.delete_scheduled_job(&other).unwrap();
+    assert!(!cancel.load(Ordering::Acquire));
+    assert!(app.automation.precheck.is_some());
+    assert!(app.automation.test_confirm.is_some());
+    app.delete_scheduled_job(&id).unwrap();
+    assert!(cancel.load(Ordering::Acquire));
+    assert!(app.automation.precheck.is_none());
+    assert!(app.automation.test_confirm.is_none());
+}
+
+#[test]
 fn native_confirmation_escape_themes_zoom_runs_nothing() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {
         for zoom in [0.8, 1.4] {

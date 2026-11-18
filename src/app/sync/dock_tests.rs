@@ -23,6 +23,7 @@ fn dock_eligibility_requires_successful_scan_and_counts_live_empty_or_malformed_
         id: "peer".into(),
         port: 1,
         token: "fixture-only".into(),
+        automation_home: None,
         paths: vec![],
     };
     write_endpoint(&directory, &peer).unwrap();

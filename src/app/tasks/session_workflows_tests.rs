@@ -1,14 +1,13 @@
 use super::*;
 
 #[test]
-fn workflows_action_lives_in_session_info_not_top_toolbar() {
+fn workflows_have_one_collapsible_inspector_entry_without_duplicate_button() {
     for theme in [theme::Theme::Light, theme::Theme::Dark] {
         for zoom in [0.8, 1.4] {
             let mut app = app();
             theme.apply(&app.ctx);
             app.ctx.set_zoom_factor(zoom);
             proposal(&mut app);
-            let id = app.tasks.selected.clone();
             app.tasks.open = false;
             let ctx = app.ctx.clone();
             let top = ctx.run(
@@ -22,51 +21,32 @@ fn workflows_action_lives_in_session_info_not_top_toolbar() {
                 |ctx| app.top_bar(ctx),
             );
             assert!(!labels(&top).iter().any(|(text, _)| text == "Workflows"));
-            for _ in 0..4 {
-                inspector(&mut app, vec![]);
-            }
-            let (rect, enabled) = ctx
-                .data(|data| {
-                    data.get_temp::<(egui::Rect, bool)>(egui::Id::new("session-workflows-button"))
-                })
-                .unwrap();
-            assert!(enabled);
-            assert!(ctx.screen_rect().contains_rect(rect));
             let order = app.prefs.cards.order.clone();
-            for pressed in [true, false] {
-                inspector(
-                    &mut app,
-                    vec![
-                        egui::Event::PointerMoved(rect.center()),
-                        egui::Event::PointerButton {
-                            pos: rect.center(),
-                            button: egui::PointerButton::Primary,
-                            pressed,
-                            modifiers: egui::Modifiers::NONE,
-                        },
-                    ],
-                );
-            }
-            assert!(app.tasks.open);
-            assert_eq!(app.tasks.selected, id);
-            assert_eq!(app.prefs.cards.order, order);
-            assert!(
-                app.tasks.processes.is_empty(),
-                "Opening evidence never starts a workflow"
+            let output = inspector(&mut app, vec![]);
+            let text = labels(&output);
+            assert!(!text.iter().any(|(text, _)| text == "Workflows"));
+            assert_eq!(
+                text.iter()
+                    .filter(|(text, _)| text == Card::Workflow.label())
+                    .count(),
+                1
             );
-            app.tasks.open = false;
-            app.state.session_file = Some("/fixture/unrelated-session.jsonl".into());
-            for _ in 0..4 {
-                inspector(&mut app, vec![]);
-            }
-            let (_, enabled) = ctx
-                .data(|data| {
-                    data.get_temp::<(egui::Rect, bool)>(egui::Id::new("session-workflows-button"))
-                })
-                .unwrap();
             assert!(
-                !enabled,
-                "Another session must not expose the previous workflow"
+                ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::new((
+                    "inspector-header-action",
+                    Card::Workflow
+                ))))
+                .is_some()
+            );
+            assert!(!app.tasks.open);
+            assert_eq!(app.prefs.cards.order, order);
+            assert!(app.tasks.processes.is_empty());
+            app.state.session_file = Some("/fixture/unrelated-session.jsonl".into());
+            let output = inspector(&mut app, vec![]);
+            assert!(
+                !labels(&output)
+                    .iter()
+                    .any(|(text, _)| text == "Workflows" || text == Card::Workflow.label())
             );
         }
     }

@@ -35,6 +35,8 @@ pub(super) struct Endpoint {
     port: u16,
     token: String,
     pub paths: Vec<LivePath>,
+    #[serde(default)]
+    automation_home: Option<PathBuf>,
 }
 #[derive(Serialize, Deserialize)]
 pub(super) struct Snapshot {
@@ -65,6 +67,7 @@ pub(super) enum Action {
     Rpc(Value),
     Settings(settings::Settings),
     Notifications(notifications::NotificationSettings),
+    DeleteScheduledJob(String),
 }
 #[derive(Serialize, Deserialize)]
 struct Wire {
@@ -87,6 +90,8 @@ struct RemoteCommand {
 }
 enum Work {
     Publish(LivePath),
+    Automation(Option<PathBuf>),
+    DeleteScheduledJob(PathBuf, String),
     Scan,
     Forget(PathBuf),
     Fetch(PathBuf, Arc<Endpoint>, u64),
@@ -99,6 +104,7 @@ enum ResultEvent {
     Snapshot(PathBuf, u64, Box<Snapshot>),
     Action(PathBuf, Box<Reply>, Option<run_status::WaitingMessage>),
     Failure(PathBuf, String),
+    JobDeleted(String, Result<(), String>),
 }
 struct Owned {
     _lock: File,
@@ -127,6 +133,7 @@ pub(super) struct WindowSync {
     port: u16,
     pub error: Option<String>,
     mirror: Option<PathBuf>,
+    automation_home: Option<PathBuf>,
     unsent: Vec<run_status::WaitingMessage>,
     // Reuse identities already resolved by claim; attention never probes disk.
     attention_aliases: std::collections::VecDeque<(PathBuf, PathBuf)>,
@@ -295,7 +302,7 @@ impl WindowSync {
     pub fn new(ctx: &egui::Context, disabled: bool) -> Self {
         Self::new_at(ctx, disabled, None)
     }
-    fn new_at(ctx: &egui::Context, disabled: bool, location: Option<PathBuf>) -> Self {
+    pub(super) fn new_at(ctx: &egui::Context, disabled: bool, location: Option<PathBuf>) -> Self {
         let (tx, work) = mpsc::channel();
         let (results, rx) = mpsc::channel();
         let (remote, commands) = mpsc::channel();
@@ -320,6 +327,7 @@ impl WindowSync {
             port: 0,
             error: None,
             mirror: None,
+            automation_home: None,
             unsent: Vec::new(),
             attention_aliases: Default::default(),
             dock_single_window: false,
@@ -359,6 +367,7 @@ impl WindowSync {
                 port: this.port,
                 token: uuid::Uuid::new_v4().to_string(),
                 paths: Vec::new(),
+                automation_home: None,
             };
             // Publish even a blank window: Dock eligibility must not mistake a
             // live pathless window for absence. Existing watcher handles changes.
@@ -427,6 +436,29 @@ impl WindowSync {
                 while let Ok(job) = work.recv() {
                     match job {
                         Work::Stop => break,
+                        Work::Automation(home) => {
+                            endpoint.automation_home = home;
+                            let _ = write_endpoint(&dir, &endpoint);
+                            continue;
+                        }
+                        Work::DeleteScheduledJob(home, id) => {
+                            let peers: Vec<_> = registry(&dir, &endpoint.id)
+                                .into_iter()
+                                .filter(|peer| peer.automation_home.as_ref() == Some(&home))
+                                .collect();
+                            let result = if peers.len() == 1 {
+                                call(
+                                    &peers[0],
+                                    &home,
+                                    0,
+                                    Some(Action::DeleteScheduledJob(id.clone())),
+                                )
+                                .and_then(|reply| reply.error.map_or(Ok(()), Err))
+                            } else {
+                                Err("Scheduler owner unavailable or uses an older Pui version. Open Scheduled tasks in its window, or close it and try again here.".into())
+                            };
+                            let _ = results.send(ResultEvent::JobDeleted(id, result));
+                        }
                         Work::Publish(live) => {
                             endpoint.paths.retain(|p| p.path != live.path);
                             endpoint.paths.push(live);
@@ -664,6 +696,20 @@ impl WindowSync {
             .filter_map(|(path, endpoint)| endpoint.paths.iter().find(|p| &p.path == path))
             .cloned()
             .collect()
+    }
+    pub(super) fn publish_scheduler(&mut self, home: Option<PathBuf>) {
+        if self.automation_home != home {
+            self.automation_home = home.clone();
+            let _ = self.tx.send(Work::Automation(home));
+        }
+    }
+    pub(super) fn delete_scheduled_job(&self, home: PathBuf, id: String) -> Result<(), String> {
+        if !self.enabled() || self.error.is_some() {
+            return Err("Window synchronization is unavailable. Manage jobs in the scheduler's owning window.".into());
+        }
+        self.tx
+            .send(Work::DeleteScheduledJob(home, id))
+            .map_err(|_| "Window synchronization stopped".into())
     }
     pub fn act(&mut self, path: &Path, action: Action) -> Result<(), String> {
         let path = identity(path);
@@ -953,6 +999,9 @@ impl Pui {
         let events: Vec<_> = self.sync.rx.try_iter().collect();
         for event in events {
             match event {
+                ResultEvent::JobDeleted(id, result) => {
+                    self.scheduled_job_delete_result(&id, result);
+                }
                 ResultEvent::PresenceUnknown => {
                     self.sync.dock_single_window = false;
                     self.sync.dock_watch_ready = false;
@@ -1120,6 +1169,16 @@ impl Pui {
         }
         let commands: Vec<_> = self.sync.commands.try_iter().collect();
         for command in commands {
+            if let Some(Action::DeleteScheduledJob(id)) = &command.action {
+                // Scheduler actions are window-scoped, never tied to a live creator.
+                let error = self.delete_remote_scheduled_job(&command.path, id).err();
+                let _ = command.reply.send(Reply {
+                    snapshot: None,
+                    edited: None,
+                    error,
+                });
+                continue;
+            }
             let path = command.path.clone();
             let reply = self
                 .with_live_chat(&path, |app| {
@@ -1230,6 +1289,9 @@ impl Pui {
         let queue_path = self.state.session_file.as_ref().map(PathBuf::from).unwrap();
         let mut edited = None;
         match action {
+            Action::DeleteScheduledJob(_) => {
+                return Err("Scheduled jobs require scheduler routing.".into());
+            }
             Action::Queue(message) => {
                 if message.text.len() > 256000 || message.images.len() > 8 {
                     return Err("Message exceeds sync limits".into());
@@ -1565,6 +1627,7 @@ mod tests {
             id: "peer".into(),
             port: 1,
             token: "test-token".into(),
+            automation_home: None,
             paths: paths
                 .into_iter()
                 .map(|path| LivePath {
@@ -1767,6 +1830,7 @@ mod tests {
             id: sync.id.clone(),
             port: sync.port,
             token: "test-token".into(),
+            automation_home: None,
             paths: vec![LivePath {
                 path,
                 revision: 1,

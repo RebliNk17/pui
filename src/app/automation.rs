@@ -9,6 +9,7 @@ use std::{
 };
 mod create;
 mod cron;
+mod delete;
 mod evidence;
 mod precheck;
 mod reschedule;
@@ -133,6 +134,7 @@ pub(super) struct Automation {
     pub error: Option<String>,
     failed: bool,
     delete: Option<String>,
+    deleting: Option<String>,
     reschedule: Option<reschedule::Editor>,
     create: Option<create::Form>,
     precheck: Option<precheck::Pending>,
@@ -435,9 +437,7 @@ impl Pui {
                 job.error = None;
                 job.next_run = next;
             }
-            "delete" => {
-                self.automation.jobs.retain(|j| j.id != id);
-            }
+            "delete" => return self.delete_scheduled_job(id),
             _ => return Err("Use pause, resume or delete.".into()),
         }
         self.automation.running.remove(id);
@@ -516,6 +516,11 @@ impl Pui {
         }
         self.poll_monitor_test();
         self.poll_automation_jobs();
+        self.sync.publish_scheduler(
+            (self.automation.writable() && !self.agents.exiting)
+                .then(|| self.automation.home.clone())
+                .flatten(),
+        );
         // Use post-poll state: a completed unsuccessful monitor has just set
         // its next check, and delivery may have just added an ack deadline.
         if let Some(delay) = self.automation.next_wake() {
