@@ -1025,6 +1025,8 @@ impl Pui {
         self.poll_deletions();
         self.usage.poll();
         self.poll_notifications();
+        self.updates
+            .maybe_auto_check(&self.ctx, self.prefs.settings.auto_check_updates, self.demo);
         self.updates.poll();
         self.settings_view.resources.poll();
         self.poll_chat_folder();

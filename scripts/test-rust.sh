@@ -15,6 +15,7 @@ cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip app::changes::commit::tests:: --skip app::changes::git_files::modes::tests:: \
   --skip app::files::loader::svg_tests:: \
   --skip workspace::commit::tests:: --skip svg_preview::process::lifecycle_tests:: \
+  --skip app::tasks::recovery::tests:: --skip app::tasks::store_safety_tests:: --skip tasks::apply::tests:: \
   --skip "$lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
@@ -35,5 +36,8 @@ cargo test --offline --locked --bin pui workspace::commit::tests:: -- --test-thr
 cargo test --offline --locked --bin pui svg_preview::process::lifecycle_tests:: -- --test-threads=1
 # Ownership lock handoff assertions must not overlap fork/exec in other tests.
 cargo test --offline --locked --bin pui app::tasks::save_conflict_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::tasks::recovery::tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui app::tasks::store_safety_tests:: -- --test-threads=1
+cargo test --offline --locked --bin pui tasks::apply::tests:: -- --test-threads=1
 # Restart/OS-lock test must not overlap any subprocess-spawning group.
 cargo test --offline --locked --bin pui "$lock_test" -- --exact --test-threads=1

@@ -22,4 +22,4 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 - Pi and Node.js are included in the macOS app. Model-provider login/API keys are still required; user extensions and external tools may have their own prerequisites.
 - CI release assets currently support Apple Silicon only.
 - Builds without Apple credentials are explicitly labeled ad-hoc and are not notarized.
-- GitLab-based update checking and in-app changelog viewing are not enabled yet.
+- GitHub-based automatic/manual update checking, verified ZIP download (`SHA256SUMS` + `codesign`), in-app changelog viewing, background install-on-quit relauncher, and automatic temporary file cleanup.

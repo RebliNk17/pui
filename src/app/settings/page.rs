@@ -54,7 +54,9 @@ impl Page {
     }
     fn keywords(self) -> &'static str {
         match self {
-            Self::General => "steer queue messages enter context compact tokens worker concurrency",
+            Self::General => {
+                "steer queue messages enter context compact tokens worker concurrency updates auto check download install"
+            }
             Self::Appearance => {
                 "layout sidebar inspector scale zoom reset dark light theme color styles midnight ivory forest sage plum rose classic neutral"
             }
@@ -124,6 +126,11 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "Worker concurrency ceiling",
             "General",
             "agents subagents parallel limit",
+        ),
+        (
+            "Automatically check for updates",
+            "General",
+            "updates github release download install version",
         ),
         (
             "Theme mode and colors",
@@ -646,6 +653,34 @@ impl Pui {
                     ui.add(egui::DragValue::new(&mut self.prefs.agent_concurrency).range(1..=16));
                 },
             )
+        });
+        section(ui, "Updates", "");
+        card(ui, |ui| {
+            row(
+                ui,
+                "Automatically check for updates",
+                "Periodically check GitHub Releases in the background. Updates never install or restart automatically without your confirmation.",
+                |ui| {
+                    toggle(
+                        ui,
+                        &mut self.prefs.settings.auto_check_updates,
+                        "Automatically check for updates",
+                    );
+                },
+            );
+            separator(ui);
+            let status_desc = if self.updates.ready_to_install() {
+                "An update is downloaded, verified and ready to install.".to_owned()
+            } else if let Some(version) = self.updates.available_version() {
+                format!("Pui {version} is available on GitHub.")
+            } else {
+                format!("Installed version {}", env!("CARGO_PKG_VERSION"))
+            };
+            row(ui, "Software updates", &status_desc, |ui| {
+                if ui.button("Check for Updates…").clicked() {
+                    self.updates.start(ui.ctx());
+                }
+            });
         });
     }
     fn settings_appearance(&mut self, ui: &mut egui::Ui) {
