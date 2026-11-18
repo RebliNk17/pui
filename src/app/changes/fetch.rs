@@ -1,5 +1,6 @@
 //! Exact branch Fetch, explicit local review then separate network confirmation.
 use super::*;
+mod update;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -12,6 +13,10 @@ pub(super) struct Fetch {
     pending: Option<workspace::read_only::Request<Result<workspace::fetch::Review, String>>>,
     review: Option<workspace::fetch::Review>,
     applying: Option<workspace::read_only::Request<Result<String, String>>>,
+    update_review: Option<workspace::fast_forward::Review>,
+    update_pending:
+        Option<workspace::read_only::Request<Result<workspace::fast_forward::Review, String>>>,
+    update_applying: Option<workspace::read_only::Request<Result<(), String>>>,
     timeout: u64,
     notice: Option<String>,
     controls: Vec<egui::Id>,
@@ -24,12 +29,15 @@ impl Changes {
         let s = &mut self.fetch;
         s.controls.clear();
         egui::CollapsingHeader::new("Fetch remote branch…").show(ui,|ui|{
-            let enabled=self.index_writable&&s.pending.is_none()&&s.applying.is_none()&&s.review.is_none()&&!egui::Popup::is_any_open(ui.ctx())&&ui.memory(|m|m.top_modal_layer().is_none());
+            let enabled=self.index_writable&&s.update_pending.is_none()&&s.update_applying.is_none()&&s.update_review.is_none()&&s.pending.is_none()&&s.applying.is_none()&&s.review.is_none()&&!egui::Popup::is_any_open(ui.ctx())&&ui.memory(|m|m.top_modal_layer().is_none());
             ui.add_enabled_ui(enabled,|ui|{
                 for(label,value)in [("Remote name",&mut s.remote),("Branch name",&mut s.branch)]{ui.label(theme::small(ui,label));let r=ui.add(egui::TextEdit::singleline(value).char_limit(1000).desired_width(ui.available_width()));s.controls.push(r.id);}
+                let update=prompt_ui::button(ui,"Review local fast-forward…",prompt_ui::Button::Secondary,workspace::push::remote::valid_name(&s.remote)&&workspace::branches::create::valid_name(&s.branch));s.controls.push(update.id);
+                if update.clicked(){let Some(permit)=branches::permit(ui.ctx())else{s.notice=Some("Git busy; retry.".into());return;};let root=workspace.root.clone();let remote=s.remote.clone();let name=s.branch.clone();let(tx,rx)=mpsc::channel();let cancel=Arc::new(AtomicBool::new(false));s.owner=Some(self.identity.clone());s.update_pending=Some(workspace::read_only::Request::new(rx,cancel.clone()));let ctx=ui.ctx().clone();if std::thread::Builder::new().name("pui-ff-review".into()).spawn(move||{let result=workspace::fast_forward::inspect(&root,&remote,&name,&cancel);drop(permit);if !cancel.load(Ordering::Acquire){let _=tx.send(result);ctx.request_repaint();}}).is_err(){s.update_pending=None;s.notice=Some("Cannot inspect fast-forward.".into());}return;}
                 let r=prompt_ui::button(ui,"Review Fetch…",prompt_ui::Button::Secondary,workspace::push::remote::valid_name(&s.remote)&&workspace::branches::create::valid_name(&s.branch));s.controls.push(r.id);
                 if r.clicked(){let Some(permit)=branches::permit(ui.ctx())else{s.notice=Some("Git busy; retry explicitly.".into());return;};let root=workspace.root.clone();let remote=s.remote.clone();let branch=s.branch.clone();let(tx,rx)=mpsc::channel();let cancel=Arc::new(AtomicBool::new(false));s.owner=Some(self.identity.clone());s.pending=Some(workspace::read_only::Request::new(rx,cancel.clone()));let ctx=ui.ctx().clone();if std::thread::Builder::new().name("pui-fetch-review".into()).spawn(move||{let result=workspace::fetch::inspect(&root,&remote,&branch,&cancel);drop(permit);if !cancel.load(Ordering::Acquire){let _=tx.send(result);ctx.request_repaint();}}).is_err(){s.pending=None;s.notice=Some("Cannot inspect Fetch.".into());}}
             });
+            if s.update_applying.is_some(){ui.label(theme::small(ui,"Updating current branch… hide view to request cancellation; inspect checkout afterward."));}
             if s.applying.is_some(){ui.label(theme::small(ui,"Fetching reviewed branch…"));if prompt_ui::button(ui,"Cancel Fetch",prompt_ui::Button::Secondary,self.index_writable).clicked(){s.applying=None;s.notice=Some("Fetch cancellation requested; objects or tracking update may already exist. Inspect before retrying.".into());}}
             if let Some(notice)=&s.notice{ui.add(egui::Label::new(theme::small(ui,notice)).wrap());}
         });
@@ -71,12 +79,42 @@ impl Changes {
             });
             self.refresh = true;
         }
+        if let Some(result) = s.update_pending.as_ref().and_then(|r| match r.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err("Update review ended".into())),
+        }) {
+            s.update_pending = None;
+            match result {
+                Ok(review) => s.update_review = Some(review),
+                Err(e) => s.notice = Some(e),
+            }
+        }
+        if let Some(result) = s.update_applying.as_ref().and_then(|r| match r.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err("Update completion uncertain; inspect checkout.".into())),
+        }) {
+            s.update_applying = None;
+            s.notice = Some(match result {
+                Ok(()) => "Current branch fast-forwarded. No network or merge commit.".into(),
+                Err(e) => e,
+            });
+            self.refresh = true;
+        }
         let focus = ctx.memory(|m| m.focused());
-        if s.review.is_some() || focus.is_some_and(|id| s.controls.contains(&id)) {
+        if s.review.is_some()
+            || s.update_review.is_some()
+            || focus.is_some_and(|id| s.controls.contains(&id))
+        {
             ctx.input_mut(|i|i.events.retain(|e|!matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)));
         }
     }
     pub(super) fn fetch_dialog(&mut self, ctx: &egui::Context) {
+        if self.fetch.update_review.is_some() {
+            self.fast_forward_dialog(ctx);
+            return;
+        }
         let Some(review) = &self.fetch.review else {
             return;
         };

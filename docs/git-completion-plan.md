@@ -17,7 +17,7 @@ User requested all Git workflows, including richer review and porcelain lifecycl
 
 ## Still to implement/validate
 
-- [ ] Fast-forward-only local update from a fetched branch (no network hidden inside merge).
+- [x] Fast-forward-only local update from a fetched branch (no network hidden inside merge). Review freezes current branch/HEAD/tracking/target/changed paths, reuses clean/ignored/untracked/active-operation/filter/source-tree gates, rejects target submodules/custom mergeOptions, then pinned `merge --ff-only --no-autostash --no-verify-signatures` with hooks disabled. Three-second local Git budgets and external writer/config races remain; cancellation has no transactional rollback promise. Focused disposable test verifies checkout update and dirty/stale refusal, theme/zoom Escape starts no worker. `/tmp/pui-ff-full.log`:1955binary+10integration passed,2ignored/zero failures; JS98/1skipped,Python41,strictClippy/fmt/diff pass. No physical/manual/provider acceptance.
 - [ ] Explicit merge/rebase, conflict inventory/editor/mark-resolved, abort/continue/skip lifecycle, dirty-state protection.
 - [ ] Stash create/list/show/apply/pop/drop with collision/conflict and recovery behavior.
 - [ ] Branch rename/delete (merged/unmerged), tags, worktree list/create/remove, remote URL editing/removal/upstream replacement, detached/unborn branch UX.
