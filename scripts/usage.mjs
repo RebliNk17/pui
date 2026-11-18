@@ -135,10 +135,12 @@ const domain = value => typeof value === "string" && value ? value.replace(/^htt
 
 async function googleToken(stored) {
   if (stored.access && safeNumber(stored.expires) > Date.now() + 60_000) return stored.access;
-  const clientId = (typeof stored.clientId === "string" && stored.clientId.trim()) || process.env.ANTIGRAVITY_CLIENT_ID?.trim();
-  if (!clientId || !stored.refresh) throw new UsageError("Antigravity sign-in expired. Reconnect it in Settings → Providers.");
+  // Same resolution as scripts/antigravity.ts: stored/env client, else the built-in Antigravity client.
+  const builtIn = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+  const clientId = (typeof stored.clientId === "string" && stored.clientId.trim()) || process.env.ANTIGRAVITY_CLIENT_ID?.trim() || builtIn;
+  if (!stored.refresh) throw new UsageError("Antigravity sign-in expired. Reconnect it in Settings → Providers.");
   const params = { client_id: clientId, refresh_token: stored.refresh, grant_type: "refresh_token" };
-  const secret = (typeof stored.clientSecret === "string" && stored.clientSecret.trim()) || process.env.ANTIGRAVITY_CLIENT_SECRET?.trim();
+  const secret = (typeof stored.clientSecret === "string" && stored.clientSecret.trim()) || process.env.ANTIGRAVITY_CLIENT_SECRET?.trim() || (clientId === builtIn ? "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" : "");
   if (secret) params.client_secret = secret;
   // Access token is used transiently; Pi's provider persists its own refreshes.
   const data = await getJson("https://oauth2.googleapis.com/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params).toString() }, "Antigravity");

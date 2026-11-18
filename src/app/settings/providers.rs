@@ -16,6 +16,13 @@ const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference u
 
 const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+/// Google's installed-app OAuth client shipped in the Antigravity app and `agy` CLI. Installed-app
+/// client secrets are not confidential (RFC 8252); PKCE protects the exchange. Using it lets Pui
+/// offer the same one-click Google sign-in as agy. ANTIGRAVITY_CLIENT_ID/SECRET or the Advanced
+/// fields override it with your own Google Cloud OAuth client.
+const ANTIGRAVITY_DEFAULT_CLIENT_ID: &str =
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const ANTIGRAVITY_DEFAULT_CLIENT_SECRET: &str = "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";
 const ANTIGRAVITY_REDIRECT_URI: &str = "http://localhost:51121/oauth-callback";
 const ANTIGRAVITY_SCOPES: &str = "https://www.googleapis.com/auth/aicode https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
 
@@ -84,6 +91,9 @@ struct ClaudeSubscriptionFlow {
 #[derive(Default)]
 struct AntigravitySubscriptionFlow {
     open: bool,
+    /// Show the custom-client and paste-callback controls.
+    advanced: bool,
+    /// Custom OAuth client; empty uses the built-in Antigravity client.
     client_id: String,
     client_secret: String,
     verifier: String,
@@ -256,6 +266,27 @@ fn build_claude_authorize_url(challenge: &str, state: &str) -> String {
     url.to_string()
 }
 
+/// Field label that wraps left-aligned. `ui.columns` uses a justified layout, where egui would
+/// stretch each wrapped line's glyphs across the column ("G o o g l e").
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.add(egui::Label::new(theme::small(ui, text)).wrap());
+    });
+}
+
+/// Custom client when provided, otherwise the built-in Antigravity client and its public secret.
+fn antigravity_client(client_id: &str, client_secret: &str) -> (String, String) {
+    let id = client_id.trim();
+    if id.is_empty() || id == ANTIGRAVITY_DEFAULT_CLIENT_ID {
+        (
+            ANTIGRAVITY_DEFAULT_CLIENT_ID.into(),
+            ANTIGRAVITY_DEFAULT_CLIENT_SECRET.into(),
+        )
+    } else {
+        (id.into(), client_secret.trim().into())
+    }
+}
+
 fn build_antigravity_authorize_url(client_id: &str, challenge: &str, state: &str) -> String {
     let mut url = url::Url::parse(ANTIGRAVITY_AUTHORIZE_URL).expect("valid google authorize url");
     url.query_pairs_mut()
@@ -398,11 +429,8 @@ fn exchange_antigravity_oauth_code(
     code: &str,
     verifier: &str,
 ) -> Result<String, String> {
-    let client_id = client_id.trim();
-    let client_secret = client_secret.trim();
-    if client_id.is_empty() {
-        return Err("Enter your Google OAuth Client ID.".into());
-    }
+    let (client_id, client_secret) = antigravity_client(client_id, client_secret);
+    let (client_id, client_secret) = (client_id.as_str(), client_secret.as_str());
     let script = r#"
 import { createHash } from 'node:crypto';
 const [tokenUrl, clientId, clientSecret, redirectUri, code, verifier] = process.argv.slice(-6);
@@ -1020,6 +1048,7 @@ impl ProvidersManager {
         let state = generate_pkce().0;
         let mut client_id = std::env::var("ANTIGRAVITY_CLIENT_ID").unwrap_or_default();
         let mut client_secret = std::env::var("ANTIGRAVITY_CLIENT_SECRET").unwrap_or_default();
+        // A previous custom-client sign-in must refresh with that client, so keep it selected.
         if let Some(path) = auth_json_path() {
             let root = read_json_object(&path);
             if client_id.trim().is_empty() {
@@ -1033,8 +1062,13 @@ impl ProvidersManager {
                 }
             }
         }
+        if client_id.trim() == ANTIGRAVITY_DEFAULT_CLIENT_ID {
+            client_id.clear();
+            client_secret.clear();
+        }
         self.antigravity = AntigravitySubscriptionFlow {
             open: true,
+            advanced: !client_id.trim().is_empty(),
             client_id,
             client_secret,
             verifier,
@@ -1498,75 +1532,40 @@ impl ProvidersManager {
                 prompt_ui::heading(
                     ui,
                     "Connect Google Antigravity",
-                    "Sign in with Google OAuth to unlock Antigravity / Cloud Code Assist models (Gemini 3.7/3.6/3.5 Flash, Gemini 3.1 Pro, Claude Opus/Sonnet 4.6, GPT-OSS 120B).",
+                    "Sign in with your Google account to use Antigravity models (Gemini, Claude, GPT-OSS) with Pi's tools and approvals.",
                 );
-                ui.add_space(10.0);
-                ui.columns(2, |cols| {
-                    cols[0].label(theme::small(
-                        &cols[0],
-                        "Google OAuth Client ID (or ANTIGRAVITY_CLIENT_ID):",
-                    ));
-                    cols[0].add_enabled(
-                        !self.antigravity.exchanging,
-                        theme::text_field(
-                            &mut self.antigravity.client_id,
-                            "….apps.googleusercontent.com",
-                        )
-                        .id_salt("antigravity-client-id-input")
-                        .desired_width(cols[0].available_width()),
-                    );
-                    cols[1].label(theme::small(
-                        &cols[1],
-                        "Client Secret (optional · or ANTIGRAVITY_CLIENT_SECRET):",
-                    ));
-                    cols[1].add_enabled(
-                        !self.antigravity.exchanging,
-                        theme::text_field(&mut self.antigravity.client_secret, "Optional")
-                            .id_salt("antigravity-client-secret-input")
-                            .password(true)
-                            .desired_width(cols[1].available_width()),
-                    );
-                });
-                ui.add_space(10.0);
-                prompt_ui::note(
-                    ui,
-                    "Click Sign In with Google below. Pui starts a local callback listener on localhost:51121 and completes sign-in automatically once you approve in your browser.\n\nIf you are on a remote browser, you can also paste the final http://localhost:51121/oauth-callback?… URL below.",
-                );
-                ui.add_space(10.0);
-                let has_client_id = !self.antigravity.client_id.trim().is_empty();
+                ui.add_space(14.0);
+                let custom = !self.antigravity.client_id.trim().is_empty();
                 if prompt_ui::button(
                     ui,
                     if self.antigravity.listening {
-                        "Waiting for Google Sign-In in Browser…"
+                        "Waiting for Google sign-in…"
+                    } else if self.antigravity.exchanging {
+                        "Connecting…"
                     } else {
-                        "Sign In with Google in Browser"
+                        "Sign in with Google"
                     },
                     prompt_ui::Button::Primary,
-                    !self.antigravity.exchanging && has_client_id,
+                    !self.antigravity.exchanging,
                 )
                 .clicked()
                 {
                     start_browser_flow = true;
                 }
-                ui.add_space(12.0);
-                ui.label(theme::small(
-                    ui,
-                    "Or paste callback URL manually (http://localhost:51121/oauth-callback?…):",
-                ));
-                let edit = ui.add_enabled(
-                    !self.antigravity.exchanging || self.antigravity.listening,
-                    theme::text_field(
-                        &mut self.antigravity.callback_input,
-                        "http://localhost:51121/oauth-callback?state=…&code=…",
-                    )
-                    .id_salt("antigravity-oauth-callback-input")
-                    .desired_width(ui.available_width()),
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(theme::small(
+                        ui,
+                        if custom {
+                            "Opens your browser using your custom OAuth client. Pui finishes sign-in on localhost:51121."
+                        } else {
+                            "Opens your browser with the same Google sign-in the Antigravity app and agy CLI use. Pui finishes sign-in on localhost:51121."
+                        },
+                    ))
+                    .wrap(),
                 );
-                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    submit_manual = true;
-                }
                 if let Some(error) = &self.antigravity.error {
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.add(
                         egui::Label::new(
                             RichText::new(error)
@@ -1576,37 +1575,94 @@ impl ProvidersManager {
                         .wrap(),
                     );
                 }
-                ui.add_space(18.0);
+                ui.add_space(10.0);
+                prompt_ui::note(
+                    ui,
+                    "Unofficial: Pui signs in as the Antigravity app. Google may change or restrict this access; usage counts against your Antigravity quota.",
+                );
+                ui.add_space(6.0);
+                if prompt_ui::text_link(
+                    ui,
+                    if self.antigravity.advanced {
+                        "Hide advanced options"
+                    } else {
+                        "Advanced: own OAuth client or paste callback URL"
+                    },
+                    Icon::Settings,
+                    true,
+                )
+                .clicked()
+                {
+                    self.antigravity.advanced = !self.antigravity.advanced;
+                }
+                if self.antigravity.advanced {
+                    ui.add_space(4.0);
+                    // Stacked fields: egui justifies wrapped labels inside ui.columns.
+                    ui.add(egui::Label::new(theme::small(ui, "OAuth client ID · optional")).wrap());
+                    ui.add_enabled(
+                        !self.antigravity.exchanging,
+                        theme::text_field(
+                            &mut self.antigravity.client_id,
+                            "Built-in Antigravity client",
+                        )
+                        .id_salt("antigravity-client-id-input")
+                        .desired_width(ui.available_width()),
+                    );
+                    ui.add(egui::Label::new(theme::small(ui, "Client secret · optional")).wrap());
+                    ui.add_enabled(
+                        !self.antigravity.exchanging && custom,
+                        theme::text_field(&mut self.antigravity.client_secret, "Optional")
+                            .id_salt("antigravity-client-secret-input")
+                            .password(true)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.add(
+                        egui::Label::new(theme::small(
+                            ui,
+                            "Signing in on another device? Paste the final localhost:51121/oauth-callback URL:",
+                        ))
+                        .wrap(),
+                    );
+                    let edit = ui.add_enabled(
+                        !self.antigravity.exchanging || self.antigravity.listening,
+                        theme::text_field(
+                            &mut self.antigravity.callback_input,
+                            "http://localhost:51121/oauth-callback?state=…&code=…",
+                        )
+                        .id_salt("antigravity-oauth-callback-input")
+                        .desired_width(ui.available_width()),
+                    );
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit_manual = true;
+                    }
+                }
+                ui.add_space(16.0);
                 prompt_ui::footer(ui, |ui| {
-                    if prompt_ui::button(
-                        ui,
-                        if self.antigravity.exchanging && !self.antigravity.listening {
-                            "Connecting…"
-                        } else {
-                            "Connect Pasted URL"
-                        },
-                        prompt_ui::Button::Secondary,
-                        has_client_id && !self.antigravity.callback_input.trim().is_empty(),
-                    )
-                    .clicked()
+                    close |= prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true)
+                        .clicked();
+                    if self.antigravity.advanced
+                        && prompt_ui::button(
+                            ui,
+                            "Connect pasted URL",
+                            prompt_ui::Button::Secondary,
+                            !self.antigravity.callback_input.trim().is_empty()
+                                && (!self.antigravity.exchanging || self.antigravity.listening),
+                        )
+                        .clicked()
                     {
                         submit_manual = true;
                     }
-                    close |= prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true)
-                        .clicked();
                 });
                 close
             },
         );
         if start_browser_flow && !self.antigravity.exchanging {
-            let client_id = self.antigravity.client_id.trim().to_owned();
-            if client_id.is_empty() {
-                self.antigravity.error = Some("Enter your Google OAuth Client ID first.".into());
-            } else {
+            let (client_id, client_secret) =
+                antigravity_client(&self.antigravity.client_id, &self.antigravity.client_secret);
+            {
                 self.antigravity.exchanging = true;
                 self.antigravity.listening = true;
                 self.antigravity.error = None;
-                let client_secret = self.antigravity.client_secret.trim().to_owned();
                 let auth_url = build_antigravity_authorize_url(
                     &client_id,
                     &self.antigravity.challenge,
@@ -1728,16 +1784,16 @@ impl ProvidersManager {
                         ui.add_space(8.0);
                     }
                     ui.columns(2, |cols| {
-                        cols[0].label(theme::small(
-                            &cols[0],
+                        field_label(
+                            &mut cols[0],
                             "Google Cloud Project ID (GOOGLE_CLOUD_PROJECT)",
-                        ));
+                        );
                         cols[0].add(
                             theme::text_field(&mut self.vertex.project_id, "my-gcp-project")
                                 .id_salt("vertex-project-id")
                                 .desired_width(cols[0].available_width()),
                         );
-                        cols[1].label(theme::small(&cols[1], "Location (GOOGLE_CLOUD_LOCATION)"));
+                        field_label(&mut cols[1], "Location (GOOGLE_CLOUD_LOCATION)");
                         cols[1].add(
                             theme::text_field(&mut self.vertex.location, "us-central1 or global")
                                 .id_salt("vertex-location")
@@ -1877,14 +1933,14 @@ impl ProvidersManager {
                 });
                 ui.add_space(8.0);
                 ui.columns(2, |cols| {
-                    cols[0].label(theme::small(&cols[0], "Provider ID"));
+                    field_label(&mut cols[0], "Provider ID");
                     cols[0].add_enabled(
                         self.endpoint.editing_id.is_none(),
                         theme::text_field(&mut self.endpoint.id, "local-openai")
                             .id_salt("endpoint-provider-id")
                             .desired_width(cols[0].available_width()),
                     );
-                    cols[1].label(theme::small(&cols[1], "Display Name"));
+                    field_label(&mut cols[1], "Display Name");
                     cols[1].add(
                         theme::text_field(&mut self.endpoint.name, "Local OpenAI")
                             .id_salt("endpoint-display-name")
@@ -1920,7 +1976,7 @@ impl ProvidersManager {
                 });
                 ui.add_space(6.0);
                 ui.columns(2, |cols| {
-                    cols[0].label(theme::small(&cols[0], "API Protocol"));
+                    field_label(&mut cols[0], "API Protocol");
                     egui::ComboBox::from_id_salt("endpoint-api-protocol")
                         .selected_text(APIS[self.endpoint.api_index].0)
                         .width(cols[0].available_width())
@@ -1937,7 +1993,7 @@ impl ProvidersManager {
                                 }
                             }
                         });
-                    cols[1].label(theme::small(&cols[1], "API Key (optional · or $ENV_VAR)"));
+                    field_label(&mut cols[1], "API Key (optional · or $ENV_VAR)");
                     let mask_endpoint_key = !self.endpoint.api_key.starts_with('$')
                         && !self.endpoint.api_key.starts_with('!');
                     cols[1].add(
@@ -2676,5 +2732,170 @@ mod tests {
 
         assert!(parse_oauth_code_input("abc#wrongstate", "state999").is_err());
         assert!(parse_oauth_code_input("   ", "state999").is_err());
+    }
+
+    #[test]
+    fn antigravity_sign_in_defaults_to_built_in_client_and_keeps_custom_override() {
+        let (id, secret) = antigravity_client("  ", "ignored");
+        assert_eq!(id, ANTIGRAVITY_DEFAULT_CLIENT_ID);
+        assert_eq!(secret, ANTIGRAVITY_DEFAULT_CLIENT_SECRET);
+        let (id, secret) = antigravity_client(" mine.apps.googleusercontent.com ", " s ");
+        assert_eq!(
+            (id.as_str(), secret.as_str()),
+            ("mine.apps.googleusercontent.com", "s")
+        );
+        let url = build_antigravity_authorize_url(&antigravity_client("", "").0, "c", "st");
+        let url = url::Url::parse(&url).unwrap();
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], ANTIGRAVITY_DEFAULT_CLIENT_ID);
+        assert_eq!(query["redirect_uri"], ANTIGRAVITY_REDIRECT_URI);
+        assert_eq!(query["code_challenge"], "c");
+        for (name, source) in [
+            (
+                "antigravity.ts",
+                include_str!("../../../scripts/antigravity.ts"),
+            ),
+            ("usage.mjs", include_str!("../../../scripts/usage.mjs")),
+        ] {
+            assert!(
+                source.contains(ANTIGRAVITY_DEFAULT_CLIENT_ID)
+                    && source.contains(ANTIGRAVITY_DEFAULT_CLIENT_SECRET),
+                "{name} must refresh with the same built-in client"
+            );
+        }
+        assert!(
+            !url.as_str().contains(ANTIGRAVITY_DEFAULT_CLIENT_SECRET),
+            "the client secret is only sent to the token endpoint"
+        );
+    }
+
+    fn antigravity_modal_texts(
+        dark: bool,
+        width: f32,
+        zoom: f32,
+        setup: impl Fn(&mut ProvidersManager),
+    ) -> (Vec<(String, bool, egui::Rect)>, egui::Rect) {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        ctx.set_zoom_factor(zoom);
+        let mut manager = ProvidersManager::default();
+        manager.antigravity.open = true;
+        setup(&mut manager);
+        let mut texts = Vec::new();
+        let mut screen = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    screen = ctx.screen_rect();
+                    manager.show_antigravity_modal(ctx)
+                },
+            );
+            texts.clear();
+            fn collect(shape: &egui::Shape, out: &mut Vec<(String, bool, egui::Rect)>) {
+                match shape {
+                    egui::Shape::Text(t) => out.push((
+                        t.galley.text().to_owned(),
+                        t.galley.job.justify,
+                        t.galley.rect.translate(t.pos.to_vec2()),
+                    )),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                    _ => {}
+                }
+            }
+            for shape in &output.shapes {
+                collect(&shape.shape, &mut texts);
+            }
+        }
+        assert!(
+            manager.antigravity.open,
+            "rendering alone must not close the dialog"
+        );
+        (texts, screen)
+    }
+
+    #[test]
+    fn antigravity_modal_is_one_click_with_readable_labels_in_both_themes() {
+        for dark in [false, true] {
+            for (width, zoom) in [(360.0, 1.0), (640.0, 1.0), (640.0, 1.5)] {
+                for advanced in [false, true] {
+                    let (texts, screen) = antigravity_modal_texts(dark, width, zoom, |m| {
+                        m.antigravity.advanced = advanced
+                    });
+                    let has = |needle: &str| texts.iter().any(|(t, ..)| t.contains(needle));
+                    assert!(has("Sign in with Google"));
+                    assert!(has("Unofficial"));
+                    assert!(!has("ANTIGRAVITY_CLIENT_ID"), "no env-var jargon in labels");
+                    assert_eq!(has("OAuth client ID"), advanced);
+                    assert_eq!(has("Connect pasted URL"), advanced);
+                    for (text, justified, rect) in &texts {
+                        assert!(!justified, "{text:?} is glyph-justified");
+                        assert!(
+                            rect.right() <= screen.right() + 1.0,
+                            "{text:?} overflows {width}pt at {zoom}x: {rect:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let (texts, _) = antigravity_modal_texts(false, 640.0, 1.0, |m| {
+            m.antigravity.exchanging = true;
+            m.antigravity.listening = true;
+        });
+        assert!(
+            texts
+                .iter()
+                .any(|(t, ..)| t == "Waiting for Google sign-in…")
+        );
+    }
+
+    #[test]
+    fn column_field_labels_wrap_without_justified_glyph_spacing() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 400.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.columns(2, |cols| {
+                        field_label(
+                            &mut cols[0],
+                            "Google Cloud Project ID (GOOGLE_CLOUD_PROJECT)",
+                        )
+                    });
+                });
+            },
+        );
+        let mut found = false;
+        for shape in output.shapes {
+            if let egui::Shape::Text(t) = shape.shape {
+                if t.galley.text().starts_with("Google Cloud") {
+                    found = true;
+                    assert!(
+                        t.galley.rows.len() > 1,
+                        "long label wraps in a narrow column"
+                    );
+                    assert!(!t.galley.job.justify);
+                }
+            }
+        }
+        assert!(found);
     }
 }

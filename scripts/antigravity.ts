@@ -29,25 +29,26 @@ export const SCOPES = [
   "https://www.googleapis.com/auth/experimentsandconfigs",
 ];
 
+// Google's installed-app OAuth client shipped in the Antigravity app and agy CLI (public per
+// RFC 8252; PKCE protects the exchange). Must match src/app/settings/providers.rs.
+export const DEFAULT_CLIENT_ID =
+  "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+export const DEFAULT_CLIENT_SECRET = "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";
+
 export function resolveClientId(credentials?: any): string {
-  const value =
+  return (
     (typeof credentials?.clientId === "string" && credentials.clientId.trim()) ||
     process.env.ANTIGRAVITY_CLIENT_ID?.trim() ||
-    "";
-  if (!value) {
-    throw new Error(
-      "Missing Google OAuth Client ID. Configure it in Settings → Providers → Connect Antigravity or set ANTIGRAVITY_CLIENT_ID.",
-    );
-  }
-  return value;
+    DEFAULT_CLIENT_ID
+  );
 }
 
 export function resolveClientSecret(credentials?: any): string {
-  return (
+  const secret =
     (typeof credentials?.clientSecret === "string" && credentials.clientSecret.trim()) ||
     process.env.ANTIGRAVITY_CLIENT_SECRET?.trim() ||
-    ""
-  );
+    "";
+  return secret || (resolveClientId(credentials) === DEFAULT_CLIENT_ID ? DEFAULT_CLIENT_SECRET : "");
 }
 
 const freeCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
