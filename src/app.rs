@@ -1121,14 +1121,13 @@ impl Pui {
                         continue;
                     }
                     self.attention_request(&record);
-                    if record["type"] == "extension_ui_request"
-                        && record["method"] == "setStatus"
-                    {
+                    if record["type"] == "extension_ui_request" && record["method"] == "setStatus" {
                         let status_key = protocol::string(&record, "statusKey");
                         if status_key == "pui-ultracode" {
-                            if let Ok(value) =
-                                serde_json::from_str::<Value>(protocol::string(&record, "statusText"))
-                            {
+                            if let Ok(value) = serde_json::from_str::<Value>(protocol::string(
+                                &record,
+                                "statusText",
+                            )) {
                                 self.ultracode_ready = value["ready"] == true;
                                 self.ultracode = value["enabled"] == true;
                             }
