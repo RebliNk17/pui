@@ -360,7 +360,7 @@ impl Usage {
                     egui::vec2(track.width() * ratio.clamp(0.0, 1.0), 3.0),
                 ),
                 2,
-                level(&colors, ratio),
+                level(colors, ratio),
             );
         }
         if response.clicked() && !demo {
@@ -644,7 +644,7 @@ fn meter(ui: &mut egui::Ui, window: &UsageWindow, now: f64) {
         let ratio = (window.used / 100.0).clamp(0.0, 1.0) as f32;
         let mut fill = rect;
         fill.set_width(rect.width() * ratio);
-        ui.painter().rect_filled(fill, 2, level(&colors, ratio));
+        ui.painter().rect_filled(fill, 2, level(colors, ratio));
         if let Some(detail) = &window.detail {
             ui.label(RichText::new(detail).size(10.0).color(colors.dim));
         }
@@ -809,11 +809,13 @@ mod tests {
         assert_eq!(until(now + 2.0 * HOUR + 14.0 * MINUTE, now), "in 2h 14m");
         assert_eq!(until(now + 4.0 * DAY + 6.0 * HOUR, now), "in 4d 6h");
         assert_eq!(until(now - 1.0, now), "now · refresh");
-        let mut usage = Usage::default();
-        usage.providers = vec![ProviderUsage {
-            windows: vec![demo_window("5-hour session", 50.0, now_ms() - 1.0)],
+        let usage = Usage {
+            providers: vec![ProviderUsage {
+                windows: vec![demo_window("5-hour session", 50.0, now_ms() - 1.0)],
+                ..Default::default()
+            }],
             ..Default::default()
-        }];
+        };
         assert!(
             usage.reset_elapsed(),
             "an elapsed reset bypasses the refresh throttle"

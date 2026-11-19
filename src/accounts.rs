@@ -78,12 +78,11 @@ impl Registry {
         let mut seen = std::collections::HashSet::new();
         self.accounts.retain(|account| {
             let mut parts = account.id.split(SEPARATOR);
-            let ok = valid_segment(&account.base)
+            valid_segment(&account.base)
                 && parts.next() == Some(account.base.as_str())
                 && parts.next().is_some_and(valid_segment)
                 && parts.next().is_none()
-                && seen.insert(account.id.clone());
-            ok
+                && seen.insert(account.id.clone())
         });
         for account in &mut self.accounts {
             account.label = account.label.as_deref().and_then(clean_label);
