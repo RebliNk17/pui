@@ -242,5 +242,21 @@ fn drain(
     Err(format!("Bounded {label} is unavailable on this platform."))
 }
 
+pub(crate) fn worktree_list_porcelain(root: &Path) -> Result<String, String> {
+    let output = command(root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|e| format!("Failed to run git worktree list: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git worktree list failed.".into()
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 pub(crate) mod tests;

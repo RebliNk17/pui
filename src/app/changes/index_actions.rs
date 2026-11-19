@@ -26,6 +26,88 @@ pub(super) struct IndexActions {
     pub(super) restoring: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
+    pub(super) fn inline_index_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        file: &workspace::FileChange,
+        loading: bool,
+    ) {
+        let colors = theme::palette(ui.ctx());
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.spacing_mut().button_padding = egui::vec2(6.0, 0.0);
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for action in [Action::Discard, Action::Unstage, Action::Stage] {
+            if !workspace::index_action::available(&file.status, action) {
+                continue;
+            }
+            let enabled = self.index_writable
+                && !loading
+                && workspace.error.is_none()
+                && workspace.is_git
+                && self.index_actions.pending.is_none()
+                && self.index_actions.applying.is_none()
+                && self.index_actions.inspected.is_none()
+                && !egui::Popup::is_any_open(ui.ctx())
+                && ui.memory(|m| m.top_modal_layer().is_none());
+            let (label, fg, bg, border) = match action {
+                Action::Stage => (
+                    "+ Stage",
+                    colors.muted,
+                    colors.surface,
+                    colors.border,
+                ),
+                Action::Unstage => (
+                    "✓ Staged",
+                    colors.green,
+                    colors.green.gamma_multiply(0.10),
+                    colors.green.gamma_multiply(0.45),
+                ),
+                Action::Discard => (
+                    "Discard",
+                    colors.muted,
+                    colors.surface,
+                    colors.border,
+                ),
+            };
+            let response = ui
+                .push_id(
+                    (
+                        "git-index-action",
+                        &self.identity,
+                        &workspace.root,
+                        &file.path,
+                        &file.status,
+                        action.label(),
+                    ),
+                    |ui| {
+                        let btn = egui::Button::new(
+                            RichText::new(label).size(10.5).color(fg),
+                        )
+                        .fill(bg)
+                        .stroke(Stroke::new(1.0, border))
+                        .corner_radius(5)
+                        .min_size(Vec2::new(0.0, 22.0));
+                        ui.add_enabled(enabled, btn)
+                            .on_hover_text(action.label())
+                    },
+                )
+                .inner;
+            self.index_actions.controls.push(response.id);
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new(("index-action", action == Action::Stage, &file.path)),
+                    (response.id, response.rect, response.enabled()),
+                )
+            });
+            if response.clicked() {
+                self.prepare_index(ui.ctx(), workspace, file, action);
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn index_row(
         &mut self,
         ui: &mut egui::Ui,

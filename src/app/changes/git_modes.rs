@@ -39,26 +39,59 @@ impl Changes {
             ctx.input_mut(|i|i.events.retain(|e|!(matches!(e,egui::Event::Text(_)|egui::Event::Paste(_))||matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Backspace,modifiers,..}if modifiers.command||modifiers.ctrl)||pointer_owns&&matches!(e,egui::Event::Key{key:egui::Key::Enter|egui::Key::Space,..}))));
         }
     }
+    #[cfg(test)]
     pub(super) fn git_mode_controls(&mut self, ui: &mut egui::Ui) {
         self.mode_controls.clear();
         egui::TopBottomPanel::top("git-diff-modes")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)))
             .show_inside(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    self.git_mode_pills(ui);
+                });
+            });
+    }
+    pub(super) fn git_mode_pills(&mut self, ui: &mut egui::Ui) {
+        let colors = theme::palette(ui.ctx());
+        let active_bg = ui.visuals().selection.bg_fill;
+        egui::Frame::new()
+            .fill(colors.sidebar)
+            .stroke(Stroke::new(1.0, colors.border))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(2))
+            .show(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
                     for (mode, label) in [
                         (workspace::DiffMode::Combined, "Combined"),
                         (workspace::DiffMode::Staged, "Staged"),
                         (workspace::DiffMode::Unstaged, "Unstaged"),
                     ] {
+                        let active = self.git_mode == mode;
+                        let text = if active {
+                            RichText::new(label)
+                                .size(11.5)
+                                .strong()
+                                .color(egui::Color32::WHITE)
+                        } else {
+                            RichText::new(label).size(11.5).color(colors.muted)
+                        };
                         let response = ui
                             .push_id(("git-diff-mode", label), |ui| {
+                                let btn = egui::Button::new(text)
+                                    .fill(if active {
+                                        active_bg
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .stroke(Stroke::NONE)
+                                    .corner_radius(4)
+                                    .min_size(Vec2::new(0.0, 20.0));
                                 ui.add_enabled(
                                     !egui::Popup::is_any_open(ui.ctx())
                                         && ui.memory(|m| m.top_modal_layer().is_none()),
-                                    egui::Button::selectable(
-                                        self.git_mode == mode,
-                                        theme::small(ui, label),
-                                    ),
+                                    btn,
                                 )
                             })
                             .inner;

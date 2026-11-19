@@ -40,10 +40,13 @@ impl Changes {
         true
     }
     pub(super) fn create_branch_ui(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+        let sheet_open = self.repo_sheet == Some(RepoSheet::CreateBranch);
+        let modal_ok = self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none());
         let state = &mut self.branch_create;
         state.controls.clear();
         let open = std::mem::take(&mut state.reveal).then_some(true);
         egui::CollapsingHeader::new("Create or switch local branch…")
+            .default_open(sheet_open)
             .open(open)
             .show(ui, |ui| {
                 let enabled = self.index_writable
@@ -52,7 +55,7 @@ impl Changes {
                     && state.applying.is_none()
                     && state.review.is_none()
                     && !egui::Popup::is_any_open(ui.ctx())
-                    && ui.memory(|m| m.top_modal_layer().is_none());
+                    && modal_ok;
                 ui.add_enabled_ui(enabled, |ui| {
                     let toggle = ui.checkbox(
                         &mut state.switch,

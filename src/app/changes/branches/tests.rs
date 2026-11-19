@@ -226,8 +226,11 @@ fn popup_is_quiet_bounded_in_themes_zoom_and_narrow_with_truthful_selection() {
                 render(&ctx, &mut changes, width, vec![]);
             }
             let output = render(&ctx, &mut changes, width, vec![]);
-            assert!(text(&output, "Inspect names · prepare a reviewed switch"));
-            assert!(text(&output, "Current local: main"));
+            assert!(text(&output, "Branches"));
+            assert!(text(&output, "History"));
+            assert!(text(&output, "main"));
+            assert!(text(&output, "current"));
+            assert!(text(&output, "+ Create or switch branch…"));
             let rect = ctx.memory(|memory| memory.area_rect(popup_id())).unwrap();
             assert!(
                 rect.left() >= 0.0 && rect.right() <= ctx.screen_rect().right() + 1.0,
@@ -245,10 +248,7 @@ fn popup_is_quiet_bounded_in_themes_zoom_and_narrow_with_truthful_selection() {
                 Current::Local("main".into())
             );
             let output = render(&ctx, &mut changes, width, vec![]);
-            assert!(text(
-                &output,
-                "Highlighted local: topic/日本語 · not current"
-            ));
+            assert!(text(&output, "topic/日本語"));
             changes.branches.snapshot.as_mut().unwrap().current = Current::Detached;
             let output = render(&ctx, &mut changes, width, vec![]);
             assert!(text(&output, "detached HEAD · no local branch selected"));

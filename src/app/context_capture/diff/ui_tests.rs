@@ -286,7 +286,10 @@ fn inline_recorded_and_working_diff_use_actual_source_and_session_identity() {
                 .unwrap_or_else(|| panic!("Missing {needle}, recorded={recorded}"))
         };
         if !recorded {
-            let target = find(&output, "Current Git");
+            let target = ctx
+                .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-git")))
+                .expect("Missing changes-source-git")
+                .center();
             for pressed in [true, false] {
                 frame(
                     &ctx,

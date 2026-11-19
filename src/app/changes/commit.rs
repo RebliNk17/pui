@@ -32,6 +32,14 @@ pub(super) struct Commit {
     controls: Vec<egui::Id>,
 }
 impl Changes {
+    pub(super) fn commit_ready(&self) -> bool {
+        self.commit.pending.is_none()
+            && self.commit.applying.is_none()
+            && self.commit.snapshot.is_none()
+    }
+    pub(super) fn commit_has_status(&self) -> bool {
+        self.commit.applying.is_some() || self.commit.notice.is_some()
+    }
     pub(super) fn commit_control(
         &mut self,
         ui: &mut egui::Ui,
@@ -120,7 +128,7 @@ impl Changes {
             self.invalidate();
         }
     }
-    fn start_commit_inspection(&mut self, ctx: &egui::Context, root: PathBuf) {
+    pub(super) fn start_commit_inspection(&mut self, ctx: &egui::Context, root: PathBuf) {
         let Some(permit) = branches::permit(ctx) else {
             self.commit.notice = Some("Git busy; retry explicitly.".into());
             return;

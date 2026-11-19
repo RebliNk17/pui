@@ -26,10 +26,12 @@ impl Changes {
         if !workspace.is_git {
             return;
         }
+        let sheet_open = self.repo_sheet == Some(RepoSheet::Fetch);
+        let modal_ok = self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none());
         let s = &mut self.fetch;
         s.controls.clear();
-        egui::CollapsingHeader::new("Fetch remote branch…").show(ui,|ui|{
-            let enabled=self.index_writable&&s.update_pending.is_none()&&s.update_applying.is_none()&&s.update_review.is_none()&&s.pending.is_none()&&s.applying.is_none()&&s.review.is_none()&&!egui::Popup::is_any_open(ui.ctx())&&ui.memory(|m|m.top_modal_layer().is_none());
+        egui::CollapsingHeader::new("Fetch remote branch…").default_open(sheet_open).show(ui,|ui|{
+            let enabled=self.index_writable&&s.update_pending.is_none()&&s.update_applying.is_none()&&s.update_review.is_none()&&s.pending.is_none()&&s.applying.is_none()&&s.review.is_none()&&!egui::Popup::is_any_open(ui.ctx())&&modal_ok;
             ui.add_enabled_ui(enabled,|ui|{
                 for(label,value)in [("Remote name",&mut s.remote),("Branch name",&mut s.branch)]{ui.label(theme::small(ui,label));let r=ui.add(egui::TextEdit::singleline(value).char_limit(1000).desired_width(ui.available_width()));s.controls.push(r.id);}
                 let update=prompt_ui::button(ui,"Review local fast-forward…",prompt_ui::Button::Secondary,workspace::push::remote::valid_name(&s.remote)&&workspace::branches::create::valid_name(&s.branch));s.controls.push(update.id);

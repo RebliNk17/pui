@@ -15,6 +15,7 @@ pub enum Icon {
     Sort,
     Folder,
     ArrowUp,
+    ArrowDown,
     ArrowLeft,
     ArrowRight,
     Globe,
@@ -137,6 +138,11 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((0.0, -6.0), (-4.0, -2.0));
             line((0.0, -6.0), (4.0, -2.0));
         }
+        Icon::ArrowDown => {
+            line((0.0, -6.0), (0.0, 6.0));
+            line((0.0, 6.0), (-4.0, 2.0));
+            line((0.0, 6.0), (4.0, 2.0));
+        }
         Icon::ArrowLeft => {
             line((6.0, 0.0), (-6.0, 0.0));
             line((-6.0, 0.0), (-2.0, -4.0));
@@ -176,9 +182,18 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((3.0, -7.0), (0.0, -4.0));
         }
         Icon::Inspect => {
-            outline(-6.0, -6.0, 12.0, 12.0, 2);
+            p.add(egui::Shape::line(
+                vec![
+                    pt(-1.0, 6.0),
+                    pt(-6.0, 6.0),
+                    pt(-6.0, -6.0),
+                    pt(6.0, -6.0),
+                    pt(6.0, -1.0),
+                ],
+                s,
+            ));
             p.add(egui::Shape::closed_line(
-                vec![pt(-2.0, -2.0), pt(6.0, 1.0), pt(2.0, 3.0), pt(0.0, 7.0)],
+                vec![pt(0.0, 0.0), pt(6.5, 2.5), pt(3.2, 3.8), pt(1.8, 7.0)],
                 s,
             ));
         }

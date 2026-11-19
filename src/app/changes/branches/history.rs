@@ -222,8 +222,8 @@ impl History {
                 rect.left_center() + egui::vec2(24.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 &commit.oid[..8],
-                FontId::monospace(10.5),
-                colors.dim,
+                FontId::monospace(11.0),
+                colors.accent,
             );
             let mut job = egui::text::LayoutJob::simple_singleline(
                 if commit.subject.is_empty() {

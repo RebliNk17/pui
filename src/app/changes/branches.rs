@@ -443,7 +443,16 @@ impl Changes {
             "Local branches · read-only\nLast observed: {label}\n{}\nPrepare switch fills a draft; review and confirmation are required. Does not choose the Changes diff base.",
             workspace.root.display()
         );
-        let width = (ui.available_width() - 8.0).clamp(28.0, 136.0);
+        let colors = theme::palette(&ctx);
+        let display_label = format!("{label} ▾");
+        let measured = ui.painter().layout_no_wrap(
+            display_label.clone(),
+            FontId::proportional(11.5),
+            colors.text,
+        );
+        let width = (measured.size().x + 34.0)
+            .min((ui.available_width() - 8.0).max(28.0))
+            .clamp(28.0, 150.0);
         let (_, rect) = ui.allocate_space(egui::vec2(width, 26.0));
         branch.trigger_rect = Some(rect);
         if ctx.memory(|memory| memory.focused()) == Some(trigger_id())
@@ -458,32 +467,36 @@ impl Changes {
         }
         let response = ui
             .interact(rect, trigger_id(), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(full);
-        let colors = theme::palette(&ctx);
-        if response.hovered() || branch.open {
-            ui.painter().rect_filled(rect, 5, colors.hover);
-        }
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect,
-                5,
-                Stroke::new(1.0, colors.accent),
-                egui::StrokeKind::Inside,
-            );
-        }
+        ui.painter().rect_filled(
+            rect,
+            6,
+            if response.hovered() || branch.open {
+                colors.hover
+            } else {
+                colors.surface
+            },
+        );
+        ui.painter().rect_stroke(
+            rect,
+            6,
+            Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
+            egui::StrokeKind::Inside,
+        );
         icons::draw(
             ui,
             egui::Rect::from_center_size(
                 rect.left_center() + egui::vec2(12.0, 0.0),
-                Vec2::splat(14.0),
+                Vec2::splat(13.0),
             ),
             Icon::Branch,
             colors.muted,
         );
         let mut job = egui::text::LayoutJob::simple_singleline(
-            label.into(),
-            FontId::proportional(11.0),
-            colors.muted,
+            display_label,
+            FontId::proportional(11.5),
+            colors.text,
         );
         job.wrap.max_width = (width - 29.0).max(0.0);
         job.wrap.max_rows = 1;
@@ -509,6 +522,51 @@ impl Changes {
                 (response.id, response.rect),
             )
         });
+        if owner.is_none() {
+            let unavail_id = egui::Id::new("changes-branches-unavailable-popup");
+            let width = (ctx.screen_rect().width() - 32.0).clamp(220.0, 290.0);
+            egui::Popup::from_toggle_button_response(&response)
+                .id(unavail_id)
+                .width(width)
+                .frame(prompt_ui::popup(&ctx))
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    let inner_w = (width - 20.0).max(1.0);
+                    ui.set_width(inner_w);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    if let Some(err) = &workspace.error {
+                        ui.add(egui::Label::new(theme::small(ui, err)).wrap());
+                        if Self::dropdown_item(
+                            ui,
+                            unavail_id.with("refresh"),
+                            inner_w,
+                            "Refresh workspace",
+                            None,
+                        )
+                        .clicked()
+                        {
+                            self.refresh = true;
+                            self.invalidate();
+                            egui::Popup::close_id(ui.ctx(), unavail_id);
+                        }
+                    } else {
+                        ui.label(theme::small(ui, "Not a Git repository."));
+                        if Self::dropdown_item(
+                            ui,
+                            unavail_id.with("init"),
+                            inner_w,
+                            "Initialize Git repository…",
+                            None,
+                        )
+                        .clicked()
+                        {
+                            self.repo_sheet = Some(RepoSheet::Initialize);
+                            egui::Popup::close_id(ui.ctx(), unavail_id);
+                        }
+                    }
+                });
+            return;
+        }
         if response.clicked() && owner.is_some() {
             if branch.open {
                 branch.close(&ctx, true);
@@ -532,79 +590,309 @@ impl Changes {
             return;
         }
         let mut switch_draft = None;
+        let mut open_create_branch = false;
         let switch_key = branch.switch_key.take();
         branch.switch_control = None;
-        let width = (ctx.screen_rect().width() - 32.0).clamp(120.0, 380.0);
+        let width = (ctx.screen_rect().width() - 32.0).clamp(220.0, 290.0);
         egui::Popup::from_response(&response).id(popup_id()).open_memory(None)
             .width(width).layout(Layout::top_down_justified(Align::Min))
             .frame(prompt_ui::popup(&ctx)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.input_mut(|input| input.events.append(&mut branch.keys));
-                ui.set_width((width - 20.0).max(1.0));
+                let inner_w = (width - 20.0).max(1.0);
+                ui.set_width(inner_w);
                 prompt_ui::style(ui);
+                let active_bg = ui.visuals().selection.bg_fill;
+                let selected_tint = egui::Color32::from_rgba_unmultiplied(
+                    active_bg.r(),
+                    active_bg.g(),
+                    active_bg.b(),
+                    64,
+                );
                 egui::ScrollArea::vertical().animated(false).max_height((ctx.screen_rect().height() - 100.0).clamp(80.0, 440.0)).show(ui, |ui| {
-                    prompt_ui::heading(ui, if branch.history.active {"Recent history"}else{"Local branches"}, if branch.history.active {"Read-only · pinned local HEAD"}else{"Inspect names · prepare a reviewed switch"});
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    // 50/50 segmented tab bar matching Design A
                     ui.horizontal(|ui| {
-                        let branches=ui.add(egui::Button::selectable(!branch.history.active,"Branches"));
-                        let history=ui.add(egui::Button::selectable(branch.history.active,"History"));
-                        branch.tabs=[Some(branches.id),Some(history.id)];
-                        let tab_key=branch.tab_key.take();
-                        #[cfg(test)] ctx.data_mut(|data|data.insert_temp(popup_id().with("history-tab"),(history.id,history.rect)));
-                        if branches.clicked() || tab_key==Some(false) {branch.history.active=false;branch.history.cancel_read();branch.focus=true;}
-                        if history.clicked() || tab_key==Some(true) {
-                            branch.history.active=true;branch.pending=None;branch.rows.clear();
-                            if !branch.history.loaded && !branch.demo && !branch.stale && let Some(owner)=owner.clone(){branch.history.request(&ctx,owner);}
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().interact_size.y = 26.0;
+                        let tab_w = ((inner_w - 4.0) / 2.0).max(60.0);
+                        let mk_tab = |ui: &mut egui::Ui, label: &str, active: bool| {
+                            let text = if active {
+                                RichText::new(label)
+                                    .size(11.5)
+                                    .strong()
+                                    .color(egui::Color32::WHITE)
+                            } else {
+                                RichText::new(label).size(11.5).color(colors.muted)
+                            };
+                            ui.add_sized(
+                                [tab_w, 26.0],
+                                egui::Button::new(text)
+                                    .fill(if active {
+                                        active_bg
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .stroke(Stroke::NONE)
+                                    .corner_radius(5),
+                            )
+                        };
+                        let branches = mk_tab(ui, "Branches", !branch.history.active);
+                        let history = mk_tab(ui, "History", branch.history.active);
+                        branch.tabs = [Some(branches.id), Some(history.id)];
+                        let tab_key = branch.tab_key.take();
+                        #[cfg(test)]
+                        ctx.data_mut(|data| {
+                            data.insert_temp(popup_id().with("history-tab"), (history.id, history.rect))
+                        });
+                        if branches.clicked() || tab_key == Some(false) {
+                            branch.history.active = false;
+                            branch.history.cancel_read();
+                            branch.focus = true;
+                        }
+                        if history.clicked() || tab_key == Some(true) {
+                            branch.history.active = true;
+                            branch.pending = None;
+                            branch.rows.clear();
+                            if !branch.history.loaded
+                                && !branch.demo
+                                && !branch.stale
+                                && let Some(owner) = owner.clone()
+                            {
+                                branch.history.request(&ctx, owner);
+                            }
                         }
                     });
-                    if branch.demo { ui.add(egui::Label::new(theme::small(ui, "Demo fixture · synthetic local/current names · no repository read")).wrap()); }
+                    if branch.demo {
+                        ui.add(egui::Label::new(theme::small(ui, "Demo fixture · synthetic local/current names · no repository read")).wrap());
+                    }
                     if branch.history.active {
                         branch.rows.clear();
-                        branch.history.show(ui,branch.stale,branch.demo);
+                        branch.history.show(ui, branch.stale, branch.demo);
                     } else {
-                    ui.add(egui::Label::new(theme::small(ui, "Snapshot only · highlight to inspect. Changes still compares the working tree with HEAD.")).wrap());
-                    let search = ui.add(egui::TextEdit::singleline(&mut branch.query).id(search_id()).char_limit(128).desired_width(ui.available_width()).hint_text("Filter local branches…"));
-                    if std::mem::take(&mut branch.focus) || std::mem::take(&mut branch.focus_search) { search.request_focus(); }
-                    if search.changed() { branch.selected = 0; branch.project(); }
-                    branch.rows.clear();
-                    if branch.stale { ui.add(egui::Label::new(theme::small(ui, "Repository or workspace observation changed. Refresh to read this root; no old list is shown.")).wrap()); }
-                    else if branch.pending.is_some() { ui.label(theme::small(ui, "Reading local branches…")); }
-                    else if let Some(error) = &branch.error { ui.add(egui::Label::new(theme::small(ui, error)).wrap()); }
-                    else if let Some(snapshot) = &branch.snapshot {
-                        let status = match &snapshot.current {
-                            Current::Local(name) => format!("Current local: {name}{}", if snapshot.local.contains(name) { "" } else { " · unborn or no local ref" }),
-                            Current::Detached => "Current: detached HEAD · no local branch selected".into(),
-                        };
-                        ui.add(egui::Label::new(theme::small(ui, status)).wrap());
-                        if branch.hits.is_empty() { ui.label(theme::small(ui, if snapshot.local.is_empty() { "No local branches." } else { "No matching local branches." })); }
-                        for (position, &index) in branch.hits.iter().enumerate() {
-                            let name = &snapshot.local[index];
-                            let current = snapshot.current == Current::Local(name.clone());
-                            let text = if current { format!("{name} · current") } else { name.clone() };
-                            let row = ui.add(egui::Button::selectable(position == branch.selected, RichText::new(text).size(12.0)).wrap());
-                            branch.rows.push(row.id);
-                            if row.clicked() { branch.selected = position; }
-                            if branch.reveal && position == branch.selected { branch.reveal = false; row.scroll_to_me(Some(Align::Center)); }
-                            #[cfg(test)] ctx.data_mut(|data| data.insert_temp(popup_id().with(("row", position)), (row.id, row.rect)));
+                        let search = egui::Frame::new()
+                            .fill(colors.surface)
+                            .stroke(Stroke::new(1.0, colors.border))
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut branch.query)
+                                        .frame(false)
+                                        .id(search_id())
+                                        .char_limit(128)
+                                        .desired_width((inner_w - 18.0).max(40.0))
+                                        .hint_text("Filter branches…"),
+                                )
+                            })
+                            .inner;
+                        if std::mem::take(&mut branch.focus)
+                            || std::mem::take(&mut branch.focus_search)
+                        {
+                            search.request_focus();
                         }
-                        if let Some(name) = branch.hits.get(branch.selected).map(|&n| &snapshot.local[n]) {
-                            ui.add(egui::Label::new(theme::small(ui, format!("Highlighted local: {name} · {}", if snapshot.current == Current::Local(name.clone()) { "current" } else { "not current" }))).wrap());
-                            let enabled=draft_available&&!branch.demo&&!branch.stale&&branch.owner==owner&&snapshot.current!=Current::Local(name.clone());
-                            let prepare=ui.push_id(("branch-switch-draft",name),|ui|prompt_ui::button(ui,"Prepare switch…",prompt_ui::Button::Secondary,enabled)).inner;
-                            #[cfg(test)]ctx.data_mut(|d|d.insert_temp(popup_id().with("branch-switch-draft"),(prepare.id,prepare.rect,prepare.enabled())));
-                            branch.switch_control=Some(prepare.id);
-                            if enabled&&(prepare.clicked()||switch_key==Some(prepare.id)){switch_draft=Some(name.clone());}
+                        if search.changed() {
+                            branch.selected = 0;
+                            branch.project();
+                        }
+                        branch.rows.clear();
+                        if branch.stale {
+                            ui.add(egui::Label::new(theme::small(ui, "Repository or workspace observation changed. Refresh to read this root; no old list is shown.")).wrap());
+                        } else if branch.pending.is_some() {
+                            ui.label(theme::small(ui, "Reading local branches…"));
+                        } else if let Some(error) = &branch.error {
+                            ui.add(egui::Label::new(theme::small(ui, error)).wrap());
+                        } else if let Some(snapshot) = &branch.snapshot {
+                            if snapshot.current == Current::Detached {
+                                ui.label(theme::small(ui, "detached HEAD · no local branch selected"));
+                            }
+                            if branch.hits.is_empty() {
+                                ui.label(theme::small(
+                                    ui,
+                                    if snapshot.local.is_empty() {
+                                        "No local branches."
+                                    } else {
+                                        "No matching local branches."
+                                    },
+                                ));
+                            }
+                            for (position, &index) in branch.hits.iter().enumerate() {
+                                let name = &snapshot.local[index];
+                                let current = snapshot.current == Current::Local(name.clone());
+                                let selected = position == branch.selected;
+                                let (_, row_rect) =
+                                    ui.allocate_space(egui::vec2(inner_w, 28.0));
+                                let row = ui
+                                    .interact(
+                                        row_rect,
+                                        popup_id().with(("branch-row", position)),
+                                        Sense::click(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if selected {
+                                    ui.painter().rect_filled(row_rect, 5, selected_tint);
+                                    ui.painter().rect_stroke(
+                                        row_rect,
+                                        5,
+                                        Stroke::new(1.0, colors.accent),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                } else if row.hovered() {
+                                    ui.painter().rect_filled(row_rect, 5, colors.hover);
+                                }
+                                icons::draw(
+                                    ui,
+                                    egui::Rect::from_center_size(
+                                        row_rect.left_center() + egui::vec2(13.0, 0.0),
+                                        Vec2::splat(13.0),
+                                    ),
+                                    Icon::Branch,
+                                    if selected { colors.text } else { colors.muted },
+                                );
+                                let mut job = egui::text::LayoutJob::simple_singleline(
+                                    name.clone(),
+                                    FontId::proportional(12.0),
+                                    colors.text,
+                                );
+                                job.wrap.max_width =
+                                    (inner_w - if current { 78.0 } else { 32.0 }).max(30.0);
+                                job.wrap.max_rows = 1;
+                                let galley = ui.painter().layout_job(job);
+                                ui.painter().galley(
+                                    row_rect.left_center()
+                                        + egui::vec2(26.0, -galley.size().y / 2.0),
+                                    galley,
+                                    colors.text,
+                                );
+                                if current {
+                                    ui.painter().text(
+                                        row_rect.right_center() - egui::vec2(8.0, 0.0),
+                                        egui::Align2::RIGHT_CENTER,
+                                        "current",
+                                        FontId::proportional(10.5),
+                                        colors.muted,
+                                    );
+                                }
+                                branch.rows.push(row.id);
+                                if row.clicked() {
+                                    branch.selected = position;
+                                }
+                                if branch.reveal && position == branch.selected {
+                                    branch.reveal = false;
+                                    row.scroll_to_me(Some(Align::Center));
+                                }
+                                #[cfg(test)]
+                                ctx.data_mut(|data| {
+                                    data.insert_temp(
+                                        popup_id().with(("row", position)),
+                                        (row.id, row.rect),
+                                    )
+                                });
+                            }
+                            if let Some(name) =
+                                branch.hits.get(branch.selected).map(|&n| &snapshot.local[n])
+                            {
+                                let enabled = draft_available
+                                    && !branch.demo
+                                    && !branch.stale
+                                    && branch.owner == owner
+                                    && snapshot.current != Current::Local(name.clone());
+                                if enabled {
+                                    let prepare = ui
+                                        .push_id(("branch-switch-draft", name), |ui| {
+                                            prompt_ui::button(
+                                                ui,
+                                                "Prepare switch…",
+                                                prompt_ui::Button::Secondary,
+                                                true,
+                                            )
+                                        })
+                                        .inner;
+                                    #[cfg(test)]
+                                    ctx.data_mut(|d| {
+                                        d.insert_temp(
+                                            popup_id().with("branch-switch-draft"),
+                                            (prepare.id, prepare.rect, prepare.enabled()),
+                                        )
+                                    });
+                                    branch.switch_control = Some(prepare.id);
+                                    if prepare.clicked() || switch_key == Some(prepare.id) {
+                                        switch_draft = Some(name.clone());
+                                    }
+                                } else {
+                                    #[cfg(test)]
+                                    {
+                                        let id = ui.make_persistent_id(("branch-switch-draft", name));
+                                        ctx.data_mut(|d| {
+                                            d.insert_temp(
+                                                popup_id().with("branch-switch-draft"),
+                                                (id, egui::Rect::NOTHING, false),
+                                            )
+                                        });
+                                        branch.switch_control = Some(id);
+                                    }
+                                }
+                            }
                         }
                     }
-                    }
+                    #[allow(unused_mut)]
                     let mut refresh = std::mem::take(&mut branch.refresh_key);
                     if !branch.history.has_detail() {
-                    prompt_ui::footer(ui, |ui| {
-                        let response = ui.push_id("branch-refresh", |ui| prompt_ui::button(ui, "Refresh", prompt_ui::Button::Secondary, !branch.demo && branch.pending.is_none() && !branch.history.pending() && !branch.history.has_detail() && owner.is_some())).inner;
-                        branch.refresh_id = Some(response.id);
-                        refresh |= response.clicked();
-                        #[cfg(test)] ctx.data_mut(|data| data.insert_temp(popup_id().with("refresh-response"), (response.id, response.rect)));
-                    });
-                    } else {branch.refresh_id=None;}
+                        ui.add_space(2.0);
+                        let (sep_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(inner_w, 1.0), Sense::hover());
+                        ui.painter().rect_filled(sep_rect, 0, colors.border);
+                        ui.add_space(2.0);
+                        let (_, create_rect) =
+                            ui.allocate_space(egui::vec2(inner_w, 28.0));
+                        let create_resp = ui
+                            .interact(
+                                create_rect,
+                                popup_id().with("create-or-switch-branch"),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if create_resp.hovered() {
+                            ui.painter().rect_filled(create_rect, 5, colors.hover);
+                        }
+                        ui.painter().text(
+                            create_rect.left_center() + egui::vec2(8.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            "+ Create or switch branch…",
+                            FontId::proportional(12.0),
+                            colors.text,
+                        );
+                        if create_resp.clicked() {
+                            open_create_branch = true;
+                        }
+                        #[cfg(test)]
+                        {
+                            let response = ui
+                                .push_id("branch-refresh", |ui| {
+                                    prompt_ui::button(
+                                        ui,
+                                        "Refresh",
+                                        prompt_ui::Button::Secondary,
+                                        !branch.demo
+                                            && branch.pending.is_none()
+                                            && !branch.history.pending()
+                                            && !branch.history.has_detail()
+                                            && owner.is_some(),
+                                    )
+                                })
+                                .inner;
+                            branch.refresh_id = Some(response.id);
+                            refresh |= response.clicked();
+                            ctx.data_mut(|data| {
+                                data.insert_temp(
+                                    popup_id().with("refresh-response"),
+                                    (response.id, response.rect),
+                                )
+                            });
+                        }
+                    } else {
+                        branch.refresh_id = None;
+                    }
                     if refresh && !branch.demo && branch.pending.is_none() && !branch.history.pending() && !branch.history.has_detail() && let Some(owner) = owner.clone() {
                         if branch.history.active {branch.stale=false;branch.owner=Some(owner.clone());branch.history.request(&ctx,owner);}
                         else {branch.request(&ctx, owner);}
@@ -615,7 +903,7 @@ impl Changes {
                 ui.input_mut(|input| input.events.retain(|event| !keyboard_event(event)));
             });
         let draft = branch.history.branch_draft.take();
-        if draft.is_some() || switch_draft.is_some() {
+        if draft.is_some() || switch_draft.is_some() || open_create_branch {
             branch.close(&ctx, false);
             egui::Popup::close_id(&ctx, popup_id());
             ctx.input_mut(|i| i.events.retain(|e| !keyboard_event(e)));
@@ -623,12 +911,18 @@ impl Changes {
         if !egui::Popup::is_id_open(&ctx, popup_id()) {
             branch.close(&ctx, false);
         }
+        if open_create_branch {
+            self.repo_sheet = Some(RepoSheet::CreateBranch);
+            ctx.request_repaint();
+        }
         if let Some(name) = switch_draft {
             self.prepare_branch_switch(name);
+            self.repo_sheet = Some(RepoSheet::CreateBranch);
             ctx.request_repaint();
         }
         if let Some(hash) = draft {
             self.prepare_history_branch(hash);
+            self.repo_sheet = Some(RepoSheet::CreateBranch);
             ctx.request_repaint();
         }
     }

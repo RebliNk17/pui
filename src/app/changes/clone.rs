@@ -27,9 +27,12 @@ impl Changes {
             && s.applying.is_none()
             && s.review.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
-            && ui.memory(|m| m.top_modal_layer().is_none());
+            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
+        let sheet_open = self.repo_sheet == Some(RepoSheet::Clone);
         ui.add_enabled_ui(enabled, |ui| {
-            egui::CollapsingHeader::new("Clone repository…").show(ui, |ui| {
+            egui::CollapsingHeader::new("Clone repository…")
+                .default_open(sheet_open)
+                .show(ui, |ui| {
                 for (label, value, limit) in [
                     ("Repository URL (no embedded credentials)", &mut s.url, 8192),
                     (

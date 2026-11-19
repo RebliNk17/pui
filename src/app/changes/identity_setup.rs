@@ -25,16 +25,20 @@ impl Changes {
         if !workspace.is_git {
             return;
         }
+        let sheet_open = self.repo_sheet == Some(RepoSheet::Identity);
+        let modal_ok = self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none());
         let s = &mut self.identity_setup;
         s.controls.clear();
-        egui::CollapsingHeader::new("Set repository commit identity…").show(ui, |ui| {
+        egui::CollapsingHeader::new("Set repository commit identity…")
+            .default_open(sheet_open)
+            .show(ui, |ui| {
             let enabled = self.index_writable
                 && s.loading.is_none()
                 && s.pending.is_none()
                 && s.applying.is_none()
                 && s.review.is_none()
                 && !egui::Popup::is_any_open(ui.ctx())
-                && ui.memory(|m| m.top_modal_layer().is_none());
+                && modal_ok;
             ui.add_enabled_ui(enabled, |ui| {
                 let load = prompt_ui::button(
                     ui,
