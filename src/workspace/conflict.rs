@@ -70,6 +70,14 @@ fn entries(bytes: &[u8], path: &str) -> Result<[Option<(String, String)>; 3], St
     Ok(result)
 }
 pub(crate) fn inspect(root: &Path, path: &str, cancel: &AtomicBool) -> Result<Review, String> {
+    inspect_at(root, path, cancel, Instant::now() + DEADLINE)
+}
+pub(super) fn inspect_at(
+    root: &Path,
+    path: &str,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<Review, String> {
     if !root.is_absolute()
         || path.is_empty()
         || path.len() > 4096
@@ -81,7 +89,6 @@ pub(crate) fn inspect(root: &Path, path: &str, cancel: &AtomicBool) -> Result<Re
     {
         return Err("Invalid literal conflict path.".into());
     }
-    let deadline = Instant::now() + DEADLINE;
     if run(
         root,
         &["rev-parse", "--show-toplevel"],

@@ -33,7 +33,7 @@ impl Changes {
         file: &workspace::FileChange,
         loading: bool,
     ) {
-        self.conflict_row(ui, workspace, file);
+        self.conflict_row(ui, workspace, file, loading);
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::small(ui, format!("Index/worktree: {}", file.status)));
             for action in [Action::Stage, Action::Unstage, Action::Discard] {

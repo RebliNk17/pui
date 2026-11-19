@@ -110,7 +110,7 @@ impl Changes {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
         self.commit_inputs(ctx, visible);
-        self.conflict_inputs(visible);
+        self.conflict_inputs(ctx, visible);
         self.initialize_inputs(ctx, visible);
         self.clone_inputs(ctx, visible);
         self.fetch_inputs(ctx, visible);
@@ -225,6 +225,7 @@ impl Changes {
         {
             document.2.stale_comments();
         }
+        self.conflict.begin_rows();
         self.bind_inline_revision(ctx, outputs, revision);
         self.bind_inline_git(workspace);
         self.poll_git_files(ctx, workspace);

@@ -545,6 +545,7 @@ pub(crate) fn restore(
 ) -> Result<(), String> {
     recovery::apply(recovery::inspect(root, path, recovery, cancel)?, cancel)
 }
+pub(crate) mod conflict_resolution;
 mod discard;
 pub(crate) mod hunks;
 pub(crate) mod recovery;
