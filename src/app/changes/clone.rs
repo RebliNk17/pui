@@ -48,13 +48,8 @@ impl Changes {
         if std::thread::Builder::new()
             .name("pui-clone-review".into())
             .spawn(move || {
-                let result = workspace::clone::inspect(
-                    &parent,
-                    &name,
-                    &url,
-                    branch.as_deref(),
-                    &cancel,
-                );
+                let result =
+                    workspace::clone::inspect(&parent, &name, &url, branch.as_deref(), &cancel);
                 drop(permit);
                 if !cancel.load(Ordering::Acquire) {
                     let _ = tx.send(result);
@@ -101,10 +96,11 @@ impl Changes {
                     total_w,
                 );
                 self.clone.controls.push(url_resp.id);
-                if url_resp.changed() && self.clone.name.is_empty()
-                    && let Some(suggested) = suggest_folder_name(&self.clone.url)
-                {
-                    self.clone.name = suggested;
+                let derived_name = suggest_folder_name(&self.clone.url);
+                if let Some(name) = &derived_name {
+                    self.clone.name = name.clone();
+                } else {
+                    self.clone.name.clear();
                 }
                 ui.add_space(10.0);
                 Self::qm_field_label(ui, "Destination folder", Some("Uses remote default branch"));
@@ -182,18 +178,17 @@ impl Changes {
                         self.clone.parent = Some(picked);
                     }
                 });
-                ui.add_space(10.0);
-                Self::qm_field_label(ui, "Folder name", None);
-                ui.add_space(4.0);
-                let name_resp = Self::qm_text_input(
-                    ui,
-                    &mut self.clone.name,
-                    "repo",
-                    255,
-                    false,
-                    total_w,
-                );
-                self.clone.controls.push(name_resp.id);
+                if let Some(name) = &derived_name {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Clones into {}",
+                            current_parent.join(name).display()
+                        ))
+                        .size(11.0)
+                        .color(colors.muted),
+                    );
+                }
             });
             if let Some(notice) = &self.clone.notice {
                 ui.add_space(4.0);
@@ -204,14 +199,14 @@ impl Changes {
                 && workspace::push::remote::valid_url(&self.clone.url)
                 && workspace::clone::valid_dest_name(&self.clone.name);
             prompt_ui::footer(ui, |ui| {
-                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
-                    cancel_sheet = true;
-                }
                 let review_btn =
                     prompt_ui::button(ui, "Review clone…", prompt_ui::Button::Primary, valid);
                 self.clone.controls.push(review_btn.id);
                 if review_btn.clicked() {
                     submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
                 }
             });
             if cancel_sheet {
@@ -226,7 +221,11 @@ impl Changes {
         ui.add_enabled_ui(enabled, |ui| {
             egui::CollapsingHeader::new("Clone repository…").show(ui, |ui| {
                 for (label, value, limit) in [
-                    ("Repository URL (no embedded credentials)", &mut self.clone.url, 8192),
+                    (
+                        "Repository URL (no embedded credentials)",
+                        &mut self.clone.url,
+                        8192,
+                    ),
                     (
                         "Destination folder name (inside current project)",
                         &mut self.clone.name,

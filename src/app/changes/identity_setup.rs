@@ -220,7 +220,14 @@ impl Changes {
                     ui.painter().rect_stroke(
                         rect,
                         7,
-                        Stroke::new(1.0, if selected { colors.accent } else { colors.border }),
+                        Stroke::new(
+                            1.0,
+                            if selected {
+                                colors.accent
+                            } else {
+                                colors.border
+                            },
+                        ),
                         egui::StrokeKind::Inside,
                     );
                     let dot_center = rect.left_center() + egui::vec2(17.0, 0.0);
@@ -229,8 +236,11 @@ impl Changes {
                         ui.painter()
                             .circle_filled(dot_center, 2.5, egui::Color32::WHITE);
                     } else {
-                        ui.painter()
-                            .circle_stroke(dot_center, 7.0, Stroke::new(1.5, colors.border));
+                        ui.painter().circle_stroke(
+                            dot_center,
+                            7.0,
+                            Stroke::new(1.5, colors.border),
+                        );
                     }
                     ui.painter().text(
                         egui::pos2(rect.left() + 33.0, rect.top() + 14.0),
@@ -263,18 +273,14 @@ impl Changes {
                     &self.identity_setup.email,
                 );
             prompt_ui::footer(ui, |ui| {
-                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
-                    cancel_sheet = true;
-                }
-                let review_btn = prompt_ui::button(
-                    ui,
-                    "Review identity…",
-                    prompt_ui::Button::Primary,
-                    valid,
-                );
+                let review_btn =
+                    prompt_ui::button(ui, "Review identity…", prompt_ui::Button::Primary, valid);
                 self.identity_setup.controls.push(review_btn.id);
                 if review_btn.clicked() {
                     submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
                 }
             });
             if cancel_sheet {
@@ -287,60 +293,59 @@ impl Changes {
         self.identity_setup.controls.clear();
         let mut do_load = false;
         let mut do_review = false;
-        egui::CollapsingHeader::new("Set repository commit identity…")
-            .show(ui, |ui| {
-                ui.add_enabled_ui(enabled, |ui| {
-                    let load = prompt_ui::button(
-                        ui,
-                        "Load current local identity",
-                        prompt_ui::Button::Secondary,
-                        true,
+        egui::CollapsingHeader::new("Set repository commit identity…").show(ui, |ui| {
+            ui.add_enabled_ui(enabled, |ui| {
+                let load = prompt_ui::button(
+                    ui,
+                    "Load current local identity",
+                    prompt_ui::Button::Secondary,
+                    true,
+                );
+                self.identity_setup.controls.push(load.id);
+                if load.clicked() {
+                    do_load = true;
+                    return;
+                }
+                for (label, value) in [
+                    ("Name", &mut self.identity_setup.name),
+                    ("Email", &mut self.identity_setup.email),
+                ] {
+                    ui.label(theme::small(ui, label));
+                    let input = ui.add(
+                        egui::TextEdit::singleline(value)
+                            .char_limit(512)
+                            .desired_width(ui.available_width()),
                     );
-                    self.identity_setup.controls.push(load.id);
-                    if load.clicked() {
-                        do_load = true;
-                        return;
-                    }
-                    for (label, value) in [
-                        ("Name", &mut self.identity_setup.name),
-                        ("Email", &mut self.identity_setup.email),
-                    ] {
-                        ui.label(theme::small(ui, label));
-                        let input = ui.add(
-                            egui::TextEdit::singleline(value)
-                                .char_limit(512)
-                                .desired_width(ui.available_width()),
-                        );
-                        self.identity_setup.controls.push(input.id);
-                    }
-                    let edit = ui.checkbox(
-                        &mut self.identity_setup.edit_local,
-                        "Edit existing direct-local identity (review old → new)",
-                    );
-                    self.identity_setup.controls.push(edit.id);
-                    let toggle = ui.checkbox(
-                        &mut self.identity_setup.override_inherited,
-                        "Override inherited identity locally (never replace local values)",
-                    );
-                    self.identity_setup.controls.push(toggle.id);
-                    let response = prompt_ui::button(
-                        ui,
-                        "Review local identity…",
-                        prompt_ui::Button::Secondary,
-                        workspace::commit::identity_setup::valid(
-                            &self.identity_setup.name,
-                            &self.identity_setup.email,
-                        ),
-                    );
-                    self.identity_setup.controls.push(response.id);
-                    if response.clicked() {
-                        do_review = true;
-                    }
-                });
-                if let Some(notice) = &self.identity_setup.notice {
-                    ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
+                    self.identity_setup.controls.push(input.id);
+                }
+                let edit = ui.checkbox(
+                    &mut self.identity_setup.edit_local,
+                    "Edit existing direct-local identity (review old → new)",
+                );
+                self.identity_setup.controls.push(edit.id);
+                let toggle = ui.checkbox(
+                    &mut self.identity_setup.override_inherited,
+                    "Override inherited identity locally (never replace local values)",
+                );
+                self.identity_setup.controls.push(toggle.id);
+                let response = prompt_ui::button(
+                    ui,
+                    "Review local identity…",
+                    prompt_ui::Button::Secondary,
+                    workspace::commit::identity_setup::valid(
+                        &self.identity_setup.name,
+                        &self.identity_setup.email,
+                    ),
+                );
+                self.identity_setup.controls.push(response.id);
+                if response.clicked() {
+                    do_review = true;
                 }
             });
+            if let Some(notice) = &self.identity_setup.notice {
+                ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
+            }
+        });
         if do_load {
             self.start_identity_load(ui.ctx(), workspace.root.clone());
         } else if do_review {

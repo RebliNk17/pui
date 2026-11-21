@@ -207,6 +207,12 @@ fn spawn_read<T: Send + 'static>(
     }
     request
 }
+pub(in crate::app) fn workspace_worker_busy(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<Arc<AtomicBool>>(egui::Id::new("git-workspace-worker"))
+            .is_some_and(|gate| gate.load(Ordering::Acquire))
+    })
+}
 pub(in crate::app) fn start_workspace(ctx: &egui::Context, root: PathBuf) -> Request<Workspace> {
     let Some(permit) = named_permit(ctx, "git-workspace-worker") else {
         let (tx, rx) = mpsc::channel();

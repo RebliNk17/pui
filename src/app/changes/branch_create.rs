@@ -17,7 +17,8 @@ pub(super) struct Create {
     branches_error: Option<String>,
     local_branches: Vec<String>,
     current_branch: Option<String>,
-    branches_rx: Option<workspace::read_only::Request<Result<workspace::branches::Snapshot, String>>>,
+    branches_rx:
+        Option<workspace::read_only::Request<Result<workspace::branches::Snapshot, String>>>,
     pending:
         Option<workspace::read_only::Request<Result<workspace::branches::create::Review, String>>>,
     review: Option<workspace::branches::create::Review>,
@@ -338,9 +339,8 @@ impl Changes {
                                                         == Some(branch_name.as_str());
                                                     let is_sel =
                                                         self.branch_create.name == branch_name;
-                                                    let (_, row_rect) = ui.allocate_space(
-                                                        egui::vec2(inner_w, 28.0),
-                                                    );
+                                                    let (_, row_rect) = ui
+                                                        .allocate_space(egui::vec2(inner_w, 28.0));
                                                     let row_resp = ui
                                                         .interact(
                                                             row_rect,
@@ -424,11 +424,9 @@ impl Changes {
                         .show(ui, |ui| {
                             ui.set_width((total_w - 20.0).max(60.0));
                             ui.label(
-                                RichText::new(
-                                    "Switching requires a clean working tree and index.",
-                                )
-                                .size(11.0)
-                                .color(colors.muted),
+                                RichText::new("Switching requires a clean working tree and index.")
+                                    .size(11.0)
+                                    .color(colors.muted),
                             );
                         });
                 }
@@ -444,9 +442,6 @@ impl Changes {
                     || self.branch_create.start.is_empty()
                     || workspace::branches::create::valid_start(&self.branch_create.start));
             prompt_ui::footer(ui, |ui| {
-                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
-                    cancel_sheet = true;
-                }
                 let review_btn = prompt_ui::button(
                     ui,
                     if self.branch_create.switch {
@@ -460,6 +455,9 @@ impl Changes {
                 self.branch_create.controls.push(review_btn.id);
                 if review_btn.clicked() {
                     submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
                 }
             });
             if cancel_sheet {

@@ -520,7 +520,10 @@ impl Changes {
                         ));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui
-                                .add(egui::Button::new(theme::small(ui, "Session root")).frame(false))
+                                .add(
+                                    egui::Button::new(theme::small(ui, "Session root"))
+                                        .frame(false),
+                                )
                                 .clicked()
                             {
                                 self.worktrees.clear_selection();
@@ -729,13 +732,11 @@ impl Changes {
         };
         let label = format!("{name} ▾");
         let popup_id = egui::Id::new("changes-worktrees-popup");
-        let open = self.worktrees.active_path.is_some()
-            || egui::Popup::is_id_open(ui.ctx(), popup_id);
-        let galley = ui.painter().layout_no_wrap(
-            label.clone(),
-            FontId::proportional(11.5),
-            colors.text,
-        );
+        let open =
+            self.worktrees.active_path.is_some() || egui::Popup::is_id_open(ui.ctx(), popup_id);
+        let galley =
+            ui.painter()
+                .layout_no_wrap(label.clone(), FontId::proportional(11.5), colors.text);
         let pill_w = (galley.size().x + 34.0).clamp(64.0, 140.0);
         let (_, rect) = ui.allocate_space(egui::vec2(pill_w, 26.0));
         let resp = ui
@@ -830,16 +831,11 @@ impl Changes {
                         .active_path
                         .as_ref()
                         .is_some_and(|p| p == &entry.path)
-                        || (self.worktrees.active_path.is_none()
-                            && entry.path == workspace.root);
+                        || (self.worktrees.active_path.is_none() && entry.path == workspace.root);
                     let (_, row_rect) = ui.allocate_space(egui::vec2(inner_w, 28.0));
                     let row_resp = ui
                         .add_enabled_ui(!entry.bare, |ui| {
-                            ui.interact(
-                                row_rect,
-                                popup_id.with(&entry.path),
-                                Sense::click(),
-                            )
+                            ui.interact(row_rect, popup_id.with(&entry.path), Sense::click())
                         })
                         .inner
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -976,7 +972,12 @@ impl Changes {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     for (src, icon, tip, _test_id) in [
-                        (Source::Git, Icon::Branch, "Current Git", "changes-source-git"),
+                        (
+                            Source::Git,
+                            Icon::Branch,
+                            "Current Git",
+                            "changes-source-git",
+                        ),
                         (
                             Source::Recorded,
                             Icon::Clock,
@@ -1019,15 +1020,10 @@ impl Changes {
             });
     }
 
-    fn git_action_icons(
-        &mut self,
-        ui: &mut egui::Ui,
-        workspace: &Workspace,
-        loading: bool,
-    ) {
+    fn git_action_icons(&mut self, ui: &mut egui::Ui, workspace: &Workspace, loading: bool) {
         let colors = theme::palette(ui.ctx());
-        let modal_clear = !egui::Popup::is_any_open(ui.ctx())
-            && ui.memory(|m| m.top_modal_layer().is_none());
+        let modal_clear =
+            !egui::Popup::is_any_open(ui.ctx()) && ui.memory(|m| m.top_modal_layer().is_none());
         let width = (ui.ctx().screen_rect().width() - 32.0).clamp(220.0, 260.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
@@ -1118,8 +1114,7 @@ impl Changes {
                 });
 
             let fetch_id = egui::Id::new("changes-fetch-popup");
-            let fetch_resp =
-                Self::boxed_icon_button(ui, Icon::ArrowDown, "Fetch remote branch…");
+            let fetch_resp = Self::boxed_icon_button(ui, Icon::ArrowDown, "Fetch remote branch…");
             egui::Popup::from_toggle_button_response(&fetch_resp)
                 .id(fetch_id)
                 .width(width)
@@ -1208,12 +1203,7 @@ impl Changes {
     pub(super) fn qm_field_label(ui: &mut egui::Ui, label: &str, hint: Option<&str>) {
         let colors = theme::palette(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(label)
-                    .size(11.5)
-                    .strong()
-                    .color(colors.text),
-            );
+            ui.label(RichText::new(label).size(11.5).strong().color(colors.text));
             if let Some(hint) = hint {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(hint).size(11.0).color(colors.dim));
@@ -1273,12 +1263,7 @@ impl Changes {
         ui.add_space(4.0);
     }
 
-    fn repo_sheet_dialog(
-        &mut self,
-        ctx: &egui::Context,
-        workspace: &Workspace,
-        loading: bool,
-    ) {
+    fn repo_sheet_dialog(&mut self, ctx: &egui::Context, workspace: &Workspace, loading: bool) {
         let Some(sheet) = self.repo_sheet else {
             return;
         };
@@ -1286,7 +1271,7 @@ impl Changes {
             RepoSheet::Initialize => (
                 "Initialize Git repository",
                 "Creates a local .git directory without staging or publishing files.",
-                false,
+                true,
             ),
             RepoSheet::Clone => (
                 "Clone repository",
@@ -1341,20 +1326,12 @@ impl Changes {
                 });
             }
         });
-        if close
-            || response.should_close()
-            || ctx.input(|i| i.key_pressed(egui::Key::Escape))
-        {
+        if close || response.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.repo_sheet = None;
         }
     }
 
-    fn active_git_notices(
-        &mut self,
-        ui: &mut egui::Ui,
-        workspace: &Workspace,
-        loading: bool,
-    ) {
+    fn active_git_notices(&mut self, ui: &mut egui::Ui, workspace: &Workspace, loading: bool) {
         if self.commit_has_status() {
             egui::TopBottomPanel::top("changes-commit-status")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)))
@@ -1410,7 +1387,11 @@ impl Changes {
         );
         let response = ui
             .add_enabled_ui(allowed, |ui| {
-                ui.interact(row_click_rect, self.inline_header_id(git, path), Sense::click())
+                ui.interact(
+                    row_click_rect,
+                    self.inline_header_id(git, path),
+                    Sense::click(),
+                )
             })
             .inner
             .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1452,7 +1433,10 @@ impl Changes {
 
         if let Some((ws, file, loading)) = git_row {
             let actions_rect = egui::Rect::from_min_max(
-                egui::pos2((rect.right() - 250.0).max(rect.left() + 80.0), rect.top() + 4.0),
+                egui::pos2(
+                    (rect.right() - 250.0).max(rect.left() + 80.0),
+                    rect.top() + 4.0,
+                ),
                 egui::pos2(rect.right() - 106.0, rect.bottom() - 4.0),
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(actions_rect), |ui| {
@@ -1463,9 +1447,7 @@ impl Changes {
         }
 
         if read_clicked {
-            let now_read = self
-                .read_state
-                .toggle(git, path, summary_sig, diff_sig);
+            let now_read = self.read_state.toggle(git, path, summary_sig, diff_sig);
             if now_read {
                 self.open_rows.remove(&key);
                 self.inline.close(&key);

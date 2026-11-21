@@ -203,6 +203,7 @@ pub struct Pui {
     session_watch: Option<sessions::Watch>,
     workspace: Workspace,
     workspace_rx: Option<workspace::read_only::Request<Workspace>>,
+    workspace_retry: bool,
     ctx: egui::Context,
     transcript: Transcript,
     outputs: Vec<RecordedFile>,
@@ -357,6 +358,7 @@ impl Pui {
             },
             workspace: Workspace::default(),
             workspace_rx: None,
+            workspace_retry: false,
             ctx: cc.egui_ctx.clone(),
             transcript: Transcript::default(),
             outputs: Vec::new(),
@@ -774,6 +776,13 @@ impl Pui {
         if self.workspace_rx.is_some() || self.demo {
             return;
         }
+        if changes::git_files::workspace_worker_busy(&self.ctx) {
+            self.workspace_retry = true;
+            self.ctx
+                .request_repaint_after(std::time::Duration::from_millis(80));
+            return;
+        }
+        self.workspace_retry = false;
         self.workspace_rx = Some(changes::git_files::start_workspace(
             &self.ctx,
             self.prefs.cwd.clone(),
@@ -1340,10 +1349,27 @@ impl Pui {
                 }),
             });
         if let Some(result) = workspace {
-            self.workspace = result;
             self.workspace_rx = None;
-            self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
-            self.changes.invalidate();
+            if result.error.as_deref()
+                == Some("A Git workspace read is still finishing. Refresh to retry.")
+            {
+                self.workspace_retry = true;
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_millis(80));
+            } else {
+                self.workspace_retry = false;
+                self.workspace = result;
+                self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
+                self.changes.invalidate();
+            }
+        }
+        if self.workspace_retry && self.workspace_rx.is_none() && !self.demo {
+            if changes::git_files::workspace_worker_busy(&self.ctx) {
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_millis(80));
+            } else {
+                self.refresh_workspace();
+            }
         }
         self.cancel_git_open_for_file_navigation();
         let git_review_overlay = self.settings_open

@@ -10,7 +10,11 @@ pub(super) struct Form {
     pub(super) pending: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
-    pub(in crate::app::changes) fn remote_create(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+    pub(in crate::app::changes) fn remote_create(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+    ) {
         if let Some(result) = self
             .push
             .create
@@ -76,18 +80,14 @@ impl Changes {
                 && workspace::push::remote::valid_name(&self.push.create.name)
                 && workspace::push::remote::valid_url(&self.push.create.url);
             prompt_ui::footer(ui, |ui| {
-                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
-                    cancel_sheet = true;
-                }
-                let review_btn = prompt_ui::button(
-                    ui,
-                    "Review new remote…",
-                    prompt_ui::Button::Primary,
-                    valid,
-                );
+                let review_btn =
+                    prompt_ui::button(ui, "Review new remote…", prompt_ui::Button::Primary, valid);
                 self.push.controls.push(review_btn.id);
                 if review_btn.clicked() {
                     submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
                 }
             });
             if cancel_sheet {
