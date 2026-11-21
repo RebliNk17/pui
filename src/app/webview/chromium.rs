@@ -1,4 +1,5 @@
 //! CEF child views. Every tab owns its Browser; hidden tabs keep DOM/history.
+mod inspection;
 #[cfg(debug_assertions)]
 mod smoke;
 use super::{Action, Options, PageState, console, safe_html, web_url};
@@ -32,7 +33,13 @@ wrap_display_handler! {
     impl DisplayHandler {
         fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
             if frame.is_some_and(|f| f.is_main() == 1) {
-                if let Some(url) = url { let url = url.to_string(); if web_url(&url) { self.events.update(|s| s.location = url); } }
+                if let Some(url) = url {
+                    let url = url.to_string();
+                    self.events.update(|state| {
+                        state.inspection.cancel(Some("Page address changed. Inspect again for a new snapshot."));
+                        if web_url(&url) { state.location = url; }
+                    });
+                }
             }
         }
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
@@ -49,6 +56,11 @@ wrap_display_handler! {
 wrap_load_handler! {
     struct Loading { events: Events }
     impl LoadHandler {
+        fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
+            if frame.is_some_and(|frame| frame.is_main() == 1) {
+                self.events.update(|state| state.inspection.cancel(Some("Page changed. Inspect again for a new snapshot.")));
+            }
+        }
         fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, back: i32, forward: i32) {
             self.events.update(|s| { s.loading = loading != 0; s.back = back != 0; s.forward = forward != 0; });
         }
@@ -114,10 +126,13 @@ wrap_life_span_handler! {
 wrap_request_handler! {
     struct Navigation { initial: String, remote: bool, devtools: bool, events: Events }
     impl RequestHandler {
-        fn on_before_browse(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32) -> i32 {
+        fn on_before_browse(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32) -> i32 {
             let url = request.map(|r| CefString::from(&r.url()).to_string()).unwrap_or_default();
             let allowed = url == "about:blank" || url == self.initial || (self.remote && web_url(&url)) || (self.devtools && (url.starts_with("devtools://") || url.starts_with("chrome-devtools://")));
             if !allowed { self.events.update(|state| state.error = Some("Blocked navigation: only HTTP/HTTPS pages are allowed.".into())); }
+            if allowed && frame.is_some_and(|frame| frame.is_main() == 1) {
+                self.events.update(|state| state.inspection.cancel(Some("Navigation cancelled inspection. Inspect again after loading.")));
+            }
             (!allowed) as i32
         }
         fn on_certificate_error(&self, _browser: Option<&mut Browser>, _error: Errorcode, _url: Option<&CefString>, _info: Option<&mut Sslinfo>, _callback: Option<&mut Callback>) -> i32 {
@@ -125,7 +140,7 @@ wrap_request_handler! {
             0
         }
         fn on_render_process_terminated(&self, _browser: Option<&mut Browser>, _status: TerminationStatus, error_code: i32, error_string: Option<&CefString>) {
-            self.events.update(|state| { state.loading = false; state.error = Some(format!("Chromium renderer stopped ({error_code}): {}. Reload to retry.", error_string.map(ToString::to_string).unwrap_or_default())); });
+            self.events.update(|state| { state.inspection.cancel(Some("Renderer stopped. Reload before inspecting.")); state.loading = false; state.error = Some(format!("Chromium renderer stopped ({error_code}): {}. Reload to retry.", error_string.map(ToString::to_string).unwrap_or_default())); });
         }
     }
 }
@@ -186,6 +201,7 @@ struct Tab {
     options: Option<Options>,
     dimensions: (i32, i32),
     initial: String,
+    inspection_observer: Option<Registration>,
     // CEF can resize its child during navigation. Its parent must be the pane,
     // never Pui's entire content view (which also contains chat and console).
     container: Retained<NSView>,
@@ -205,6 +221,13 @@ impl Tab {
         unsafe { (host.window_handle() as *const NSView).as_ref() }
     }
     fn hide(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.inspection.pending() || state.inspection.facts.is_some() {
+                state
+                    .inspection
+                    .cancel(Some("Inspection cancelled because this page was hidden."));
+            }
+        }
         if !self.container.isHidden() {
             self.container.setHidden(true);
         }
@@ -221,7 +244,9 @@ impl Tab {
             let json = CefString::from(params.to_string().as_str());
             let mut params = cef::parse_json(Some(&json), JsonParserOptions::RFC)
                 .and_then(|value| value.dictionary());
-            host.execute_dev_tools_method(0, Some(&CefString::from(method)), params.as_mut());
+            if let Some(id) = super::inspection::message_id() {
+                host.execute_dev_tools_method(id, Some(&CefString::from(method)), params.as_mut());
+            }
         }
     }
     fn emulate(&mut self, options: &Options, rect: egui::Rect) {
@@ -297,6 +322,38 @@ impl Engine {
             }
         }
     }
+    pub fn cancel_inspection(&self, key: &str) {
+        if let Some(tab) = self.tabs.get(key) {
+            if let Ok(mut state) = tab.state.lock() {
+                state.inspection.cancel(None);
+            }
+        }
+    }
+    pub fn prepare_inspection(&mut self, key: &str) {
+        if let Some(tab) = self.tabs.get_mut(key) {
+            if tab.inspection_observer.is_none() {
+                tab.inspection_observer = inspection::register(tab);
+            }
+            if let Ok(mut state) = tab.state.lock() {
+                state.inspection.ready = tab.inspection_observer.is_some();
+                if !state.inspection.ready {
+                    state.inspection.message =
+                        Some("Chromium inspection observer is unavailable.".into());
+                }
+            }
+        }
+    }
+    pub fn inspect(&self, key: &str, epoch: u64, query: &str) {
+        if key == self.active {
+            if let Some(tab) = self
+                .tabs
+                .get(key)
+                .filter(|tab| tab.inspection_observer.is_some())
+            {
+                inspection::inspect(tab, epoch, query);
+            }
+        }
+    }
     pub fn hide(&self) {
         for tab in self.tabs.values() {
             tab.hide();
@@ -327,7 +384,7 @@ impl Engine {
             Action::Forward => tab.browser.go_forward(),
             Action::Reload => tab.browser.reload(),
             Action::Stop => tab.browser.stop_load(),
-            Action::DevTools | Action::Inspect => {
+            Action::DevTools => {
                 if let Some(host) = tab.host() {
                     let events = Events {
                         state: Arc::new(Mutex::new(PageState::default())),
@@ -340,9 +397,6 @@ impl Engine {
                         Some(&BrowserSettings::default()),
                         None,
                     );
-                    if matches!(action, Action::Inspect) {
-                        tab.command("Overlay.setInspectMode", serde_json::json!({"mode":"searchForNode","highlightConfig":{"showInfo":true,"contentColor":{"r":111,"g":168,"b":220,"a":0.4}}}));
-                    }
                 }
             }
         }
@@ -473,6 +527,7 @@ impl Engine {
                     options: None,
                     dimensions: (0, 0),
                     initial,
+                    inspection_observer: None,
                     container,
                     #[cfg(debug_assertions)]
                     diagnostics: Default::default(),
