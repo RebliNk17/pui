@@ -9,7 +9,33 @@ use eframe::egui::{self, Align, FontId, Layout, Rect, RichText, Sense, Stroke, V
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
+    sync::{Arc, Mutex, atomic::AtomicUsize},
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindTarget {
+    pub query: String,
+    pub message_index: usize,
+    pub occurrence_in_message: usize,
+    pub scroll_to_active: bool,
+}
+
+fn scope_find(
+    ctx: &egui::Context,
+    target: Option<&FindTarget>,
+    message_index: usize,
+    active_rect: &Arc<Mutex<Option<Rect>>>,
+) {
+    let highlight = target
+        .filter(|f| !f.query.is_empty())
+        .map(|f| markdown::FindHighlight {
+            query: f.query.clone(),
+            active_in_scope: (f.message_index == message_index).then_some(f.occurrence_in_message),
+            seen: Arc::new(AtomicUsize::new(0)),
+            active_rect: active_rect.clone(),
+        });
+    markdown::set_find_highlight(ctx, highlight);
+}
 
 #[derive(Default)]
 pub struct Transcript {
@@ -32,6 +58,7 @@ pub struct Transcript {
     pub message_actions_enabled: bool,
     pub task_output: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
+    pub find: Option<FindTarget>,
     progress_phase: Option<(Progress, f64)>,
 }
 
@@ -328,6 +355,8 @@ impl Transcript {
         let gallery = &mut self.gallery;
         let mut message_action = None;
         let actions_enabled = self.message_actions_enabled;
+        let find_target = self.find.clone();
+        let find_rect: Arc<Mutex<Option<Rect>>> = Arc::new(Mutex::new(None));
         let output = area.show_viewport(&mut child, |ui, viewport| {
             let top = ui.cursor().top();
             ui.add_space(16.0);
@@ -411,6 +440,7 @@ impl Transcript {
                             ui.set_width(column);
                             ui.push_id(start, |ui| {
                                 if group[0].role == "user" {
+                                    scope_find(ui.ctx(), find_target.as_ref(), start, &find_rect);
                                     if let Some(action) =
                                         user_actions(ui, &group[0], gallery, actions_enabled)
                                     {
@@ -422,6 +452,7 @@ impl Transcript {
                                 ) {
                                     compaction_separator(ui);
                                 } else if group[0].role == "custom" {
+                                    scope_find(ui.ctx(), find_target.as_ref(), start, &find_rect);
                                     egui::Frame::new()
                                         .fill(colors.sidebar)
                                         .corner_radius(8)
@@ -434,6 +465,7 @@ impl Transcript {
                                     let (changed, fork) = assistant(
                                         ui,
                                         group,
+                                        start,
                                         model,
                                         thinking,
                                         (
@@ -444,6 +476,8 @@ impl Transcript {
                                         ),
                                         task_output,
                                         gallery,
+                                        find_target.as_ref(),
+                                        &find_rect,
                                     );
                                     layout_changed |= changed;
                                     if fork {
@@ -535,7 +569,16 @@ impl Transcript {
                 },
             );
             ui.add_space(12.0);
+            if find_target.as_ref().is_some_and(|f| f.scroll_to_active)
+                && let Ok(Some(rect)) = find_rect.lock().map(|g| *g)
+            {
+                ui.scroll_to_rect(rect, Some(Align::Center));
+                if let Some(find) = &mut self.find {
+                    find.scroll_to_active = false;
+                }
+            }
         });
+        markdown::set_find_highlight(ui.ctx(), None);
         // Disclosures only change their owning, visible turn. Keep all other
         // measured heights; a global revision caused full-history relayout.
         if layout_changed {
@@ -785,6 +828,7 @@ fn user_bubble(
     if let Some(section) = job.sections.first_mut() {
         section.format.line_height = Some(23.0);
     }
+    let active_find = markdown::highlight_job(ui, &mut job);
     let galley = ui.fonts(|f| f.layout_job(job));
     let width = (galley.size().x + 34.0)
         .max(footer_width.min(max))
@@ -822,7 +866,16 @@ fn user_bubble(
                             ui.add_space(6.0);
                         }
                         if !text.is_empty() {
-                            ui.add(egui::Label::new(galley).selectable(true));
+                            let response =
+                                ui.add(egui::Label::new(galley.clone()).selectable(true));
+                            if let Some(byte_start) = active_find {
+                                markdown::record_find_match_rect(
+                                    ui,
+                                    &galley,
+                                    response.rect.left_top(),
+                                    byte_start,
+                                );
+                            }
                         }
                     });
             });
@@ -865,14 +918,18 @@ fn user_footer(
     action
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assistant(
     ui: &mut egui::Ui,
     messages: &[Message],
+    start: usize,
     model: &str,
     thinking: &str,
     flags: (bool, bool, bool, View),
     task_output: bool,
     gallery: &mut crate::media::Gallery,
+    find: Option<&FindTarget>,
+    find_rect: &Arc<Mutex<Option<Rect>>>,
 ) -> (bool, bool) {
     let colors = crate::theme::palette(ui.ctx());
     let (running, expand, actions_enabled, view) = flags;
@@ -916,6 +973,7 @@ fn assistant(
     let mut pending: Vec<&crate::protocol::Tool> = Vec::new();
     let mut group_index = 0;
     for (message_index, message) in messages.iter().enumerate() {
+        scope_find(ui.ctx(), find, start + message_index, find_rect);
         if message.blocks.is_empty() {
             // Normal summarizes recorded actions, never internal reasoning. Hidden
             // thinking must not split one action run into many summary rows.
@@ -1447,11 +1505,14 @@ mod tests {
                             assistant(
                                 ui,
                                 &messages,
+                                0,
                                 "model",
                                 "off",
                                 (false, false, true, View::Normal),
                                 false,
                                 &mut gallery,
+                                None,
+                                &Arc::new(Mutex::new(None)),
                             );
                         });
                     },
@@ -1761,11 +1822,14 @@ mod tests {
                             assistant(
                                 ui,
                                 &messages,
+                                0,
                                 "model",
                                 "high",
                                 (running, false, false, View::Normal),
                                 false,
                                 &mut gallery,
+                                None,
+                                &Arc::new(Mutex::new(None)),
                             );
                             heights.push(ui.cursor().top() - top);
                         });
@@ -2442,11 +2506,14 @@ mod tests {
                                             blocks: vec![Block::Thinking(source.into())],
                                             ..Default::default()
                                         }],
+                                        0,
                                         "model",
                                         "high",
                                         (running, false, false, View::Verbose),
                                         false,
                                         &mut crate::media::Gallery::default(),
+                                        None,
+                                        &Arc::new(Mutex::new(None)),
                                     )
                                     .0;
                                 });

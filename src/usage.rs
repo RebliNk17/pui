@@ -371,6 +371,7 @@ impl Usage {
     pub(super) fn popover(&mut self, response: &egui::Response, demo: bool) {
         egui::Popup::from_toggle_button_response(response)
             .align(egui::RectAlign::TOP_START)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .width(300.0_f32.min((response.ctx.screen_rect().width() - 32.0).max(160.0)))
             .show(|ui| {
                 egui::ScrollArea::vertical()
@@ -396,7 +397,20 @@ impl Usage {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Usage").size(14.0).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icons::button(ui, Icon::Refresh, "Refresh account usage").clicked() && !demo {
+                if self.rx.is_some() {
+                    let size = ui.spacing().interact_size.y;
+                    ui.allocate_ui_with_layout(
+                        Vec2::splat(size),
+                        Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.add(egui::Spinner::new().size(14.0).color(colors.muted));
+                        },
+                    )
+                    .response
+                    .on_hover_text("Refreshing account usage…");
+                } else if icons::button(ui, Icon::Refresh, "Refresh account usage").clicked()
+                    && !demo
+                {
                     self.refresh(ui.ctx(), true);
                 }
             });

@@ -489,6 +489,14 @@ impl Pui {
                             });
                         });
                     });
+                let pane_rect = ui.max_rect();
+                if let Some(idx) = self
+                    .chat_find
+                    .sync(&self.state.messages, self.prefs.transcript_view)
+                {
+                    self.transcript.jump_to_message(idx);
+                }
+                self.transcript.find = self.chat_find.target();
                 self.transcript.task_output = matches!(
                     self.task_session(&self.state),
                     Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
@@ -555,6 +563,15 @@ impl Pui {
                     );
                 }
                 self.attention_rendered(ui);
+                if self
+                    .transcript
+                    .find
+                    .as_ref()
+                    .is_some_and(|f| !f.scroll_to_active)
+                {
+                    self.chat_find.scroll_to_active = false;
+                }
+                self.show_chat_find_bar(ctx, pane_rect);
             });
         self.history_action();
     }

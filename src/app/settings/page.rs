@@ -24,8 +24,8 @@ impl Page {
         Self::Notifications,
         Self::Shortcuts,
         Self::Permissions,
-        Self::Models,
         Self::Providers,
+        Self::Models,
         Self::Resources,
     ];
     fn title(self) -> &'static str {
@@ -113,6 +113,11 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "Messages while working",
             "General",
             "steer queue delivery enter",
+        ),
+        (
+            "Model context window",
+            "General",
+            "context window max tokens limit override model",
         ),
         (
             "Auto compact at",
@@ -617,8 +622,38 @@ impl Pui {
             ui,
             "Changes apply at the next context check. A summary already running is left alone.",
         ));
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let active_model = self
+            .state
+            .models
+            .iter()
+            .find(|m| {
+                m.id == self.state.model
+                    && (self.state.provider.is_empty() || m.provider == self.state.provider)
+            })
+            .or_else(|| self.state.models.iter().find(|m| m.id == self.state.model))
+            .cloned();
         card(ui, |ui| {
             ui.scope(|ui| {
+                if let Some(model) = active_model {
+                    row(
+                        ui,
+                        "Model context window",
+                        &format!(
+                            "Maximum context limit for {} (saved in ~/.pi/agent/models.json).",
+                            model.name
+                        ),
+                        |ui| {
+                            self.model_context_editor(
+                                ui,
+                                &model.provider,
+                                &model.id,
+                                model.context_window,
+                            );
+                        },
+                    );
+                    separator(ui);
+                }
                 row(
                     ui,
                     "Auto compact at",
@@ -1066,30 +1101,155 @@ impl Pui {
             ui.label(theme::small(ui, "Connect to Pi to load the model catalog."));
             return;
         }
-        card(ui, |ui| {
-            for (index, model) in models.iter().enumerate() {
-                if index > 0 {
-                    separator(ui);
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let mut by_provider: std::collections::BTreeMap<String, Vec<protocol::Model>> =
+            std::collections::BTreeMap::new();
+        for model in models {
+            by_provider
+                .entry(model.provider.clone())
+                .or_default()
+                .push(model);
+        }
+        for (provider, provider_models) in by_provider {
+            let display = crate::accounts::display_provider(&provider);
+            let heading = if display.eq_ignore_ascii_case(&provider) {
+                display.to_owned()
+            } else {
+                format!("{display} ({provider})")
+            };
+            section(
+                ui,
+                &heading,
+                &format!(
+                    "{} model(s) · toggle visibility in the chat model picker.",
+                    provider_models.len()
+                ),
+            );
+            card(ui, |ui| {
+                for (index, model) in provider_models.iter().enumerate() {
+                    if index > 0 {
+                        separator(ui);
+                    }
+                    let hidden_key = format!("{}/{}", model.provider, model.id);
+                    let was_visible = !self.prefs.hidden_models.contains(&hidden_key);
+                    let mut visible = was_visible;
+                    row(
+                        ui,
+                        &model.name,
+                        &format!("{} · {}", display, model.id),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                self.model_context_editor(
+                                    ui,
+                                    &model.provider,
+                                    &model.id,
+                                    model.context_window,
+                                );
+                                ui.label(theme::small(
+                                    ui,
+                                    format!("· ${} / ${}", model.input_cost, model.output_cost),
+                                ))
+                                .on_hover_text(
+                                    "Configured input / output price per million tokens",
+                                );
+                                ui.add_space(4.0);
+                                toggle(
+                                    ui,
+                                    &mut visible,
+                                    &format!("Show {} in chat model picker", model.name),
+                                );
+                                if visible != was_visible {
+                                    if visible {
+                                        self.prefs.hidden_models.remove(&hidden_key);
+                                    } else {
+                                        self.prefs.hidden_models.insert(hidden_key.clone());
+                                    }
+                                }
+                            });
+                        },
+                    );
                 }
-                row(
-                    ui,
-                    &model.name,
-                    &format!("{} · {}", model.provider, model.id),
-                    |ui| {
-                        ui.label(theme::small(
-                            ui,
-                            format!(
-                                "{}k context · ${} / ${}",
-                                model.context_window / 1000,
-                                model.input_cost,
-                                model.output_cost
-                            ),
-                        ))
-                        .on_hover_text("Configured input / output price per million tokens");
-                    },
-                );
+            });
+        }
+    }
+
+    fn model_context_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: &str,
+        model_id: &str,
+        current_window: u64,
+    ) {
+        let key = (provider.to_owned(), model_id.to_owned());
+        let saved_override = self
+            .settings_view
+            .providers
+            .model_context_overrides
+            .get(&key)
+            .copied();
+        let effective = saved_override.unwrap_or(current_window.max(4_096));
+        let mut draft = self
+            .settings_view
+            .providers
+            .context_override_drafts
+            .get(&key)
+            .copied()
+            .unwrap_or(effective);
+        let mut commit = None;
+        let mut reset = false;
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::DragValue::new(&mut draft)
+                    .range(4_096..=10_000_000)
+                    .speed(4_096)
+                    .suffix(" tokens"),
+            );
+            if response.changed() {
+                self.settings_view
+                    .providers
+                    .context_override_drafts
+                    .insert(key.clone(), draft);
+            }
+            if (response.drag_stopped() || response.lost_focus()) && draft != effective {
+                commit = Some(draft);
+            }
+            if saved_override.is_some()
+                && ui
+                    .add(egui::Button::new(theme::small(ui, "Reset")).frame(false))
+                    .on_hover_text("Remove context window override and use provider default")
+                    .clicked()
+            {
+                reset = true;
             }
         });
+        if let Some(tokens) = commit {
+            if let Err(err) = self
+                .settings_view
+                .providers
+                .set_model_context_window(provider, model_id, tokens)
+            {
+                self.settings_view.providers.status_error = Some(err);
+            } else {
+                for m in &mut self.state.models {
+                    if m.provider == provider && m.id == model_id {
+                        m.context_window = tokens;
+                    }
+                }
+                if self.state.model == model_id
+                    && (self.state.provider.is_empty() || self.state.provider == provider)
+                {
+                    self.state.context_window = tokens as f64;
+                }
+            }
+        } else if reset {
+            if let Err(err) = self
+                .settings_view
+                .providers
+                .clear_model_context_window(provider, model_id)
+            {
+                self.settings_view.providers.status_error = Some(err);
+            }
+        }
     }
 }
 fn command() -> &'static str {

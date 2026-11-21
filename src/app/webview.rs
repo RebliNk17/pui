@@ -522,28 +522,61 @@ impl BrowserView {
         if toggle_pause {
             console::pause::toggle(&mut options.console_paused, &state.console, ui.ctx());
         }
-        if let Some(error) = state.error {
+        // Native views composite above egui: reserve bottom status space without shifting the page top.
+        let mut available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+        if !available.is_positive() {
+            return egui::Rect::NOTHING;
+        }
+        if state.error.is_some() || state.loading {
+            let status_h = 26.0_f32.min(available.height() * 0.4);
+            let status_rect = egui::Rect::from_min_max(
+                egui::pos2(available.left() + 8.0, available.bottom() - status_h),
+                egui::pos2(
+                    (available.right() - 8.0).max(available.left() + 8.0),
+                    available.bottom() - 2.0,
+                ),
+            );
+            available.max.y = (available.max.y - status_h - 2.0).max(available.min.y);
             let colors = theme::palette(ui.ctx());
-            egui::Frame::new().fill(colors.error_bg).inner_margin(12).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(egui::Label::new(RichText::new(error).size(12.0).color(colors.red)).wrap());
-                ui.add(egui::Label::new(theme::small(ui, "Check the URL and connection, then Reload. Certificate checks remain enabled.")).wrap());
-            });
-        } else if state.loading {
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                theme::status::indicator(
-                    ui,
-                    rect.center(),
-                    "Working",
-                    theme::palette(ui.ctx()).accent,
-                    4.0,
-                );
-                ui.label(theme::small(ui, "Loading page…"));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(status_rect), |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if let Some(error) = state.error {
+                        let resp = egui::Frame::new()
+                            .fill(colors.error_bg)
+                            .stroke(egui::Stroke::new(1.0_f32, colors.red))
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(error).size(11.0).color(colors.red));
+                            })
+                            .response;
+                        resp.on_hover_text(
+                            "Check the URL and connection, then Reload. Certificate checks remain enabled.",
+                        );
+                    } else if state.loading {
+                        egui::Frame::new()
+                            .fill(colors.surface)
+                            .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                    theme::status::indicator(
+                                        ui,
+                                        rect.center(),
+                                        "Working",
+                                        colors.accent,
+                                        3.5,
+                                    );
+                                    ui.label(theme::small(ui, "Loading page…"));
+                                });
+                            });
+                    }
+                });
             });
         }
-        // Native views composite above egui: reserve status/console space first.
-        let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
         if !available.is_positive() {
             return egui::Rect::NOTHING;
         }

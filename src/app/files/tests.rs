@@ -469,8 +469,10 @@ fn explicit_open_supports_tmp_reports_and_deduplicates_tabs() {
     assert_eq!(app.draft, "Keep this draft");
     assert_eq!(app.state.messages.len(), messages);
     assert!(!app.files.tabs[0].source);
-    let source = text(&output, "Source");
-    click(&ctx, &mut app, source);
+    let source = ctx
+        .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("file-preview-source-toggle-rect")))
+        .unwrap();
+    click(&ctx, &mut app, source.center());
     let output = frame(&ctx, &mut app, vec![]);
     text(&output, "# Workspace");
     assert!(app.files.tabs[0].source);

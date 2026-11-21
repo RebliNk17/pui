@@ -5,6 +5,7 @@ mod attachments;
 mod attention;
 mod automation;
 mod changes;
+mod chat_find;
 mod completions;
 mod composer_history;
 mod composer_text;
@@ -102,6 +103,7 @@ struct Preferences {
     closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
     model_catalogs: Vec<model_cache::Catalog>,
+    hidden_models: std::collections::BTreeSet<String>,
     restart_checkpoints: Vec<restart::Checkpoint>,
     usage_cache: Option<crate::usage::CachedUsage>,
 }
@@ -220,6 +222,7 @@ pub struct Pui {
     pending_dialog: Option<String>,
     focus_composer: bool,
     focus_search: bool,
+    chat_find: chat_find::ChatFind,
     screenshot: Option<PathBuf>,
     frames: usize,
 }
@@ -373,6 +376,7 @@ impl Pui {
             pending_dialog: None,
             focus_composer: true,
             focus_search: false,
+            chat_find: chat_find::ChatFind::default(),
             screenshot: options.screenshot,
             frames: 0,
         };
@@ -839,6 +843,7 @@ impl Pui {
         };
         self.seed_model_catalog();
         self.transcript.clear();
+        self.chat_find.clear_results();
         self.pulls = Default::default();
         if let Some(path) = session.clone() {
             self.state.session_file = Some(path.display().to_string());
@@ -984,6 +989,7 @@ impl Pui {
             self.state.context_breakdown = None;
             self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
             self.transcript.clear();
+            self.chat_find.clear_results();
             let (tx, rx) = mpsc::channel();
             self.preview_rx = Some(rx);
             let preview_path = path.clone();

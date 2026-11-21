@@ -186,6 +186,8 @@ pub(in crate::app) struct ProvidersManager {
     loaded: bool,
     pub(in crate::app) custom_providers: Vec<CustomProviderSummary>,
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
+    pub(in crate::app) model_context_overrides: std::collections::BTreeMap<(String, String), u64>,
+    pub(in crate::app) context_override_drafts: std::collections::BTreeMap<(String, String), u64>,
     claude: ClaudeSubscriptionFlow,
     antigravity: AntigravitySubscriptionFlow,
     vertex: VertexModal,
@@ -889,6 +891,7 @@ impl ProvidersManager {
         self.accounts.registry = None;
         self.custom_providers.clear();
         self.saved_auth.clear();
+        self.model_context_overrides.clear();
         if let Some(auth_path) = auth_json_path() {
             let root = read_json_object(&auth_path);
             if let Some(obj) = root.as_object() {
@@ -948,17 +951,116 @@ impl ProvidersManager {
                             });
                         }
                     }
-                    self.custom_providers.push(CustomProviderSummary {
-                        id: id.clone(),
-                        name,
-                        base_url,
-                        api,
-                        api_key,
-                        models,
-                    });
+                    if let Some(overrides) = config["modelOverrides"].as_object() {
+                        for (model_id, ov) in overrides {
+                            if let Some(cw) = ov["contextWindow"].as_u64().filter(|&v| v > 0) {
+                                self.model_context_overrides
+                                    .insert((id.clone(), model_id.clone()), cw);
+                            }
+                        }
+                    }
+                    if !base_url.is_empty() || !models.is_empty() {
+                        self.custom_providers.push(CustomProviderSummary {
+                            id: id.clone(),
+                            name,
+                            base_url,
+                            api,
+                            api_key,
+                            models,
+                        });
+                    }
                 }
             }
         }
+    }
+
+    pub(in crate::app) fn set_model_context_window(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+        tokens: u64,
+    ) -> Result<(), String> {
+        let tokens = tokens.clamp(4_096, 10_000_000);
+        let path = models_json_path().ok_or("Cannot resolve ~/.pi/agent/models.json.")?;
+        let mut root = read_json_object(&path);
+        if !root["providers"].is_object() {
+            root["$schema"] = json!("https://pi.dev/schemas/models.schema.json");
+            root["providers"] = json!({});
+        }
+        let providers = root["providers"]
+            .as_object_mut()
+            .ok_or("Invalid providers object in models.json.")?;
+        let entry = providers
+            .entry(provider.to_owned())
+            .or_insert_with(|| json!({}));
+        if !entry.is_object() {
+            *entry = json!({});
+        }
+        if !entry["modelOverrides"].is_object() {
+            entry["modelOverrides"] = json!({});
+        }
+        let overrides = entry["modelOverrides"]
+            .as_object_mut()
+            .ok_or("Invalid modelOverrides object in models.json.")?;
+        let model_ov = overrides
+            .entry(model_id.to_owned())
+            .or_insert_with(|| json!({}));
+        if !model_ov.is_object() {
+            *model_ov = json!({});
+        }
+        model_ov["contextWindow"] = json!(tokens);
+        write_json_atomic(&path, &root, false)?;
+        self.context_override_drafts
+            .remove(&(provider.to_owned(), model_id.to_owned()));
+        self.reload_from_disk();
+        self.status_error = None;
+        self.reload_requested = true;
+        Ok(())
+    }
+
+    pub(in crate::app) fn clear_model_context_window(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+    ) -> Result<(), String> {
+        let path = models_json_path().ok_or("Cannot resolve ~/.pi/agent/models.json.")?;
+        let mut root = read_json_object(&path);
+        if let Some(providers) = root["providers"].as_object_mut() {
+            let mut remove_provider = false;
+            if let Some(entry) = providers.get_mut(provider).and_then(|v| v.as_object_mut()) {
+                let mut remove_overrides = false;
+                if let Some(overrides) = entry
+                    .get_mut("modelOverrides")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    let mut remove_model = false;
+                    if let Some(model_ov) =
+                        overrides.get_mut(model_id).and_then(|v| v.as_object_mut())
+                    {
+                        model_ov.remove("contextWindow");
+                        remove_model = model_ov.is_empty();
+                    }
+                    if remove_model {
+                        overrides.remove(model_id);
+                    }
+                    remove_overrides = overrides.is_empty();
+                }
+                if remove_overrides {
+                    entry.remove("modelOverrides");
+                }
+                remove_provider = entry.is_empty();
+            }
+            if remove_provider {
+                providers.remove(provider);
+            }
+            write_json_atomic(&path, &root, false)?;
+        }
+        self.context_override_drafts
+            .remove(&(provider.to_owned(), model_id.to_owned()));
+        self.reload_from_disk();
+        self.status_error = None;
+        self.reload_requested = true;
+        Ok(())
     }
 
     pub(in crate::app) fn poll(&mut self) {
@@ -1368,13 +1470,21 @@ impl ProvidersManager {
                 }
             }
         }
-        root["providers"][&id] = json!({
+        let existing_overrides = root["providers"][&id]
+            .get("modelOverrides")
+            .cloned()
+            .filter(|v| v.is_object());
+        let mut provider_entry = json!({
             "name": name,
             "baseUrl": base_url,
             "api": api,
             "apiKey": api_key,
             "models": models_json,
         });
+        if let Some(overrides) = existing_overrides {
+            provider_entry["modelOverrides"] = overrides;
+        }
+        root["providers"][&id] = provider_entry;
         write_json_atomic(&path, &root, false)?;
         self.endpoint.open = false;
         self.reload_from_disk();
@@ -2356,6 +2466,9 @@ impl ProvidersManager {
 
 impl Pui {
     pub(in crate::app) fn refresh_providers_catalog(&mut self) {
+        if self.state.ready() {
+            self.send(json!({"type": "prompt", "message": "/pui-reload-models"}));
+        }
         self.send(protocol::command("get_available_models"));
         self.send(protocol::command("get_state"));
         self.send(protocol::command("get_available_thinking_levels"));

@@ -33,6 +33,7 @@ impl Item {
         marked.wrap.max_width = ui.available_width().max(1.0);
         marked.align_baseline = true;
         *job = LayoutJob::default();
+        let active = highlight_job(ui, &mut marked);
         let mut galley = ui.fonts(|fonts| fonts.layout_job(marked));
         // Keep marker and body in ONE selectable label. Only move placed rows:
         // bytes, sections, bidi cursors and baseline boxes survive unchanged.
@@ -51,7 +52,7 @@ impl Item {
             ui.max_rect().max,
         );
         let mut label_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-        show_galley(&mut label_ui, galley, links);
+        show_galley_with_find(&mut label_ui, galley, links, active);
         // Advancing with the label's gutter would expand this Ui leftwards,
         // causing every later paragraph and nested list to lose its inset.
         let mut used = label_ui.min_rect();

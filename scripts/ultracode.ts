@@ -47,6 +47,16 @@ export default function puiExtension(pi: any) {
       process.env.PUI_SETTINGS = JSON.stringify(next);
     },
   });
+  pi.registerCommand("pui-reload-models", {
+    description: "Reload models.json overrides and refresh active model metadata",
+    handler: async (_args: string, ctx: any) => {
+      await ctx.modelRegistry?.refresh?.();
+      if (ctx.model && ctx.modelRegistry?.find) {
+        const updated = ctx.modelRegistry.find(ctx.model.provider, ctx.model.id);
+        if (updated) await pi.setModel(updated);
+      }
+    },
+  });
   const pending = new Map<string, AbortController>();
   let refreshController: AbortController | undefined;
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";

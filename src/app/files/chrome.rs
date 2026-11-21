@@ -60,12 +60,13 @@ impl Browser {
                                             .file_name()
                                             .unwrap_or_default()
                                             .to_string_lossy();
+                                        let colors = theme::palette(ui.ctx());
                                         let (selected, closed) = chrome::tab(
                                             ui,
                                             ("file", &file.path),
                                             &title,
                                             &file.path.display().to_string(),
-                                            Icon::File,
+                                            super::syntax::file_icon(&file.path, &colors).0,
                                             self.selected.as_ref() == Some(&file.path),
                                             width,
                                         );

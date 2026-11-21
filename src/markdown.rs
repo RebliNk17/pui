@@ -7,7 +7,169 @@ mod table;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, TextFormat, Ui, text::LayoutJob};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+
+#[derive(Clone)]
+pub struct FindHighlight {
+    pub query: String,
+    pub active_in_scope: Option<usize>,
+    pub seen: Arc<AtomicUsize>,
+    pub active_rect: Arc<Mutex<Option<egui::Rect>>>,
+}
+
+fn find_highlight_id() -> egui::Id {
+    egui::Id::new("pui-markdown-find-highlight")
+}
+
+pub fn set_find_highlight(ctx: &egui::Context, highlight: Option<FindHighlight>) {
+    ctx.data_mut(|d| {
+        if let Some(h) = highlight {
+            d.insert_temp(find_highlight_id(), h);
+        } else {
+            d.remove::<FindHighlight>(find_highlight_id());
+        }
+    });
+}
+
+pub fn find_case_insensitive_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if query.is_ascii() {
+        let qlen = query.len();
+        let mut i = 0;
+        while i + qlen <= text.len() {
+            if let Some(slice) = text.get(i..i + qlen)
+                && slice.eq_ignore_ascii_case(query)
+            {
+                out.push(i..i + qlen);
+                i += qlen;
+                continue;
+            }
+            if let Some(ch) = text[i..].chars().next() {
+                i += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return out;
+    }
+    let q_lower = query.to_lowercase();
+    let mut lowered = String::with_capacity(text.len());
+    let mut byte_map = Vec::with_capacity(text.len());
+    for (orig_idx, ch) in text.char_indices() {
+        for lc in ch.to_lowercase() {
+            let start = lowered.len();
+            lowered.push(lc);
+            for _ in start..lowered.len() {
+                byte_map.push(orig_idx);
+            }
+        }
+    }
+    byte_map.push(text.len());
+    let mut pos = 0;
+    while let Some(found) = lowered[pos..].find(&q_lower) {
+        let l_start = pos + found;
+        let l_end = l_start + q_lower.len();
+        out.push(byte_map[l_start]..byte_map[l_end]);
+        pos = l_end;
+    }
+    out
+}
+
+/// Apply active chat-find highlights to `job`, returning the byte offset of the active match if present.
+pub fn highlight_job(ui: &Ui, job: &mut LayoutJob) -> Option<usize> {
+    let state = ui
+        .ctx()
+        .data(|d| d.get_temp::<FindHighlight>(find_highlight_id()))?;
+    let ranges = find_case_insensitive_ranges(&job.text, &state.query);
+    if ranges.is_empty() {
+        return None;
+    }
+    let dark = ui.ctx().style().visuals.dark_mode;
+    let active_bg = Color32::from_rgb(234, 138, 30);
+    let active_fg = Color32::WHITE;
+    let other_bg = if dark {
+        Color32::from_rgba_unmultiplied(234, 179, 8, 95)
+    } else {
+        Color32::from_rgba_unmultiplied(250, 204, 21, 145)
+    };
+    let other_fg = if dark {
+        Color32::from_rgb(255, 240, 180)
+    } else {
+        Color32::BLACK
+    };
+    let mut active_byte = None;
+    let tagged: Vec<(std::ops::Range<usize>, bool)> = ranges
+        .into_iter()
+        .map(|r| {
+            let idx = state.seen.fetch_add(1, Ordering::Relaxed);
+            let is_active = state.active_in_scope == Some(idx);
+            if is_active {
+                active_byte = Some(r.start);
+            }
+            (r, is_active)
+        })
+        .collect();
+    let old_sections = std::mem::take(&mut job.sections);
+    for section in old_sections {
+        let s_start = section.byte_range.start;
+        let s_end = section.byte_range.end;
+        let mut cursor = s_start;
+        for (r, is_active) in &tagged {
+            if r.end <= cursor || r.start >= s_end {
+                continue;
+            }
+            let o_start = r.start.max(cursor);
+            let o_end = r.end.min(s_end);
+            if o_start > cursor {
+                let mut prefix = section.clone();
+                prefix.byte_range = cursor..o_start;
+                job.sections.push(prefix);
+            }
+            let mut matched = section.clone();
+            matched.byte_range = o_start..o_end;
+            matched.format.background = if *is_active { active_bg } else { other_bg };
+            matched.format.color = if *is_active { active_fg } else { other_fg };
+            job.sections.push(matched);
+            cursor = o_end;
+        }
+        if cursor < s_end {
+            let mut tail = section;
+            tail.byte_range = cursor..s_end;
+            job.sections.push(tail);
+        }
+    }
+    active_byte
+}
+
+pub fn record_find_match_rect(
+    ui: &Ui,
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    byte_start: usize,
+) {
+    let Some(state) = ui
+        .ctx()
+        .data(|d| d.get_temp::<FindHighlight>(find_highlight_id()))
+    else {
+        return;
+    };
+    let char_idx = galley
+        .job
+        .text
+        .get(..byte_start)
+        .map_or(0, |s| s.chars().count());
+    let local = galley.pos_from_cursor(egui::text::CCursor::new(char_idx));
+    let rect = local.translate(origin.to_vec2());
+    if let Ok(mut slot) = state.active_rect.lock() {
+        *slot = Some(rect);
+    }
+}
 use table::Table;
 #[derive(Default)]
 struct ParseMarkdown;
@@ -75,11 +237,20 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     }
     job.wrap.max_width = ui.available_width();
     job.align_baseline = true;
+    let active = highlight_job(ui, job);
     let galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
-    show_galley(ui, galley, links);
+    show_galley_with_find(ui, galley, links, active);
     links.clear();
 }
 fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
+    show_galley_with_find(ui, galley, links, None);
+}
+fn show_galley_with_find(
+    ui: &mut Ui,
+    galley: Arc<egui::Galley>,
+    links: &[Link],
+    active_byte: Option<usize>,
+) {
     let response = ui.add(egui::Label::new(galley.clone()).wrap().selectable(true));
     capture::offer(ui, &response, &galley.job.text);
     let origin = match galley.job.halign {
@@ -87,6 +258,9 @@ fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
         egui::Align::Center => response.rect.center_top(),
         egui::Align::Max => response.rect.right_top(),
     };
+    if let Some(byte_start) = active_byte {
+        record_find_match_rect(ui, &galley, origin, byte_start);
+    }
     if let Some(pos) = response.hover_pos() {
         let cursor = galley.cursor_from_pos(pos - origin);
         let byte = galley
@@ -586,8 +760,13 @@ pub fn diff(ui: &mut Ui, source: &str) {
             },
         );
     }
+    let active = highlight_job(ui, &mut job);
     let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(egui::Label::new(job).selectable(true).extend());
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let response = ui.add(egui::Label::new(galley.clone()).selectable(true).extend());
+    if let Some(byte_start) = active {
+        record_find_match_rect(ui, &galley, response.rect.left_top(), byte_start);
+    }
     let width = response.rect.width().max(ui.available_width());
     let shapes = backgrounds
         .into_iter()

@@ -247,6 +247,7 @@ impl Pui {
                 };
                 ctx.input_mut(|i| i.events.push(event));
             }
+            Find => self.open_chat_find(),
             Search => self.open_search(),
             QuickOpen => self.open_quick_files(),
             DarkTheme | LightTheme => {

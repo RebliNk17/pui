@@ -489,7 +489,21 @@ impl Pui {
             .frame(prompt_ui::popup(ctx).inner_margin(6)).gap(6.0).show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(width - 12.0);
-                let providers = self.state.models.iter().map(|m| m.provider.clone()).collect::<std::collections::BTreeSet<_>>();
+                let visible_models = self
+                    .state
+                    .models
+                    .iter()
+                    .filter(|m| {
+                        !self
+                            .prefs
+                            .hidden_models
+                            .contains(&format!("{}/{}", m.provider, m.id))
+                    })
+                    .collect::<Vec<_>>();
+                let providers = visible_models
+                    .iter()
+                    .map(|m| m.provider.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
                 let search_frame = egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0, colors.border)).corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(7, 5)).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -521,8 +535,16 @@ impl Pui {
                 if let Some(reason) = blocked { ui.add(egui::Label::new(theme::small(ui, reason)).wrap()); }
                 if let Some(error) = &self.state.error { ui.add(egui::Label::new(RichText::new(error).size(11.0).color(colors.red)).wrap()); }
                 let query = self.model_query.to_lowercase();
-                let filtered = self.state.models.iter().filter(|m| (self.model_provider.is_empty() || m.provider == self.model_provider)
-                    && format!("{} {} {}", m.id, m.name, m.provider).to_lowercase().contains(&query)).collect::<Vec<_>>();
+                let filtered = visible_models
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        (self.model_provider.is_empty() || m.provider == self.model_provider)
+                            && format!("{} {} {}", m.id, m.name, m.provider)
+                                .to_lowercase()
+                                .contains(&query)
+                    })
+                    .collect::<Vec<_>>();
                 let ids = filtered.iter().map(|m| ui.id().with(("model", &m.provider, &m.id))).collect::<Vec<_>>();
                 let selected_index = filtered.iter().position(|m| m.id == self.state.model && m.provider == self.state.provider).unwrap_or(0);
                 let target = navigate(ui, &ids, selected_index, blocked.is_none());

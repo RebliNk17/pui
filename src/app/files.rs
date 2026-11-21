@@ -9,6 +9,7 @@ mod loader;
 mod open_tests;
 mod quick_paths;
 mod svg;
+mod syntax;
 mod table_preferences;
 use super::*;
 use std::{
@@ -988,7 +989,7 @@ impl Browser {
         actions: &mut Vec<Action>,
     ) {
         let colors = theme::palette(ui.ctx());
-        let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width().max(120.0), 30.0));
+        let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width().max(120.0), 22.0));
         let response = ui.interact(
             rect,
             ui.make_persistent_id(("workspace-file", &self.root, &entry.path)),
@@ -1018,15 +1019,16 @@ impl Browser {
                 colors.dim,
             );
         }
+        let (icon, icon_color) = if entry.directory {
+            (Icon::Folder, colors.muted)
+        } else {
+            syntax::file_icon(&entry.path, &colors)
+        };
         icons::draw(
             ui,
-            egui::Rect::from_center_size(egui::pos2(x + 20.0, rect.center().y), Vec2::splat(16.0)),
-            if entry.directory {
-                Icon::Folder
-            } else {
-                Icon::File
-            },
-            colors.muted,
+            egui::Rect::from_center_size(egui::pos2(x + 20.0, rect.center().y), Vec2::splat(15.0)),
+            icon,
+            icon_color,
         );
         let name = if search {
             entry
@@ -1169,22 +1171,8 @@ impl Browser {
                     .to_ascii_lowercase();
                 let markdown = matches!(extension.as_str(), "md" | "markdown" | "mdown");
                 let html = matches!(extension.as_str(), "html" | "htm");
-                let table = matches!(extension.as_str(), "csv" | "tsv");
                 let svg = extension == "svg";
-                if markdown || svg {
-                    ui.horizontal(|ui| {
-                        let preview_response = ui.selectable_value(
-                            &mut tab.source,
-                            false,
-                            if table { "Table" } else { "Preview" },
-                        );
-                        let source_response = ui.selectable_value(&mut tab.source, true, "Source");
-                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
-                            preview.remember(0, &preview_response);
-                            preview.remember(1, &source_response);
-                        }
-                    });
-                }
+                let pane_rect = ui.max_rect();
                 if let Some(notice) = &tab.line_notice {
                     ui.label(theme::small(ui, notice));
                 }
@@ -1272,13 +1260,7 @@ impl Browser {
                                                 )
                                                 .extend(),
                                             );
-                                            let galley = ui.fonts(|fonts| {
-                                                fonts.layout_no_wrap(
-                                                    content.clone(),
-                                                    FontId::monospace(12.0),
-                                                    colors.text,
-                                                )
-                                            });
+                                            let galley = syntax::galley(ui, &tab.path, content);
                                             let response = ui.add(
                                                 egui::Label::new(galley.clone())
                                                     .extend()
@@ -1316,6 +1298,40 @@ impl Browser {
                                 );
                             });
                     }
+                }
+                if markdown || svg {
+                    let toggle_id = ui.id().with("preview-source-toggle");
+                    let pos = egui::pos2(pane_rect.right() - 32.0, pane_rect.top());
+                    egui::Area::new(toggle_id)
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::new()
+                                .fill(colors.surface)
+                                .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                                .corner_radius(6)
+                                .inner_margin(2)
+                                .show(ui, |ui| {
+                                    let (icon, tip) = if tab.source {
+                                        (crate::icons::Icon::File, "Show preview")
+                                    } else {
+                                        (crate::icons::Icon::Code, "Show source")
+                                    };
+                                    let response = crate::icons::button(ui, icon, tip);
+                                    ui.ctx().data_mut(|data| {
+                                        data.insert_temp(
+                                            egui::Id::new("file-preview-source-toggle-rect"),
+                                            response.rect,
+                                        );
+                                    });
+                                    if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                                        preview.remember(0, &response);
+                                    }
+                                    if response.clicked() {
+                                        tab.source = !tab.source;
+                                    }
+                                });
+                        });
                 }
             });
     }

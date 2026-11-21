@@ -327,7 +327,7 @@ impl Engine {
             Action::Forward => tab.browser.go_forward(),
             Action::Reload => tab.browser.reload(),
             Action::Stop => tab.browser.stop_load(),
-            Action::DevTools | Action::Inspect => {
+            Action::DevTools => {
                 if let Some(host) = tab.host() {
                     let events = Events {
                         state: Arc::new(Mutex::new(PageState::default())),
@@ -340,9 +340,27 @@ impl Engine {
                         Some(&BrowserSettings::default()),
                         None,
                     );
-                    if matches!(action, Action::Inspect) {
-                        tab.command("Overlay.setInspectMode", serde_json::json!({"mode":"searchForNode","highlightConfig":{"showInfo":true,"contentColor":{"r":111,"g":168,"b":220,"a":0.4}}}));
-                    }
+                }
+            }
+            Action::Inspect => {
+                tab.command("DOM.enable", serde_json::json!({}));
+                tab.command("Overlay.enable", serde_json::json!({}));
+                tab.command(
+                    "Overlay.setInspectMode",
+                    serde_json::json!({
+                        "mode": "searchForNode",
+                        "highlightConfig": {
+                            "showInfo": true,
+                            "showStyles": true,
+                            "contentColor": {"r": 111, "g": 168, "b": 220, "a": 0.4},
+                            "paddingColor": {"r": 147, "g": 196, "b": 125, "a": 0.35},
+                            "borderColor": {"r": 255, "g": 229, "b": 153, "a": 0.45},
+                            "marginColor": {"r": 246, "g": 178, "b": 107, "a": 0.4}
+                        }
+                    }),
+                );
+                if let Some(host) = tab.host() {
+                    host.set_focus(1);
                 }
             }
         }
