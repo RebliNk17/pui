@@ -6,15 +6,15 @@ import { stripTypeScriptTypes } from 'node:module';
 const raw = (await readFile(new URL('../scripts/workflows.ts', import.meta.url), 'utf8'))
   .replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });');
 const { installWorkflows } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(raw)).toString('base64')}`);
-function host() {
+function host(entries = []) {
   let tool;
-  const requests = [], statuses = [];
-  installWorkflows({ registerTool: t => { tool = t; } });
-  const ctx = { hasUI: true, mode: 'rpc', ui: {
+  const requests = [], statuses = [], saved = [], events = new Map();
+  installWorkflows({ registerTool: t => { tool = t; }, on: (name, handler) => events.set(name, handler), appendEntry: (customType, data) => { const entry = {type:"custom", customType, data}; saved.push(entry); entries.push(entry); } });
+  const ctx = { hasUI: true, mode: 'rpc', sessionManager: {getBranch: () => entries}, ui: {
     input: async (...args) => { requests.push(args); return JSON.stringify({ approved: false, regular_development: true }); },
     setStatus: (...args) => statuses.push(args),
   }};
-  return { tool, ctx, requests, statuses };
+  return { tool, ctx, requests, statuses, saved, events };
 }
 const args = { objective: 'Preserve sidebar keyboard navigation', reason: 'Separate checks and review help catch focus regressions.' };
 test('workflow is a sequential, consent-first host request, without an automatic start or timeout', async () => {
@@ -114,4 +114,63 @@ test('revision feedback is returned to the lead without approval, execution or h
  assert.equal(result.details.workflow.approved,false);assert.equal(result.details.workflow.revision_requested,true);
  assert.equal(result.details.workflow.feedback,'Keep public API unchanged');assert.notEqual(result.terminate,true);
  assert.equal(h.statuses.length,1);assert.equal(h.requests.length,0);
+});
+
+test('workflow guidance excludes routine work and never treats Ultracode or planning as consent', () => {
+  const h = host();
+  const guidance = h.tool.promptGuidelines.join(' ');
+  for (const text of ['Do not open a chat with a workflow offer', 'genuinely hard, high-risk', 'Routine fixes', 'NOT sufficient reasons', 'use subagents', 'Ultracode does not lower this threshold']) assert.ok(guidance.includes(text), text);
+  assert.match(h.tool.description, /Do not offer for routine work/);
+  assert.match(h.tool.promptSnippet, /otherwise develop normally/);
+});
+
+test('regular development suppresses subsequent offers and persists only a conversation preference', async () => {
+  const h = host();
+  await h.tool.execute('', args, undefined, null, h.ctx);
+  const result = await h.tool.execute('', {...args, objective:'A different ordinary follow-up'}, undefined, null, h.ctx);
+  assert.equal(h.requests.length, 1);
+  assert.equal(result.details.workflow.offer_suppressed, true);
+  assert.deepEqual(h.saved, [{type:'custom', customType:'pui-workflow-offers', data:{suppressed:true}}]);
+  assert.equal(h.statuses.length, 1);
+  const restored = host(h.saved.slice());
+  restored.events.get('session_start')({}, restored.ctx);
+  assert.equal((await restored.tool.execute('', args, undefined, null, restored.ctx)).details.workflow.offer_suppressed, true);
+  assert.equal(restored.requests.length, 0);
+  const separate = host();
+  separate.events.get('session_start')({}, separate.ctx);
+  await separate.tool.execute('', args, undefined, null, separate.ctx);
+  assert.equal(separate.requests.length, 1);
+});
+
+test('only a positive explicit user workflow request can reopen native consent after decline', async () => {
+  const h = host();
+  await h.tool.execute('', args, undefined, null, h.ctx);
+  for (const text of ['Continue', 'Implement everything', 'Use subagents', 'Make a plan', 'Do not use a workflow', "Don't start a workflow", 'Run without a workflow', 'Stop the workflow']) {
+    h.events.get('input')({source:'rpc', text});
+    assert.equal((await h.tool.execute('', args, undefined, null, h.ctx)).details.workflow.offer_suppressed, true, text);
+  }
+  h.events.get('input')({source:'extension', text:'Use a workflow'});
+  assert.equal((await h.tool.execute('', args, undefined, null, h.ctx)).details.workflow.offer_suppressed, true);
+  h.events.get('input')({source:'rpc', text:'Use a workflow for this migration'});
+  assert.equal(h.requests.length, 1, 'explicit request alone runs nothing');
+  h.ctx.ui.input = async (...request) => { h.requests.push(request); return JSON.stringify({approved:false,cancelled:true}); };
+  const result = await h.tool.execute('', args, undefined, null, h.ctx);
+  assert.equal(h.requests.length, 2, 'a fresh native consent is still required');
+  assert.equal(result.details.workflow.approved, false);
+  assert.equal(result.terminate, true);
+  assert.deepEqual(h.saved.at(-1).data, {suppressed:false});
+});
+
+test('revision, cancellation and abort never persist a decline or execution authority', async () => {
+  for (const response of [{approved:false,revision_requested:true}, {approved:false,cancelled:true}, undefined]) {
+    const h = host();
+    h.ctx.ui.input = async () => response === undefined ? undefined : JSON.stringify(response);
+    await h.tool.execute('', args, undefined, null, h.ctx);
+    assert.deepEqual(h.saved, []);
+  }
+  const h = host();
+  await h.tool.execute('', args, undefined, null, h.ctx);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(h.tool.execute('', args, controller.signal, null, h.ctx), /abort/i);
+  assert.equal(h.requests.length, 1);
 });

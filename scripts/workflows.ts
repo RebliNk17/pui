@@ -1,14 +1,35 @@
 import { Type } from "typebox";
 
+export const WORKFLOW_GUIDANCE = "Regular development is the default: inspect and get on with the work without asking about workflows. Do not open a chat with a workflow offer. Offer pui_workflow only after inspection establishes a genuinely hard, high-risk change with interdependent stages, such as a major architecture migration, a cross-system refactor, or a difficult reliability/security change where isolated execution and independent verification materially reduce risk. Routine fixes, ordinary features, UI polish, code review, investigation, documentation, adding tests, touching several files, or merely benefiting from testing/review are NOT sufficient reasons. A request to make a plan, implement everything, or use subagents is not a request for a workflow. If the user explicitly requests a workflow, honor that request through native consent. After Regular development is selected, do not offer again in this conversation unless the user explicitly asks to use a workflow. Ultracode does not lower this threshold.";
+
 export function installWorkflows(pi: any) {
+  let declined = false;
+  const preference = "pui-workflow-offers";
+  const remember = (suppressed: boolean) => {
+    declined = suppressed;
+    pi.appendEntry(preference, { suppressed });
+  };
+  pi.on("session_start", (_event: any, ctx: any) => {
+    declined = false;
+    for (const entry of ctx.sessionManager?.getBranch() ?? []) {
+      if (entry.type === "custom" && entry.customType === preference && typeof entry.data?.suppressed === "boolean") declined = entry.data.suppressed;
+    }
+  });
+  pi.on("input", (event: any) => {
+    // This only permits a fresh native question; it never approves execution.
+    // Ordinary follow-ups and extension-authored steering do not reset a decline.
+    if (declined && ["interactive", "rpc"].includes(event.source)
+      && /\b(?:use|start|run|enable|create|try)\s+(?:(?:a|the|this|that|structured)\s+)*(?:workflow|pui_workflow)\b/i.test(event.text)
+      && !/\b(?:no|not|never|without|avoid|stop|cancel|don['’]?t|do\s+not)\b/i.test(event.text)) remember(false);
+  });
   pi.registerTool({
     name: "pui_workflow",
     label: "Propose workflow",
     exposure: "model-only",
     executionMode: "sequential",
-    description: "Ask before using a structured development workflow instead of regular development. Supply the agreed objective, constraints, a concrete plan with exact checks when available, and one short sentence explaining why separate checks and independent review help this particular change. Pui asks the user before creating anything or making provider calls. Approval authorizes agent-managed checks, implementation, verification and up to two repairs; normal tool permissions still apply. Waits event-driven for the result. Decline means regular development; cancellation is not approval. No commits, merges or deployments. Git uses a retained isolated worktree with a verified snapshot of current files, including uncommitted changes and excluding ignored files, without committing, stashing or changing the original checkout; non-Git works in place.",
-    promptSnippet: "Submit the agreed plan and checks for approval, then implement and verify",
-    promptGuidelines: ["Use pui_workflow only when structured checks and independent review offer a concrete benefit over regular development. Explain that benefit very briefly in reason. Do not start a workflow automatically or ask separately first: pui_workflow presents the one required approval. Inspect first and include plan.steps and plan.checks when a concrete plan is available, especially after the user asks to review a plan. The native approval shows that exact plan; approved checks are frozen and no redundant proposal agent replaces them. In Plan mode, submit a concrete plan only when ready for implementation approval; the host asks explicitly to switch this conversation to Manual, while denial/cancellation keeps read-only mode. Never change modes or treat a plan/tool call as permission yourself. If the user requests changes, the tool returns revision_requested with feedback and no execution approval: revise only the plan, then submit it for a fresh host approval. Without a plan the workflow first establishes acceptance checks. After approval, manage the work without further workflow setup or acceptance steps. Do not perform parallel development while pui_workflow is running. Decline uses regular development; cancellation means wait for the user, not retry. Tool permissions remain separate."],
+    description: "Only for genuinely hard, high-risk development after inspection, or an explicit user request. Do not offer for routine work, ordinary fixes/features, reviews or tests; regular development is the default. Ask before using a structured development workflow instead of regular development. Supply the agreed objective, constraints, a concrete plan with exact checks when available, and one short sentence explaining why separate checks and independent review help this particular change. Pui asks the user before creating anything or making provider calls. Approval authorizes agent-managed checks, implementation, verification and up to two repairs; normal tool permissions still apply. Waits event-driven for the result. Decline means regular development; cancellation is not approval. No commits, merges or deployments. Git uses a retained isolated worktree with a verified snapshot of current files, including uncommitted changes and excluding ignored files, without committing, stashing or changing the original checkout; non-Git works in place.",
+    promptSnippet: "Exceptional hard/high-risk work only; otherwise develop normally without a workflow prompt",
+    promptGuidelines: [WORKFLOW_GUIDANCE + " Use pui_workflow only when this threshold is met. Explain that benefit very briefly in reason. Do not start a workflow automatically or ask separately first: pui_workflow presents the one required approval. Inspect first and include plan.steps and plan.checks when a concrete plan is available, especially after the user asks to review a plan. The native approval shows that exact plan; approved checks are frozen and no redundant proposal agent replaces them. In Plan mode, submit a concrete plan only when ready for implementation approval; the host asks explicitly to switch this conversation to Manual, while denial/cancellation keeps read-only mode. Never change modes or treat a plan/tool call as permission yourself. If the user requests changes, the tool returns revision_requested with feedback and no execution approval: revise only the plan, then submit it for a fresh host approval. Without a plan the workflow first establishes acceptance checks. After approval, manage the work without further workflow setup or acceptance steps. Do not perform parallel development while pui_workflow is running. Decline uses regular development; cancellation means wait for the user, not retry. Tool permissions remain separate."],
     parameters: Type.Object({
       objective: Type.String({ minLength: 1, maxLength: 16000 }),
       constraints: Type.Optional(Type.String({ maxLength: 12000 })),
@@ -42,6 +63,11 @@ export function installWorkflows(pi: any) {
         }
         if (plan.checks.criteria.every((check: any) => !check.command.trim())) throw new Error("Include an executable check; inspection alone is not verified completion.");
       }
+      signal?.throwIfAborted();
+      if (declined) {
+        const result = { approved: false, regular_development: true, offer_suppressed: true, note: "The user chose regular development in this conversation. Continue normally without another workflow offer unless the user explicitly asks to use a workflow. No workflow was created." };
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: { workflow: result } };
+      }
       const id = crypto.randomUUID();
       try {
         signal?.throwIfAborted();
@@ -50,6 +76,7 @@ export function installWorkflows(pi: any) {
         if (value === undefined) return { content: [{ type: "text", text: "Workflow request cancelled. Nothing was approved; wait for the user's next instruction." }], details: { cancelled: true }, terminate: true };
         const result = JSON.parse(value);
         if (result.error) throw new Error(result.error);
+        if (result.regular_development === true && result.approved === false && result.cancelled !== true) remember(true);
         return { content: [{ type: "text", text: JSON.stringify(result) }], details: { workflow: result }, ...(result.cancelled ? { terminate: true } : {}) };
       } finally {
         ctx.ui.setStatus("pui-workflow", JSON.stringify({ closed: id }));
