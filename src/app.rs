@@ -13,6 +13,7 @@ mod confirmations;
 pub(crate) mod context_capture;
 mod deletion;
 mod diagnostics;
+mod dictation;
 mod diff_viewer;
 mod files;
 mod kanban;
@@ -165,6 +166,7 @@ pub struct Pui {
     deliveries: Vec<run_status::Delivery>,
     interrupt: Option<run_status::Interrupt>,
     draft: String,
+    dictation: dictation::Dictation,
     context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     recall_width: f32,
@@ -311,6 +313,7 @@ impl Pui {
             deliveries: Vec::new(),
             interrupt: None,
             draft: String::new(),
+            dictation: dictation::Dictation::default(),
             context_chips: Default::default(),
             recall: Default::default(),
             recall_width: 700.0,
@@ -1587,6 +1590,9 @@ impl Pui {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(notice) = self.dictation.poll(&mut self.draft) {
+            self.state.notice = Some(notice);
+        }
         let colors = crate::theme::palette(ui.ctx());
         if let Some(error) = self.state.error.clone() {
             egui::Frame::new()
@@ -1879,6 +1885,7 @@ impl Pui {
                             }
                         }
                         self.composer_context_ring(ui);
+                        self.composer_mic_button(ui, ctx);
                     });
                 });
             });
@@ -1899,6 +1906,7 @@ impl Pui {
             self.completion_popup(ctx, anchor, layer);
         }
         if submit && !self.model_picker_open && !self.effort_picker_open {
+            self.dictation.stop();
             if alternate {
                 self.submit_mode(ctx, self.prefs.settings.delivery.opposite());
             } else {
@@ -1985,6 +1993,60 @@ impl Pui {
         if switch_account {
             self.settings_view.select("Providers");
             self.settings_open = true;
+        }
+    }
+
+    fn composer_mic_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let colors = crate::theme::palette(ui.ctx());
+        let listening = self.dictation.active();
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if listening {
+            ui.painter()
+                .rect_filled(rect, 6, colors.red.linear_multiply(0.22));
+            ui.painter().rect_stroke(
+                rect,
+                6,
+                Stroke::new(1.0_f32, colors.red),
+                egui::StrokeKind::Inside,
+            );
+        } else if response.hovered() {
+            ui.painter().rect_filled(rect, 6, colors.hover);
+        }
+        icons::draw(
+            ui,
+            rect,
+            Icon::Mic,
+            if listening {
+                colors.red
+            } else if response.hovered() {
+                colors.text
+            } else {
+                colors.muted
+            },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                !self.demo,
+                if listening {
+                    "Stop voice dictation"
+                } else {
+                    "Start voice dictation"
+                },
+            )
+        });
+        let tip = if listening {
+            "Listening… click to stop dictation"
+        } else {
+            "Voice dictation (macOS Speech Recognition)"
+        };
+        if response.on_hover_text(tip).clicked() && !self.demo {
+            if let Err(err) = self.dictation.toggle(ctx, &self.draft) {
+                self.state.notice = Some(err);
+            } else {
+                self.focus_composer = true;
+            }
         }
     }
 
