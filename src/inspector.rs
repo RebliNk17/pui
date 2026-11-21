@@ -198,41 +198,29 @@ pub fn stack(
                         colors.dim,
                     );
                     if collapsed && button.is_none() {
-                        let bar = if card == Card::Context {
-                            context_fraction.map(|fraction| {
-                                let bar_width = (rect.width() - 120.0).clamp(16.0, 54.0);
-                                let bar = egui::Rect::from_center_size(
-                                    rect.right_center() - egui::vec2(bar_width / 2.0, 0.0),
-                                    egui::vec2(bar_width, 4.0),
-                                );
-                                ui.painter().rect_filled(bar, 2, colors.hover);
-                                let mut fill = bar;
-                                fill.set_width(bar.width() * fraction.clamp(0.0, 1.0));
-                                ui.painter().rect_filled(fill, 2, colors.blue);
-                                bar
-                            })
-                        } else {
-                            None
-                        };
-                        let right = bar.map(|b| b.left() - 8.0).unwrap_or(rect.right());
                         let text = summary(card);
-                        let mut job = egui::text::LayoutJob::simple_singleline(
-                            text.clone(),
-                            egui::FontId::proportional(11.0),
-                            colors.muted,
-                        );
-                        job.wrap.max_width = (right - summary_left).max(1.0);
-                        job.wrap.max_rows = 1;
-                        job.wrap.break_anywhere = true;
-                        let galley = ui.painter().layout_job(job);
-                        if galley.elided {
-                            response.clone().on_hover_text(text);
+                        if let Some(fraction) = context_fraction.filter(|_| card == Card::Context) {
+                            context_ring(ui, rect, fraction, &text);
+                        } else {
+                            let right = rect.right();
+                            let mut job = egui::text::LayoutJob::simple_singleline(
+                                text.clone(),
+                                egui::FontId::proportional(11.0),
+                                colors.muted,
+                            );
+                            job.wrap.max_width = (right - summary_left).max(1.0);
+                            job.wrap.max_rows = 1;
+                            job.wrap.break_anywhere = true;
+                            let galley = ui.painter().layout_job(job);
+                            if galley.elided {
+                                response.clone().on_hover_text(text);
+                            }
+                            let pos = egui::pos2(
+                                right - galley.size().x,
+                                rect.center().y - galley.size().y / 2.0,
+                            );
+                            ui.painter().galley(pos, galley, colors.muted);
                         }
-                        let pos = egui::pos2(
-                            right - galley.size().x,
-                            rect.center().y - galley.size().y / 2.0,
-                        );
-                        ui.painter().galley(pos, galley, colors.muted);
                     }
                     if response.clicked()
                         || (response.has_focus()
@@ -400,6 +388,49 @@ pub fn stack(
         layout.move_to(source, target);
     }
     action
+}
+
+pub(crate) const CONTEXT_RING_RADIUS: f32 = 11.0;
+
+/// Collapsed Context summary: a usage ring with the percentage inside. The
+/// unfilled track is the context that is still left.
+fn context_ring(ui: &egui::Ui, row: egui::Rect, fraction: f32, text: &str) {
+    let colors = crate::theme::palette(ui.ctx());
+    let radius = CONTEXT_RING_RADIUS;
+    let stroke = 2.0;
+    let center = row.right_center() - egui::vec2(radius + stroke, 0.0);
+    let painter = ui.painter();
+    painter.circle_stroke(center, radius, egui::Stroke::new(stroke, colors.hover));
+    let fraction = fraction.clamp(0.0, 1.0);
+    if fraction > 0.005 {
+        let sweep = fraction * std::f32::consts::TAU;
+        let segments = (fraction * 40.0).ceil().max(4.0) as usize;
+        let start = -std::f32::consts::FRAC_PI_2;
+        let points = (0..=segments)
+            .map(|i| {
+                let angle = start + sweep * i as f32 / segments as f32;
+                center + radius * egui::vec2(angle.cos(), angle.sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            points,
+            egui::Stroke::new(stroke, colors.blue),
+        ));
+    }
+    // Shrink the label so "100%" / "~89%" stay inside the ring.
+    let mut size = 9.0;
+    let galley = loop {
+        let galley = painter.layout_no_wrap(
+            text.to_owned(),
+            egui::FontId::proportional(size),
+            colors.muted,
+        );
+        if galley.size().x <= (radius - stroke) * 2.0 - 2.0 || size <= 6.5 {
+            break galley;
+        }
+        size -= 0.5;
+    };
+    painter.galley(center - galley.size() / 2.0, galley, colors.muted);
 }
 
 pub fn detail(ui: &mut egui::Ui, label: &str, value: &str) {
@@ -693,6 +724,8 @@ mod tests {
             shape: &egui::Shape,
             labels: &mut Vec<(String, egui::Rect)>,
             rects: &mut Vec<egui::epaint::RectShape>,
+            circles: &mut Vec<egui::epaint::CircleShape>,
+            arcs: &mut Vec<egui::epaint::PathShape>,
             lines: &mut usize,
         ) {
             match shape {
@@ -701,6 +734,8 @@ mod tests {
                     t.galley.rect.translate(t.pos.to_vec2()),
                 )),
                 egui::Shape::Rect(r) => rects.push(r.clone()),
+                egui::Shape::Circle(c) => circles.push(c.clone()),
+                egui::Shape::Path(p) => arcs.push(p.clone()),
                 egui::Shape::LineSegment { points, stroke }
                     if (points[1].x - points[0].x).abs() > 100.0 && stroke.width == 1.0 =>
                 {
@@ -708,7 +743,7 @@ mod tests {
                 }
                 egui::Shape::Vec(v) => {
                     for s in v {
-                        inspect(s, labels, rects, lines);
+                        inspect(s, labels, rects, circles, arcs, lines);
                     }
                 }
                 _ => {}
@@ -728,6 +763,8 @@ mod tests {
                         };
                         let mut labels = vec![];
                         let mut rects = vec![];
+                        let mut circles = vec![];
+                        let mut arcs = vec![];
                         let mut lines = 0;
                         for _ in 0..2 {
                             let output = ctx.run(
@@ -767,9 +804,18 @@ mod tests {
                             );
                             labels.clear();
                             rects.clear();
+                            circles.clear();
+                            arcs.clear();
                             lines = 0;
                             for s in output.shapes {
-                                inspect(&s.shape, &mut labels, &mut rects, &mut lines);
+                                inspect(
+                                    &s.shape,
+                                    &mut labels,
+                                    &mut rects,
+                                    &mut circles,
+                                    &mut arcs,
+                                    &mut lines,
+                                );
                             }
                         }
                         let title = labels.iter().find(|(s, _)| s == "Context").unwrap().1;
@@ -813,23 +859,29 @@ mod tests {
                             "section boxes must not return"
                         );
                         let colors = crate::theme::palette(&ctx);
-                        let fills: Vec<_> =
-                            rects.iter().filter(|r| r.fill == colors.blue).collect();
+                        let fills: Vec<_> = arcs
+                            .iter()
+                            .filter(|p| {
+                                p.stroke.color == egui::epaint::ColorMode::Solid(colors.blue)
+                            })
+                            .collect();
                         if let Some(fraction) = fraction {
-                            let track = rects
+                            let ring = circles
                                 .iter()
-                                .find(|r| r.rect.height() == 4.0 && r.fill == colors.hover)
-                                .unwrap();
-                            if fraction > 0.0 {
-                                assert_eq!(fills.len(), 1);
-                                assert!(
-                                    (fills[0].rect.width() - track.rect.width() * fraction).abs()
-                                        < 0.01
-                                );
-                                assert!(track.rect.left() > summary.right());
-                            }
+                                .find(|c| c.radius == CONTEXT_RING_RADIUS)
+                                .expect("context ring");
+                            let inner = egui::Rect::from_center_size(
+                                ring.center,
+                                egui::Vec2::splat(ring.radius * 2.0),
+                            );
+                            assert!(
+                                inner.contains_rect(summary),
+                                "percentage must sit inside the ring: {summary:?} {inner:?}"
+                            );
+                            assert_eq!(fills.len(), usize::from(fraction > 0.0));
                         } else {
                             assert!(fills.is_empty());
+                            assert!(circles.is_empty());
                         }
                     }
                 }
