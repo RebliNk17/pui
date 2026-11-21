@@ -1205,6 +1205,74 @@ impl Changes {
         });
     }
 
+    pub(super) fn qm_field_label(ui: &mut egui::Ui, label: &str, hint: Option<&str>) {
+        let colors = theme::palette(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(label)
+                    .size(11.5)
+                    .strong()
+                    .color(colors.text),
+            );
+            if let Some(hint) = hint {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(hint).size(11.0).color(colors.dim));
+                });
+            }
+        });
+    }
+
+    pub(super) fn qm_text_input(
+        ui: &mut egui::Ui,
+        value: &mut String,
+        placeholder: &str,
+        limit: usize,
+        mono: bool,
+        width: f32,
+    ) -> egui::Response {
+        let colors = theme::palette(ui.ctx());
+        let inner_w = (width - 20.0).max(40.0);
+        let frame = egui::Frame::new()
+            .fill(colors.sidebar)
+            .stroke(Stroke::new(1.0, colors.border))
+            .corner_radius(7)
+            .inner_margin(egui::Margin::symmetric(10, 6));
+        let mut resp = None;
+        let frame_resp = frame.show(ui, |ui| {
+            let font = if mono {
+                FontId::monospace(12.0)
+            } else {
+                FontId::proportional(12.5)
+            };
+            let edit = egui::TextEdit::singleline(value)
+                .frame(false)
+                .font(font)
+                .char_limit(limit)
+                .desired_width(inner_w)
+                .hint_text(placeholder);
+            resp = Some(ui.add_sized([inner_w, 18.0], edit));
+        });
+        let resp = resp.unwrap();
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                frame_resp.response.rect,
+                7,
+                Stroke::new(1.5, colors.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        resp
+    }
+
+    pub(super) fn qm_divider(ui: &mut egui::Ui) {
+        let colors = theme::palette(ui.ctx());
+        ui.add_space(4.0);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+        ui.painter().rect_filled(rect, 0, colors.border);
+        ui.add_space(4.0);
+    }
+
     fn repo_sheet_dialog(
         &mut self,
         ctx: &egui::Context,
@@ -1214,39 +1282,47 @@ impl Changes {
         let Some(sheet) = self.repo_sheet else {
             return;
         };
-        let (title, subtitle) = match sheet {
+        let (title, subtitle, custom_footer) = match sheet {
             RepoSheet::Initialize => (
                 "Initialize Git repository",
                 "Creates a local .git directory without staging or publishing files.",
+                false,
             ),
             RepoSheet::Clone => (
                 "Clone repository",
-                "Clone a remote repository into a local folder inside this project.",
+                "Clones the repository’s default branch into the chosen folder.",
+                true,
             ),
             RepoSheet::Identity => (
-                "Set repository commit identity",
-                "Saved to repository-local git config (.git/config).",
+                "Commit identity",
+                "Saved to repository-local config (.git/config).",
+                true,
             ),
             RepoSheet::CreateRemote => (
                 "Create remote",
                 "Add a new Git remote to this repository.",
+                true,
             ),
             RepoSheet::CreateBranch => (
-                "Create or switch local branch",
-                "Inspect and confirm before creating or switching a branch.",
+                "Branch",
+                "Inspect and confirm before creating or switching a local branch.",
+                true,
             ),
             RepoSheet::Push => (
                 "Push & remotes",
                 "Inspect push destination and commits before pushing.",
+                false,
             ),
             RepoSheet::Fetch => (
                 "Fetch remote branch",
                 "Updates only the tracking ref; working tree is unchanged.",
+                false,
             ),
         };
         let mut close = false;
-        let response = prompt_ui::modal(ctx, egui::Id::new("changes-repo-sheet"), 420.0, |ui| {
+        let response = prompt_ui::modal(ctx, egui::Id::new("changes-repo-sheet"), 440.0, |ui| {
             prompt_ui::heading(ui, title, subtitle);
+            ui.add_space(4.0);
             match sheet {
                 RepoSheet::Initialize => self.initialize_ui(ui, workspace, loading),
                 RepoSheet::Clone => self.clone_ui(ui, workspace, loading),
@@ -1256,11 +1332,14 @@ impl Changes {
                 RepoSheet::Push => self.push_review(ui, workspace, loading),
                 RepoSheet::Fetch => self.fetch_ui(ui, workspace),
             }
-            prompt_ui::footer(ui, |ui| {
-                if prompt_ui::button(ui, "Close", prompt_ui::Button::Secondary, true).clicked() {
-                    close = true;
-                }
-            });
+            if !custom_footer {
+                prompt_ui::footer(ui, |ui| {
+                    if prompt_ui::button(ui, "Close", prompt_ui::Button::Secondary, true).clicked()
+                    {
+                        close = true;
+                    }
+                });
+            }
         });
         if close
             || response.should_close()
