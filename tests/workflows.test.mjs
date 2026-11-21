@@ -8,13 +8,14 @@ const raw = (await readFile(new URL('../scripts/workflows.ts', import.meta.url),
 const { installWorkflows } = await import(`data:text/javascript;base64,${Buffer.from(stripTypeScriptTypes(raw)).toString('base64')}`);
 function host(entries = []) {
   let tool;
+  const tools = new Map();
   const requests = [], statuses = [], saved = [], events = new Map();
-  installWorkflows({ registerTool: t => { tool = t; }, on: (name, handler) => events.set(name, handler), appendEntry: (customType, data) => { const entry = {type:"custom", customType, data}; saved.push(entry); entries.push(entry); } });
+  installWorkflows({ registerTool: t => { tools.set(t.name,t); if(t.name==="pui_workflow") tool = t; }, on: (name, handler) => events.set(name, handler), appendEntry: (customType, data) => { const entry = {type:"custom", customType, data}; saved.push(entry); entries.push(entry); } });
   const ctx = { hasUI: true, mode: 'rpc', sessionManager: {getBranch: () => entries}, ui: {
     input: async (...args) => { requests.push(args); return JSON.stringify({ approved: false, regular_development: true }); },
     setStatus: (...args) => statuses.push(args),
   }};
-  return { tool, ctx, requests, statuses, saved, events };
+  return { tool, tools, ctx, requests, statuses, saved, events };
 }
 const args = { objective: 'Preserve sidebar keyboard navigation', reason: 'Separate checks and review help catch focus regressions.' };
 test('workflow is a sequential, consent-first host request, without an automatic start or timeout', async () => {
@@ -25,6 +26,7 @@ test('workflow is a sequential, consent-first host request, without an automatic
   const [title, body, options] = h.requests[0];
   assert.equal(title, 'Pui agent control');
   assert.equal(JSON.parse(body).action, 'workflow_request');
+  assert.equal(JSON.parse(body).background, true);
   assert.equal(JSON.parse(body).reason, args.reason);
   assert.equal(options.timeout, undefined);
   assert.equal(result.details.workflow.regular_development, true);
@@ -40,7 +42,7 @@ test('explicit pinned policy and reported stop threshold are forwarded for nativ
   const defaultHost = host();
   await defaultHost.tool.execute('', args, undefined, null, defaultHost.ctx);
   const defaultRequest = JSON.parse(defaultHost.requests[0][1]);
-  assert.equal(defaultRequest.policy, undefined);
+  assert.equal(defaultRequest.policy, "selected");
   assert.equal(defaultRequest.spend_limit, undefined);
 });
 test('invalid policy and nonpositive or nonfinite thresholds fail before a host question', async () => {
@@ -116,6 +118,35 @@ test('revision feedback is returned to the lead without approval, execution or h
  assert.equal(h.statuses.length,1);assert.equal(h.requests.length,0);
 });
 
+test('background handle keeps chat read-only until an owner control reports a terminal result', async () => {
+  const h=host();
+  h.ctx.ui.input=async()=>JSON.stringify({approved:true,started:true,workflow_id:'run-1',outcome:'running'});
+  const started=await h.tool.execute('start',args,undefined,null,h.ctx);
+  assert.equal(started.details.workflow.started,true);
+  assert.equal((await h.events.get('tool_call')({toolName:'write'})).block,true);
+  assert.equal(await h.events.get('tool_call')({toolName:'read'}),undefined);
+  const control=h.tools.get('pui_workflow_control');
+  h.ctx.ui.input=async()=>JSON.stringify({workflow_id:'run-1',timed_out:true,outcome:'running'});
+  await control.execute('wait-1',{workflow_id:'run-1',operation:'wait'},undefined,null,h.ctx);
+  assert.equal((await h.events.get('tool_call')({toolName:'bash'})).block,true);
+  assert.equal(h.statuses.at(-1)[0],'pui-workflow-wait');
+  assert.deepEqual(JSON.parse(h.statuses.at(-1)[1]),{closed:'wait-1'});
+  h.ctx.ui.input=async()=>JSON.stringify({workflow_id:'run-1',outcome:'not_verified',cancelled:true});
+  await control.execute('cancel',{workflow_id:'run-1',operation:'cancel'},undefined,null,h.ctx);
+  assert.equal(await h.events.get('tool_call')({toolName:'write'}),undefined);
+});
+
+test('native resource guard survives missing extension handle and fails closed for unknown tools', async () => {
+  const h=host();
+  h.ctx.ui.input=async(title,body)=>{assert.equal(JSON.parse(body).action,'workflow_tool_guard');return JSON.stringify({blocked:true,reason:'resource owner'});};
+  assert.equal((await h.events.get('tool_call')({toolName:'mcp__write'},h.ctx)).block,true);
+  assert.equal(await h.events.get('tool_call')({toolName:'read'},h.ctx),undefined);
+  h.ctx.ui.input=async()=>undefined;
+  assert.equal((await h.events.get('tool_call')({toolName:'write'},h.ctx)).block,true);
+  h.ctx.ui.input=async()=>JSON.stringify({blocked:false});
+  assert.equal(await h.events.get('tool_call')({toolName:'write'},h.ctx),undefined);
+});
+
 test('workflow guidance excludes routine work and never treats Ultracode or planning as consent', () => {
   const h = host();
   const guidance = h.tool.promptGuidelines.join(' ');
@@ -136,6 +167,9 @@ test('regular development suppresses subsequent offers and persists only a conve
   restored.events.get('session_start')({}, restored.ctx);
   assert.equal((await restored.tool.execute('', args, undefined, null, restored.ctx)).details.workflow.offer_suppressed, true);
   assert.equal(restored.requests.length, 0);
+  restored.events.get('session_tree')({}, {...restored.ctx,sessionManager:{getBranch:()=>[]}});
+  await restored.tool.execute('',args,undefined,null,restored.ctx);
+  assert.equal(restored.requests.length,1,'tree navigation restores only the selected branch preference');
   const separate = host();
   separate.events.get('session_start')({}, separate.ctx);
   await separate.tool.execute('', args, undefined, null, separate.ctx);

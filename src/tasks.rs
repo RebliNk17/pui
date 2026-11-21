@@ -8,8 +8,13 @@ pub mod apply;
 #[path = "tasks/apply_unsupported.rs"]
 pub mod apply;
 pub mod checkpoints;
+pub mod continuation;
+pub mod decision;
+pub mod engine;
+pub mod feedback;
 pub mod outcome;
 pub mod plan;
+pub mod profile;
 #[cfg(test)]
 pub mod proposal;
 pub mod recovery;
@@ -60,7 +65,7 @@ impl Phase {
             Self::Verifying => "Independent review",
             Self::Ready => "Completed · checks and review passed",
             Self::Accepted => "Previously accepted",
-            Self::Failed => "Checks failed · repair limit reached",
+            Self::Failed => "Verification failed · work retained",
             Self::Blocked => "Blocked",
             Self::Interrupted => "Interrupted · not resumed",
             Self::Cancelled => "Cancelled",
@@ -246,9 +251,13 @@ pub struct Task {
     /// Initial user consent for this objective; absent on legacy manual tasks.
     #[serde(default)]
     pub initial_approved: bool,
+    #[serde(default)]
+    pub pause_requested: bool,
     /// Optional lead-authored plan shown in the initial host consent.
     #[serde(default)]
     pub execution_plan: Option<plan::ExecutionPlan>,
+    #[serde(default)]
+    pub profile: Option<profile::Receipt>,
     pub workspace: Option<PathBuf>,
     pub isolated: bool,
     pub provider: String,
@@ -260,6 +269,8 @@ pub struct Task {
     /// Agent-established checks frozen before implementation; later output cannot replace them.
     pub approved: Option<Contract>,
     pub phase: Phase,
+    #[serde(default)]
+    pub reason: Option<decision::Reason>,
     pub note: String,
     #[serde(default)]
     pub checkpoints: Vec<checkpoints::Checkpoint>,
@@ -280,9 +291,19 @@ pub struct Task {
     pub setup: Vec<setup::SetupRecord>,
     pub attempts: Vec<Attempt>,
     pub runs: Vec<Run>,
+    #[serde(default)]
+    pub operations: Vec<engine::Operation>,
+    #[serde(default)]
+    pub feedback: Vec<feedback::Feedback>,
+    #[serde(default)]
+    pub continuations: Vec<continuation::Continuation>,
     pub updated: u64,
     #[serde(default)]
     pub dynamic_routing: bool,
+    #[serde(default)]
+    pub catalog_selected: bool,
+    #[serde(default)]
+    pub selected_catalog: Option<String>,
     #[serde(default)]
     pub spend_limit: Option<f64>,
     #[serde(default)]
@@ -296,7 +317,9 @@ impl Task {
             source,
             parent_session: None,
             initial_approved: false,
+            pause_requested: false,
             execution_plan: None,
+            profile: None,
             workspace: None,
             isolated: false,
             provider,
@@ -307,6 +330,7 @@ impl Task {
             proposed: Contract::default(),
             approved: None,
             phase: Phase::Draft,
+            reason: None,
             note: String::new(),
             checkpoints: Vec::new(),
             dirty_source: false,
@@ -319,8 +343,13 @@ impl Task {
             setup: vec![],
             attempts: vec![],
             runs: vec![],
+            operations: vec![],
+            feedback: vec![],
+            continuations: vec![],
             updated: now(),
             dynamic_routing: false,
+            catalog_selected: false,
+            selected_catalog: None,
             spend_limit: None,
             pending_route: None,
         }
@@ -350,12 +379,14 @@ impl Task {
             a.note = note.into();
         }
         self.phase = Phase::Stale;
+        self.reason = Some(decision::Reason::SourceChanged);
         self.note = note.into();
     }
     pub fn cost(&self) -> f64 {
         self.runs.iter().map(|r| r.cost + r.permission_cost).sum()
     }
     pub fn recover(&mut self) {
+        self.interrupt_operations();
         let interrupted_setup = self
             .setup
             .iter()
@@ -386,6 +417,7 @@ impl Task {
                 }
             }
             self.phase = Phase::Interrupted;
+            self.reason = Some(decision::Reason::Interrupted);
             self.note = "Pui stopped during execution. No prompts or commands were replayed. Inspect the retained workspace; ask the agent for a new workflow if needed.".into();
         }
     }

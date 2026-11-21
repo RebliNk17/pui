@@ -61,7 +61,7 @@ impl Pui {
         ui.add_space(8.0);
         let proposal = task.runs.iter().rev().find(|r| r.role == Role::Proposal);
         let status = if task.approved.is_some() {
-            "Established"
+            task.acceptance_status()
         } else if matches!(task.phase, Phase::Draft | Phase::AwaitingApproval) {
             "Legacy · new agent request required"
         } else {

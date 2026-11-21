@@ -10,7 +10,10 @@ pub fn summary(task: &Task) -> Value {
             .as_ref()
             .zip(evidence.as_ref())
             .is_some_and(|(contract, attempt)| attempt.passed(contract));
-    let instruction = if verified {
+    let running = task.phase.active();
+    let instruction = if running {
+        "Workflow is still running, not verified. Use an event-driven wait when needed; do not poll or mutate its source/candidate concurrently."
+    } else if verified {
         "Report the verified candidate and concrete checks/review. Clearly say isolated changes remain in the retained workspace unless a separate application is confirmed. Workflow success does not authorize applying, committing, merging or deploying."
     } else {
         "Report this as NOT VERIFIED, with the blocker or missing evidence. A completed tool call or approved request is not success. Do not automatically retry, replay effects, or claim the original checkout was updated."
@@ -20,11 +23,11 @@ pub fn summary(task: &Task) -> Value {
         "checks":attempt.checks.iter().map(check_summary).collect::<Vec<_>>(),"review":attempt.review,"note":attempt.note
     })).collect::<Vec<_>>();
     json!({
-        "workflow_id":task.id,"approved":true,"phase":task.phase.label(),"verified":verified,
-        "outcome":if verified {"verified_candidate"} else {"not_verified"}, "note":task.note,
+        "workflow_id":task.id,"approved":true,"phase":task.phase.label(),"reason":task.reason,"verified":verified,
+        "outcome":if running {"running"} else if verified {"verified_candidate"} else {"not_verified"}, "note":task.note,"pause_requested":task.pause_requested,
         "workspace":task.workspace,"isolated":task.isolated,
         "application_status":if task.isolated {"separate_confirmation_required_not_established_by_workflow_completion"} else {"in_place_edits_may_already_exist"},
-        "reported_cost":task.cost(),"execution_plan":task.execution_plan,"checks":task.approved,"attempts":attempts,
+        "reported_cost":task.cost(),"profile":task.profile,"operations":task.operations,"continuations":task.continuations,"execution_plan":task.execution_plan,"checks":task.approved,"attempts":attempts,
         "current_evidence":evidence.as_ref().map(|attempt| json!({"number":attempt.number,"fingerprint":attempt.fingerprint,"invalidated":attempt.invalidated,
             "checks":attempt.checks.iter().map(check_summary).collect::<Vec<_>>(),"review":attempt.review,"note":attempt.note})),
         "instruction":instruction

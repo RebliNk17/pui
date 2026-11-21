@@ -1,8 +1,8 @@
 //! App-owned task supervisor. Pi still owns the agent loop and tool permissions.
 use super::*;
-use crate::tasks::{
-    self as domain, Attempt, Check, Contract, Phase, Review, Role, Run, Task, Verdict,
-};
+use crate::tasks::{self as domain, Attempt, Check, Contract, Phase, Review, Role, Run, Task};
+#[cfg(test)]
+use domain::Verdict;
 use std::collections::BTreeMap;
 
 mod attachment;
@@ -10,7 +10,10 @@ mod changes_preview;
 pub(super) mod chat;
 mod checkpoints;
 mod consent;
+mod continuation;
+mod control;
 pub(super) mod environment;
+mod feedback;
 mod operations;
 pub(super) mod recovery;
 mod refresh;
@@ -39,6 +42,9 @@ pub(super) enum FingerprintStep {
     RecoveryAfterChecks,
     RecoveryAfterReview,
     InitialResumeBeforeBuilder,
+    FeedbackBefore,
+    FeedbackAfter,
+    Continue,
 }
 enum JobResult {
     Inspected(domain::workspace::Inspection),
@@ -54,6 +60,13 @@ enum JobResult {
 struct Job {
     task: String,
     rx: Receiver<Result<JobResult, String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 #[derive(Clone)]
 struct Pending {
@@ -64,6 +77,15 @@ struct Pending {
     accepted: bool,
     settled: bool,
     aborted: bool,
+    operation: Option<String>,
+}
+struct Dispatch {
+    run: String,
+    operation: String,
+    command: Value,
+    record: String,
+    before: Task,
+    reply: Receiver<Result<(), String>>,
 }
 struct Process {
     run: String,
@@ -138,6 +160,9 @@ pub(super) struct Tasks {
     display_paths: chat::DisplayPaths,
     live: Option<String>,
     processes: Vec<Process>,
+    dispatch: Option<Dispatch>,
+    feedback: feedback::State,
+    continuation: continuation::State,
     retiring: Vec<Receiver<()>>,
     histories: BTreeMap<String, State>,
     pub(super) selected_run: Option<String>,
@@ -154,7 +179,8 @@ pub(super) struct Tasks {
     local_owned: std::collections::BTreeSet<String>,
     store: Option<mpsc::Sender<StoreCommand>>,
     store_worker: Option<std::thread::JoinHandle<()>>,
-    loaded: Option<Receiver<Result<Vec<Task>, String>>>,
+    loaded: Option<Receiver<Result<domain::store::History, String>>>,
+    history_warning: Option<String>,
     errors: Option<Receiver<StoreError>>,
     detached: Vec<Receiver<Result<Vec<Task>, String>>>,
     pub error: Option<String>,
@@ -163,6 +189,8 @@ pub(super) struct Tasks {
     pub current_dialog: String,
     questions: questions::View,
     requests: BTreeMap<String, consent::Request>,
+    waits: Vec<control::Wait>,
+    start: Option<control::Start>,
     pub revalidate_at: Option<std::time::Instant>,
     preview: Option<(String, Receiver<Result<crate::history::Preview, String>>)>,
     watched: Option<(String, PathBuf)>,
@@ -186,7 +214,7 @@ impl Tasks {
         result.updates.setup = Some(watch_rx);
         let ctx = ctx.clone();
         result.store_worker = Some(std::thread::spawn(move || {
-            let _ = loaded_tx.send(domain::store::load(&home));
+            let _ = loaded_tx.send(domain::store::history(&home));
             let _ = watch_tx.send(refresh::watch(home.clone(), &ctx));
             ctx.request_repaint();
             run_store(&home, rx, errors, &ctx);
@@ -422,6 +450,8 @@ impl Tasks {
     }
     pub fn stop(&mut self) {
         self.recovery.cancel_pending();
+        self.dispatch = None;
+        self.continuation.cancel();
         if let Some(process) = &mut self.setup {
             process.cancel();
         }
@@ -434,7 +464,9 @@ impl Tasks {
                     run.status = "Cancelled".into();
                 }
             }
+            t.interrupt_operations();
             t.phase = Phase::Cancelled;
+            t.reason = Some(domain::decision::Reason::Cancelled);
             t.note = "Stopped by you. No commands were replayed; files and sessions are retained."
                 .into();
             recovery::finish_interrupted(t);
@@ -457,6 +489,7 @@ impl Tasks {
         self.live = None;
     }
     fn retire(&mut self) {
+        self.feedback = Default::default();
         for p in std::mem::take(&mut self.processes) {
             self.histories.insert(p.run, p.state);
             let (tx, rx) = mpsc::channel();
@@ -467,10 +500,19 @@ impl Tasks {
             });
         }
     }
-    fn block(&mut self, reason: impl Into<String>) {
+    fn block_with_reason(&mut self, note: impl Into<String>, reason: domain::decision::Reason) {
+        self.block_inner(note.into(), Some(reason));
+    }
+    fn block(&mut self, note: impl Into<String>) {
+        self.block_inner(note.into(), None);
+    }
+    fn block_inner(&mut self, reason: String, category: Option<domain::decision::Reason>) {
         self.revalidate_claim = None;
-        let reason = reason.into();
+        self.dispatch = None;
+        self.continuation = Default::default();
         if let Some(t) = self.live_mut() {
+            t.interrupt_operations();
+            t.reason = category;
             for run in &mut t.runs {
                 if matches!(run.status.as_str(), "Connecting" | "Working") {
                     run.status = "Blocked".into();
@@ -519,8 +561,9 @@ impl Tasks {
         }
         if let Some(rx) = &self.loaded {
             match rx.try_recv() {
-                Ok(Ok(mut tasks)) => {
-                    self.records.append(&mut tasks);
+                Ok(Ok(mut history)) => {
+                    self.history_warning = history.warning();
+                    self.records.append(&mut history.records);
                     self.loaded = None;
                 }
                 Ok(Err(e)) => {
@@ -564,11 +607,14 @@ impl Tasks {
     }
     pub fn shutdown(&mut self) {
         self.recovery.cancel_pending();
+        self.dispatch = None;
+        self.continuation = Default::default();
         if let Some(process) = &mut self.setup {
             process.cancel();
         }
         if self.live.is_some() {
             if let Some(t) = self.live_mut().filter(|t| t.phase.active()) {
+                t.interrupt_operations();
                 t.phase = Phase::Interrupted;
                 t.note = "Pui closed during execution. No automatic replay.".into();
                 recovery::finish_interrupted(t);
@@ -597,18 +643,24 @@ fn run_store(
     while let Ok(command) = rx.recv() {
         match command {
             StoreCommand::Refresh { reply } => {
-                let _ = reply.send(domain::store::load(home).map(|records| refresh::Snapshot {
-                    records,
-                    owned: owned.keys().cloned().collect(),
-                }));
+                let _ = reply.send(
+                    domain::store::history(home).map(|history| refresh::Snapshot {
+                        warning: history.warning(),
+                        records: history.records,
+                        owned: owned.keys().cloned().collect(),
+                    }),
+                );
             }
             StoreCommand::ReleaseCurrent { id, reply } => {
                 owned.remove(&id);
                 rejected.insert(id.clone());
-                let _ = reply.send(domain::store::load(home).map(|records| refresh::Snapshot {
-                    records,
-                    owned: owned.keys().cloned().collect(),
-                }));
+                let _ = reply.send(
+                    domain::store::history(home).map(|history| refresh::Snapshot {
+                        warning: history.warning(),
+                        records: history.records,
+                        owned: owned.keys().cloned().collect(),
+                    }),
+                );
             }
             StoreCommand::ClaimCurrent { expected, reply } => {
                 let id = expected.id.clone();
@@ -1014,6 +1066,7 @@ impl Pui {
         self.tasks.persist_loaded();
         self.poll_task_operations();
         self.task_poll_recovery();
+        self.poll_task_continuation();
         self.poll_task_updates();
         self.poll_task_attachment();
         self.tasks

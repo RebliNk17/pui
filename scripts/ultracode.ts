@@ -51,12 +51,25 @@ export default function puiExtension(pi: any) {
   let refreshController: AbortController | undefined;
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
+  pi.registerTool({
+    name:"pui_run_check",label:"Run focused workflow check",executionMode:"sequential",
+    description:"Workflow builders only: request one frozen check by criterion ID through the host. Exact command permission still applies; bounded to four calls per implementation attempt. Feedback is not final acceptance evidence. No arbitrary commands, installs or delegation.",
+    parameters:Type.Object({criterion:Type.String({minLength:1,maxLength:64})}),
+    async execute(_id:string,args:any,signal:AbortSignal|undefined,_update:any,ctx:any){
+      if(taskRole!=="builder")throw new Error("Focused workflow checks are builder-only.");
+      signal?.throwIfAborted();
+      const value=await ctx.ui.input("Pui workflow check",JSON.stringify({criterion:args.criterion}),{signal});
+      signal?.throwIfAborted(); if(value===undefined)throw new Error("Focused check cancelled; no replay.");
+      const result=JSON.parse(value);if(result.error)throw new Error(result.error);
+      return {content:[{type:"text",text:JSON.stringify(result)}],details:{feedback:result}};
+    }
+  });
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
-  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_workflow"];
+  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_workflow","pui_workflow_control","pui_run_check"];
   const setMode = (on: boolean) => {
     enabled = on && !readonly && !taskRole;
     const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
-    const controls = taskRole ? [] : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
+    const controls = taskRole ? (taskRole==="builder" ? ["pui_run_check"] : []) : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
     pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
   };
   pi.on("session_start", (_event: any, ctx: any) => {
@@ -108,7 +121,7 @@ export default function puiExtension(pi: any) {
     if (taskRole === "router") return { block: true, reason: "Model router has no tool access." };
     if (taskRole === "checks") return { block: true, reason: "Task check runner executes only host-submitted, approved commands; model tools are disabled." };
     if (taskRole === "builder" && ["bash", "codemode", "pui_spawn_agent"].includes(event.toolName)) return { block: true, reason: "Verified-task builders use bounded file tools only. Approved tests execute in the independent check runner; no shell, codemode, delegation or Git mutations." };
-    if (taskRole === "builder" && !["read", "grep", "find", "ls", "edit", "write", "pui_ask_questions"].includes(event.toolName)) return { block: true, reason: "Tool outside verified-task builder allowlist." };
+    if (taskRole === "builder" && !["read", "grep", "find", "ls", "edit", "write", "pui_ask_questions", "pui_run_check"].includes(event.toolName)) return { block: true, reason: "Tool outside verified-task builder allowlist." };
     if (taskRole === "builder" && ["edit", "write"].includes(event.toolName) && !await localPath(ctx.cwd, event.input?.path)) return { block: true, reason: "Verified-task edits must stay in the canonical workspace and cannot target protected paths or symlinks." };
   });
   pi.on("user_bash", () => taskRole && taskRole !== "checks" ? { result: { output: "Shell is reserved for the verified-task check runner.", exitCode: 1, cancelled: false, truncated: false } } : undefined);

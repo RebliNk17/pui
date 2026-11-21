@@ -31,6 +31,7 @@ fn external_refresh_reparents_removes_and_adds_retained_history_without_touching
     moved.parent_session = Some("/fixture/new-chat".into());
     let added = task();
     tasks.merge_history(Snapshot {
+        warning: None,
         records: vec![moved.clone(), foreign_owner, added.clone()],
         owned: BTreeSet::from([owner.id.clone()]),
     });
@@ -57,6 +58,7 @@ fn queued_local_save_and_owner_claim_are_not_overwritten_by_older_refresh() {
     let (_tx, rx) = mpsc::channel();
     tasks.revalidate_claim = Some((claim.id.clone(), rx));
     tasks.merge_history(Snapshot {
+        warning: None,
         records: vec![],
         owned: BTreeSet::new(),
     });

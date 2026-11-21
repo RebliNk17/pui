@@ -3,6 +3,9 @@
 //! no-follow parent descriptors are used for every mutation. Editors/Git are not
 //! locked out; races may require manual recovery and are never reported as success.
 use super::*;
+#[path = "apply_directories.rs"]
+mod directories;
+pub(super) use directories::missing as missing_directories;
 use std::io::Write;
 #[cfg(unix)]
 use std::{
@@ -53,6 +56,8 @@ struct Journal {
     identity: Identity,
     patch_hash: String,
     operations: Vec<Operation>,
+    #[serde(default)]
+    directories: Vec<String>,
 }
 struct Parent {
     directory: fs::File,
@@ -112,6 +117,7 @@ fn parent(root: &Path, path: &str) -> Result<Parent, String> {
 fn parent(_root: &Path, _path: &str) -> Result<Parent, String> {
     Err("Recoverable apply is currently supported only on Unix.".into())
 }
+#[cfg(test)]
 pub(super) fn parent_available(root: &Path, path: &str) -> bool {
     parent(root, path).is_ok()
 }
@@ -445,9 +451,32 @@ pub(super) fn transact(
         .map_err(|e| e.to_string())?
         .join("apply-v1")
         .join(format!("transaction-{}-{id}", task.id));
+    let missing = plan
+        .changes
+        .iter()
+        .map(|change| directories::missing(&plan.identity.original, &change.path))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<_>>();
+    let mut missing = missing.into_iter().collect::<Vec<_>>();
+    missing.sort_by_key(|path| (path.matches('/').count(), path.clone()));
+    if missing.len() > MAX_FILES {
+        return Err("Apply requires too many new directories; nothing changed.".into());
+    }
+    check(task, plan)?;
+    baseline::private_dir(&directory)?;
+    // Directory intent is durable before mkdir. A partial creation without a
+    // matching receipt is explicitly uncertain and is never automatically removed.
+    baseline::durable_file(
+        &directory.join("directory-plan.json"),
+        &serde_json::to_vec(&missing).map_err(|e| e.to_string())?,
+    )?;
+    baseline::sync_dir(directory.parent().unwrap())?;
+    let created = directories::create(&plan.identity.original, &missing, &directory)?;
     let mut operations = Vec::new();
     let mut parents = Vec::new();
-    // All paths/parents/content are preflighted before even staging any file.
+    // All paths/content remain checked before file publication.
     for (i, change) in plan.changes.iter().enumerate() {
         name(change.path.as_bytes())?;
         let p = parent(&plan.identity.original, &change.path)?;
@@ -483,6 +512,7 @@ pub(super) fn transact(
         identity: plan.identity.clone(),
         patch_hash: plan.patch_hash.clone(),
         operations,
+        directories: missing,
     };
     let retained = recovery_directory(&journal.identity, &id, true)?;
     for p in &mut parents {
@@ -592,7 +622,7 @@ pub(super) fn transact(
     match result {
         Ok(false)=>Ok(outcome(&directory,&id,TransactionStatus::Interrupted,"Injected interruption: transaction intentionally has no completion receipt; inspect and explicitly roll back, never replay.".into())),
         Ok(true)=>Ok(finish(&directory,&id,TransactionStatus::Applied,"Exact reviewed builder changes applied to working files. Git index and unrelated files were not written. Private Git-directory backups and durable journal permit explicit conditional rollback; no recovery artifacts were added to the source working tree. Filesystem multi-file writes were not atomic.".into())),
-        Err(error)=>{let(complete,detail)=rollback(&directory,&journal,&parents);Ok(finish(&directory,&id,if complete{TransactionStatus::RolledBack}else{TransactionStatus::RecoveryRequired},format!("Apply failed: {error}. {detail}")))}
+        Err(error)=>{let(complete,detail)=rollback(&directory,&journal,&parents);let clean=if complete{directories::cleanup(&journal.identity.original,&created)}else{Err("Directory cleanup awaits file recovery.".into())};Ok(finish(&directory,&id,if complete&&clean.is_ok(){TransactionStatus::RolledBack}else{TransactionStatus::RecoveryRequired},format!("Apply failed: {error}. {detail} {}",clean.err().unwrap_or_default())))}
     }
 }
 /// Roll back only bytes/inodes we can still attribute to this transaction. A
@@ -689,8 +719,21 @@ fn load_journal(directory: &Path, task: &Task, id: &str) -> Result<Journal, Stri
         || journal.transaction_id != id
         || identity(task)? != journal.identity
         || journal.operations.len() > MAX_FILES
+        || journal.directories.len() > MAX_FILES
     {
         return Err("Apply recovery identity mismatch; inspect retained evidence manually.".into());
+    }
+    let mut directory_names = BTreeSet::new();
+    for directory in &journal.directories {
+        name(directory.as_bytes())?;
+        if !directory_names.insert(directory)
+            || !journal
+                .operations
+                .iter()
+                .any(|op| op.before.is_none() && op.path.starts_with(&format!("{directory}/")))
+        {
+            return Err("Invalid directory recovery plan; nothing changed.".into());
+        }
     }
     let mut paths = BTreeSet::new();
     let mut total = 0u64;
@@ -787,12 +830,23 @@ pub fn recover_owned(
         })
         .collect();
     let parents = parents?;
+    let created =
+        directories::receipts(&journal.identity.original, &journal.directories, &directory)?;
     // Append and fsync BEFORE any rollback mutation. A crash now supersedes an
     // earlier Applied event; inspection never replays or reports old success.
     append_event(&outcome(&directory,id,TransactionStatus::Interrupted,"Explicit conditional rollback started; completion is uncertain until a later durable event.".into()))?;
     match action {
         RecoveryAction::RollBack => {
-            let (done, detail) = rollback(&directory, &journal, &parents);
+            let (done, mut detail) = rollback(&directory, &journal, &parents);
+            let cleanup = if done {
+                directories::cleanup(&journal.identity.original, &created)
+            } else {
+                Err("Directory cleanup awaits file recovery.".into())
+            };
+            let done = done && cleanup.is_ok();
+            if let Err(error) = cleanup {
+                detail.push_str(&format!(" {error}"));
+            }
             Ok(finish(
                 &directory,
                 id,

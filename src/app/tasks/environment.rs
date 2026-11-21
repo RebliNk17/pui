@@ -201,20 +201,50 @@ pub(super) fn failed_requirement(check: &Check) -> Option<String> {
         return None;
     }
     let text = check.output.to_ascii_lowercase();
-    let recognized = [
-        "cannot find module",
-        "modulenotfounderror:",
-        "no module named ",
-        "command not found",
-        "no matching package named",
-        "failed to get `",
-        "could not resolve host",
-        "network is unreachable",
-    ];
-    let cargo_offline_cache = text.contains("error: failed to download `")
-        && text.contains("attempting to make an http request, but --offline was specified");
-    let missing_linker = text.lines().any(|line| {
-        line.trim_start().starts_with("error: linker `") && line.trim_end().ends_with("` not found")
+    let tool = check.command.split_whitespace().next().unwrap_or_default();
+    let node = matches!(tool, "node" | "npm" | "npx" | "pnpm" | "yarn" | "bun");
+    let python = matches!(tool, "python" | "python3" | "pytest" | "uv")
+        || tool.ends_with("/python")
+        || tool.ends_with("/python3")
+        || tool.ends_with("/pytest");
+    // Test names, assertion messages and quoted diagnostics are not environment
+    // evidence. A missing relative/absolute project import is eligible for repair.
+    let missing_module = text.lines().any(|line| {
+        let line = line.trim_start();
+        let module = if node {
+            line.strip_prefix("error: cannot find module '")
+                .or_else(|| {
+                    line.strip_prefix("error [err_module_not_found]: cannot find package '")
+                })
+        } else if python {
+            line.strip_prefix("modulenotfounderror: no module named '")
+        } else {
+            None
+        };
+        module
+            .and_then(|s| s.split_once('\''))
+            .is_some_and(|(name, _)| {
+                !name.is_empty() && !name.starts_with(['.', '/', '\\']) && !name.contains(':')
+            })
     });
-    (recognized.iter().any(|s| text.contains(s)) || cargo_offline_cache || missing_linker).then(|| format!("Check {} reported an unavailable module, tool, package, or network prerequisite. Inspect its exact retained command/output; environment health is unknown. No verifier or automatic repair was started. Automatic setup is unsupported; inspect a separate user-reviewed setup plan with exact-command permission, then explicitly choose recovery. Never replay uncertain shell effects.", check.criterion))
+    let cargo = tool == "cargo";
+    let cargo_offline_cache = cargo
+        && text
+            .lines()
+            .any(|line| line.starts_with("error: failed to download `"))
+        && text.lines().any(|line| {
+            line.trim_start() == "attempting to make an http request, but --offline was specified"
+        });
+    let prerequisite = text.lines().any(|line| {
+        let line = line.trim_start();
+        (cargo
+            && (line.starts_with("error: no matching package named ")
+                || line.starts_with("error: failed to get `")
+                || line.starts_with("error: linker `") && line.ends_with("` not found")))
+            || line.starts_with("curl: (6) could not resolve host:")
+            || line.starts_with("/bin/sh:") && line.ends_with(": not found")
+            || line.starts_with("/bin/bash:") && line.ends_with(": command not found")
+            || line.starts_with("sh:") && line.ends_with(": command not found")
+    });
+    (missing_module || cargo_offline_cache || prerequisite).then(|| format!("Check {} reported an unavailable module, tool, package, or network prerequisite. Inspect its exact retained command/output; environment health is unknown. No verifier or automatic repair was started. Automatic setup is unsupported; inspect a separate user-reviewed setup plan with exact-command permission, then explicitly choose recovery. Never replay uncertain shell effects.", check.criterion))
 }
