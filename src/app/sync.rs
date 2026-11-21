@@ -927,6 +927,11 @@ impl Pui {
             command.description.hash(&mut hash);
         }
         self.state.permission_classifier.hash(&mut hash);
+        for model in &self.state.permission_classifier_models {
+            model.provider.hash(&mut hash);
+            model.id.hash(&mut hash);
+            model.name.hash(&mut hash);
+        }
         self.state.permission_cost.to_bits().hash(&mut hash);
         self.state.compaction_settings_error.hash(&mut hash);
         self.state.compact_percent.hash(&mut hash);
@@ -1346,6 +1351,7 @@ impl Pui {
                 let before = self.prefs.settings.clone();
                 self.set_permission(settings.permission);
                 self.prefs.settings.delivery = settings.delivery;
+                self.prefs.settings.permission_classifier = settings.permission_classifier;
                 self.prefs.settings.compact_percent = settings.compact_percent;
                 self.prefs.settings.keep_recent_tokens = settings.keep_recent_tokens;
                 if before.payload() != self.prefs.settings.payload() {
@@ -2107,6 +2113,7 @@ mod tests {
         let settings = settings::Settings {
             permission: settings::PermissionMode::Plan,
             compact_percent: 75,
+            permission_classifier: Some("google/gemini-flash".into()),
             ..Default::default()
         };
         mirror.remote_action(Action::Settings(settings.clone()));
