@@ -198,6 +198,7 @@ pub struct Pui {
     rename_chat: Option<PathBuf>,
     rename_text: String,
     usage: crate::usage::Usage,
+    dismissed_usage_warning: Option<String>,
     sessions: Vec<Session>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
@@ -349,6 +350,7 @@ impl Pui {
                     .map(crate::usage::Usage::from_cached)
                     .unwrap_or_default()
             },
+            dismissed_usage_warning: None,
             sessions: Vec::new(),
             session_rx: None,
             session_watch: if options.demo || cfg!(test) {
@@ -1623,6 +1625,7 @@ impl Pui {
         let settings_before = self.prefs.settings.clone();
         self.permission_confirmation(ui);
         self.propagate_settings(&settings_before);
+        self.usage_limit_banner(ui);
         let mut submit = false;
         let mut alternate = false;
         let mut completion_anchor = None;
@@ -1875,6 +1878,7 @@ impl Pui {
                                 });
                             }
                         }
+                        self.composer_context_ring(ui);
                     });
                 });
             });
@@ -1901,6 +1905,191 @@ impl Pui {
                 self.submit(ctx);
             }
         }
+    }
+
+    fn usage_limit_banner(&mut self, ui: &mut egui::Ui) {
+        if self.demo {
+            return;
+        }
+        let Some(warning) = self.usage.warning_banner(&self.state.provider) else {
+            return;
+        };
+        if self.dismissed_usage_warning.as_deref() == Some(warning.key.as_str()) {
+            return;
+        }
+        let colors = crate::theme::palette(ui.ctx());
+        let accent = if warning.critical {
+            colors.red
+        } else {
+            colors.amber
+        };
+        let mut switch_account = false;
+        let mut dismiss = false;
+        egui::Frame::new()
+            .fill(colors.sidebar)
+            .stroke(Stroke::new(1.0, accent.linear_multiply(0.55)))
+            .corner_radius(12)
+            .inner_margin(egui::Margin {
+                left: 12,
+                right: 8,
+                top: 8,
+                bottom: 8,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    icons::inline(ui, Icon::Clock, accent);
+                    ui.label(
+                        RichText::new(&warning.title)
+                            .size(11.5)
+                            .strong()
+                            .color(colors.text),
+                    );
+                    if !warning.detail.is_empty() {
+                        ui.label(
+                            RichText::new(&warning.detail)
+                                .size(11.0)
+                                .color(colors.muted),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close = icons::button(ui, Icon::Close, "Dismiss usage warning");
+                        if close.clicked() {
+                            dismiss = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Switch account")
+                                        .size(11.0)
+                                        .color(colors.text),
+                                )
+                                .fill(colors.surface)
+                                .stroke(Stroke::new(1.0, colors.border))
+                                .corner_radius(6),
+                            )
+                            .on_hover_text(format!(
+                                "Open Providers settings ({})",
+                                warning.provider_name
+                            ))
+                            .clicked()
+                        {
+                            switch_account = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
+        if dismiss {
+            self.dismissed_usage_warning = Some(warning.key);
+        }
+        if switch_account {
+            self.settings_view.select("Providers");
+            self.settings_open = true;
+        }
+    }
+
+    fn composer_context_ring(&mut self, ui: &mut egui::Ui) {
+        let fraction = if self.demo {
+            Some(0.45_f32)
+        } else {
+            crate::context::usage_fraction(&self.state)
+        };
+        let Some(fraction) = fraction else {
+            return;
+        };
+        let colors = crate::theme::palette(ui.ctx());
+        let compact_threshold =
+            (self.prefs.settings.compact_percent as f32 / 100.0).clamp(0.1, 0.99);
+        let ring_color = if fraction >= 0.90 {
+            colors.red
+        } else if fraction >= compact_threshold {
+            colors.amber
+        } else {
+            colors.accent
+        };
+
+        let size = Vec2::splat(24.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 6, colors.hover);
+        }
+
+        let center = rect.center();
+        let radius = 7.5_f32;
+        let stroke_w = 2.0_f32;
+        ui.painter()
+            .circle_stroke(center, radius, Stroke::new(stroke_w, colors.border));
+
+        if fraction > 0.005 {
+            let sweep = fraction.clamp(0.0, 1.0) * std::f32::consts::TAU;
+            let segments = ((sweep / std::f32::consts::TAU) * 28.0).ceil().max(4.0) as usize;
+            let start = -std::f32::consts::FRAC_PI_2;
+            let points: Vec<egui::Pos2> = (0..=segments)
+                .map(|i| {
+                    let t = i as f32 / segments as f32;
+                    let angle = start + sweep * t;
+                    egui::pos2(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    )
+                })
+                .collect();
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(stroke_w, ring_color)));
+        }
+
+        let pct = (fraction * 100.0).round() as u32;
+        let tooltip = if self.demo {
+            "Context: 45% (450k / 1.0m) · Click to inspect".into()
+        } else {
+            let used = self
+                .state
+                .context_tokens
+                .or_else(|| self.state.context_breakdown.as_ref().map(|p| p.total()));
+            match used {
+                Some(u) if self.state.context_window > 0.0 => format!(
+                    "Context: {pct}% ({} / {}) · Click to inspect · Right-click to compact",
+                    crate::context::number(u),
+                    crate::context::number(self.state.context_window)
+                ),
+                _ => format!("Context: {pct}% · Click to inspect"),
+            }
+        };
+
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("Context usage {pct}%"),
+            )
+        });
+        let response = response.on_hover_text(tooltip);
+        if response.clicked() {
+            self.prefs.hide_inspector = false;
+            self.prefs.cards.hidden.remove(&inspector::Card::Context);
+            self.prefs.cards.collapsed.remove(&inspector::Card::Context);
+        }
+        response.context_menu(|ui| {
+            theme::menu_controls(ui);
+            if ui.button("Inspect context").clicked() {
+                self.prefs.hide_inspector = false;
+                self.prefs.cards.hidden.remove(&inspector::Card::Context);
+                self.prefs.cards.collapsed.remove(&inspector::Card::Context);
+                ui.close();
+            }
+            if !self.demo
+                && ui
+                    .add_enabled(
+                        self.connected && self.state.ready(),
+                        egui::Button::new("Compact context"),
+                    )
+                    .clicked()
+            {
+                self.send(protocol::command("compact"));
+                ui.close();
+            }
+        });
     }
 
     fn cancel_git_open_for_file_navigation(&mut self) {

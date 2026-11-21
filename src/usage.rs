@@ -100,6 +100,18 @@ pub struct CachedUsage {
     pub unsupported: Vec<String>,
     pub litellm_error: Option<String>,
 }
+/// Active rate-limit / budget warning shown above the composer when a window is nearly full.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageWarning {
+    /// Stable dismissal key for this window + reset epoch + severity tier.
+    pub key: String,
+    pub provider_name: String,
+    pub title: String,
+    pub detail: String,
+    pub percent: f64,
+    pub critical: bool,
+}
+
 #[derive(Default)]
 pub struct Usage {
     /// LiteLLM gateway budget, when that provider is configured.
@@ -267,6 +279,116 @@ impl Usage {
             lines.join("\n")
         }
     }
+    /// Returns a warning banner when the active provider (or any provider if unmatched)
+    /// has a rate-limit window or gateway budget at or above 80%.
+    pub fn warning_banner(&self, active_provider: &str) -> Option<UsageWarning> {
+        self.warning_banner_at(active_provider, now_ms())
+    }
+
+    fn warning_banner_at(&self, active_provider: &str, now: f64) -> Option<UsageWarning> {
+        const WARN_PCT: f64 = 80.0;
+        const CRIT_PCT: f64 = 95.0;
+
+        let active = active_provider.trim().to_ascii_lowercase();
+        let provider_matches = |p: &ProviderUsage| -> bool {
+            if active.is_empty() {
+                return false;
+            }
+            let id = p.id.to_ascii_lowercase();
+            let name = p.name.to_ascii_lowercase();
+            id == active
+                || name == active
+                || (active.contains("anthropic")
+                    && (id.contains("claude") || id.contains("anthropic")))
+                || (active.contains("claude")
+                    && (id.contains("claude") || id.contains("anthropic")))
+                || (active.contains("openai")
+                    && (id.contains("openai") || id.contains("chatgpt") || id.contains("codex")))
+                || (active.contains("antigravity") && id.contains("antigravity"))
+                || (active.contains("gemini") && (id.contains("gemini") || id.contains("google")))
+        };
+
+        let matching: Vec<&ProviderUsage> = self
+            .providers
+            .iter()
+            .filter(|p| provider_matches(p))
+            .collect();
+        let candidates: Vec<&ProviderUsage> = if matching.is_empty() {
+            self.providers.iter().collect()
+        } else {
+            matching
+        };
+
+        let mut best: Option<UsageWarning> = None;
+        for provider in candidates {
+            let list = if provider.windows.is_empty() {
+                &provider.models
+            } else {
+                &provider.windows
+            };
+            for w in list {
+                if w.used < WARN_PCT {
+                    continue;
+                }
+                if best.as_ref().is_some_and(|b| b.percent >= w.used) {
+                    continue;
+                }
+                let critical = w.used >= CRIT_PCT;
+                let reset_suffix = w
+                    .resets
+                    .map(|r| {
+                        let rel = until(r, now);
+                        match absolute(r) {
+                            Some(abs) => format!("Resets {rel} ({abs})"),
+                            None => format!("Resets {rel}"),
+                        }
+                    })
+                    .unwrap_or_default();
+                let title = if critical {
+                    format!("{} limit nearly reached ({:.0}%)", w.label, w.used)
+                } else {
+                    format!("Approaching {} limit ({:.0}%)", w.label, w.used)
+                };
+                let tier = if critical { "crit" } else { "warn" };
+                let reset_epoch = w.resets.map(|r| (r / 60_000.0) as i64).unwrap_or(0);
+                best = Some(UsageWarning {
+                    key: format!("{}:{}:{reset_epoch}:{tier}", provider.id, w.label),
+                    provider_name: provider.name.clone(),
+                    title,
+                    detail: reset_suffix,
+                    percent: w.used,
+                    critical,
+                });
+            }
+        }
+
+        if let Some(acct) = &self.data
+            && let Some(ratio) = acct.ratio()
+        {
+            let pct = (ratio as f64) * 100.0;
+            if pct >= WARN_PCT && best.as_ref().is_none_or(|b| pct > b.percent) {
+                let critical = pct >= CRIT_PCT;
+                let tier = if critical { "crit" } else { "warn" };
+                let reset_key = acct.reset.as_deref().unwrap_or("");
+                let detail = acct
+                    .reset
+                    .as_deref()
+                    .map(|s| format!("Resets {}", s.get(..10).unwrap_or(s)))
+                    .unwrap_or_default();
+                best = Some(UsageWarning {
+                    key: format!("litellm:{reset_key}:{tier}"),
+                    provider_name: "LiteLLM".into(),
+                    title: format!("Approaching budget limit ({pct:.0}%)"),
+                    detail,
+                    percent: pct,
+                    critical,
+                });
+            }
+        }
+
+        best
+    }
+
     pub fn refresh(&mut self, ctx: &egui::Context, force: bool) {
         if self.rx.is_some()
             || (!force
@@ -979,5 +1101,53 @@ mod tests {
         );
         assert!(!egui::Popup::is_any_open(&ctx));
         assert!(usage.rx.is_none(), "Demo must not fetch account usage");
+    }
+
+    #[test]
+    fn warning_banner_triggers_above_eighty_percent_and_prefers_active_provider() {
+        let now = 1_700_000_000_000.0;
+        let mut usage = Usage::default();
+        usage.providers = vec![
+            ProviderUsage {
+                id: "claude".into(),
+                name: "Claude".into(),
+                windows: vec![UsageWindow {
+                    label: "5-hour session".into(),
+                    used: 84.0,
+                    resets: Some(now + 3_600_000.0),
+                    detail: None,
+                }],
+                ..Default::default()
+            },
+            ProviderUsage {
+                id: "openai".into(),
+                name: "OpenAI".into(),
+                windows: vec![UsageWindow {
+                    label: "Weekly".into(),
+                    used: 96.0,
+                    resets: Some(now + 7_200_000.0),
+                    detail: None,
+                }],
+                ..Default::default()
+            },
+        ];
+
+        let claude = usage
+            .warning_banner_at("anthropic", now)
+            .expect("claude warning");
+        assert_eq!(claude.provider_name, "Claude");
+        assert!(!claude.critical);
+        assert!(claude.title.contains("84%"));
+        assert!(claude.detail.contains("Resets in"));
+
+        let openai = usage
+            .warning_banner_at("openai", now)
+            .expect("openai critical warning");
+        assert_eq!(openai.provider_name, "OpenAI");
+        assert!(openai.critical);
+        assert!(openai.title.contains("96%"));
+
+        usage.providers[0].windows[0].used = 79.0;
+        assert!(usage.warning_banner_at("anthropic", now).is_none());
     }
 }
