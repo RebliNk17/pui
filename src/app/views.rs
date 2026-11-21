@@ -492,7 +492,12 @@ impl Pui {
                         }
                         self.prefs.cards = layout;
                         if action == Some(Card::Workflow) {
-                            if let Some(id) = workflow_id { self.open_task_from_board(id, None); }
+                            if let Some(id) = workflow_id {
+                                self.open_task_from_board(id, None);
+                            }
+                        } else if action == Some(Card::Connectors) {
+                            self.settings_view.select("Resources");
+                            self.settings_open = true;
                         }
                     });
             });
@@ -635,14 +640,6 @@ impl Pui {
                 self.request_resource_reload();
             }
         }
-        ui.add_space(4.0);
-        if ui
-            .add(egui::Button::new(theme::small(ui, "Manage connectors…")).frame(false))
-            .clicked()
-        {
-            self.settings_view.select("Resources");
-            self.settings_open = true;
-        }
     }
 
     fn background_tasks_card(&mut self, ui: &mut egui::Ui) {
@@ -758,15 +755,8 @@ impl Pui {
             let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
             let header = ui
                 .horizontal(|ui| {
-                    icons::inline(
-                        ui,
-                        if open {
-                            Icon::ArrowDown
-                        } else {
-                            Icon::ArrowRight
-                        },
-                        colors.dim,
-                    );
+                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    icons::chevron(ui, chev_rect, open, colors.dim);
                     ui.label(
                         RichText::new(format!("{finished_count} finished"))
                             .size(11.0)

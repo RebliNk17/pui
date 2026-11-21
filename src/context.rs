@@ -349,15 +349,8 @@ fn show_loaded_resources(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
         let row = ui
             .horizontal(|ui| {
-                crate::icons::inline(
-                    ui,
-                    if open {
-                        crate::icons::Icon::ArrowDown
-                    } else {
-                        crate::icons::Icon::ArrowRight
-                    },
-                    colors.dim,
-                );
+                let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                crate::icons::chevron(ui, chev_rect, open, colors.dim);
                 ui.label(RichText::new(label).size(11.0).color(colors.muted));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(

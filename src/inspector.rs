@@ -145,11 +145,15 @@ pub fn stack(
                 ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
                 ui.horizontal(|ui| {
                     let button = header_action.filter(|(target, _)| *target == card);
+                    let gear = button.is_none() && !collapsed && card == Card::Connectors;
                     let button_width = 46.0;
+                    let gear_width = 22.0;
                     let label_width = (ui.available_width()
                         - 36.0
                         - if button.is_some() {
                             button_width + ui.spacing().item_spacing.x
+                        } else if gear {
+                            gear_width + ui.spacing().item_spacing.x
                         } else {
                             0.0
                         })
@@ -259,6 +263,10 @@ pub fn stack(
                         if response.clicked() {
                             action = Some(card);
                         }
+                    } else if gear
+                        && icons::button(ui, Icon::Settings, "Manage connectors").clicked()
+                    {
+                        action = Some(card);
                     }
                     let (grip_rect, _) = ui.allocate_exact_size(
                         Vec2::new(20.0, crate::theme::COMPACT_HEIGHT),
