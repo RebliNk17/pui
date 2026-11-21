@@ -782,11 +782,11 @@ fn user_actions(
     enabled: bool,
 ) -> Option<MessageAction> {
     let footer_width = footer_text_width(ui, &time_label(message.timestamp))
-        + ["Copy", "Edit", "Rewind"]
+        + ["Copy", "Edit", "Rewind", "Fork"]
             .into_iter()
             .map(|label| footer_action_width(ui, label))
             .sum::<f32>()
-        + 30.0;
+        + 40.0;
     user_bubble(ui, message, gallery, footer_width);
     user_footer(ui, user_display_text(message), message.timestamp, enabled)
 }
@@ -895,8 +895,9 @@ fn user_footer(
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         // Reverse construction keeps the visible order timestamp, Copy, Edit,
-        // Rewind while anchoring the whole footer to the user's right edge.
+        // Rewind, Fork while anchoring the whole footer to the user's right edge.
         for (label, icon, kind, hint) in [
+            ("Fork", Icon::Branch, MessageAction::Fork, "Start a separate conversation branched from this message. Original chat and files stay unchanged."),
             ("Rewind", Icon::Rewind, MessageAction::Rewind, "Return to before this message. Choose file restore only when available; nothing is resent."),
             ("Edit", Icon::Edit, MessageAction::Edit, "Bring this message back to the composer. Your current draft is saved; nothing is sent automatically."),
         ] {
@@ -2005,18 +2006,14 @@ mod tests {
                 for shape in output.shapes {
                     labels(&shape.shape, &mut text);
                 }
-                assert!(
-                    !text
-                        .iter()
-                        .any(|(t, _)| t.contains("Fork") || t == "Message actions")
-                );
+                assert!(!text.iter().any(|(t, _)| t == "Message actions"));
                 let timestamp = text
                     .iter()
                     .find(|(t, _)| t == &time_label(60000))
                     .unwrap()
                     .1;
                 let mut previous = timestamp;
-                for label in ["Copy", "Edit", "Rewind"] {
+                for label in ["Copy", "Edit", "Rewind", "Fork"] {
                     let rect = text.iter().find(|(t, _)| t == label).expect(label).1;
                     assert!(
                         rect.left() > previous.right(),

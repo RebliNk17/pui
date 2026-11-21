@@ -105,7 +105,11 @@ impl Pui {
             self.state.error = Some("Fork from the writable parent chat; read-only worker restrictions cannot be removed by forking.".into());
             return;
         }
-        if (operation == MessageAction::Fork) != (message.role == "assistant") {
+        if operation != MessageAction::Fork && message.role != "user" {
+            return;
+        }
+        if operation == MessageAction::Fork && message.role != "assistant" && message.role != "user"
+        {
             return;
         }
         let Some(point) = point_for(message, &self.state.history_points) else {
@@ -145,8 +149,21 @@ impl Pui {
         let fork = request.operation == MessageAction::Fork;
         let choice = confirmations::Dialog::new(
             "history-restore-confirmation",
-            match request.operation { MessageAction::Edit => "Edit message", MessageAction::Fork => "Fork after this response?", MessageAction::Rewind => "Rewind conversation" },
-            if fork { "Start a separate conversation including this response. Nothing will be rerun." } else { "Bring this prompt back to the composer. Choose what happens to files; nothing is sent until you send it." },
+            match request.operation {
+                MessageAction::Edit => "Edit message",
+                MessageAction::Fork if request.message.role == "user" => "Fork from this message?",
+                MessageAction::Fork => "Fork after this response?",
+                MessageAction::Rewind => "Rewind conversation",
+            },
+            if fork {
+                if request.message.role == "user" {
+                    "Start a separate conversation branched from this message. Nothing will be rerun."
+                } else {
+                    "Start a separate conversation including this response. Nothing will be rerun."
+                }
+            } else {
+                "Bring this prompt back to the composer. Choose what happens to files; nothing is sent until you send it."
+            },
             "Cancel",
             match (request.operation, request.mode) { (MessageAction::Fork, _) => "Create fork", (_, Mode::Code) => "Restore files", (MessageAction::Edit, Mode::Messages) => "Edit message", (MessageAction::Edit, Mode::Both) => "Restore files and edit", (_, Mode::Messages) => "Rewind messages", (_, Mode::Both) => "Restore files and rewind" },
         ).width(440.0).destructive(!fork && request.mode != Mode::Messages).enabled(self.history_ready() && (request.mode == Mode::Messages || self.workspace_restore_idle())).show(ctx, |ui| {

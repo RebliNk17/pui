@@ -1401,34 +1401,60 @@ impl Pui {
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
         // Keep remote web links with the OS/default browser. Only local
         // development previews and files are captured by the docked viewer.
-        let mut targets = Vec::new();
+        let mut targets: Vec<(String, Option<usize>)> = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| {
                 if let egui::OutputCommand::OpenUrl(url) = command {
                     if cfg!(target_os = "macos") && super::webview::local_preview_url(&url.url) {
-                        targets.push(url.url.clone());
+                        targets.push((url.url.clone(), None));
                         return false;
                     }
-                    if let Ok(url) = url::Url::parse(&url.url)
-                        && url.scheme() == "file"
-                        && let Ok(path) = url.to_file_path()
+                    if let Ok(parsed) = url::Url::parse(&url.url)
+                        && parsed.scheme() == "file"
+                        && let Ok(path) = parsed.to_file_path()
                     {
-                        targets.push(path.display().to_string());
+                        let line = parsed.fragment().and_then(|frag| {
+                            let trimmed = frag
+                                .strip_prefix('L')
+                                .or_else(|| frag.strip_prefix('l'))
+                                .unwrap_or(frag);
+                            trimmed
+                                .split('-')
+                                .next()
+                                .and_then(|s| s.trim().parse::<usize>().ok())
+                                .filter(|&n| n > 0)
+                        });
+                        targets.push((path.display().to_string(), line));
                         return false;
                     }
-                    if !url.url.contains(':')
-                        && !url.url.starts_with('#')
-                        && std::path::Path::new(&url.url).extension().is_some()
+                    let (base, line) = crate::markdown::split_file_line(&url.url);
+                    if !base.contains(':')
+                        && !base.starts_with('#')
+                        && std::path::Path::new(base).extension().is_some()
                     {
-                        targets.push(url.url.clone());
+                        targets.push((base.to_owned(), line));
                         return false;
                     }
                 }
                 true
             })
         });
-        for target in targets {
-            if let Err(error) = self.files.open_target(ctx, &self.prefs.cwd, &target) {
+        for (target, line) in targets {
+            let result = if let Some(line_num) = line {
+                let candidate = Path::new(&target);
+                let resolved = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    let stripped = target.strip_prefix("./").unwrap_or(&target);
+                    self.prefs.cwd.join(stripped)
+                };
+                self.files
+                    .open_workspace_source(ctx, &self.prefs.cwd, &resolved, Some(line_num))
+                    .or_else(|_| self.files.open_target(ctx, &self.prefs.cwd, &target))
+            } else {
+                self.files.open_target(ctx, &self.prefs.cwd, &target)
+            };
+            if let Err(error) = result {
                 self.state.notice = Some(error);
             } else {
                 self.inspector_panel = false;

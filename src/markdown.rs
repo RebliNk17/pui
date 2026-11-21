@@ -187,20 +187,129 @@ struct Link {
     range: std::ops::Range<usize>,
     url: String,
 }
-fn local_file(value: &str) -> bool {
-    !value.chars().any(char::is_whitespace)
-        && (value.starts_with('/') || value.starts_with("./") || value.starts_with("~/"))
-        && std::path::Path::new(value).extension().is_some()
+/// Splits a local file link into `(path, optional_1_based_line)`.
+/// Supports `path:42`, `path:42:10`, `path#L42`, `path#L42-L60`, and `path#42`.
+pub fn split_file_line(value: &str) -> (&str, Option<usize>) {
+    if let Some((base, frag)) = value.split_once('#') {
+        let trimmed = frag
+            .strip_prefix('L')
+            .or_else(|| frag.strip_prefix('l'))
+            .unwrap_or(frag);
+        let digits = trimmed.split('-').next().unwrap_or("").trim();
+        if let Ok(line) = digits.parse::<usize>()
+            && line > 0
+        {
+            return (base, Some(line));
+        }
+    }
+    if let Some((prefix, last)) = value.rsplit_once(':')
+        && let Ok(num) = last.parse::<usize>()
+        && num > 0
+    {
+        // Handle `path:line:col` as well as `path:line`.
+        if let Some((path, line_str)) = prefix.rsplit_once(':')
+            && let Ok(line) = line_str.parse::<usize>()
+            && line > 0
+        {
+            return (path, Some(line));
+        }
+        return (prefix, Some(num));
+    }
+    (value, None)
 }
+
+fn known_bare_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "md"
+            | "markdown"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "svg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "sh"
+            | "zsh"
+            | "bash"
+            | "txt"
+            | "csv"
+            | "sql"
+            | "xml"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "hpp"
+            | "go"
+            | "java"
+            | "kt"
+            | "swift"
+            | "rb"
+            | "php"
+            | "lock"
+    )
+}
+
+fn local_file(value: &str) -> bool {
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains("://")
+        || value.starts_with('#')
+    {
+        return false;
+    }
+    let (base, _) = split_file_line(value);
+    if base.is_empty() || base.contains(':') {
+        return false;
+    }
+    let Some(ext) = std::path::Path::new(base)
+        .extension()
+        .and_then(|e| e.to_str())
+    else {
+        return false;
+    };
+    if base.starts_with('/') || base.starts_with("./") || base.starts_with("~/") {
+        return !ext.is_empty()
+            && ext.len() <= 12
+            && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    if base.contains('/') {
+        return !base.starts_with("http")
+            && !ext.is_empty()
+            && ext.len() <= 12
+            && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    known_bare_extension(ext)
+}
+
 fn safe_url(url: &str) -> bool {
     url.starts_with("https://")
         || url.starts_with("http://")
         || url.starts_with("mailto:")
         || url.starts_with("file://")
         || local_file(url)
-        || (!url.contains(':')
-            && !url.starts_with('#')
-            && std::path::Path::new(url).extension().is_some())
+        || {
+            let (base, _) = split_file_line(url);
+            !base.contains(':')
+                && !base.starts_with('#')
+                && std::path::Path::new(base).extension().is_some()
+        }
 }
 
 pub fn show_file(ui: &mut Ui, source: &str, path: &std::path::Path) {
@@ -1309,5 +1418,27 @@ mod tests {
         }
         assert!(commands.iter().any(|c|matches!(c,egui::OutputCommand::OpenUrl(u) if u.url=="https://github.com/a/b/pull/59")));
         assert!(!safe_url("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn split_file_line_and_local_file_handle_relative_paths_and_line_anchors() {
+        assert_eq!(split_file_line("src/app.rs:120"), ("src/app.rs", Some(120)));
+        assert_eq!(
+            split_file_line("src/app.rs:120:15"),
+            ("src/app.rs", Some(120))
+        );
+        assert_eq!(
+            split_file_line("src/app.rs#L42-L60"),
+            ("src/app.rs", Some(42))
+        );
+        assert_eq!(split_file_line("ASSETS.md"), ("ASSETS.md", None));
+
+        assert!(local_file("src/app.rs:120"));
+        assert!(local_file("./README.md#L10"));
+        assert!(local_file("ASSETS.md"));
+        assert!(local_file("/tmp/demo.rs:42"));
+        assert!(safe_url("src/app.rs:120"));
+        assert!(!local_file("self.state"));
+        assert!(!local_file("https://example.com/a.rs"));
     }
 }
