@@ -10,7 +10,11 @@ pub(super) struct Form {
     pub(super) pending: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
-    pub(super) fn remote_create(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+    pub(in crate::app::changes) fn remote_create(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+    ) {
         if let Some(result) = self
             .push
             .create
@@ -41,9 +45,10 @@ impl Changes {
             && self.push.remote_pending.is_none()
             && self.push.create.pending.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
-            && ui.memory(|m| m.top_modal_layer().is_none());
+            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
         egui::CollapsingHeader::new("Create remote…")
             .id_salt("create-push-remote")
+            .default_open(self.repo_sheet == Some(RepoSheet::CreateRemote))
             .show(ui, |ui| {
                 ui.add_enabled_ui(available, |ui| {
                     for (label, value, limit) in [

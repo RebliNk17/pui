@@ -9,6 +9,8 @@ import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
 import { installWorkflows } from "./workflows.ts";
+import { installAntigravity } from "./antigravity.ts";
+import { installAccounts } from "./accounts.ts";
 
 export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
 Do not launch delegated agents through Bash, Python subprocesses, detached pi --print/--mode json, or another CLI: those processes are not registered with Pui and cannot be opened as live child chats. If managed spawning is unavailable or denied, report the blocker instead of silently falling back to an invisible process. Never claim a worker launched until pui_spawn_agent succeeds.
@@ -37,6 +39,7 @@ export default function puiExtension(pi: any) {
   installWorkflows(pi);
   installContext(pi);
   installTitles(pi);
+  installAntigravity(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",
     handler: (args: string, ctx: any) => {
@@ -47,6 +50,7 @@ export default function puiExtension(pi: any) {
     },
   });
   const pending = new Map<string, AbortController>();
+  let refreshController: AbortController | undefined;
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
@@ -57,8 +61,28 @@ export default function puiExtension(pi: any) {
     const controls = taskRole ? [] : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
     pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
   };
-  pi.on("session_start", (_event: any, ctx: any) => {setMode(false);announce(ctx);});
-  pi.on("session_shutdown", () => { for (const controller of pending.values()) controller.abort(); pending.clear(); });
+  pi.on("session_start", (_event: any, ctx: any) => {
+    setMode(false);
+    announce(ctx);
+    if (typeof ctx?.modelRegistry?.refresh === "function") {
+      refreshController?.abort();
+      const controller = new AbortController();
+      refreshController = controller;
+      // Pi's RPC mode only runs offline catalog refresh at startup; refresh dynamic catalogs here.
+      void ctx.modelRegistry.refresh({ allowNetwork: true, signal: controller.signal })
+        .then(() => {
+          if (!controller.signal.aborted) {
+            ctx.ui.setStatus("pui-models", JSON.stringify({ refreshed: true }));
+          }
+        })
+        .catch(() => {});
+    }
+  });
+  pi.on("session_shutdown", () => {
+    refreshController?.abort();
+    for (const controller of pending.values()) controller.abort();
+    pending.clear();
+  });
   pi.on("turn_end", async (_event: any, ctx: any) => {
     if (!ctx.signal?.aborted) await ctx.ui.input("Pui steering window", "", { signal: ctx.signal, timeout: 30000 });
   });
@@ -132,4 +156,7 @@ export default function puiExtension(pi: any) {
   pi.registerTool({ name: "pui_agents", label: "Agent status", description: "List this agent's descendants and lifecycle status; no transcript polling or messages are generated.", parameters: Type.Object({}), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("list", args, signal, ctx) });
   pi.registerTool({ name: "pui_message_agent", label: "Message agent", description: "Send only a necessary assignment, clarification, blocker or result to a direct parent/descendant. No automatic peer chatter. Steers a running recipient at the next turn/tool boundary without interrupting active tools; starts a turn if idle. Use kind=task only for a new assignment requiring a completion report, not for acknowledgements.", parameters: Type.Object({ agent_id: Type.String(), message: Type.String({ maxLength: 12000 }), kind:Type.Optional(Type.Union([Type.Literal("task"),Type.Literal("clarification"),Type.Literal("blocker"),Type.Literal("result")])) }), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("message", args, signal, ctx) });
   pi.registerTool({ name: "pui_stop_agent", label: "Stop agent", description: "Stop a descendant and its subtree. Does not delete worktrees or session files.", parameters: Type.Object({ agent_id: Type.String() }), execute: (_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) => request("stop", args, signal, ctx) });
+  // Extra accounts load provider modules asynchronously; Pi waits for the returned promise so
+  // restored sessions can select account models at startup. Failures leave base providers intact.
+  return installAccounts(pi).catch(() => {});
 }

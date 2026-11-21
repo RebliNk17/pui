@@ -87,7 +87,7 @@ impl Changes {
             && !loading
             && self.push.pending.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
-            && ui.memory(|m| m.top_modal_layer().is_none());
+            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
         ui.add_enabled_ui(enabled, |ui| {
             let toggle = ui.checkbox(
                 &mut self.push.explicit,

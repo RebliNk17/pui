@@ -103,6 +103,7 @@ struct Preferences {
     last_session: Option<PathBuf>,
     model_catalogs: Vec<model_cache::Catalog>,
     restart_checkpoints: Vec<restart::Checkpoint>,
+    usage_cache: Option<crate::usage::CachedUsage>,
 }
 
 impl Preferences {
@@ -242,6 +243,7 @@ impl Pui {
         let projects = prefs.projects_view;
         let closed_projects = prefs.closed_projects.clone();
         let expanded_projects = prefs.expanded_projects.clone();
+        let usage_cache = prefs.usage_cache.clone();
         prefs.cwd = options
             .cwd
             .or_else(|| {
@@ -339,7 +341,9 @@ impl Pui {
             usage: if options.demo {
                 crate::usage::Usage::demo()
             } else {
-                crate::usage::Usage::default()
+                usage_cache
+                    .map(crate::usage::Usage::from_cached)
+                    .unwrap_or_default()
             },
             sessions: Vec::new(),
             session_rx: None,
@@ -1033,6 +1037,11 @@ impl Pui {
             .maybe_auto_check(&self.ctx, self.prefs.settings.auto_check_updates, self.demo);
         self.updates.poll();
         self.settings_view.resources.poll();
+        self.settings_view.providers.poll();
+        if self.settings_view.providers.reload_requested {
+            self.settings_view.providers.reload_requested = false;
+            self.refresh_providers_catalog();
+        }
         self.poll_chat_folder();
         self.poll_tasks();
         self.poll_rpc();
@@ -1116,17 +1125,22 @@ impl Pui {
                         continue;
                     }
                     self.attention_request(&record);
-                    if record["type"] == "extension_ui_request"
-                        && record["method"] == "setStatus"
-                        && record["statusKey"] == "pui-ultracode"
-                    {
-                        if let Ok(value) =
-                            serde_json::from_str::<Value>(protocol::string(&record, "statusText"))
-                        {
-                            self.ultracode_ready = value["ready"] == true;
-                            self.ultracode = value["enabled"] == true;
+                    if record["type"] == "extension_ui_request" && record["method"] == "setStatus" {
+                        let status_key = protocol::string(&record, "statusKey");
+                        if status_key == "pui-ultracode" {
+                            if let Ok(value) = serde_json::from_str::<Value>(protocol::string(
+                                &record,
+                                "statusText",
+                            )) {
+                                self.ultracode_ready = value["ready"] == true;
+                                self.ultracode = value["enabled"] == true;
+                            }
+                            continue;
                         }
-                        continue;
+                        if status_key == "pui-models" {
+                            self.send(protocol::command("get_available_models"));
+                            continue;
+                        }
                     }
                     let kind = protocol::string(&record, "type").to_owned();
                     let command = protocol::string(&record, "command").to_owned();
@@ -2384,6 +2398,9 @@ impl eframe::App for Pui {
             self.changes.review_comments.save_checkpoint(storage);
             if let Some(wrap) = diff_viewer::wrap_preference::get(&self.ctx) {
                 self.prefs.diff_wrap = wrap;
+            }
+            if let Some(cached) = self.usage.cached() {
+                self.prefs.usage_cache = Some(cached);
             }
             eframe::set_value(
                 storage,

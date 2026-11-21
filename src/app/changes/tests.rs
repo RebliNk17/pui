@@ -171,8 +171,14 @@ fn second_toolbar_button_opens_changes_and_inline_recorded_diff_in_both_themes()
         frame(&ctx, &mut app, vec![]);
         let output = frame(&ctx, &mut app, vec![]);
         position(&output, "Changes");
-        position(&output, "Recorded edits");
-        position(&output, "Current Git");
+        assert!(
+            ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-recorded")))
+                .is_some()
+        );
+        let git_tab = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-git")))
+            .expect("Current Git icon rect")
+            .center();
         let path = app.outputs.last().unwrap().path.clone();
         click(&ctx, &mut app, position(&output, &path));
         frame(&ctx, &mut app, vec![]);
@@ -185,8 +191,8 @@ fn second_toolbar_button_opens_changes_and_inline_recorded_diff_in_both_themes()
         );
         click(&ctx, &mut app, position(&output, &path));
         assert!(!app.changes.open_rows.contains(&(false, path)));
-        let output = frame(&ctx, &mut app, vec![]);
-        click(&ctx, &mut app, position(&output, "Current Git"));
+        frame(&ctx, &mut app, vec![]);
+        click(&ctx, &mut app, git_tab);
         assert!(app.changes.source == Source::Git);
         frame(&ctx, &mut app, vec![]);
         let output = frame(&ctx, &mut app, vec![]);
@@ -239,7 +245,11 @@ fn changes_search_expand_refresh_and_file_panel_switching() {
     frame(&ctx, &mut app, vec![]);
     let output = frame(&ctx, &mut app, vec![]);
     position(&output, "No matching changes.");
-    click(&ctx, &mut app, position(&output, "Refresh"));
+    let refresh = ctx
+        .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-refresh")))
+        .expect("Refresh icon rect")
+        .center();
+    click(&ctx, &mut app, refresh);
     assert!(app.changes.diffs.is_empty());
     let output = frame(&ctx, &mut app, vec![]);
     let folder = output
@@ -278,8 +288,12 @@ fn current_git_diff_is_inline_numbered_and_refresh_preserves_repository() {
     assert_eq!(app.workspace.files[0].added, "2");
     app.inspector_panel = true;
     frame(&ctx, &mut app, vec![]);
-    let output = frame(&ctx, &mut app, vec![]);
-    click(&ctx, &mut app, position(&output, "Current Git"));
+    let _output = frame(&ctx, &mut app, vec![]);
+    let git_tab = ctx
+        .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-git")))
+        .expect("Current Git icon rect")
+        .center();
+    click(&ctx, &mut app, git_tab);
     let output = frame(&ctx, &mut app, vec![]);
     click(&ctx, &mut app, position(&output, "README.md"));
     if let Some(diff) = app.changes.diffs.get_mut("README.md")

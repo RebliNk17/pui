@@ -27,82 +27,86 @@ impl Changes {
             && s.applying.is_none()
             && s.review.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
-            && ui.memory(|m| m.top_modal_layer().is_none());
+            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
+        let sheet_open = self.repo_sheet == Some(RepoSheet::Clone);
         ui.add_enabled_ui(enabled, |ui| {
-            egui::CollapsingHeader::new("Clone repository…").show(ui, |ui| {
-                for (label, value, limit) in [
-                    ("Repository URL (no embedded credentials)", &mut s.url, 8192),
-                    (
-                        "Destination folder name (inside current project)",
-                        &mut s.name,
-                        255,
-                    ),
-                ] {
-                    ui.label(theme::small(ui, label));
-                    let input = ui.add(
-                        egui::TextEdit::singleline(value)
-                            .char_limit(limit)
+            egui::CollapsingHeader::new("Clone repository…")
+                .default_open(sheet_open)
+                .show(ui, |ui| {
+                    for (label, value, limit) in [
+                        ("Repository URL (no embedded credentials)", &mut s.url, 8192),
+                        (
+                            "Destination folder name (inside current project)",
+                            &mut s.name,
+                            255,
+                        ),
+                    ] {
+                        ui.label(theme::small(ui, label));
+                        let input = ui.add(
+                            egui::TextEdit::singleline(value)
+                                .char_limit(limit)
+                                .desired_width(ui.available_width()),
+                        );
+                        s.controls.push(input.id);
+                    }
+                    ui.label(theme::small(
+                        ui,
+                        "Start branch (optional; blank uses remote default)",
+                    ));
+                    let branch = ui.add(
+                        egui::TextEdit::singleline(&mut s.branch)
+                            .char_limit(1000)
                             .desired_width(ui.available_width()),
                     );
-                    s.controls.push(input.id);
-                }
-                ui.label(theme::small(
-                    ui,
-                    "Start branch (optional; blank uses remote default)",
-                ));
-                let branch = ui.add(
-                    egui::TextEdit::singleline(&mut s.branch)
-                        .char_limit(1000)
-                        .desired_width(ui.available_width()),
-                );
-                s.controls.push(branch.id);
-                let valid = workspace::push::remote::valid_url(&s.url)
-                    && workspace::clone::valid_dest_name(&s.name)
-                    && (s.branch.is_empty() || workspace::branches::create::valid_name(&s.branch));
-                let response =
-                    prompt_ui::button(ui, "Review clone…", prompt_ui::Button::Secondary, valid);
-                s.controls.push(response.id);
-                if response.clicked() {
-                    let Some(permit) = branches::permit(ui.ctx()) else {
-                        s.notice = Some("Git busy; retry explicitly.".into());
-                        return;
-                    };
-                    let root = workspace.root.clone();
-                    let url = s.url.clone();
-                    let name = s.name.clone();
-                    let branch = if s.branch.trim().is_empty() {
-                        None
-                    } else {
-                        Some(s.branch.trim().to_owned())
-                    };
-                    let (tx, rx) = mpsc::channel();
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    s.owner = Some(self.identity.clone());
-                    s.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
-                    let ctx = ui.ctx().clone();
-                    if std::thread::Builder::new()
-                        .name("pui-clone-review".into())
-                        .spawn(move || {
-                            let result = workspace::clone::inspect(
-                                &root,
-                                &name,
-                                &url,
-                                branch.as_deref(),
-                                &cancel,
-                            );
-                            drop(permit);
-                            if !cancel.load(Ordering::Acquire) {
-                                let _ = tx.send(result);
-                                ctx.request_repaint();
-                            }
-                        })
-                        .is_err()
-                    {
-                        s.pending = None;
-                        s.notice = Some("Cannot start clone review.".into());
+                    s.controls.push(branch.id);
+                    let valid = workspace::push::remote::valid_url(&s.url)
+                        && workspace::clone::valid_dest_name(&s.name)
+                        && (s.branch.is_empty()
+                            || workspace::branches::create::valid_name(&s.branch));
+                    let response =
+                        prompt_ui::button(ui, "Review clone…", prompt_ui::Button::Secondary, valid);
+                    s.controls.push(response.id);
+                    if response.clicked() {
+                        let Some(permit) = branches::permit(ui.ctx()) else {
+                            s.notice = Some("Git busy; retry explicitly.".into());
+                            return;
+                        };
+                        let root = workspace.root.clone();
+                        let url = s.url.clone();
+                        let name = s.name.clone();
+                        let branch = if s.branch.trim().is_empty() {
+                            None
+                        } else {
+                            Some(s.branch.trim().to_owned())
+                        };
+                        let (tx, rx) = mpsc::channel();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        s.owner = Some(self.identity.clone());
+                        s.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                        let ctx = ui.ctx().clone();
+                        if std::thread::Builder::new()
+                            .name("pui-clone-review".into())
+                            .spawn(move || {
+                                let result = workspace::clone::inspect(
+                                    &root,
+                                    &name,
+                                    &url,
+                                    branch.as_deref(),
+                                    &cancel,
+                                );
+                                drop(permit);
+                                if !cancel.load(Ordering::Acquire) {
+                                    let _ = tx.send(result);
+                                    ctx.request_repaint();
+                                }
+                            })
+                            .is_err()
+                        {
+                            s.pending = None;
+                            s.notice = Some("Cannot start clone review.".into());
+                        }
                     }
-                }
-            });
+                });
             if let Some(notice) = &s.notice {
                 ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
             }

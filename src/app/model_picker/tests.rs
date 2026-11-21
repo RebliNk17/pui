@@ -636,3 +636,60 @@ fn composer_controls_open_exclusively_and_have_independent_names() {
     state.models.push(model("two"));
     assert_eq!(model_label(&state), "Friendly model · one");
 }
+
+#[test]
+fn provider_filter_grows_when_more_providers_load() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    live(&mut app);
+    let models = |providers: &[&str]| {
+        providers
+            .iter()
+            .map(|provider| protocol::Model {
+                id: format!("{provider}-model"),
+                name: format!("{provider} model"),
+                provider: (*provider).into(),
+                context_window: 1000,
+                input_cost: 1.0,
+                output_cost: 2.0,
+            })
+            .collect::<Vec<_>>()
+    };
+    // First open measures the popup while only one provider is known.
+    app.state.models = models(&["anthropic"]);
+    app.model_picker_open = true;
+    let output = settle(&ctx, &mut app);
+    let center = |text: &str| position(&output, text).y;
+    assert!(
+        (center("Search models…") - center("All providers")).abs() <= 1.0,
+        "search text must be vertically centered with the provider filter"
+    );
+    click(&ctx, &mut app, position(&output, "All providers"));
+    let output = settle(&ctx, &mut app);
+    click(&ctx, &mut app, position(&output, "All providers"));
+    settle(&ctx, &mut app);
+    app.state.models = models(&["anthropic", "deepseek-local", "google", "openai"]);
+    let output = settle(&ctx, &mut app);
+    click(&ctx, &mut app, position(&output, "All providers"));
+    let output = settle(&ctx, &mut app);
+    let last = texts(&output)
+        .into_iter()
+        .filter(|(s, _)| s == "openai")
+        .map(|(_, r)| r)
+        .next()
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                texts(&output).iter().map(|t| &t.0).collect::<Vec<_>>()
+            )
+        });
+    let visible = ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter_map(|l| m.area_rect(l.id))
+            .filter(|r| r.width() < 200.0)
+            .any(|r| r.contains_rect(last))
+    });
+    assert!(visible, "openai option is clipped by a stale popup size");
+}

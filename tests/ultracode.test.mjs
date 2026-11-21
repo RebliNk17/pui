@@ -8,9 +8,16 @@ async function host(readonly = false, taskRole = '') {
   // Only type annotations/import resolution differ from the Pi extension host.
   const { stripTypeScriptTypes } = await import('node:module');
   let raw = await readFile(new URL('../scripts/ultracode.ts', import.meta.url), 'utf8');
-  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'workflows']) {
-    const dependency = stripTypeScriptTypes((await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8')).replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });'));
-    raw = raw.replace(`"./${name}.ts"`, JSON.stringify(`data:text/javascript;base64,${Buffer.from(dependency).toString('base64')}`));
+  const urls = {};
+  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'workflows', 'antigravity', 'accounts']) {
+    let text = await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8');
+    // Dependencies may import earlier adapter modules (accounts.ts → antigravity.ts).
+    for (const [known, url] of Object.entries(urls)) text = text.replace(`"./${known}.ts"`, JSON.stringify(url));
+    const dependency = stripTypeScriptTypes(text
+      .replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });')
+      .replace(/import\s*\{[^}]*\}\s*from\s*"@earendil-works\/pi-ai";/s, 'const createAssistantMessageEventStream = () => ({}), getCurrentSystemPrompt = () => "", getCurrentTools = () => [];'));
+    urls[name] = `data:text/javascript;base64,${Buffer.from(dependency).toString('base64')}`;
+    raw = raw.replace(`"./${name}.ts"`, JSON.stringify(urls[name]));
   }
   const source = stripTypeScriptTypes(raw.replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });'));
   const { default: extension, ULTRACODE_GUIDANCE } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);

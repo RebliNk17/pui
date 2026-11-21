@@ -34,7 +34,11 @@ pub(super) fn model_label(state: &State) -> String {
         .len()
         > 1;
     if ambiguous && !state.provider.is_empty() {
-        format!("{name} · {}", state.provider)
+        // Several accounts offer the same model; name the account (`anthropic · Work`).
+        format!(
+            "{name} · {}",
+            crate::accounts::display_provider(&state.provider)
+        )
     } else {
         name.into()
     }
@@ -90,14 +94,16 @@ fn provider_filter(
             visuals.bg_stroke = Stroke::NONE;
             visuals.weak_bg_fill = Color32::TRANSPARENT;
         }
-        let response = egui::ComboBox::from_id_salt("provider-filter")
+        // ponytail: egui Areas remember their last size and clamp the next frame to it,
+        // so a popup first measured with fewer providers would stay clipped. Re-key on count.
+        let response = egui::ComboBox::from_id_salt(("provider-filter", providers.len()))
             .width(width)
             .truncate()
             .selected_text(
                 RichText::new(if provider.is_empty() {
-                    "All providers"
+                    "All providers".to_owned()
                 } else {
-                    provider.as_str()
+                    crate::accounts::display_provider(provider)
                 })
                 .size(11.0),
             )
@@ -120,7 +126,11 @@ fn provider_filter(
             .show_ui(ui, |ui| {
                 ui.selectable_value(provider, String::new(), "All providers");
                 for value in providers {
-                    ui.selectable_value(provider, value.clone(), value);
+                    ui.selectable_value(
+                        provider,
+                        value.clone(),
+                        crate::accounts::display_provider(value),
+                    );
                 }
             })
             .response;
@@ -487,7 +497,7 @@ impl Pui {
                             let provider_width = (ui.available_width() * 0.44).clamp(44.0, 115.0);
                             let search_width = (ui.available_width() - provider_width - 2.0 * ui.spacing().item_spacing.x - 1.0).max(8.0);
                             let search = ui.add(egui::TextEdit::singleline(&mut self.model_query).id_salt("model-search")
-                                .font(FontId::proportional(11.0)).frame(false).margin(0).hint_text("Search models…").desired_width(search_width).min_size(egui::vec2(0.0, 20.0)));
+                                .font(FontId::proportional(11.0)).frame(false).margin(0).hint_text("Search models…").vertical_align(Align::Center).desired_width(search_width).min_size(egui::vec2(0.0, 20.0)));
                             let (divider, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
                             ui.painter().line_segment([divider.center_top(), divider.center_bottom()], Stroke::new(1.0, colors.border));
                             provider_filter(ui, &mut self.model_provider, &providers, provider_width);
@@ -535,7 +545,7 @@ impl Pui {
                             let selected = self.state.model == model.id && self.state.provider == model.provider;
                             let name = if model.name.is_empty() { &model.id } else { &model.name };
                             let prices = format!("{} / {}", price(model.input_cost), price(model.output_cost));
-                            let metadata = format!("{} context · {}", crate::context::number(model.context_window as f64), model.provider);
+                            let metadata = format!("{} context · {}", crate::context::number(model.context_window as f64), crate::accounts::display_provider(&model.provider));
                             let response = menu_row(ui, ids[index], 32.0, selected, blocked.is_none(), &format!("{name}, {metadata}, {prices} per million tokens"));
                             let rect = response.rect;
                             let price_width = ui.painter().layout_no_wrap(prices.clone(), FontId::proportional(10.0), colors.muted).size().x.min(rect.width() * 0.45);

@@ -120,6 +120,7 @@ impl Settings {
 }
 mod appearance;
 mod page;
+mod providers;
 mod resources;
 mod scale;
 pub(super) use page::{View, search_entries};

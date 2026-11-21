@@ -102,7 +102,7 @@ pub(crate) fn sdk() -> Option<PathBuf> {
     )
 }
 
-fn agent_dir() -> Option<PathBuf> {
+pub(crate) fn agent_dir() -> Option<PathBuf> {
     std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
