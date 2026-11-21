@@ -2,7 +2,10 @@
 use super::*;
 mod chips;
 mod diff;
+mod file_blocks;
 pub(super) use chips::Draft;
+pub(crate) use file_blocks::offer as offer_file_block;
+pub(super) use file_blocks::show as show_file_blocks;
 mod rendered;
 mod source;
 pub(super) use diff::{demo as demo_diff, offer as offer_diff_selection};
@@ -13,6 +16,7 @@ pub(super) use source::{demo as demo_source, offer as offer_source_selection};
 
 pub(super) fn clear_source(ctx: &egui::Context) {
     source::clear(ctx);
+    file_blocks::clear(ctx);
     ctx.data_mut(|data| {
         data.remove::<Snippet>(egui::Id::new("pui-context-capture"));
         data.remove::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"));
@@ -20,6 +24,7 @@ pub(super) fn clear_source(ctx: &egui::Context) {
 }
 
 pub(super) fn inputs(ctx: &egui::Context) {
+    file_blocks::inputs(ctx);
     source::inputs(ctx);
 }
 
@@ -121,6 +126,9 @@ pub(crate) fn queue_parts<'a>(
     });
 }
 impl Pui {
+    pub(super) fn prepare_file_block_capture(&mut self, ctx: &egui::Context) {
+        file_blocks::prepare(self, ctx);
+    }
     /// Runtime owner for local review: an unsaved chat is not the shared string "new".
     pub(super) fn review_comment_owner(&mut self) -> String {
         self.state
@@ -129,6 +137,7 @@ impl Pui {
             .unwrap_or_else(|| format!("agent:{}", self.ensure_agent()))
     }
     pub(super) fn collect_context_capture(&mut self) {
+        file_blocks::collect(self);
         source::finish(&self.ctx);
         let snippet = self
             .ctx

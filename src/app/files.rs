@@ -1255,7 +1255,13 @@ impl Browser {
                             .show(ui, |ui| {
                                 if markdown && !tab.source {
                                     ui.set_max_width(ui.available_width().min(840.0));
-                                    markdown::show_file(ui, content, &tab.path);
+                                    context_capture::show_file_blocks(
+                                        ui,
+                                        &tab.path,
+                                        content,
+                                        tab._budget.document(),
+                                        |ui| markdown::show_file(ui, content, &tab.path),
+                                    );
                                 } else {
                                     ui.push_id(("source-text", &tab.path), |ui| {
                                         ui.horizontal_top(|ui| {
@@ -1815,6 +1821,8 @@ fn search_paths(root: &Path, query: &str, cancel: &AtomicBool) -> Result<Search,
 
 #[cfg(test)]
 mod auto_restore_tests;
+#[cfg(test)]
+mod block_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
 mod path_menu;

@@ -2270,6 +2270,7 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
+                self.prepare_file_block_capture(ctx);
                 let capture_owner = self.review_comment_owner();
                 context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
