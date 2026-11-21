@@ -42,6 +42,8 @@ pub(super) struct Endpoint {
 pub(super) struct Snapshot {
     pub revision: u64,
     pub state: State,
+    #[serde(default)]
+    pub manual_title: Option<String>,
     pub waiting: Vec<run_status::WaitingMessage>,
     pub settings: settings::Settings,
     #[serde(default)]
@@ -61,6 +63,7 @@ pub(super) struct Snapshot {
 #[serde(tag = "action", content = "data")]
 pub(super) enum Action {
     Queue(run_status::WaitingMessage),
+    Rename(String),
     Remove(usize),
     Edit(usize),
     SendNow(usize),
@@ -768,6 +771,12 @@ impl Drop for WindowSync {
 }
 
 impl Pui {
+    pub(super) fn invalidate_title_publication(&mut self, path: &Path) {
+        let path = identity(path);
+        if let Some(owner) = self.sync.owned.get_mut(&path) {
+            owner.stamp = 0;
+        }
+    }
     pub(super) fn other_window_status(&self, path: &Path) -> Option<&str> {
         if self.sync.endpoints.is_empty() {
             return None;
@@ -960,6 +969,13 @@ impl Pui {
         owner.revision += 1;
         owner.published = std::time::Instant::now();
         let revision = self.sync.owned[&path].revision;
+        let display_title = self
+            .prefs
+            .chats
+            .get(&path)
+            .and_then(|meta| meta.title.clone())
+            .or_else(|| self.state.chat_title())
+            .unwrap_or_default();
         let _ = self.sync.tx.send(Work::Publish(LivePath {
             path,
             revision,
@@ -971,7 +987,7 @@ impl Pui {
             } else {
                 self.run_label().0.into()
             },
-            title: self.state.chat_title().unwrap_or_default(),
+            title: display_title,
             cwd: self.prefs.cwd.clone(),
             model: self.state.model_name.clone(),
         }));
@@ -1063,6 +1079,11 @@ impl Pui {
                             // The owner supplies event identity, never derive unread
                             // from status/transcript or a transport revision.
                             self.attention.import_for(&path, metadata);
+                        }
+                        // The owner exports explicit user renames separately
+                        // from mutable harness metadata. Never infer a rename.
+                        if let Some(title) = snapshot.manual_title {
+                            self.prefs.chats.entry(path.clone()).or_default().title = Some(title);
                         }
                         self.state = snapshot.state;
                         self.update_session_title();
@@ -1232,6 +1253,11 @@ impl Pui {
         Ok(Snapshot {
             revision: self.sync.owned[path].revision,
             state: self.state.clone(),
+            manual_title: self
+                .prefs
+                .chats
+                .get(path)
+                .and_then(|meta| meta.title.clone()),
             waiting: self
                 .waiting
                 .iter()
@@ -1280,6 +1306,18 @@ impl Pui {
         if self.deletion.in_progress() || self.deletion.deleting_chat(path) {
             return Err("Deletion is in progress for this chat in the owning window.".into());
         }
+        if let Action::Rename(title) = &action {
+            if title.trim().is_empty() {
+                return Err("Chat name cannot be empty".into());
+            }
+            self.prefs
+                .chats
+                .entry(self.state.session_file.as_ref().map(PathBuf::from).unwrap())
+                .or_default()
+                .title = Some(title.trim().into());
+            self.invalidate_title_publication(path);
+            return Ok(None);
+        }
         if self.loading_chat || self.resource_reload.pending() {
             return Err("Owning window is connecting; try again when ready.".into());
         }
@@ -1289,6 +1327,7 @@ impl Pui {
         let queue_path = self.state.session_file.as_ref().map(PathBuf::from).unwrap();
         let mut edited = None;
         match action {
+            Action::Rename(_) => unreachable!("explicit rename handled before run-state gates"),
             Action::DeleteScheduledJob(_) => {
                 return Err("Scheduled jobs require scheduler routing.".into());
             }
@@ -1514,6 +1553,42 @@ mod tests {
         assert!(
             mirror.client.is_none(),
             "Snapshots must not start an RPC owner"
+        );
+        owner.shutdown_agents();
+        mirror.shutdown_agents();
+    }
+    #[test]
+    fn explicit_cross_window_rename_beats_late_automatic_metadata() {
+        let (directory, path) = location();
+        let mut owner = app(&directory, &path);
+        owner.client = Some(rpc::Client::stub());
+        owner.state.preserve_title("Fix Hebrew sidebar");
+        assert!(owner.attach_or_claim(&path));
+        owner.publish_live();
+        let mut mirror = app(&directory, &path);
+        assert!(!mirror.attach_or_claim(&path));
+        spin(&mut owner, &mut mirror, |_, mirror| {
+            mirror.state.assigned_title() == Some("Fix Hebrew sidebar")
+        });
+        let manual = format!("Explicit {}", "界".repeat(100));
+        assert!(mirror.remote_action(Action::Rename(manual.clone())));
+        spin(&mut owner, &mut mirror, |owner, mirror| {
+            owner.prefs.chats.get(&path).and_then(|p| p.title.as_ref()) == Some(&manual)
+                && mirror.prefs.chats.get(&path).and_then(|p| p.title.as_ref()) == Some(&manual)
+        });
+        owner
+            .state
+            .apply(json!({"type":"session_info_changed","name":"Late tool output"}));
+        owner.update_session_title();
+        owner.publish_live();
+        let revision = owner.sync.owned[&path].revision;
+        spin(&mut owner, &mut mirror, |_, mirror| {
+            mirror.sync.revisions.get(&path).copied().unwrap_or(0) >= revision
+        });
+        assert_eq!(mirror.state.assigned_title(), Some("Fix Hebrew sidebar"));
+        assert_eq!(
+            mirror.prefs.chats[&path].title.as_deref(),
+            Some(manual.as_str())
         );
         owner.shutdown_agents();
         mirror.shutdown_agents();

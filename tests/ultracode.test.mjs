@@ -8,7 +8,7 @@ async function host(readonly = false, taskRole = '') {
   // Only type annotations/import resolution differ from the Pi extension host.
   const { stripTypeScriptTypes } = await import('node:module');
   let raw = await readFile(new URL('../scripts/ultracode.ts', import.meta.url), 'utf8');
-  for (const name of ['permissions', 'compaction', 'context', 'rewind', 'questions', 'open', 'workflows']) {
+  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'workflows']) {
     const dependency = stripTypeScriptTypes((await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8')).replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });'));
     raw = raw.replace(`"./${name}.ts"`, JSON.stringify(`data:text/javascript;base64,${Buffer.from(dependency).toString('base64')}`));
   }

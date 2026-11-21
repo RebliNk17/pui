@@ -219,13 +219,14 @@ impl Pui {
                 .then(|| worker_launch(record.access == "read-only", &record.name, None, None));
             let state = State {
                 session_file: Some(record.path.display().to_string()),
-                // Root names may have come from a compacted context. Rediscover
-                // their original title instead of treating that label as a rename.
-                session_name: if record.parent.is_some() {
-                    record.name.clone()
-                } else {
-                    String::new()
-                },
+                // Existing names are assigned, even when their provenance is
+                // unknown. Never migrate them from a compacted projection.
+                session_name: record.name.clone(),
+                title: (!protocol::title_placeholder(&record.name)).then(|| protocol::ChatTitle {
+                    session_file: record.path.display().to_string(),
+                    title: record.name.clone(),
+                    initial_request: None,
+                }),
                 ..Default::default()
             };
             self.agents.parked.insert(
@@ -1840,7 +1841,11 @@ mod tests {
         app.start_waiting_agents();
         let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
         app.agents.nodes.get_mut(&parent).unwrap().path = Some(path.clone());
-        app.agents.nodes.get_mut(&child).unwrap().path = Some(path);
+        app.agents.nodes.get_mut(&child).unwrap().path = Some(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/Cargo.lock"
+        )));
+        app.agents.nodes.get_mut(&parent).unwrap().name = "Preserved root name".into();
         let records = app.agent_records();
         app.agents = Default::default();
         app.prefs.agent_tree =
@@ -1854,7 +1859,10 @@ mod tests {
         assert!(app.agents.parked[&child].client.is_none());
         assert!(app.agents.nodes[&child].launch.as_ref().unwrap().readonly);
         assert!(app.agents.nodes[&child].stopped);
-        assert!(app.agents.parked[&parent].state.session_name.is_empty());
+        assert_eq!(
+            app.agents.parked[&parent].state.session_name,
+            app.agents.nodes[&parent].name
+        );
         let session = Session {
             path: app.agents.nodes[&parent].path.clone().unwrap(),
             cwd: app.prefs.cwd.clone(),
@@ -1863,10 +1871,7 @@ mod tests {
             created: None,
             modified: std::time::SystemTime::now(),
         };
-        assert_eq!(
-            app.session_title(&session),
-            "Original prompt before compaction"
-        );
+        assert_eq!(app.session_title(&session), "Preserved root name");
         assert_eq!(
             app.agents.parked[&child].state.session_name,
             "Scoped reader"
