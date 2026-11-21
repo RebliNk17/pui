@@ -3,6 +3,76 @@ use super::State;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// One named entry of an expandable list: a tool, skill, memory file or agent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "(String, f64)", into = "(String, f64)")]
+pub struct ContextItem {
+    pub name: String,
+    pub tokens: f64,
+}
+
+impl From<(String, f64)> for ContextItem {
+    fn from((name, tokens): (String, f64)) -> Self {
+        Self { name, tokens }
+    }
+}
+
+impl From<ContextItem> for (String, f64) {
+    fn from(item: ContextItem) -> Self {
+        (item.name, item.tokens)
+    }
+}
+
+/// Per-item sizes and tools registered but not sent to the model ("deferred").
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextDetail {
+    pub mcp_tools: Vec<ContextItem>,
+    pub system_tools: Vec<ContextItem>,
+    pub skills: Vec<ContextItem>,
+    pub memory: Vec<ContextItem>,
+    pub agents: Vec<ContextItem>,
+    pub mcp_tools_count: usize,
+    pub deferred_mcp: f64,
+    pub deferred_mcp_count: usize,
+    pub deferred_system: f64,
+    pub deferred_system_count: usize,
+}
+
+impl ContextDetail {
+    fn scaled(&self, scale: f64) -> Self {
+        let items = |list: &[ContextItem]| {
+            list.iter()
+                .map(|i| ContextItem {
+                    name: i.name.clone(),
+                    tokens: i.tokens * scale,
+                })
+                .collect()
+        };
+        Self {
+            mcp_tools: items(&self.mcp_tools),
+            system_tools: items(&self.system_tools),
+            skills: items(&self.skills),
+            memory: items(&self.memory),
+            agents: items(&self.agents),
+            // Deferred tools are outside the active context, so they keep their raw estimate.
+            ..self.clone()
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.mcp_tools
+            .iter()
+            .chain(&self.system_tools)
+            .chain(&self.skills)
+            .chain(&self.memory)
+            .chain(&self.agents)
+            .map(|i| i.tokens)
+            .chain([self.deferred_mcp, self.deferred_system])
+            .all(|v| v.is_finite() && v >= 0.0)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ContextBreakdown {
     pub system: f64,
@@ -12,10 +82,20 @@ pub struct ContextBreakdown {
     pub assistant: f64,
     pub tool_results: f64,
     pub other: f64,
+    #[serde(default)]
+    pub skills: f64,
+    #[serde(default)]
+    pub memory: f64,
+    #[serde(default)]
+    pub mcp_instructions: f64,
+    #[serde(default)]
+    pub agents: f64,
+    #[serde(default)]
+    pub detail: ContextDetail,
 }
 
 impl ContextBreakdown {
-    pub fn values(&self) -> [f64; 7] {
+    pub fn values(&self) -> [f64; 11] {
         [
             self.system,
             self.tools,
@@ -24,6 +104,10 @@ impl ContextBreakdown {
             self.assistant,
             self.tool_results,
             self.other,
+            self.skills,
+            self.memory,
+            self.mcp_instructions,
+            self.agents,
         ]
     }
 
@@ -46,6 +130,11 @@ impl ContextBreakdown {
             assistant: self.assistant * scale,
             tool_results: self.tool_results * scale,
             other: self.other * scale,
+            skills: self.skills * scale,
+            memory: self.memory * scale,
+            mcp_instructions: self.mcp_instructions * scale,
+            agents: self.agents * scale,
+            detail: self.detail.scaled(scale),
         }
     }
 }
@@ -58,10 +147,15 @@ impl State {
         {
             return;
         }
-        self.context_breakdown = serde_json::from_value::<ContextBreakdown>(value["parts"].clone())
+        let mut parts = value["parts"].clone();
+        if let Some(object) = parts.as_object_mut().filter(|_| value["detail"].is_object()) {
+            object.insert("detail".into(), value["detail"].clone());
+        }
+        self.context_breakdown = serde_json::from_value::<ContextBreakdown>(parts)
             .ok()
             .filter(|parts| {
-                parts.values().iter().all(|v| v.is_finite() && *v >= 0.0)
+                parts.detail.is_valid()
+                    && parts.values().iter().all(|v| v.is_finite() && *v >= 0.0)
                     && parts.total().is_finite()
                     && parts.total() > 0.0
             });
@@ -179,5 +273,34 @@ mod tests {
         state.apply(status(parts(), Value::Null));
         assert!(state.context_tokens.is_none());
         assert_eq!(state.context_breakdown.unwrap().total(), 2100.0);
+    }
+
+    #[test]
+    fn detail_and_new_categories_parse_scale_and_stay_backward_compatible() {
+        let mut state = State {
+            session_file: Some("current".into()),
+            ..Default::default()
+        };
+        let text = json!({"version":1,"sessionFile":"current","tokens":1000,"contextWindow":10000,
+            "parts":{"system":100,"tools":100,"mcp_tools":100,"user":100,"assistant":100,"tool_results":100,"other":0,
+                     "skills":100,"memory":100,"mcp_instructions":100,"agents":100},
+            "detail":{"mcp_tools":[["mcp__a__b",100]],"memory":[["~/x.md",100]],"mcp_tools_count":1,"deferred_mcp":50}}).to_string();
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-context","statusText":text}));
+        let full = state.context_breakdown.clone().unwrap();
+        assert_eq!(full.total(), 1000.0);
+        let scaled = full.scaled(2000.0);
+        assert!((scaled.skills - 200.0).abs() < 1e-9);
+        assert_eq!(scaled.detail.mcp_tools[0].name, "mcp__a__b");
+        assert!((scaled.detail.memory[0].tokens - 200.0).abs() < 1e-9);
+        assert_eq!(scaled.detail.deferred_mcp, 50.0, "deferred is not rescaled");
+        // Older adapters omit the new fields entirely.
+        state.apply(status(parts(), json!(4200)));
+        let legacy = state.context_breakdown.clone().unwrap();
+        assert_eq!(legacy.skills, 0.0);
+        assert!(legacy.detail.mcp_tools.is_empty());
+        // Negative detail sizes invalidate the whole estimate.
+        let bad = json!({"version":1,"sessionFile":"current","parts":parts(),"detail":{"skills":[["x",-1]]},"contextWindow":10000}).to_string();
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-context","statusText":bad}));
+        assert!(state.context_breakdown.is_none());
     }
 }

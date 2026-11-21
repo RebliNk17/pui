@@ -5,6 +5,15 @@ use crate::{
 };
 use eframe::egui::{self, Align, Layout, RichText, Sense, Vec2};
 
+/// Rows hidden while empty; the core rows stay visible so the list keeps a stable shape.
+const OPTIONAL_ROWS: [&str; 5] = [
+    "Skills",
+    "MCP server instructions",
+    "Memory files",
+    "Custom agents",
+    "Other context",
+];
+
 pub fn number(value: f64) -> String {
     if value >= 1_000_000.0 {
         format!("{:.1}m", value / 1_000_000.0)
@@ -86,17 +95,18 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
             );
         });
     });
+    let grey = |shade: u8| egui::Color32::from_rgb(shade, shade, shade.saturating_add(8));
     let demo_cats = [
-        ("Messages", 473000.0, colors.blue),
-        ("MCP tools", 2900.0, colors.blue),
-        ("Tools", 1600.0, egui::Color32::from_rgb(47, 157, 143)),
-        (
-            "System prompt",
-            1200.0,
-            egui::Color32::from_rgb(107, 114, 128),
-        ),
+        ("Messages", 410000.0, colors.blue),
+        ("MCP tools", 25700.0, colors.accent),
+        ("System tools", 18700.0, egui::Color32::from_rgb(47, 157, 143)),
+        ("System prompt", 10800.0, egui::Color32::from_rgb(214, 158, 46)),
+        ("Skills", 9900.0, grey(150)),
+        ("MCP server instructions", 3300.0, grey(125)),
+        ("Memory files", 455.0, grey(105)),
+        ("Custom agents", 60.0, grey(90)),
         ("Autocompact buffer", 33000.0, colors.dim),
-        ("Free space", 88300.0, colors.hover),
+        ("Free space", 88000.0, colors.hover),
     ];
     let live_cats = scaled.as_ref().map(|p| {
         let mut rows = vec![
@@ -106,8 +116,12 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
                 colors.blue,
             ),
             ("MCP tools", p.mcp_tools, colors.accent),
-            ("Tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
-            ("System prompt", p.system, colors.muted),
+            ("System tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
+            ("System prompt", p.system, egui::Color32::from_rgb(214, 158, 46)),
+            ("Skills", p.skills, grey(150)),
+            ("MCP server instructions", p.mcp_instructions, grey(125)),
+            ("Memory files", p.memory, grey(105)),
+            ("Custom agents", p.agents, grey(90)),
             ("Other context", p.other, colors.dim),
         ];
         if autocompact_buffer > 0.0 {
@@ -146,9 +160,14 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
     }
     ui.add_space(8.0);
     if let Some(cats) = cats {
+        let mut gap_added = false;
         for &(label, tokens, color) in cats {
-            if tokens == 0.0 && label == "Other context" {
+            if tokens == 0.0 && OPTIONAL_ROWS.contains(&label) {
                 continue;
+            }
+            if matches!(label, "Autocompact buffer" | "Free space") && !gap_added {
+                ui.add_space(10.0);
+                gap_added = true;
             }
             if label == "Messages" {
                 let id = ui.make_persistent_id("message-context");
@@ -184,6 +203,25 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
                     false,
                     !demo && (label != "Free space" || estimated_total),
                 );
+            }
+        }
+        let demo_detail = demo.then(demo_detail);
+        let ctx_detail = if demo {
+            demo_detail.as_ref()
+        } else {
+            scaled.as_ref().map(|p| &p.detail)
+        };
+        if let Some(ctx_detail) = ctx_detail {
+            let deferred = [
+                ("MCP tools (deferred)", ctx_detail.deferred_mcp),
+                ("System tools (deferred)", ctx_detail.deferred_system),
+            ];
+            if deferred.iter().any(|(_, tokens)| *tokens > 0.0) {
+                ui.add_space(8.0);
+            }
+            for (label, tokens) in deferred.into_iter().filter(|(_, tokens)| *tokens > 0.0) {
+                category(ui, label, tokens, 0.0, colors.dim, false, false, true)
+                    .on_hover_text("Registered but not sent to the model until a tool search or activation loads them.");
             }
         }
         if !demo {
@@ -238,7 +276,9 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
         ui.label(RichText::new(threshold).size(10.0).color(colors.dim))
             .on_hover_text("The model limit is not the auto-compaction trigger. Settings → General controls the threshold; the remaining space is a safety buffer. Overflow or truncated-response recovery can compact earlier.");
         ui.add_space(7.0);
-        show_loaded_resources(ui, state, cwd);
+        show_loaded_resources(ui, state, cwd, scaled.as_ref().map(|p| &p.detail));
+    } else {
+        show_loaded_resources(ui, state, cwd, Some(&demo_detail()));
     }
     crate::section::Section::new("Usage details")
         .grouped()
@@ -299,62 +339,163 @@ fn session_tokens(state: &State) -> Option<f64> {
     })
 }
 
-fn show_loaded_resources(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path) {
+/// Example lists for `--demo`, shaped like a busy session with many MCP tools.
+fn demo_detail() -> crate::protocol::ContextDetail {
+    let item = |name: &str, tokens: f64| crate::protocol::ContextItem {
+        name: name.into(),
+        tokens,
+    };
+    let mcp = [
+        ("apply_agent_config", 307.0),
+        ("apply_approval_request", 363.0),
+        ("archive_agent_graph", 467.0),
+        ("archive_flag", 235.0),
+        ("copy_flag_config", 383.0),
+        ("create_ai_config", 1400.0),
+        ("create_ai_tool", 863.0),
+        ("create_experiment", 2400.0),
+    ];
+    crate::protocol::ContextDetail {
+        mcp_tools: mcp
+            .iter()
+            .map(|(name, tokens)| item(&format!("mcp__launchdarkly__{name}"), *tokens))
+            .collect(),
+        mcp_tools_count: 748,
+        system_tools: vec![item("bash", 4100.0), item("edit", 2300.0), item("read", 900.0)],
+        skills: vec![item("deploy", 1800.0), item("find-skills", 900.0)],
+        memory: vec![
+            item("~/.claude/CLAUDE.md", 14.0),
+            item("~/.claude/RTK.md", 371.0),
+            item("~/git/CLAUDE.md", 70.0),
+        ],
+        agents: vec![item("posthog:error-analyzer", 60.0)],
+        deferred_mcp: 649300.0,
+        deferred_mcp_count: 748,
+        deferred_system: 27500.0,
+        deferred_system_count: 12,
+    }
+}
+
+/// `mcp__server__tool_name` → `server · tool name`.
+fn pretty_tool(name: &str) -> String {
+    match name.strip_prefix("mcp__").map(|rest| rest.split_once("__")) {
+        Some(Some((server, tool))) => format!("{server} · {}", tool.replace('_', " ")),
+        Some(None) => name.trim_start_matches("mcp__").replace('_', " "),
+        None => name.to_owned(),
+    }
+}
+
+struct ResourceList {
+    key: &'static str,
+    label: &'static str,
+    count: usize,
+    items: Vec<(String, Option<f64>)>,
+}
+
+fn named_items(list: &[crate::protocol::ContextItem], pretty: bool) -> Vec<(String, Option<f64>)> {
+    list.iter()
+        .map(|i| {
+            (
+                if pretty { pretty_tool(&i.name) } else { i.name.clone() },
+                Some(i.tokens),
+            )
+        })
+        .collect()
+}
+
+fn show_loaded_resources(
+    ui: &mut egui::Ui,
+    state: &State,
+    cwd: &std::path::Path,
+    detail: Option<&crate::protocol::ContextDetail>,
+) {
     let colors = crate::theme::palette(ui.ctx());
-    let mut memory_files: Vec<String> = Vec::new();
-    if !cwd.as_os_str().is_empty() {
-        for name in ["AGENTS.md", "CLAUDE.md", ".pi/AGENTS.md"] {
-            if cwd.join(name).is_file() {
-                memory_files.push(name.into());
+    let detail = detail.cloned().unwrap_or_default();
+    let mut memory_files: Vec<(String, Option<f64>)> = named_items(&detail.memory, false);
+    if memory_files.is_empty() {
+        if !cwd.as_os_str().is_empty() {
+            for name in ["AGENTS.md", "CLAUDE.md", ".pi/AGENTS.md"] {
+                if cwd.join(name).is_file() {
+                    memory_files.push((name.into(), None));
+                }
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            for rel in [".pi/agent/AGENTS.md", ".claude/CLAUDE.md"] {
+                if home.join(rel).is_file() {
+                    memory_files.push((format!("~/{rel}"), None));
+                }
             }
         }
     }
-    if let Some(home) = dirs::home_dir() {
-        for rel in [".pi/agent/AGENTS.md", ".claude/CLAUDE.md"] {
-            if home.join(rel).is_file() {
-                memory_files.push(format!("~/{rel}"));
-            }
-        }
+    let mut skills = named_items(&detail.skills, false);
+    if skills.is_empty() {
+        skills = state
+            .commands
+            .iter()
+            .filter_map(|c| c.name.strip_prefix("skill:"))
+            .map(|name| (format!("skill:{name}"), None))
+            .collect();
     }
-    let skills: Vec<&str> = state
-        .commands
-        .iter()
-        .filter(|c| c.name.starts_with("skill:"))
-        .map(|c| c.name.as_str())
-        .collect();
-    let other_cmds: Vec<&str> = state
+    let other_cmds: Vec<(String, Option<f64>)> = state
         .commands
         .iter()
         .filter(|c| !c.name.starts_with("skill:"))
-        .map(|c| c.name.as_str())
+        .map(|c| (c.name.clone(), None))
         .collect();
-
-    if memory_files.is_empty() && skills.is_empty() && other_cmds.is_empty() {
+    let lists = [
+        ResourceList {
+            key: "ctx-mcp-tools",
+            label: "MCP tools",
+            count: detail.mcp_tools_count.max(detail.mcp_tools.len()),
+            items: named_items(&detail.mcp_tools, true),
+        },
+        ResourceList {
+            key: "ctx-system-tools",
+            label: "System tools",
+            count: detail.system_tools.len(),
+            items: named_items(&detail.system_tools, false),
+        },
+        ResourceList {
+            key: "ctx-skills",
+            label: "Skills",
+            count: skills.len(),
+            items: skills,
+        },
+        ResourceList {
+            key: "ctx-memory",
+            label: "Memory files",
+            count: memory_files.len(),
+            items: memory_files,
+        },
+        ResourceList {
+            key: "ctx-agents",
+            label: "Custom agents",
+            count: detail.agents.len(),
+            items: named_items(&detail.agents, false),
+        },
+        ResourceList {
+            key: "ctx-commands",
+            label: "Slash commands",
+            count: other_cmds.len(),
+            items: other_cmds,
+        },
+    ];
+    if lists.iter().all(|l| l.items.is_empty()) {
         return;
     }
 
-    for (id_key, label, items) in [
-        ("ctx-skills", "Skills", skills),
-        (
-            "ctx-memory",
-            "Memory files",
-            memory_files.iter().map(String::as_str).collect(),
-        ),
-        ("ctx-commands", "Slash commands", other_cmds),
-    ] {
-        if items.is_empty() {
-            continue;
-        }
-        let id = ui.make_persistent_id(id_key);
+    for list in lists.iter().filter(|l| !l.items.is_empty()) {
+        let id = ui.make_persistent_id(list.key);
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
         let row = ui
             .horizontal(|ui| {
                 let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                 crate::icons::chevron(ui, chev_rect, open, colors.dim);
-                ui.label(RichText::new(label).size(11.0).color(colors.muted));
+                ui.label(RichText::new(list.label).size(11.0).color(colors.muted));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
-                        RichText::new(items.len().to_string())
+                        RichText::new(list.count.to_string())
                             .size(11.0)
                             .color(colors.dim),
                     );
@@ -367,22 +508,68 @@ fn show_loaded_resources(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path
             open = !open;
             ui.ctx().data_mut(|d| d.insert_temp(id, open));
         }
-        if open {
-            ui.indent(id_key, |ui| {
-                for item in items.iter().take(24) {
-                    ui.label(RichText::new(*item).size(10.5).color(colors.muted));
-                }
-                if items.len() > 24 {
-                    ui.label(
-                        RichText::new(format!("+{} more", items.len() - 24))
-                            .size(10.0)
-                            .color(colors.dim),
-                    );
-                }
-            });
+        if !open {
+            continue;
         }
+        ui.indent(list.key, |ui| {
+            // Long lists (hundreds of MCP tools) scroll inside the panel instead of stretching it.
+            let body = |ui: &mut egui::Ui| {
+                for (name, tokens) in &list.items {
+                    item_row(ui, name, *tokens);
+                }
+            };
+            if list.items.len() > 12 {
+                egui::ScrollArea::vertical()
+                    .id_salt((list.key, "scroll"))
+                    .max_height(228.0)
+                    .auto_shrink([false, true])
+                    .show(ui, body);
+            } else {
+                body(ui);
+            }
+            if list.count > list.items.len() {
+                ui.label(
+                    RichText::new(format!("+{} more", list.count - list.items.len()))
+                        .size(10.0)
+                        .color(colors.dim),
+                );
+            }
+        });
     }
     ui.add_space(5.0);
+}
+
+/// A name with an optional right-aligned token estimate, truncated with an ellipsis.
+fn item_row(ui: &mut egui::Ui, name: &str, tokens: Option<f64>) {
+    let colors = crate::theme::palette(ui.ctx());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 19.0), Sense::hover());
+    let right = if tokens.is_some() { 80.0 } else { 4.0 };
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        name.into(),
+        egui::FontId::proportional(10.5),
+        colors.muted,
+    );
+    job.wrap.max_width = (rect.width() - right - 4.0).max(0.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        rect.left_center() + egui::vec2(2.0, -galley.size().y / 2.0),
+        galley,
+        colors.muted,
+    );
+    if let Some(tokens) = tokens {
+        ui.painter().text(
+            rect.right_center() - egui::vec2(46.0, 0.0),
+            egui::Align2::RIGHT_CENTER,
+            format!("~{}", number(tokens)),
+            egui::FontId::proportional(10.0),
+            colors.dim,
+        );
+    }
+    response.on_hover_text(name);
 }
 
 fn session_token_summary(state: &State) -> String {

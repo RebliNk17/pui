@@ -144,6 +144,7 @@ fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
                             assistant: 500.0,
                             tool_results: 600.0,
                             other: 100.0,
+                            ..Default::default()
                         }),
                         ..Default::default()
                     };
@@ -190,6 +191,119 @@ fn live_context_renders_in_both_themes_at_narrow_widths_and_zoom() {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn detailed_breakdown_shows_every_category_deferred_rows_and_named_lists() {
+    use crate::protocol::{ContextDetail, ContextItem};
+    let item = |name: &str, tokens: f64| ContextItem {
+        name: name.into(),
+        tokens,
+    };
+    for dark in [false, true] {
+        for width in [240.0, 320.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            ctx.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let state = State {
+                context_tokens: Some(3000.0),
+                context_window: 600000.0,
+                compact_percent: Some(85),
+                context_breakdown: Some(ContextBreakdown {
+                    system: 100.0,
+                    tools: 200.0,
+                    mcp_tools: 300.0,
+                    user: 400.0,
+                    assistant: 500.0,
+                    tool_results: 600.0,
+                    skills: 300.0,
+                    memory: 200.0,
+                    mcp_instructions: 250.0,
+                    agents: 150.0,
+                    detail: ContextDetail {
+                        mcp_tools: vec![item("mcp__docs__search_pages", 300.0)],
+                        mcp_tools_count: 1,
+                        system_tools: vec![item("read", 200.0)],
+                        skills: vec![item("deploy", 300.0)],
+                        memory: vec![item("~/.claude/CLAUDE.md", 200.0)],
+                        agents: vec![item("agents", 150.0)],
+                        deferred_mcp: 6000.0,
+                        deferred_system: 900.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let mut labels = Vec::new();
+            for _ in 0..3 {
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, 1400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            for key in [
+                                "ctx-mcp-tools",
+                                "ctx-system-tools",
+                                "ctx-skills",
+                                "ctx-memory",
+                                "ctx-agents",
+                            ] {
+                                let id = ui.make_persistent_id(key);
+                                ui.ctx().data_mut(|d| d.insert_temp(id, true));
+                            }
+                            show(ui, &state, false);
+                        });
+                    },
+                );
+                labels.clear();
+                for shape in output.shapes {
+                    painted_labels(&shape.shape, &mut labels);
+                }
+            }
+            for expected in [
+                "Messages",
+                "MCP tools",
+                "System tools",
+                "System prompt",
+                "Skills",
+                "MCP server instructions",
+                "Memory files",
+                "Custom agents",
+                "Autocompact buffer",
+                "Free space",
+                "MCP tools (deferred)",
+                "System tools (deferred)",
+                "docs · search pages",
+                "read",
+                "deploy",
+                "~/.claude/CLAUDE.md",
+                "agents",
+            ] {
+                assert!(
+                    labels.iter().any(|(text, _)| text == expected),
+                    "Missing {expected} at {width}pt: {labels:?}"
+                );
+            }
+            // Deferred tools are outside the active context, so they have no share of the window.
+            assert!(labels.iter().any(|(text, _)| text == "—"));
+            for (label, bounds) in &labels {
+                assert!(
+                    bounds.right() <= ctx.screen_rect().right() + 1.0 && bounds.left() >= -1.0,
+                    "{label:?} overflows {width}pt: {bounds:?}"
+                );
             }
         }
     }
