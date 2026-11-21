@@ -62,7 +62,7 @@ impl Language {
     }
 }
 
-pub(super) fn file_icon(path: &Path, colors: &Palette) -> (Icon, Color32) {
+pub(in crate::app) fn file_icon(path: &Path, colors: &Palette) -> (Icon, Color32) {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

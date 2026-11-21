@@ -10,6 +10,7 @@ mod open_tests;
 mod quick_paths;
 mod svg;
 mod syntax;
+pub(super) use syntax::file_icon;
 mod table_preferences;
 use super::*;
 use std::{

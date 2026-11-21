@@ -9,17 +9,21 @@ pub enum Card {
     Workflow,
     Environment,
     Context,
+    Connectors,
     Outputs,
     Pulls,
     Changes,
+    BackgroundTasks,
 }
 impl Card {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::Environment,
         Self::Context,
         Self::Outputs,
+        Self::Connectors,
         Self::Pulls,
         Self::Changes,
+        Self::BackgroundTasks,
         Self::Workflow,
     ];
     pub fn label(self) -> &'static str {
@@ -27,9 +31,11 @@ impl Card {
             Self::Workflow => "Workflow",
             Self::Environment => "Environment",
             Self::Context => "Context",
+            Self::Connectors => "Connectors",
             Self::Outputs => "Outputs",
             Self::Pulls => "Pull requests",
             Self::Changes => "Changes",
+            Self::BackgroundTasks => "Background tasks",
         }
     }
 }
@@ -791,7 +797,7 @@ mod tests {
                                 .all(|(_, r)| r.left() >= environment.right() + 7.0),
                             "Long status must not collide with its title: {labels:?}"
                         );
-                        assert_eq!(lines, 3, "one rule between each visible section");
+                        assert_eq!(lines, 5, "one rule between each visible section");
                         assert!(
                             !rects
                                 .iter()

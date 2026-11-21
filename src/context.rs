@@ -48,7 +48,12 @@ pub fn usage_summary(state: &State) -> String {
         .unwrap_or_else(|| "Not reported".into())
 }
 
+#[cfg(test)]
 pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
+    show_with_cwd(ui, state, std::path::Path::new(""), demo);
+}
+
+pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, demo: bool) {
     let colors = crate::theme::palette(ui.ctx());
     let window = state.context_window;
     let parts = state.context_breakdown.as_ref();
@@ -56,6 +61,11 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
     let used = state.context_tokens.or_else(|| parts.map(|p| p.total()));
     let prefix = if estimated_total { "~" } else { "" };
     let scaled = parts.map(|p| p.scaled(used.unwrap_or_default()));
+    let autocompact_buffer = state
+        .compact_percent
+        .filter(|&p| p < 100 && window > 0.0 && state.compaction_settings_error.is_none())
+        .map(|p| window * f64::from(100 - p) / 100.0)
+        .unwrap_or(0.0);
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(
@@ -89,7 +99,7 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         ("Free space", 88300.0, colors.hover),
     ];
     let live_cats = scaled.as_ref().map(|p| {
-        vec![
+        let mut rows = vec![
             (
                 "Messages",
                 p.user + p.assistant + p.tool_results,
@@ -99,12 +109,16 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
             ("Tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
             ("System prompt", p.system, colors.muted),
             ("Other context", p.other, colors.dim),
-            (
-                "Free space",
-                (window - used.unwrap_or_default()).max(0.0),
-                colors.hover,
-            ),
-        ]
+        ];
+        if autocompact_buffer > 0.0 {
+            rows.push(("Autocompact buffer", autocompact_buffer, colors.dim));
+        }
+        rows.push((
+            "Free space",
+            (window - used.unwrap_or_default() - autocompact_buffer).max(0.0),
+            colors.hover,
+        ));
+        rows
     });
     let cats = if demo {
         Some(demo_cats.as_slice())
@@ -224,6 +238,7 @@ pub fn show(ui: &mut egui::Ui, state: &State, demo: bool) {
         ui.label(RichText::new(threshold).size(10.0).color(colors.dim))
             .on_hover_text("The model limit is not the auto-compaction trigger. Settings → General controls the threshold; the remaining space is a safety buffer. Overflow or truncated-response recovery can compact earlier.");
         ui.add_space(7.0);
+        show_loaded_resources(ui, state, cwd);
     }
     crate::section::Section::new("Usage details")
         .grouped()
@@ -282,6 +297,99 @@ fn session_tokens(state: &State) -> Option<f64> {
             .try_fold(0.0, |sum, value| value.map(|value| sum + value))
             .filter(|n| n.is_finite())
     })
+}
+
+fn show_loaded_resources(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path) {
+    let colors = crate::theme::palette(ui.ctx());
+    let mut memory_files: Vec<String> = Vec::new();
+    if !cwd.as_os_str().is_empty() {
+        for name in ["AGENTS.md", "CLAUDE.md", ".pi/AGENTS.md"] {
+            if cwd.join(name).is_file() {
+                memory_files.push(name.into());
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for rel in [".pi/agent/AGENTS.md", ".claude/CLAUDE.md"] {
+            if home.join(rel).is_file() {
+                memory_files.push(format!("~/{rel}"));
+            }
+        }
+    }
+    let skills: Vec<&str> = state
+        .commands
+        .iter()
+        .filter(|c| c.name.starts_with("skill:"))
+        .map(|c| c.name.as_str())
+        .collect();
+    let other_cmds: Vec<&str> = state
+        .commands
+        .iter()
+        .filter(|c| !c.name.starts_with("skill:"))
+        .map(|c| c.name.as_str())
+        .collect();
+
+    if memory_files.is_empty() && skills.is_empty() && other_cmds.is_empty() {
+        return;
+    }
+
+    for (id_key, label, items) in [
+        ("ctx-skills", "Skills", skills),
+        (
+            "ctx-memory",
+            "Memory files",
+            memory_files.iter().map(String::as_str).collect(),
+        ),
+        ("ctx-commands", "Slash commands", other_cmds),
+    ] {
+        if items.is_empty() {
+            continue;
+        }
+        let id = ui.make_persistent_id(id_key);
+        let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        let row = ui
+            .horizontal(|ui| {
+                crate::icons::inline(
+                    ui,
+                    if open {
+                        crate::icons::Icon::ArrowDown
+                    } else {
+                        crate::icons::Icon::ArrowRight
+                    },
+                    colors.dim,
+                );
+                ui.label(RichText::new(label).size(11.0).color(colors.muted));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(items.len().to_string())
+                            .size(11.0)
+                            .color(colors.dim),
+                    );
+                });
+            })
+            .response
+            .interact(Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if row.clicked() {
+            open = !open;
+            ui.ctx().data_mut(|d| d.insert_temp(id, open));
+        }
+        if open {
+            ui.indent(id_key, |ui| {
+                for item in items.iter().take(24) {
+                    ui.label(RichText::new(*item).size(10.5).color(colors.muted));
+                }
+                if items.len() > 24 {
+                    ui.label(
+                        RichText::new(format!("+{} more", items.len() - 24))
+                            .size(10.0)
+                            .color(colors.dim),
+                    );
+                }
+            });
+        }
+    }
+    ui.add_space(5.0);
 }
 
 fn session_token_summary(state: &State) -> String {
