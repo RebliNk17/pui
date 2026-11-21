@@ -319,12 +319,21 @@ impl Pui {
                     Some("Fork did not return a session path. No prompt was sent.".into());
                 return true;
             };
+            let fork_path = PathBuf::from(path);
+            let parent_path = PathBuf::from(&request.path);
+            if fork_path != parent_path {
+                self.prefs
+                    .chats
+                    .entry(fork_path.clone())
+                    .or_default()
+                    .parent_session = Some(parent_path);
+            }
             if !self.agents.background {
                 self.ensure_agent();
                 self.update_session_title();
                 self.publish_live();
                 self.park_tree();
-                self.connect(&self.ctx.clone(), Some(PathBuf::from(path)));
+                self.connect(&self.ctx.clone(), Some(fork_path));
                 self.ensure_agent();
             } else {
                 self.state.notice = Some(format!(

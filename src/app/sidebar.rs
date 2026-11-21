@@ -18,6 +18,7 @@ pub(super) struct ChatPrefs {
     pub(super) archived: bool,
     pub(super) hidden: bool,
     pub(super) section: Option<String>,
+    pub(super) parent_session: Option<PathBuf>,
 }
 #[derive(Clone)]
 enum Action {
