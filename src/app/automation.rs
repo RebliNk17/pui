@@ -115,6 +115,7 @@ impl Job {
 struct Running {
     cancel: Arc<AtomicBool>,
     rx: Receiver<runner::Check>,
+    provenance: Option<evidence::Provenance>,
 }
 impl Drop for Running {
     fn drop(&mut self) {
@@ -139,6 +140,7 @@ pub(super) struct Automation {
     create: Option<create::Form>,
     precheck: Option<precheck::Pending>,
     test_confirm: Option<(String, String)>,
+    comparison: Option<evidence::Comparison>,
 }
 impl Automation {
     fn next_wake(&self) -> Option<Duration> {
@@ -588,10 +590,14 @@ impl Pui {
                 .get(&id)
                 .and_then(|r| r.rx.try_recv().ok())
             {
-                self.automation.running.remove(&id);
+                let running = self.automation.running.remove(&id).unwrap();
                 let job = &mut self.automation.jobs[index];
                 job.last_run = Some(now());
-                job.record_check(&check, job.last_run.unwrap());
+                job.record_captured_check(
+                    &check,
+                    job.last_run.unwrap(),
+                    running.provenance.clone(),
+                );
                 job.next_run = job.following(now()).unwrap_or(i64::MAX);
                 job.error = check.error;
                 if check.success {
@@ -719,7 +725,20 @@ impl Pui {
                     let command = command.clone();
                     let timeout = *timeout_seconds;
                     let ctx = self.ctx.clone();
-                    self.automation.running.insert(id, Running { cancel, rx });
+                    let provenance = evidence::Provenance::capture(
+                        job,
+                        self.automation.home.as_deref(),
+                        evidence::Origin::Scheduled,
+                        now(),
+                    );
+                    self.automation.running.insert(
+                        id,
+                        Running {
+                            cancel,
+                            rx,
+                            provenance,
+                        },
+                    );
                     std::thread::spawn(move || {
                         let _ = tx.send(runner::run(&cwd, &command, timeout, signal));
                         ctx.request_repaint();

@@ -122,6 +122,22 @@ impl Pui {
         let mut create = false;
         let mut monitor = false;
         let mut test = None;
+        let mut compare = None;
+        let owner = self.automation.lock.is_some();
+        if self
+            .automation
+            .comparison
+            .as_ref()
+            .is_some_and(|comparison| {
+                !self
+                    .automation
+                    .jobs
+                    .iter()
+                    .any(|job| comparison.applies(job, self.automation.home.as_deref(), owner))
+            })
+        {
+            self.automation.comparison = None;
+        }
         let counts = job_counts(&self.automation.jobs);
         let filter_id = egui::Id::new("automation-filter");
         let mut filter = ctx
@@ -204,7 +220,7 @@ impl Pui {
                                     ui.label(theme::small(ui, "Prompt for the creator chat"));
                                     ui.add(egui::Label::new(&job.message).wrap().selectable(true));
                                     ui.add_space(12.0);
-                                    job.show_check_history(ui);
+                                    if job.show_check_history(ui, self.automation.home.as_deref(), owner, self.automation.comparison.as_ref()) { compare = Some(job.id.clone()); }
                                     ui.label(theme::small(ui, "Created by"));
                                     if ui.add_enabled(!self.demo, egui::Button::new(RichText::new(&job.creator.name).size(12.0).color(colors.accent)).frame(false).truncate())
                                         .on_hover_text(format!("{} ({})\n{}", job.creator.name, job.creator.id, job.creator.path.display())).clicked() {
@@ -252,6 +268,18 @@ impl Pui {
                 });
             });
         ctx.data_mut(|data| data.insert_temp(filter_id, filter));
+        // Explicit user activation only, outside render closures; no idle collection.
+        // Keep one bounded comparison snapshot across all jobs/checks.
+        if let Some(id) = compare
+            && !egui::Popup::is_any_open(ctx)
+            && !prompt_ui::modal_owns_current_pass(ctx)
+            && ctx.memory(|memory| memory.top_modal_layer().is_none())
+            && let Some(job) = self.automation.jobs.iter().find(|job| job.id == id)
+        {
+            self.automation.comparison =
+                evidence::Comparison::collect(job, self.automation.home.as_deref(), owner);
+            ctx.request_repaint();
+        }
         if let Some((id, operation)) = action {
             if let Err(error) = self.change_job(&id, operation) {
                 self.automation.error = Some(error);
