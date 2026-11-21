@@ -936,15 +936,25 @@ fn assistant(
     let mut fork = false;
     let first = &messages[0];
     ui.horizontal(|ui| {
+        let model_name = if first.model.is_empty() {
+            model
+        } else {
+            &first.model
+        };
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(23.0), Sense::hover());
-        ui.painter().rect_filled(rect, 7, colors.accent_bg);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "pi",
-            FontId::new(15.0, egui::FontFamily::Name("pi-serif".into())),
-            colors.accent,
-        );
+        if crate::icons::has_provider_logo(model_name) {
+            ui.painter().rect_filled(rect, 7, colors.surface);
+            crate::icons::draw_provider(ui, rect.shrink(4.0), model_name);
+        } else {
+            ui.painter().rect_filled(rect, 7, colors.accent_bg);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "pi",
+                FontId::new(15.0, egui::FontFamily::Name("pi-serif".into())),
+                colors.accent,
+            );
+        }
         let effort = if first.effort.is_empty() {
             thinking
         } else {
@@ -953,11 +963,7 @@ fn assistant(
         ui.label(
             RichText::new(format!(
                 "{}{}",
-                if first.model.is_empty() {
-                    model
-                } else {
-                    &first.model
-                },
+                model_name,
                 if effort.is_empty() || effort == "off" {
                     String::new()
                 } else {

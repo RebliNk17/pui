@@ -1,7 +1,9 @@
 //! Small, resolution-independent line icons (no platform-specific glyph fonts).
+mod providers;
 #[cfg(test)]
 mod tests;
 use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+pub use providers::{draw_provider, has_provider_logo, provider_inline};
 
 #[derive(Clone, Copy)]
 pub enum Icon {

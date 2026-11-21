@@ -11,10 +11,8 @@ use std::path::{Path, PathBuf};
 mod accounts;
 
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_COPY_REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
-const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -259,20 +257,6 @@ fn generate_pkce() -> (String, String) {
     hasher.update(verifier.as_bytes());
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
     (verifier, challenge)
-}
-
-fn build_claude_authorize_url(challenge: &str, state: &str) -> String {
-    let mut url = url::Url::parse(ANTHROPIC_AUTHORIZE_URL).expect("valid authorize url");
-    url.query_pairs_mut()
-        .append_pair("code", "true")
-        .append_pair("client_id", ANTHROPIC_CLIENT_ID)
-        .append_pair("response_type", "code")
-        .append_pair("redirect_uri", ANTHROPIC_COPY_REDIRECT_URI)
-        .append_pair("scope", ANTHROPIC_SCOPES)
-        .append_pair("code_challenge", challenge)
-        .append_pair("code_challenge_method", "S256")
-        .append_pair("state", state);
-    url.to_string()
 }
 
 /// Field label that wraps left-aligned. `ui.columns` uses a justified layout, where egui would
@@ -1147,24 +1131,6 @@ impl ProvidersManager {
                 }
             }
         }
-    }
-
-    pub(in crate::app) fn open_claude_subscription(&mut self) {
-        let (verifier, challenge) = generate_pkce();
-        let authorize_url = build_claude_authorize_url(&challenge, &verifier);
-        self.claude = ClaudeSubscriptionFlow {
-            open: true,
-            verifier,
-            authorize_url,
-            code_input: String::new(),
-            exchanging: false,
-            rx: None,
-            error: None,
-        };
-    }
-
-    pub(in crate::app) fn open_antigravity_subscription(&mut self) {
-        self.open_antigravity_for("antigravity");
     }
 
     pub(in crate::app) fn open_antigravity_for(&mut self, target: &str) {
@@ -2493,301 +2459,60 @@ impl Pui {
             "Add or connect provider",
             "Connect your Google Antigravity or Claude Code subscription, configure Google Gemini / Vertex AI, or add a compatible endpoint with automatic model discovery.",
         );
-        let antigravity_auth = self
-            .settings_view
-            .providers
-            .saved_auth
-            .iter()
-            .find(|a| a.provider == "antigravity" && a.kind == "oauth")
-            .cloned();
-        let claude_connected = self
-            .settings_view
-            .providers
-            .saved_auth
-            .iter()
-            .any(|a| a.provider == "anthropic" && a.kind == "oauth");
-        let google_key_connected = self
-            .settings_view
-            .providers
-            .saved_auth
-            .iter()
-            .any(|a| a.provider == "google");
-        let vertex_auth = self
-            .settings_view
-            .providers
-            .saved_auth
-            .iter()
-            .find(|a| a.provider == "google-vertex")
-            .cloned();
-
         page::card(ui, |ui| {
-            let agy_desc = if let Some(auth) = &antigravity_auth {
-                if let Some(email) = &auth.detail {
-                    format!(
-                        "Connected via Google OAuth ({email}). Antigravity models load from your account."
-                    )
-                } else {
-                    "Connected via Google OAuth in ~/.pi/agent/auth.json. Antigravity models are available in the model picker.".into()
-                }
-            } else {
-                "Sign in with your Google account to use Antigravity models (Gemini, Claude, GPT-OSS).".into()
-            };
             page::row(
                 ui,
-                "Google Antigravity / Gemini CLI (OAuth Subscription)",
-                &agy_desc,
+                "Sign in with subscription",
+                "Claude Pro/Max, ChatGPT Plus/Pro, or Google Antigravity via OAuth.",
                 |ui| {
-                    if ui
-                        .button(if antigravity_auth.is_some() {
-                            "Reconnect Antigravity…"
-                        } else {
-                            "Connect Antigravity…"
-                        })
-                        .clicked()
-                    {
-                        self.settings_view.providers.open_antigravity_subscription();
+                    if ui.button("Antigravity…").clicked() {
+                        self.settings_view
+                            .providers
+                            .add_account(ui.ctx(), "antigravity");
+                    }
+                    if ui.button("ChatGPT…").clicked() {
+                        self.settings_view
+                            .providers
+                            .add_account(ui.ctx(), "openai-codex");
+                    }
+                    if ui.button("Claude…").clicked() {
+                        self.settings_view
+                            .providers
+                            .add_account(ui.ctx(), "anthropic");
                     }
                 },
             );
             page::separator(ui);
             page::row(
                 ui,
-                "Claude Code Subscription (Claude Pro / Max)",
-                if claude_connected {
-                    "Connected via OAuth in ~/.pi/agent/auth.json. Claude models are available in the model picker."
-                } else {
-                    "Sign in with your Anthropic Claude Pro or Max subscription via OAuth."
-                },
+                "API key or Vertex AI",
+                "Google Gemini, Anthropic, OpenAI, OpenRouter, DeepSeek, xAI, or Google Cloud Vertex AI.",
                 |ui| {
-                    if ui
-                        .button(if claude_connected {
-                            "Reconnect Claude…"
-                        } else {
-                            "Connect Subscription…"
-                        })
-                        .clicked()
-                    {
-                        self.settings_view.providers.open_claude_subscription();
+                    if ui.button("Vertex AI…").clicked() {
+                        self.settings_view.providers.open_vertex_modal();
+                    }
+                    if ui.button("API Key…").clicked() {
+                        self.settings_view.providers.open_api_key_modal(None);
                     }
                 },
             );
             page::separator(ui);
-            let google_desc = match (&vertex_auth, google_key_connected) {
-                (Some(v), true) => format!(
-                    "Gemini API key + Vertex AI ({}) configured.",
-                    v.detail.as_deref().unwrap_or("API key")
-                ),
-                (Some(v), false) => format!(
-                    "Vertex AI configured ({}).",
-                    v.detail.as_deref().unwrap_or("API key")
-                ),
-                (None, true) => "Google Gemini API key saved in ~/.pi/agent/auth.json.".into(),
-                (None, false) => "Connect a Google Gemini API key (GEMINI_API_KEY) or Google Cloud Vertex AI (gcloud ADC / project & location).".into(),
-            };
-            page::row(ui, "Google Gemini & Vertex AI", &google_desc, |ui| {
-                if ui
-                    .button("Vertex AI…")
-                    .on_hover_text(
-                        "Vertex AI with gcloud ADC, a project and location, or an API key",
-                    )
-                    .clicked()
-                {
-                    self.settings_view.providers.open_vertex_modal();
-                }
-                if ui
-                    .button("API key…")
-                    .on_hover_text("Gemini API key")
-                    .clicked()
-                {
-                    self.settings_view
-                        .providers
-                        .open_api_key_modal(Some("google"));
-                }
-            });
-            page::separator(ui);
             page::row(
                 ui,
-                "OpenAI / Google / Anthropic-Compatible Endpoint (Local / Custom)",
-                "Connect Ollama, LM Studio, vLLM, llama.cpp, or custom Google Generative AI / Vertex endpoints with automatic model discovery.",
+                "Local or custom endpoint",
+                "Ollama, LM Studio, vLLM, llama.cpp, or compatible API URLs with auto model discovery.",
                 |ui| {
                     if ui.button("Add Endpoint…").clicked() {
                         self.settings_view.providers.open_add_endpoint(None);
                     }
                 },
             );
-            page::separator(ui);
-            page::row(
-                ui,
-                "Provider API Key",
-                "Store an API key for Google Gemini, Anthropic, OpenAI, OpenRouter, DeepSeek or xAI.",
-                |ui| {
-                    if ui.button("Add API Key…").clicked() {
-                        self.settings_view.providers.open_api_key_modal(None);
-                    }
-                },
-            );
         });
 
-        // Several accounts per provider (Claude, ChatGPT, Antigravity, API keys).
+        // Unified Accounts card (subscriptions, API keys, and custom endpoints).
         self.settings_accounts(ui);
 
-        // 2. Custom & Local Compatible Endpoints
-        let custom_list = self.settings_view.providers.custom_providers.clone();
-        if !custom_list.is_empty() {
-            page::section(
-                ui,
-                "OpenAI, Google & custom endpoints",
-                "Configured in ~/.pi/agent/models.json. Edit or re-run auto model discovery anytime.",
-            );
-            let mut edit_target = None;
-            let mut remove_target = None;
-            let mut rediscover_target = None;
-            page::card(ui, |ui| {
-                for (index, item) in custom_list.iter().enumerate() {
-                    if index > 0 {
-                        page::separator(ui);
-                    }
-                    let model_names: Vec<&str> =
-                        item.models.iter().take(4).map(|m| m.id.as_str()).collect();
-                    let summary = if item.models.is_empty() {
-                        format!("{} · {} · no models listed", item.base_url, item.api)
-                    } else if item.models.len() > 4 {
-                        format!(
-                            "{} · {} models ({}, +{} more)",
-                            item.base_url,
-                            item.models.len(),
-                            model_names.join(", "),
-                            item.models.len() - 4
-                        )
-                    } else {
-                        format!(
-                            "{} · {} model(s): {}",
-                            item.base_url,
-                            item.models.len(),
-                            model_names.join(", ")
-                        )
-                    };
-                    page::row(
-                        ui,
-                        &format!("{} ({})", item.name, item.id),
-                        &summary,
-                        |ui| {
-                            if ui.button("Remove").clicked() {
-                                remove_target = Some(item.id.clone());
-                            }
-                            if ui.button("Edit / Discover…").clicked() {
-                                edit_target = Some(item.clone());
-                            }
-                            if item.models.is_empty() && ui.button("Discover").clicked() {
-                                rediscover_target = Some(item.clone());
-                            }
-                        },
-                    );
-                }
-            });
-            if let Some(target) = edit_target.or(rediscover_target) {
-                self.settings_view.providers.open_edit_endpoint(&target);
-            }
-            if let Some(id) = remove_target {
-                self.settings_view.providers.remove_custom_provider(&id);
-            }
-        }
-
-        // 3. Active providers from Pi
-        page::section(
-            ui,
-            "Active providers in Pi",
-            "Providers currently active in your Pi model catalog. Newly added endpoints or credentials appear after refreshing or starting a new chat.",
-        );
-        let mut providers = BTreeMap::<String, usize>::new();
-        for model in &self.state.models {
-            *providers.entry(model.provider.clone()).or_default() += 1;
-        }
-        let saved_auth = self.settings_view.providers.saved_auth.clone();
-        if providers.is_empty() && saved_auth.is_empty() {
-            page::card(ui, |ui| {
-                page::row(
-                    ui,
-                    "No catalog loaded",
-                    "Connect a provider above or open a workspace chat to load models from Pi.",
-                    |ui| {
-                        if ui.button("Refresh catalog").clicked() {
-                            self.refresh_providers_catalog();
-                        }
-                    },
-                )
-            });
-        } else {
-            let mut remove_auth = None;
-            page::card(ui, |ui| {
-                let mut rows_drawn = 0;
-                for (provider, count) in &providers {
-                    if rows_drawn > 0 {
-                        page::separator(ui);
-                    }
-                    rows_drawn += 1;
-                    let auth_badge = saved_auth
-                        .iter()
-                        .find(|a| &a.provider == provider)
-                        .map(|a| match (&a.detail, a.kind.as_str()) {
-                            (Some(d), "oauth") => format!(" · OAuth ({d})"),
-                            (None, "oauth") => " · OAuth subscription".to_owned(),
-                            (Some(d), _) => format!(" · {d}"),
-                            (None, _) => " · Stored API key".to_owned(),
-                        })
-                        .unwrap_or_default();
-                    page::row(
-                        ui,
-                        &crate::accounts::display_provider(provider),
-                        &format!("{count} models available from Pi{auth_badge}"),
-                        |ui| {
-                            if saved_auth.iter().any(|a| &a.provider == provider)
-                                && ui.button("Sign out").clicked()
-                            {
-                                remove_auth = Some(provider.clone());
-                            }
-                            ui.label(theme::small(
-                                ui,
-                                if provider == &self.state.provider {
-                                    "Current provider"
-                                } else {
-                                    "Available"
-                                },
-                            ));
-                        },
-                    );
-                }
-                for auth in &saved_auth {
-                    if providers.contains_key(&auth.provider) {
-                        continue;
-                    }
-                    if rows_drawn > 0 {
-                        page::separator(ui);
-                    }
-                    rows_drawn += 1;
-                    let kind_label = match (&auth.detail, auth.kind.as_str()) {
-                        (Some(d), "oauth") => {
-                            format!("OAuth subscription ({d}) · reload chat to load models")
-                        }
-                        (None, "oauth") => {
-                            "OAuth subscription saved · reload chat to load models".into()
-                        }
-                        (Some(d), _) => format!("{d} · reload chat to load models"),
-                        (None, _) => "API key saved · reload chat to load models".into(),
-                    };
-                    page::row(ui, &auth.provider, &kind_label, |ui| {
-                        if ui.button("Sign out").clicked() {
-                            remove_auth = Some(auth.provider.clone());
-                        }
-                    });
-                }
-            });
-            if let Some(provider) = remove_auth {
-                self.settings_view.providers.remove_saved_auth(&provider);
-            }
-        }
-
-        // 4. Reload / CLI fallback section
+        // Reload / CLI fallback section
         page::section(ui, "Catalog & CLI sign-in", "");
         page::card(ui, |ui| {
             page::row(
