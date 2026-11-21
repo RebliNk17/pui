@@ -1301,8 +1301,26 @@ impl Browser {
                     }
                 }
                 if markdown || svg {
+                    let md_headings = if markdown && !tab.source {
+                        if let Some(Ok(Content::Text(content))) = &tab.content {
+                            markdown::headings(content)
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    let has_outline = !md_headings.is_empty();
+                    let outline_open_id = ui.id().with(("md-outline-open", &tab.path));
+                    let mut outline_open = has_outline
+                        && ui
+                            .ctx()
+                            .data(|d| d.get_temp::<bool>(outline_open_id))
+                            .unwrap_or(false);
+
                     let toggle_id = ui.id().with("preview-source-toggle");
-                    let pos = egui::pos2(pane_rect.right() - 32.0, pane_rect.top());
+                    let width_offset = if has_outline { 60.0 } else { 32.0 };
+                    let pos = egui::pos2(pane_rect.right() - width_offset, pane_rect.top());
                     egui::Area::new(toggle_id)
                         .order(egui::Order::Foreground)
                         .fixed_pos(pos)
@@ -1313,26 +1331,99 @@ impl Browser {
                                 .corner_radius(6)
                                 .inner_margin(2)
                                 .show(ui, |ui| {
-                                    let (icon, tip) = if tab.source {
-                                        (crate::icons::Icon::File, "Show preview")
-                                    } else {
-                                        (crate::icons::Icon::Code, "Show source")
-                                    };
-                                    let response = crate::icons::button(ui, icon, tip);
-                                    ui.ctx().data_mut(|data| {
-                                        data.insert_temp(
-                                            egui::Id::new("file-preview-source-toggle-rect"),
-                                            response.rect,
-                                        );
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                        if has_outline {
+                                            let outline_btn = crate::icons::button(
+                                                ui,
+                                                crate::icons::Icon::Details,
+                                                "Toggle document outline",
+                                            );
+                                            if outline_btn.clicked() {
+                                                outline_open = !outline_open;
+                                                ui.ctx().data_mut(|d| {
+                                                    d.insert_temp(outline_open_id, outline_open);
+                                                });
+                                            }
+                                        }
+                                        let (icon, tip) = if tab.source {
+                                            (crate::icons::Icon::File, "Show preview")
+                                        } else {
+                                            (crate::icons::Icon::Code, "Show source")
+                                        };
+                                        let response = crate::icons::button(ui, icon, tip);
+                                        ui.ctx().data_mut(|data| {
+                                            data.insert_temp(
+                                                egui::Id::new("file-preview-source-toggle-rect"),
+                                                response.rect,
+                                            );
+                                        });
+                                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                                            preview.remember(0, &response);
+                                        }
+                                        if response.clicked() {
+                                            tab.source = !tab.source;
+                                        }
                                     });
-                                    if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
-                                        preview.remember(0, &response);
-                                    }
-                                    if response.clicked() {
-                                        tab.source = !tab.source;
-                                    }
                                 });
                         });
+
+                    if outline_open {
+                        let outline_pos = egui::pos2(
+                            (pane_rect.right() - 248.0).max(pane_rect.left() + 8.0),
+                            pane_rect.top() + 34.0,
+                        );
+                        egui::Area::new(ui.id().with("md-outline-popover"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(outline_pos)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(colors.sidebar)
+                                    .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                                    .corner_radius(8)
+                                    .inner_margin(8)
+                                    .show(ui, |ui| {
+                                        ui.set_width(232.0);
+                                        ui.label(
+                                            RichText::new("Outline")
+                                                .size(11.0)
+                                                .strong()
+                                                .color(colors.muted),
+                                        );
+                                        ui.add_space(4.0);
+                                        egui::ScrollArea::vertical()
+                                            .max_height(
+                                                (pane_rect.height() - 64.0).clamp(120.0, 360.0),
+                                            )
+                                            .show(ui, |ui| {
+                                                for (idx, (level, title)) in
+                                                    md_headings.iter().enumerate()
+                                                {
+                                                    let indent = (*level as f32 - 1.0) * 10.0;
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(indent);
+                                                        if ui
+                                                            .add(
+                                                                egui::Button::new(
+                                                                    RichText::new(title)
+                                                                        .size(11.5)
+                                                                        .color(colors.text),
+                                                                )
+                                                                .frame(false),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            markdown::request_scroll_to_heading(
+                                                                ui.ctx(),
+                                                                idx,
+                                                            );
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                    });
+                            });
+                    }
                 }
             });
     }

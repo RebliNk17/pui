@@ -1,5 +1,6 @@
 //! Selectable Markdown with tables, one consistent baseline and real link hit targets.
 mod capture;
+mod mermaid;
 mod reply;
 #[cfg(test)]
 mod reply_tests;
@@ -183,9 +184,46 @@ impl egui::cache::ComputerMut<&str, Arc<Vec<Event<'static>>>> for ParseMarkdown 
     }
 }
 type MarkdownCache = egui::cache::FrameCache<Arc<Vec<Event<'static>>>, ParseMarkdown>;
+#[derive(Clone)]
 struct Link {
     range: std::ops::Range<usize>,
     url: String,
+}
+
+fn scroll_heading_id() -> egui::Id {
+    egui::Id::new("pui-markdown-scroll-heading")
+}
+
+/// Request that the next Markdown file render scroll to the `index`-th heading (0-based).
+pub fn request_scroll_to_heading(ctx: &egui::Context, index: usize) {
+    ctx.data_mut(|d| d.insert_temp(scroll_heading_id(), index));
+}
+
+/// Extracts `(level, title)` for headings in a Markdown document (ignoring fenced code blocks).
+pub fn headings(source: &str) -> Vec<(u8, String)> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if (1..=4).contains(&hashes) {
+            let rest = &trimmed[hashes..];
+            if let Some(title) = rest.strip_prefix(' ') {
+                let title = title.trim().trim_end_matches('#').trim();
+                if !title.is_empty() {
+                    out.push((hashes as u8, title.to_owned()));
+                }
+            }
+        }
+    }
+    out
 }
 /// Splits a local file link into `(path, optional_1_based_line)`.
 /// Supports `path:42`, `path:42:10`, `path#L42`, `path#L42-L60`, and `path#42`.
@@ -501,6 +539,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
     let mut in_item = false;
     let mut table: Option<Table> = None;
     let mut table_header = false;
+    let mut heading_index = 0usize;
     let mut event_index = 0;
     while event_index < events.len() {
         let event = events[event_index].clone();
@@ -577,6 +616,13 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
             Event::End(TagEnd::Emphasis) => italic = false,
             Event::Start(Tag::Heading { .. }) => {
                 flush(ui, &mut job, &mut links);
+                let target: Option<usize> = ui.ctx().data(|d| d.get_temp(scroll_heading_id()));
+                if target == Some(heading_index) {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                    ui.ctx()
+                        .data_mut(|d| d.remove_temp::<usize>(scroll_heading_id()));
+                }
+                heading_index += 1;
                 heading = true;
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -595,6 +641,13 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                 };
             }
             Event::End(TagEnd::CodeBlock) => {
+                let is_mermaid = language.eq_ignore_ascii_case("mermaid");
+                let mermaid_src_id = ui.make_persistent_id(("mermaid-src", event_index));
+                let mut show_mermaid_source = is_mermaid
+                    && ui
+                        .ctx()
+                        .data(|d| d.get_temp::<bool>(mermaid_src_id))
+                        .unwrap_or(false);
                 egui::Frame::new()
                     .fill(colors.code_bg)
                     .stroke(egui::Stroke::new(1.0, colors.border))
@@ -615,23 +668,46 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                                     {
                                         ui.ctx().copy_text(code_text.clone());
                                     }
+                                    if is_mermaid {
+                                        let toggle_label = if show_mermaid_source {
+                                            "Diagram"
+                                        } else {
+                                            "Source"
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(theme::small(ui, toggle_label))
+                                                    .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            show_mermaid_source = !show_mermaid_source;
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(mermaid_src_id, show_mermaid_source);
+                                            });
+                                        }
+                                    }
                                 },
                             );
                         });
-                        egui::ScrollArea::horizontal()
-                            .id_salt(ui.next_auto_id())
-                            .show(ui, |ui| {
-                                let text = code_text.trim_end();
-                                let response = ui.add(
-                                    egui::Label::new(
-                                        RichText::new(text)
-                                            .font(FontId::monospace(12.0))
-                                            .color(colors.code_text),
-                                    )
-                                    .selectable(true),
-                                );
-                                capture::offer(ui, &response, text);
-                            });
+                        let rendered_diagram =
+                            is_mermaid && !show_mermaid_source && mermaid::show(ui, &code_text);
+                        if !rendered_diagram {
+                            egui::ScrollArea::horizontal()
+                                .id_salt(ui.next_auto_id())
+                                .show(ui, |ui| {
+                                    let text = code_text.trim_end();
+                                    let response = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(text)
+                                                .font(FontId::monospace(12.0))
+                                                .color(colors.code_text),
+                                        )
+                                        .selectable(true),
+                                    );
+                                    capture::offer(ui, &response, text);
+                                });
+                        }
                     });
                 code_text.clear();
                 code = false;
@@ -762,6 +838,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
         }
     }
     flush(ui, &mut job, &mut links);
+    table::show_expanded_modal(ui.ctx());
 }
 
 fn alert(ui: &mut Ui, kind: pulldown_cmark::BlockQuoteKind, events: &[Event<'static>]) {

@@ -3,14 +3,50 @@ use crate::theme;
 use eframe::egui::{self, Ui, text::LayoutJob};
 use pulldown_cmark::Alignment;
 
+#[derive(Clone)]
 struct Cell {
     job: LayoutJob,
     links: Vec<Link>,
 }
 
+#[derive(Clone, Default)]
 pub(super) struct Table {
     alignments: Vec<Alignment>,
     rows: Vec<Vec<Cell>>,
+}
+
+fn expanded_table_id() -> egui::Id {
+    egui::Id::new("pui-expanded-markdown-table")
+}
+
+pub(super) fn show_expanded_modal(ctx: &egui::Context) {
+    let table: Option<std::sync::Arc<Table>> = ctx.data(|d| d.get_temp(expanded_table_id()));
+    let Some(table) = table else {
+        return;
+    };
+    let mut open = true;
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        open = false;
+    }
+    let max_size = ctx.available_rect().size() * 0.85;
+    egui::Window::new("Table")
+        .id(egui::Id::new("pui-expanded-markdown-table-window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .default_width(max_size.x.min(960.0))
+        .max_size(max_size)
+        .show(ctx, |ui| {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    table.render(ui, false);
+                });
+        });
+    if !open {
+        ctx.data_mut(|d| d.remove_temp::<std::sync::Arc<Table>>(expanded_table_id()));
+    }
 }
 
 impl Table {
@@ -31,6 +67,10 @@ impl Table {
     }
 
     pub(super) fn show(self, ui: &mut Ui) {
+        self.render(ui, true);
+    }
+
+    fn render(&self, ui: &mut Ui, allow_expand: bool) {
         const PADDING: egui::Vec2 = egui::vec2(10.0, 6.0);
         let columns = self.alignments.len();
         if columns == 0 {
@@ -47,7 +87,8 @@ impl Table {
         let available = ui.available_width() - 2.0 * PADDING.x * columns as f32;
         let preferred: f32 = widths.iter().sum();
         let minimum = 80.0 * columns as f32;
-        if preferred > available && preferred > minimum {
+        let is_wide = preferred > available;
+        if is_wide && preferred > minimum {
             let scale = ((available - minimum) / (preferred - minimum)).clamp(0.0, 1.0);
             for width in &mut widths {
                 *width = 80.0 + (*width - 80.0) * scale;
@@ -56,27 +97,28 @@ impl Table {
         let width = widths.iter().sum::<f32>() + 2.0 * PADDING.x * columns as f32;
         let colors = theme::palette(ui.ctx());
         let stroke = egui::Stroke::new(1.0, colors.border);
-        egui::ScrollArea::horizontal()
+        let scroll_out = egui::ScrollArea::horizontal()
             .id_salt(ui.next_auto_id())
             .show(ui, |ui| {
                 let mut rows = Vec::new();
                 let mut height = 0.0;
-                for row in self.rows {
+                for row in &self.rows {
                     let mut row_height = 24.0_f32;
                     let cells: Vec<_> = row
-                        .into_iter()
+                        .iter()
                         .enumerate()
                         .take(columns)
-                        .map(|(column, mut cell)| {
-                            cell.job.wrap.max_width = widths[column];
-                            cell.job.halign = match self.alignments[column] {
+                        .map(|(column, cell)| {
+                            let mut job = cell.job.clone();
+                            job.wrap.max_width = widths[column];
+                            job.halign = match self.alignments[column] {
                                 Alignment::Center => egui::Align::Center,
                                 Alignment::Right => egui::Align::Max,
                                 _ => egui::Align::Min,
                             };
-                            let galley = ui.fonts(|fonts| fonts.layout_job(cell.job));
+                            let galley = ui.fonts(|fonts| fonts.layout_job(job));
                             row_height = row_height.max(galley.size().y);
-                            (galley, cell.links)
+                            (galley, cell.links.clone())
                         })
                         .collect();
                     row_height += 2.0 * PADDING.y;
@@ -124,5 +166,40 @@ impl Table {
                 ui.painter()
                     .rect_stroke(rect, 0, stroke, egui::StrokeKind::Inside);
             });
+        if allow_expand && is_wide {
+            let btn_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    scroll_out.inner_rect.right() - 22.0,
+                    scroll_out.inner_rect.top() + 3.0,
+                ),
+                egui::vec2(19.0, 19.0),
+            );
+            let resp = ui
+                .interact(btn_rect, ui.id().with("expand-table"), egui::Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Expand wide table");
+            ui.painter().rect(
+                btn_rect,
+                4.0,
+                if resp.hovered() {
+                    colors.hover
+                } else {
+                    colors.surface
+                },
+                egui::Stroke::new(1.0_f32, colors.border),
+                egui::StrokeKind::Inside,
+            );
+            crate::icons::draw(
+                ui,
+                btn_rect.shrink(3.0),
+                crate::icons::Icon::Expand,
+                colors.muted,
+            );
+            if resp.clicked() {
+                let arc = std::sync::Arc::new(self.clone());
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(expanded_table_id(), arc));
+            }
+        }
     }
 }
