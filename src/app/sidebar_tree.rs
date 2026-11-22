@@ -1,8 +1,24 @@
 //! Sidebar projection only: one row per session, explicit ownership, no model calls
 //! or filesystem scans. Task workers open their supervisor, never a second Pi owner.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
+
+#[derive(Default)]
+pub(super) struct ListingCache {
+    stamp: Option<u64>,
+    pinned: Vec<Branch>,
+    branches: Vec<Branch>,
+}
+
+pub(super) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.as_os_str() == b.as_os_str() || (a.file_name() == b.file_name() && a == b)
+}
+
+fn path_key_eq(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a.as_os_str() == b.as_os_str() || (a.file_name() == b.file_name() && path_key(a) == path_key(b))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Target {
@@ -58,11 +74,114 @@ impl Branch {
                         app.state
                             .session_file
                             .as_deref()
-                            .is_some_and(|s| path_key(std::path::Path::new(s)) == path_key(p))
+                            .is_some_and(|s| path_key_eq(std::path::Path::new(s), p))
                     })
             }
         }
     }
+}
+pub(super) fn cached_listing(app: &mut Pui) -> (Vec<Branch>, Vec<Branch>) {
+    let current = stamp(app);
+    if app.sidebar_cache.stamp == Some(current) {
+        return (
+            app.sidebar_cache.pinned.clone(),
+            app.sidebar_cache.branches.clone(),
+        );
+    }
+    let (pinned, branches) = listing(app);
+    app.sidebar_cache = ListingCache {
+        stamp: Some(current),
+        pinned: pinned.clone(),
+        branches: branches.clone(),
+    };
+    (pinned, branches)
+}
+fn stamp(app: &Pui) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let hash_path = |p: &std::path::Path, h: &mut std::collections::hash_map::DefaultHasher| {
+        p.as_os_str().as_encoded_bytes().hash(h);
+    };
+    let hash_state = |s: &State, h: &mut std::collections::hash_map::DefaultHasher| {
+        s.session_file.hash(h);
+        s.assigned_title().hash(h);
+        s.title_request.is_some().hash(h);
+        s.session_name.hash(h);
+        s.messages.last().map(|m| m.timestamp).hash(h);
+    };
+    app.show_hidden.hash(&mut h);
+    app.sessions.len().hash(&mut h);
+    for s in &app.sessions {
+        hash_path(&s.path, &mut h);
+        hash_path(&s.cwd, &mut h);
+        hash_path(&s.project, &mut h);
+        s.title.hash(&mut h);
+        s.created.hash(&mut h);
+        s.modified.hash(&mut h);
+    }
+    app.prefs.chats.len().hash(&mut h);
+    for (path, meta) in &app.prefs.chats {
+        hash_path(path, &mut h);
+        meta.title.hash(&mut h);
+        meta.initial_title.hash(&mut h);
+        meta.project
+            .as_deref()
+            .map(|p| p.as_os_str().as_encoded_bytes())
+            .hash(&mut h);
+        meta.pinned.hash(&mut h);
+        meta.hidden.hash(&mut h);
+        meta.archived.hash(&mut h);
+    }
+    app.agents.active.hash(&mut h);
+    hash_state(&app.state, &mut h);
+    app.agents.nodes.len().hash(&mut h);
+    for node in app.agents.nodes.values() {
+        node.id.hash(&mut h);
+        node.parent.hash(&mut h);
+        node.name.hash(&mut h);
+        node.status.hash(&mut h);
+        hash_path(&node.cwd, &mut h);
+        node.path
+            .as_deref()
+            .map(|p| p.as_os_str().as_encoded_bytes())
+            .hash(&mut h);
+        node.created.hash(&mut h);
+        node.last_activity.hash(&mut h);
+    }
+    app.agents.parked.len().hash(&mut h);
+    for (id, chat) in &app.agents.parked {
+        id.hash(&mut h);
+        hash_state(&chat.state, &mut h);
+    }
+    app.tasks.records.len().hash(&mut h);
+    for task in &app.tasks.records {
+        task.id.hash(&mut h);
+        task.objective.hash(&mut h);
+        task.phase.label().hash(&mut h);
+        task.updated.hash(&mut h);
+        hash_path(&task.source, &mut h);
+        task.workspace
+            .as_deref()
+            .map(|p| p.as_os_str().as_encoded_bytes())
+            .hash(&mut h);
+        task.parent_session
+            .as_deref()
+            .map(|p| p.as_os_str().as_encoded_bytes())
+            .hash(&mut h);
+        task.runs.len().hash(&mut h);
+        for run in &task.runs {
+            run.id.hash(&mut h);
+            run.routing_for.is_some().hash(&mut h);
+            run.role.label().hash(&mut h);
+            run.attempt.hash(&mut h);
+            run.status.hash(&mut h);
+            run.session
+                .as_deref()
+                .map(|p| p.as_os_str().as_encoded_bytes())
+                .hash(&mut h);
+        }
+    }
+    app.tasks.parents.hash(&mut h);
+    h.finish()
 }
 /// Pull pinned descendants into a dedicated section and expose hidden descendants
 /// without requiring their visible parent to be shown. No duplicated row IDs.
@@ -152,23 +271,44 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
     let mut rows = BTreeMap::<String, Branch>::new();
     let mut parents = BTreeMap::<String, String>::new();
     let mut order = Vec::new();
+    let mut live_titles = HashMap::with_capacity(app.agents.parked.len() + 1);
+    for chat in app.agents.parked.values() {
+        if let Some(path) = chat.state.session_file.as_deref() {
+            live_titles.insert(std::path::Path::new(path), chat.state.chat_title());
+        }
+    }
+    if let Some(path) = app.state.session_file.as_deref() {
+        live_titles.insert(std::path::Path::new(path), app.state.chat_title());
+    }
     for (index, s) in app.sessions.iter().enumerate() {
         let key = session_key(&s.path);
         if rows.contains_key(&key) {
             continue;
         }
+        let meta = app.prefs.chats.get(&s.path);
+        let title = meta
+            .and_then(|m| m.title.clone().or_else(|| m.initial_title.clone()))
+            .or_else(|| live_titles.get(s.path.as_path()).cloned().flatten())
+            .unwrap_or_else(|| s.title.clone());
         let mut row = empty(
             key.clone(),
             Target::Session(index),
             Some(s.path.clone()),
-            app.session_title(s),
+            title,
             s.cwd.clone(),
             s.project.clone(),
         );
         row.created = s.created;
         row.modified = s.modified;
         row.activity = (s.modified > SystemTime::UNIX_EPOCH).then_some(s.modified);
-        preferences(app, &mut row);
+        if let Some(meta) = meta {
+            if let Some(project) = &meta.project {
+                row.project = project.clone();
+            }
+            row.pinned = meta.pinned;
+            row.hidden = meta.hidden;
+            row.archived = meta.archived;
+        }
         order.push(key.clone());
         rows.insert(key, row);
     }

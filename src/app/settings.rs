@@ -119,6 +119,13 @@ impl Settings {
     pub fn payload(&self) -> Value {
         json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)})
     }
+    pub fn hash_payload(&self, state: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.permission.key().hash(state);
+        self.permission_classifier.hash(state);
+        self.compact_percent.clamp(50, 95).hash(state);
+        self.keep_recent_tokens.clamp(1000, 200000).hash(state);
+    }
 }
 mod appearance;
 mod page;

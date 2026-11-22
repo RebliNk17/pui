@@ -112,10 +112,13 @@ struct AgentWait {
     ids: Vec<String>,
     deadline: std::time::Instant,
 }
+pub(super) const MAX_IDLE_PARKED_ROOTS: usize = 3;
+
 #[derive(Default)]
 pub(super) struct Agents {
     pub nodes: BTreeMap<String, Node>,
     pub(super) parked: BTreeMap<String, Chat>,
+    recent_roots: std::collections::VecDeque<String>,
     pub active: String,
     next: u64,
     pub close_prompt: bool,
@@ -133,11 +136,16 @@ impl Pui {
         path: &std::path::Path,
         action: impl FnOnce(&mut Self) -> R,
     ) -> Option<R> {
+        let target = sync::identity(path);
+        let matches = |candidate: &str, sync: &sync::WindowSync| {
+            let p = std::path::Path::new(candidate);
+            p == path || sync.attention_identity(p) == target || sync::identity(p) == target
+        };
         if self
             .state
             .session_file
-            .as_ref()
-            .is_some_and(|p| sync::identity(std::path::Path::new(p)) == sync::identity(path))
+            .as_deref()
+            .is_some_and(|p| matches(p, &self.sync))
         {
             return Some(action(self));
         }
@@ -146,9 +154,10 @@ impl Pui {
             .parked
             .iter()
             .find(|(_, chat)| {
-                chat.state.session_file.as_ref().is_some_and(|p| {
-                    sync::identity(std::path::Path::new(p)) == sync::identity(path)
-                })
+                chat.state
+                    .session_file
+                    .as_deref()
+                    .is_some_and(|p| matches(p, &self.sync))
             })
             .map(|(id, _)| id.clone())?;
         let chat = self.agents.parked.remove(&id)?;
@@ -315,6 +324,7 @@ impl Pui {
             self.agents.nodes.remove(id);
             self.agents.parked.remove(id);
         }
+        self.agents.recent_roots.retain(|id| !ids.contains(id));
         for node in self.agents.nodes.values_mut() {
             node.children.retain(|id| !ids.contains(id));
             node.depends.retain(|id| !ids.contains(id));
@@ -505,8 +515,10 @@ impl Pui {
         {
             let old = self.ensure_agent();
             let current = self.take_chat();
-            self.agents.parked.insert(old, current);
+            self.agents.parked.insert(old.clone(), current);
+            self.touch_parked_root(&old);
         }
+        self.agents.recent_roots.retain(|existing| existing != id);
         let next = self.agents.parked.remove(id).unwrap();
         self.agents.active = id.into();
         self.put_chat(next);
@@ -522,6 +534,7 @@ impl Pui {
                 self.connect(&self.ctx.clone(), self.agents.nodes[id].path.clone());
             }
         }
+        self.evict_idle_parked_roots();
         self.workspace_rx = None;
         self.workspace = Workspace::default();
         self.refresh_workspace();
@@ -682,7 +695,11 @@ impl Pui {
         self.agents
             .nodes
             .values()
-            .find(|n| n.path.as_deref() == Some(path))
+            .find(|n| {
+                n.path
+                    .as_deref()
+                    .is_some_and(|p| sidebar_tree::same_path(p, path))
+            })
             .map(|n| n.id.clone())
     }
     pub(super) fn park_tree(&mut self) {
@@ -692,8 +709,129 @@ impl Pui {
         self.leave_session_layout();
         let id = self.agents.active.clone();
         let chat = self.take_chat();
-        self.agents.parked.insert(id, chat);
+        self.agents.parked.insert(id.clone(), chat);
         self.agents.active.clear();
+        self.touch_parked_root(&id);
+        self.evict_idle_parked_roots();
+    }
+    fn touch_parked_root(&mut self, id: &str) {
+        self.agents.recent_roots.retain(|existing| existing != id);
+        if self
+            .agents
+            .nodes
+            .get(id)
+            .is_some_and(|node| node.parent.is_none())
+        {
+            self.agents.recent_roots.push_back(id.to_owned());
+        }
+    }
+    fn is_evictable_idle_root(&self, id: &str) -> bool {
+        if id == self.agents.active {
+            return false;
+        }
+        let (Some(node), Some(chat)) = (self.agents.nodes.get(id), self.agents.parked.get(id))
+        else {
+            return false;
+        };
+        if node.parent.is_some()
+            || !node.children.is_empty()
+            || node.setup_pending()
+            || node.needs_report
+            || node.failure.is_some()
+            || chat.new_chat
+            || chat.client.is_none()
+            || !chat.connected
+            || chat.loading
+            || chat.pending.is_some()
+            || chat.preview.is_some()
+            || !chat.state.ready()
+            || chat.deletion_busy()
+            || !chat.draft.is_empty()
+            || !chat.images.is_empty()
+            || !chat.history_drafts.is_empty()
+            || !chat.preview_opens.is_empty()
+        {
+            return false;
+        }
+        let Some(path) = node.path.as_ref() else {
+            return false;
+        };
+        if !path.is_file()
+            || self.waiting.get(path).is_some_and(|q| !q.is_empty())
+            || self.deletion.deleting_chat(path)
+            || self.deletion.deleting_agent(id)
+            || self.agents.permission_changes.contains_key(id)
+            || self
+                .agents
+                .waits
+                .iter()
+                .any(|w| w.source == id || w.ids.iter().any(|target| target == id))
+            || self
+                .agents
+                .mail
+                .values()
+                .any(|(target, report)| target == id || report.as_deref() == Some(id))
+            || self.tasks.parents.values().any(|parent| parent == id)
+            || self.has_active_automation(id, path)
+        {
+            return false;
+        }
+        true
+    }
+    pub(super) fn evict_idle_parked_roots(&mut self) {
+        if !self.sync.can_evict_owned() {
+            return;
+        }
+        let mut ordered = Vec::new();
+        for id in self.agents.parked.keys() {
+            if !self.agents.recent_roots.iter().any(|r| r == id) && self.is_evictable_idle_root(id)
+            {
+                ordered.push(id.clone());
+            }
+        }
+        for id in &self.agents.recent_roots {
+            if self.is_evictable_idle_root(id) {
+                ordered.push(id.clone());
+            }
+        }
+        let evict_count = ordered.len().saturating_sub(MAX_IDLE_PARKED_ROOTS);
+        for id in ordered.into_iter().take(evict_count) {
+            if let Some(chat) = self.agents.parked.get_mut(&id) {
+                if let Some(client) = chat.client.take() {
+                    client.retire();
+                }
+                chat.connected = false;
+                chat.loading = false;
+                chat.ready = false;
+                chat.state.messages.clear();
+                chat.state.messages.shrink_to_fit();
+                chat.transcript.clear();
+            }
+            if let Some(node) = self.agents.nodes.get_mut(&id) {
+                node.stopped = true;
+                node.status = "Saved".into();
+                if let Some(path) = node.path.as_deref() {
+                    self.sync.release(path);
+                }
+            }
+            self.agents.recent_roots.retain(|existing| existing != &id);
+        }
+    }
+    fn parked_needs_poll(&self, id: &str, chat: &Chat) -> bool {
+        if chat.client.is_some()
+            || chat.preview.is_some()
+            || chat.history_pending.is_some()
+            || chat.resource_reload.pending()
+            || !chat.deliveries.is_empty()
+        {
+            return true;
+        }
+        self.agents.nodes.get(id).is_none_or(|node| {
+            !node.stopped
+                || (node.needs_report && !node.reported)
+                || node.failure.is_some()
+                || node.setup.is_some()
+        })
     }
     pub(super) fn has_tree(&self) -> bool {
         self.agents
@@ -1227,6 +1365,20 @@ impl Pui {
             return;
         }
         let original = self.agents.active.clone();
+        let ids: Vec<_> = self
+            .agents
+            .parked
+            .iter()
+            .filter(|(id, chat)| **id != original && self.parked_needs_poll(id, chat))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.report_agent_result();
+            self.start_waiting_agents();
+            self.finish_agent_waits();
+            self.evict_idle_parked_roots();
+            return;
+        }
         let cwd = self.prefs.cwd.clone();
         let current = self.take_chat();
         let placeholder = if original.is_empty() {
@@ -1236,13 +1388,6 @@ impl Pui {
             None
         };
         self.agents.background = true;
-        let ids: Vec<_> = self
-            .agents
-            .parked
-            .keys()
-            .filter(|id| **id != original)
-            .cloned()
-            .collect();
         for id in ids {
             let Some(chat) = self.agents.parked.remove(&id) else {
                 continue;
@@ -1250,12 +1395,28 @@ impl Pui {
             self.agents.active = id.clone();
             self.prefs.cwd = self.agents.nodes[&id].cwd.clone();
             self.put_chat(chat);
-            self.poll_rpc();
-            self.poll_history();
-            self.deliver_waiting();
-            self.agent_status();
-            self.report_agent_result();
-            self.publish_live();
+            let had_activity = self.poll_rpc();
+            let needs_work = had_activity
+                || self.history_pending.is_some()
+                || self.resource_reload.pending()
+                || !self.waiting.is_empty()
+                || !self.deliveries.is_empty()
+                || !self.state.ready()
+                || self
+                    .agents
+                    .nodes
+                    .get(&id)
+                    .is_some_and(|n| (n.needs_report && !n.reported) || n.status != "Idle")
+                || !self
+                    .sync
+                    .is_published_clean(self.state.session_file.as_deref());
+            if needs_work {
+                self.poll_history();
+                self.deliver_waiting();
+                self.agent_status();
+                self.report_agent_result();
+                self.publish_live();
+            }
             let chat = self.take_chat();
             self.agents.parked.insert(id, chat);
         }
@@ -1267,6 +1428,7 @@ impl Pui {
         self.report_agent_result();
         self.start_waiting_agents();
         self.finish_agent_waits();
+        self.evict_idle_parked_roots();
     }
     fn report_agent_result(&mut self) {
         let id = self.agents.active.clone();
@@ -2448,5 +2610,80 @@ mod tests {
         assert!(app.agents.nodes[&child].stopped);
         assert!(app.agents.parked[&child].client.is_none());
         assert!(app.client.is_none());
+    }
+    #[test]
+    fn idle_parked_root_chats_are_capped_at_three_without_evicting_busy_or_draft_chats() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let dir = std::env::temp_dir().join(format!("pui-idle-cap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ids = Vec::new();
+        for index in 0..6 {
+            let path = dir.join(format!("chat-{index}.jsonl"));
+            std::fs::write(&path, "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n").unwrap();
+            app.state = State {
+                session_file: Some(path.display().to_string()),
+                session_name: format!("Chat {index}"),
+                messages: vec![Message {
+                    role: "assistant".into(),
+                    text: format!("Response {index}"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            app.client = Some(rpc::Client::stub());
+            app.connected = true;
+            app.loading_chat = false;
+            app.new_chat = false;
+            app.draft = if index == 0 {
+                "keep draft".into()
+            } else {
+                String::new()
+            };
+            app.state.busy = index == 1;
+            let id = app.ensure_agent();
+            app.agent_status();
+            ids.push(id);
+            if index < 5 {
+                app.park_tree();
+            }
+        }
+        // index 0 has a draft and index 1 is busy, so neither is evicted;
+        // among idle roots [2, 3, 4] (3 total), all 3 remain warm while index 5 is active.
+        for id in &ids[..5] {
+            assert!(
+                app.agents.parked[id].client.is_some(),
+                "{id} should still be warm"
+            );
+        }
+        // Parking index 5 makes 4 idle roots [2, 3, 4, 5], evicting the oldest idle root (index 2).
+        app.park_tree();
+        assert!(
+            app.agents.parked[&ids[0]].client.is_some(),
+            "draft chat must stay warm"
+        );
+        assert!(
+            app.agents.parked[&ids[1]].client.is_some(),
+            "busy chat must stay warm"
+        );
+        assert!(
+            app.agents.parked[&ids[2]].client.is_none(),
+            "oldest idle root must be evicted"
+        );
+        assert!(app.agents.parked[&ids[2]].state.messages.is_empty());
+        assert_eq!(app.agents.nodes[&ids[2]].status, "Saved");
+        assert!(app.agents.nodes[&ids[2]].stopped);
+        for id in &ids[3..6] {
+            assert!(
+                app.agents.parked[id].client.is_some(),
+                "recent 3 idle roots stay warm"
+            );
+        }
+        // Selecting the evicted chat reconnects it cleanly.
+        app.view_agent(&ids[2]);
+        assert_eq!(app.agents.active, ids[2]);
+        assert!(app.client.is_some());
+        app.shutdown_agents();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

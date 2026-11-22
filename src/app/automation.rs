@@ -473,6 +473,12 @@ impl Pui {
         }
         Ok(())
     }
+    pub(super) fn has_active_automation(&self, id: &str, path: &std::path::Path) -> bool {
+        self.automation
+            .jobs
+            .iter()
+            .any(|job| job.enabled && (job.creator.id == id || job.creator.path == path))
+    }
     pub(super) fn pause_agent_jobs(&mut self, id: &str) {
         if self.agents.exiting || !self.automation.writable() {
             return;

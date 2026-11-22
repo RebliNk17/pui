@@ -194,7 +194,7 @@ fn receiving_a_refreshed_timestamp_reorders_without_a_chat_revision() {
 }
 
 #[test]
-fn only_non_merged_statuses_expire_after_five_seconds() {
+fn only_non_merged_statuses_expire_after_thirty_seconds() {
     let url = pull("a/b", 1).url;
     let mut cache = Cache::default();
     assert!(cache.due(&url, 10_000));
@@ -204,13 +204,13 @@ fn only_non_merged_statuses_expire_after_five_seconds() {
         status.state = state.into();
         cache.record(url.clone(), status, 10_000);
         assert!(!cache.due(&url, 10_000));
-        assert!(!cache.due(&url, 14_999));
-        assert_eq!(cache.due(&url, 15_000), state != "Merged");
+        assert!(!cache.due(&url, 39_999));
+        assert_eq!(cache.due(&url, 40_000), state != "Merged");
         assert_eq!(cache.due(&url, i64::MAX), state != "Merged");
         // A clock adjustment must not postpone refresh indefinitely.
         assert_eq!(cache.due(&url, 9_000), state != "Merged");
         cache.in_flight.insert(url.clone());
-        assert!(!cache.due(&url, 20_000));
+        assert!(!cache.due(&url, 50_000));
         cache.in_flight.clear();
     }
 }
@@ -225,7 +225,7 @@ fn polling_is_bounded_deduplicated_and_prioritizes_unseen_then_oldest() {
         cache.record(pull.url.clone(), open, 10_000 - index as i64);
     }
     cache.record(links[6].url.clone(), status(None), 20_000);
-    let scheduled = cache.schedule(links.iter().collect(), 30_000);
+    let scheduled = cache.schedule(links.iter().collect(), 50_000);
     assert_eq!(
         scheduled,
         [
@@ -236,11 +236,11 @@ fn polling_is_bounded_deduplicated_and_prioritizes_unseen_then_oldest() {
         ]
     );
     assert_eq!(cache.in_flight.len(), MAX_IN_FLIGHT);
-    assert!(cache.schedule(links.iter().collect(), 30_000).is_empty());
+    assert!(cache.schedule(links.iter().collect(), 50_000).is_empty());
     cache.in_flight.remove(&links[7].url);
-    cache.record(links[7].url.clone(), status(None), 30_000);
+    cache.record(links[7].url.clone(), status(None), 50_000);
     assert_eq!(
-        cache.schedule(links.iter().collect(), 30_000),
+        cache.schedule(links.iter().collect(), 50_000),
         [links[3].url.clone()]
     );
     assert!(!cache.in_flight.contains(&links[6].url));
@@ -256,14 +256,14 @@ fn repaint_deadline_tracks_the_next_expiry_instead_of_delaying_each_frame() {
     cache.record(links[1].url.clone(), open, 10_000);
     assert_eq!(
         cache.next_refresh(&links, 10_000),
-        Some(Duration::from_secs(5))
+        Some(Duration::from_secs(30))
     );
     assert_eq!(
-        cache.next_refresh(&links, 14_999),
+        cache.next_refresh(&links, 39_999),
         Some(Duration::from_millis(1))
     );
     cache.in_flight.insert(links[1].url.clone());
-    assert_eq!(cache.next_refresh(&links, 15_000), None);
+    assert_eq!(cache.next_refresh(&links, 40_000), None);
 }
 
 #[test]
@@ -386,8 +386,8 @@ fn disk_cache_survives_restart_and_stale_writers_cannot_undo_a_merge() {
     cache.record(open_url.clone(), open, 20_000);
     restarted.load(&open_url);
     assert_eq!(restarted.entries[&open_url].status.state, "Open");
-    assert!(!restarted.due(&open_url, 24_999));
-    assert!(restarted.due(&open_url, 25_000));
+    assert!(!restarted.due(&open_url, 49_999));
+    assert!(restarted.due(&open_url, 50_000));
     let mut stale = status(Some(50));
     stale.state = "Closed".into();
     stale_window.record(open_url.clone(), stale, 15_000);

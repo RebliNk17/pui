@@ -3,6 +3,9 @@ use super::*;
 
 impl Pui {
     pub(in crate::app) fn sidebar_unread(&self, branch: &sidebar_tree::Branch) -> bool {
+        if self.attention.entries.is_empty() {
+            return false;
+        }
         if let Some(path) = &branch.path {
             return self.saved_unread(path);
         }
@@ -17,8 +20,19 @@ impl Pui {
     }
 
     pub(in crate::app) fn saved_unread(&self, path: &Path) -> bool {
-        let owner = Owner::Saved(self.sync.attention_identity(path));
+        if self.attention.entries.is_empty() {
+            return false;
+        }
         let time = now();
+        if !self
+            .attention
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.owner, Owner::Saved(_)) && entry.unread_at(time))
+        {
+            return false;
+        }
+        let owner = Owner::Saved(self.sync.attention_identity(path));
         self.attention
             .entries
             .iter()

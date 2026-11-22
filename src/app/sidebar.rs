@@ -42,7 +42,7 @@ impl Pui {
         let colors = crate::theme::palette(ctx);
         let mut action = None;
         let tasks_loading = self.tasks.loading_history();
-        let (mut pinned, branches) = sidebar_tree::listing(self);
+        let (mut pinned, branches) = sidebar_tree::cached_listing(self);
         let fresh_chat = self.new_chat.then(|| self.agents.active.clone());
         let fresh_id = egui::Id::new("sidebar-fresh-chat");
         let reveal_new_chat = fresh_chat.is_some()
@@ -958,22 +958,18 @@ impl Pui {
     }
     pub(super) fn session_title(&self, session: &Session) -> String {
         let live_title = || {
-            if self
-                .state
-                .session_file
-                .as_deref()
-                .is_some_and(|path| std::path::Path::new(path) == session.path)
-            {
+            if self.state.session_file.as_deref().is_some_and(|path| {
+                sidebar_tree::same_path(std::path::Path::new(path), &session.path)
+            }) {
                 self.state.chat_title()
             } else {
                 self.agents
                     .parked
                     .values()
                     .find(|chat| {
-                        chat.state
-                            .session_file
-                            .as_deref()
-                            .is_some_and(|path| std::path::Path::new(path) == session.path)
+                        chat.state.session_file.as_deref().is_some_and(|path| {
+                            sidebar_tree::same_path(std::path::Path::new(path), &session.path)
+                        })
                     })
                     .and_then(|chat| chat.state.chat_title())
             }
@@ -981,13 +977,7 @@ impl Pui {
         self.prefs
             .chats
             .get(&session.path)
-            .and_then(|meta| meta.title.clone())
-            .or_else(|| {
-                self.prefs
-                    .chats
-                    .get(&session.path)
-                    .and_then(|meta| meta.initial_title.clone())
-            })
+            .and_then(|meta| meta.title.clone().or_else(|| meta.initial_title.clone()))
             .or_else(live_title)
             .unwrap_or_else(|| session.title.clone())
     }
@@ -1011,13 +1001,13 @@ impl Pui {
                 .state
                 .session_file
                 .as_deref()
-                .is_some_and(|p| std::path::Path::new(p) == path)
+                .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), &path))
                 || self.demo && index == 0);
-        let node = self
-            .agents
-            .nodes
-            .values()
-            .find(|n| n.path.as_ref() == Some(&path));
+        let node = self.agents.nodes.values().find(|n| {
+            n.path
+                .as_deref()
+                .is_some_and(|p| sidebar_tree::same_path(p, &path))
+        });
         let shared = self.other_window_status(&path).map(str::to_owned);
         let (status, status_color) = if deleting {
             ("Deleting…", colors.red)

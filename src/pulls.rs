@@ -18,7 +18,7 @@ use std::{
 
 mod store;
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_IN_FLIGHT: usize = 4;
 type SharedCache = Arc<Mutex<Cache>>;
 #[derive(Clone, Debug)]
@@ -130,7 +130,7 @@ impl Cache {
             if let Some(entry) = self.entries.get_mut(&pull.url)
                 && entry.status.state != "Merged"
             {
-                entry.checked_at = 0;
+                entry.checked_at = i64::MIN;
             }
         }
     }
@@ -195,9 +195,22 @@ pub fn referenced(messages: &[Message]) -> Vec<Pull> {
 }
 impl Pulls {
     pub fn update(&mut self, ctx: &egui::Context, messages: &[Message], revision: u64, demo: bool) {
-        if self.revision != Some(revision) {
+        let changed = self.revision != Some(revision);
+        if changed {
             self.revision = Some(revision);
             self.links = referenced(messages);
+        }
+        if self.links.is_empty() {
+            self.results.clear();
+            if changed {
+                ctx.data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new("pull-status-cache"),
+                        BTreeMap::<String, Status>::new(),
+                    )
+                });
+            }
+            return;
         }
 
         if !demo {
