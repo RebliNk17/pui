@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const source=stripTypeScriptTypes(await readFile(new URL('../scripts/permissions.ts',import.meta.url),'utf8'));
-const { installPermissions, cheapestModel, classifierModels, localPath, safeShell }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { installPermissions, cheapestModel, classifierModels, localPath, safeShell, failureCategory, parseDecision }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const model=(id,provider,input,output)=>({id,provider,cost:{input,output},input:['text'],contextWindow:32000,maxTokens:2048});
 const cwd=await mkdtemp(join(tmpdir(),'pui-permissions-'));
 await mkdir(join(cwd,'src'));await writeFile(join(cwd,'src','file'),'test');
@@ -168,6 +168,51 @@ test('Auto rejects invalid JSON and incomplete responses without leaking provide
     assert.equal(result.block,true);assert.equal(result.terminate,false);
     assert.match(result.reason,/not a model denial/);assert.equal(h.prompts.length,0);
   }
+});
+test('Automatic classifier fails over past a broken provider, names a sanitized cause and cools it down',async()=>{
+  const h=host('auto');
+  const tried=[];
+  h.ctx.modelRegistry.streamSimple=(m)=>({result:async()=>{
+    tried.push(m.id);
+    if(m.id==='cheap')return {content:[],stopReason:'error',errorMessage:'400 API key not valid. key=SECRET_KEY_123'};
+    return {content:[{type:'text',text:'```json\n{"decision":"allow"}\n```'}],stopReason:'stop',usage:{cost:{total:0}}};
+  }});
+  assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
+  assert.deepEqual(tried,['cheap','other']);
+  assert.equal(JSON.parse(h.statuses.at(-1)[1]).classifier,'elsewhere/other','status shows the healthy classifier');
+  assert.equal(await h.gate('bash',{command:'cargo test'}),undefined);
+  assert.deepEqual(tried,['cheap','other','other'],'failed model is skipped during cooldown');
+  // Every candidate failing reports each sanitized cause without provider text.
+  const all=host('auto');
+  all.ctx.modelRegistry.streamSimple=(m)=>({result:async()=>m.id==='cheap'
+    ?{content:[],stopReason:'error',errorMessage:'401 Unauthorized SECRET_KEY_123'}
+    :{content:[],stopReason:'error',errorMessage:'429 RESOURCE_EXHAUSTED quota'}});
+  const blocked=await all.gate('bash',{command:'npm test'});
+  assert.equal(blocked.block,true);assert.equal(blocked.terminate,false);
+  assert.match(blocked.reason,/current\/cheap: authentication failed; elsewhere\/other: rate limited/);
+  assert.match(blocked.reason,/not a model denial/);assert.match(blocked.reason,/Reconnect that provider/);
+  const summary=JSON.stringify(all.events.get('message_end')({message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}));
+  assert.match(summary,/current\/cheap check unavailable \(authentication failed\)/);
+  assert.doesNotMatch(blocked.reason,/SECRET_KEY_123/);
+  assert.equal(all.prompts.length,0);
+  // An explicit override never substitutes another model.
+  const pinned=host('auto');pinned.control.update({permission:'auto',permissionClassifier:'current/cheap'},pinned.ctx);
+  const pinnedTried=[];
+  pinned.ctx.modelRegistry.streamSimple=(m)=>({result:async()=>{pinnedTried.push(m.id);return {content:[],stopReason:'error',errorMessage:'API key not valid'};}});
+  assert.equal((await pinned.gate('bash',{command:'npm test'})).block,true);
+  assert.deepEqual(pinnedTried,['cheap']);
+});
+test('classifier failure categories and fenced decisions',()=>{
+  assert.equal(failureCategory(Object.assign(new Error('x'),{name:'TimeoutError'})),'timeout');
+  assert.equal(failureCategory(new Error('Classifier deadline exceeded')),'timeout');
+  assert.equal(failureCategory(new Error('Classifier did not finish safely'),{stopReason:'length'}),'incomplete response');
+  assert.equal(failureCategory(new SyntaxError('bad')),'invalid response');
+  assert.equal(failureCategory(new Error('x'),{errorMessage:'API key not valid'}),'authentication failed');
+  assert.equal(failureCategory(new Error('x'),{errorMessage:'429 Too Many Requests'}),'rate limited');
+  assert.equal(failureCategory(new Error('connect ECONNRESET')),'provider error');
+  assert.deepEqual(parseDecision('```json\n{"decision":"deny"}\n```'),{decision:'deny'});
+  assert.deepEqual(parseDecision(' {"decision":"allow"} '),{decision:'allow'});
+  assert.throws(()=>parseDecision('not json'));
 });
 test('Auto prompt permits supporting development and keyword examples without weakening danger checks',async()=>{
   const h=host('auto',{decision:'allow'});

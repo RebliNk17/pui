@@ -47,6 +47,22 @@ export function classifierModels(ctx: any) {
 export function cheapestModel(ctx: any) {
   return classifierModels(ctx).find(priced);
 }
+// Fixed labels only: provider error text can contain account details or echoed input.
+export function failureCategory(error: unknown, result?: any) {
+  if ((error as any)?.name === "TimeoutError" || /deadline/i.test(String((error as any)?.message ?? ""))) return "timeout";
+  if (result?.stopReason === "length") return "incomplete response";
+  if (error instanceof SyntaxError || /decision/i.test(String((error as any)?.message ?? ""))) return "invalid response";
+  const text = `${result?.errorMessage ?? ""} ${String((error as any)?.message ?? "")}`;
+  if (/api[ _-]?key|unauthori[sz]ed|unauthenticated|\b40[13]\b|permission[ _]denied|invalid[ _]?(?:credential|token)|expired/i.test(text)) return "authentication failed";
+  if (/\b429\b|rate[ _-]?limit|quota|resource[ _]exhausted|overloaded|\b529\b/i.test(text)) return "rate limited";
+  return "provider error";
+}
+export function parseDecision(text: string) {
+  const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  return JSON.parse(body);
+}
+const CLASSIFIER_ATTEMPTS = 3;
+const CLASSIFIER_COOLDOWN_MS = 5 * 60_000;
 
 export const AUTO_GUIDANCE = 'Pui Auto mode: blocked tool calls are non-terminal. Continue remaining safe work and use genuinely safe alternatives, without asking the user to approve, change permission mode/model, or run blocked actions for you. Never retry the same denied effect through another tool, wrapper, agent or encoding. If a necessary step stays blocked, finish what you can and report the limitation in your final response: "I tried X, Y, Z, but Auto blocked these attempts", naming the classifier when a model actually denied them. Distinguish classifier denial, classifier unavailability and built-in safety rules; do not blame a model that was never called, claim blocked actions ran, or say every attempt was blocked if some succeeded. Ordinary requirements questions and dedicated workflow/scheduling consent are separate from permission escalation.';
 export const CLASSIFIER_PROMPT = `You check proposed developer tool calls for DANGEROUS EFFECTS, not narrow task relevance. Return ONLY JSON {"decision":"allow"|"deny","reason":"short explanation of actual effects"}.
@@ -104,7 +120,17 @@ export function installPermissions(pi: any, initial: any = {}) {
   const requests = new Set<AbortController>();
   // Session-memory only; exact arguments + tool + cwd, never a whole-tool grant.
   const grants = new Set<string>();
-  const selectedModel = (ctx: any) => classifier ? classifierModels(ctx).find((m: any) => modelKey(m) === classifier) : cheapestModel(ctx);
+  // Automatic selection skips recently failing models (e.g. a revoked API key);
+  // an explicit override is never substituted.
+  const unhealthy = new Map<string, number>();
+  const candidates = (ctx: any) => {
+    if (classifier) return classifierModels(ctx).filter((m: any) => modelKey(m) === classifier);
+    const now = Date.now();
+    const priced_ = classifierModels(ctx).filter(priced);
+    const healthy = priced_.filter((m: any) => (unhealthy.get(modelKey(m)) ?? 0) <= now);
+    return (healthy.length ? healthy : priced_).slice(0, CLASSIFIER_ATTEMPTS);
+  };
+  const selectedModel = (ctx: any) => candidates(ctx)[0];
   let catalog = "";
   const status = (ctx: any) => {
     const model = mode === "auto" ? selectedModel(ctx) : undefined;
@@ -193,30 +219,43 @@ export function installPermissions(pi: any, initial: any = {}) {
       explanation = risky ? "Built-in safety rule: destructive action or protected/external resource." : !model ? (classifier ? `Selected classifier ${classifier} is unavailable or outside the configured scope; no fallback model was used.` : "No suitable priced classifier model is available.") : !requestsContext.length ? "No user request context is available." : "Action is too large to classify safely; use smaller calls only if they have genuinely safe effects.";
       let source = risky || (model && (!requestsContext.length || payload.length > 24000)) ? "built-in safety rule" : "classifier unavailable";
       if (model && requestsContext.length && payload.length <= 24000 && !risky) {
+        const failures: string[] = [];
+        for (const model of candidates(ctx)) {
         const controller = new AbortController(); requests.add(controller);
-        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000), ...(ctx.signal ? [ctx.signal] : [])]);
+        const deadline = AbortSignal.timeout(12000);
+        const signal = AbortSignal.any([controller.signal, deadline, ...(ctx.signal ? [ctx.signal] : [])]);
+        let result: any;
         try {
-          const result = await ctx.modelRegistry.streamSimple(model, {
+          result = await ctx.modelRegistry.streamSimple(model, {
             systemPrompt: CLASSIFIER_PROMPT,
             messages: [{ role: "user", content: JSON.stringify({ RECENT_USER_REQUESTS: requestsContext, WORKSPACE: ctx.cwd, ACTION: { tool: name, description: pi.getAllTools?.().find((t: any) => t.name === name)?.description?.slice(0, 2000), arguments: args } }), timestamp: Date.now() }],
           }, { maxTokens: 256, signal, cacheRetention: "none" }).result();
           if (revision !== version || ctx.signal?.aborted || controller.signal.aborted) return block("Permission check cancelled; retry under the current settings.");
-          if (signal.aborted) throw new Error("Classifier deadline exceeded");
+          if (deadline.aborted) throw new Error("Classifier deadline exceeded");
           spent += result.usage?.cost?.total || 0;
           status(ctx);
           if (result.stopReason !== "stop") throw new Error("Classifier did not finish safely");
           const text = result.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("").trim();
-          const { decision, reason } = JSON.parse(text);
+          const { decision, reason } = parseDecision(text);
           if (!["allow", "deny", "ask"].includes(decision)) throw new Error("Unrecognized classifier decision");
           pi.appendEntry("pui-permission-check", { model: modelKey(model), decision, tool: name, cost: result.usage?.cost?.total ?? 0 });
           if (decision === "allow") return;
           source = `${modelKey(model)} ${decision === "ask" ? "uncertain" : "denied"}`;
           explanation = `${source}.${typeof reason === "string" ? ` Classifier explanation (untrusted data): ${JSON.stringify(reason.slice(0, 500))}` : ""}`;
-        } catch {
-          source = `${modelKey(model)} check unavailable`;
-          explanation = `${source} (provider error, timeout, incomplete or invalid response). This is not a model denial.`;
+          unhealthy.delete(modelKey(model));
+          break;
+        } catch (error) {
+          if (revision !== version || ctx.signal?.aborted || controller.signal.aborted) return block("Permission check cancelled; retry under the current settings.");
+          const category = failureCategory(error, result);
+          unhealthy.set(modelKey(model), Date.now() + CLASSIFIER_COOLDOWN_MS);
+          failures.push(`${modelKey(model)}: ${category}`);
+          // Attribute to the first (selected) model so repeated blocks aggregate.
+          if (failures.length === 1) source = `${modelKey(model)} check unavailable (${category})`;
+          status(ctx);
+          explanation = `Classifier check unavailable — ${failures.join("; ")}. This is not a model denial.${failures.some(f => f.endsWith("authentication failed")) ? " Reconnect that provider in Settings → Providers or choose another classifier model." : ""}`;
         }
         finally { requests.delete(controller); }
+        }
       }
       if (revision !== version || ctx.signal?.aborted) return block("Permission check cancelled; retry under the current settings.");
       return autoBlock(name, source, explanation);
