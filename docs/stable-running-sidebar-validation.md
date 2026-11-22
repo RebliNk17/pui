@@ -26,4 +26,8 @@ Incomplete / blocked; not reported as passing:
 
 Toolchain notes: Rust 1.88 is installed under `~/.rustup/toolchains/stable-aarch64-apple-darwin/bin`; the temporary CMake recovery installation was incomplete. The existing Android SDK CMake/Ninja installation allowed compilation and the successful focused tests without installing dependencies. No production timeout, assertion or test-runner scheduling was changed.
 
+## Master integration
+
+Merged current remote master without conflicts, preserving both existing local performance commits and the remote history. Integration review added the new fork `parent_session` metadata to preference non-emptiness and sidebar cache invalidation so fork nesting is neither pruned on save nor left stale. A regression test covers both cases. Post-merge focused Cargo validation also exceeded its 150-second bound without a test result (`/tmp/pui-stable-running-post-merge.log`); the merged tree and new integration regression are not claimed to have passed runtime validation.
+
 After disclosure of these validation limits, the user explicitly requested pushing the feature to master. The feature is committed with the incomplete validation recorded here, not represented as a fully validated release. Concurrent unrelated changes/commits are preserved.

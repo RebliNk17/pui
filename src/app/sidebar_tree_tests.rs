@@ -164,6 +164,31 @@ fn sidebar_running_rows_stay_above_idle_and_stable_across_activity_and_completio
 }
 
 #[test]
+fn fork_parent_metadata_survives_cleanup_and_invalidates_cached_tree() {
+    let mut app = fixture();
+    app.agents = Default::default();
+    let child = app.sessions[0].path.clone();
+    let parent = app.sessions.last().unwrap().path.clone();
+    let (_, before) = cached_listing(&mut app);
+    assert!(before.iter().any(|row| row.path.as_ref() == Some(&child)));
+    let meta = app.prefs.chats.entry(child.clone()).or_default();
+    assert!(meta.is_empty());
+    meta.parent_session = Some(parent.clone());
+    assert!(!meta.is_empty());
+    let (_, after) = cached_listing(&mut app);
+    assert!(!after.iter().any(|row| row.path.as_ref() == Some(&child)));
+    let root = after
+        .iter()
+        .find(|row| row.path.as_ref() == Some(&parent))
+        .unwrap();
+    assert!(
+        root.children
+            .iter()
+            .any(|row| row.path.as_ref() == Some(&child))
+    );
+}
+
+#[test]
 fn pinned_and_hidden_descendants_are_reachable_once_without_their_parent() {
     let mut app = fixture();
     let hidden_path = app.sessions[0].path.clone();

@@ -130,6 +130,7 @@ fn stamp(app: &Pui) -> u64 {
         meta.pinned.hash(&mut h);
         meta.hidden.hash(&mut h);
         meta.archived.hash(&mut h);
+        meta.parent_session.hash(&mut h);
     }
     app.agents.active.hash(&mut h);
     hash_state(&app.state, &mut h);

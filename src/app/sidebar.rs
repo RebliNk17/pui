@@ -32,6 +32,7 @@ impl ChatPrefs {
             && !self.archived
             && !self.hidden
             && self.section.is_none()
+            && self.parent_session.is_none()
     }
 }
 #[derive(Clone)]
