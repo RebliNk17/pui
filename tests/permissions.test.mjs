@@ -6,11 +6,11 @@ import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const source=stripTypeScriptTypes(await readFile(new URL('../scripts/permissions.ts',import.meta.url),'utf8'));
-const { installPermissions, cheapestModel, classifierModels, localPath, safeShell, failureCategory, parseDecision }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { installPermissions, cheapestModel, classifierModels, localPath, safeShell, failureCategory, parseDecision, sensitivePath }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const model=(id,provider,input,output)=>({id,provider,cost:{input,output},input:['text'],contextWindow:32000,maxTokens:2048});
 const cwd=await mkdtemp(join(tmpdir(),'pui-permissions-'));
 await mkdir(join(cwd,'src'));await writeFile(join(cwd,'src','file'),'test');
-function host(mode, {decision='ask',fail=false,approve=false,readonly=false,response}={}) {
+function host(mode, {decision='ask',fail=false,approve=false,readonly=false,response,scope={}}={}) {
   const events=new Map(),prompts=[],calls=[],entries=[],statuses=[];
   const pi={on:(n,f)=>events.set(n,f),appendEntry:(...a)=>entries.push(a)};
   const ctx={
@@ -27,7 +27,7 @@ function host(mode, {decision='ask',fail=false,approve=false,readonly=false,resp
     },
     ui:{setStatus:(...a)=>statuses.push(a),confirm:async(...a)=>{prompts.push(a);return approve;}}
   };
-  const control=installPermissions(pi,{permission:mode,readonly});
+  const control=installPermissions(pi,{permission:mode,readonly,...scope});
   events.get('before_agent_start')({messageType:'user',prompt:'Update src/file to fix the requested bug',systemPrompt:'base'});
   return {events,prompts,calls,entries,statuses,ctx,control,gate:(toolName,input={})=>events.get('tool_call')({toolName,input},ctx)};
 }
@@ -457,4 +457,70 @@ test('Plan workflow handoff only opens native review; it never grants tool permi
   assert.equal((await readonly.gate('pui_workflow',{plan:{steps:['x']}})).block,true);
   const noAsk=host('dontAsk');
   assert.equal((await noAsk.gate('pui_workflow',{plan:{steps:['x']}})).block,true);
+});
+
+test('Auto classifier only uses models the picker shows (configured providers minus hidden)',async()=>{
+  // An environment-only provider ('current') is outside the picker scope.
+  const h=host('auto',{decision:'allow',scope:{classifierProviders:['elsewhere'],hiddenModels:[]}});
+  assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
+  assert.deepEqual(h.calls.map(c=>c.m.provider),['elsewhere']);
+  const listed=JSON.parse(h.statuses.find(([,t])=>JSON.parse(t).classifierModels)[1]).classifierModels;
+  assert.deepEqual(listed.map(m=>m.provider),['elsewhere'],'Settings picker lists only visible models');
+  // Hidden models are excluded; with nothing visible, Auto fails closed without calling a model.
+  h.control.update({permission:'auto',classifierProviders:['elsewhere'],hiddenModels:['elsewhere/other']},h.ctx);
+  const blocked=await h.gate('bash',{command:'cargo test'});
+  assert.equal(blocked.block,true);assert.match(blocked.reason,/No suitable priced classifier/);
+  assert.equal(h.calls.length,1);
+  // An explicit override outside the scope is unavailable, never substituted.
+  h.control.update({permission:'auto',permissionClassifier:'current/cheap',classifierProviders:['elsewhere'],hiddenModels:[]},h.ctx);
+  assert.match((await h.gate('bash',{command:'npm test'})).reason,/no fallback model was used/);
+  // A settings update without a scope keeps the last one instead of widening.
+  h.control.update({permission:'auto',permissionClassifier:null},h.ctx);
+  assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
+  assert.equal(h.calls.at(-1).m.provider,'elsewhere');
+});
+test('Auto blocks credential stores and agent configs, including through workspace symlinks',async()=>{
+  for(const path of ['/x/.netrc','/x/.npmrc','/x/.pypirc','/x/.git-credentials','/x/.kube/config','/x/.docker/config.json','/x/.config/gh/hosts.yml','/x/.pi/agent/models.json','/x/.pi/agent/settings.json','/x/.ssh/id_ecdsa','~/.aws/credentials']){
+    const h=host('auto',{decision:'allow'});
+    const result=await h.gate('read',{path});
+    assert.equal(result?.block,true,path);assert.match(result.reason,/Built-in safety rule/);assert.equal(h.calls.length,0);
+  }
+  const secrets=await mkdtemp(join(tmpdir(),'pui-secret-'));await mkdir(join(secrets,'.kube'));await writeFile(join(secrets,'.kube','config'),'token');
+  await symlink(join(secrets,'.kube','config'),join(cwd,'innocent.txt'));
+  assert.equal(await sensitivePath(cwd,'innocent.txt'),true);
+  const h=host('auto',{decision:'allow'});
+  assert.equal((await h.gate('read',{path:'innocent.txt'})).block,true);
+  for(const path of ['src/file','README.md','/x/src/environment.ts','/x/docs/credentials-guide/intro.md.txt'.replace('credentials-guide','guide')]){
+    assert.equal(await host('auto').gate('read',{path}),undefined,path);
+  }
+});
+test('Auto local cp/mv never overwrites existing work without the classifier',async()=>{
+  const h=host('auto',{decision:'deny'});
+  assert.equal(await h.gate('bash',{command:'cp src/file src/copy-new'}),undefined,'new target is preapproved');
+  assert.equal(h.calls.length,0);
+  assert.equal((await h.gate('bash',{command:'cp README.md src/file'})).block,true,'overwrite asks the classifier');
+  assert.equal((await h.gate('bash',{command:'mv src/new-name src/file'})).block,true);
+  assert.equal(h.calls.length,2);
+  assert.equal(await h.gate('bash',{command:'mkdir -p src'}),undefined,'existing directory mkdir is harmless');
+});
+test('Auto built-in rule catches rewritten destructive commands without a model',async()=>{
+  for(const command of ['/bin/rm -rf build','command rm x','xargs rm < list','ls | xargs -0 rm','echo $(rm x)','bash -c "rm -rf x"','find . -name "*.tmp" -delete','find . -exec rm {} \\;','git -C ../repo push','git -c core.x=y push origin','git reset --hard HEAD~1','git clean -fdx','git branch -D main','unlink x','pkill node','dd if=/dev/zero of=x','shred x']){
+    const h=host('auto',{decision:'allow'});
+    const result=await h.gate('bash',{command});
+    assert.equal(result?.block,true,command);assert.match(result.reason,/Built-in safety rule/,command);assert.equal(h.calls.length,0,command);
+  }
+  for(const command of ['rg "rm -rf" src','git diff','cargo test','grep -r "git push" docs','npm run format']){
+    const h=host('auto',{decision:'allow'});
+    assert.equal(await h.gate('bash',{command}),undefined,command);
+  }
+});
+test('read-only shell inspection works even when the classifier is unavailable',async()=>{
+  for(const command of ['ls src','ls -la docs/x','git status','git status -sb','git log --oneline -5','git log -n 3 --stat','git branch --show-current','git rev-parse --abbrev-ref HEAD','git remote -v','whoami']){
+    assert.equal(safeShell(command),true,command);
+    const h=host('auto',{fail:true});
+    assert.equal(await h.gate('bash',{command}),undefined,command);assert.equal(h.calls.length,0);
+  }
+  for(const command of ['ls ~/.ssh','ls .env','ls src; rm x','ls $(whoami)','ls `id`','git log --exec=x','git log -p','git -c core.pager=x log','git diff --ext-diff','git status && rm x','ls > out','git log --format=%H']){
+    assert.equal(safeShell(command),false,command);
+  }
 });

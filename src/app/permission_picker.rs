@@ -35,6 +35,27 @@ impl Pui {
             self.select_permission(mode);
         }
     }
+    /// Keep Auto's classifier aligned with the model picker: configured
+    /// providers minus hidden models. Re-sent only when the scope changes.
+    pub(super) fn sync_model_scope(&mut self) {
+        if self.demo {
+            return;
+        }
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let scope = self
+            .settings_view
+            .providers
+            .configured_providers()
+            .map(|providers| settings::ModelScope {
+                providers,
+                hidden: self.prefs.hidden_models.iter().cloned().collect(),
+            });
+        if scope != self.prefs.settings.model_scope {
+            let before = self.prefs.settings.clone();
+            self.prefs.settings.model_scope = scope;
+            self.propagate_settings(&before);
+        }
+    }
     pub(super) fn propagate_settings(&mut self, before: &Settings) {
         if *before != self.prefs.settings
             && !self.demo

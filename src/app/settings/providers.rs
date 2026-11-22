@@ -922,6 +922,23 @@ impl ProvidersManager {
         self.reload_from_disk();
     }
 
+    /// Providers the model picker offers, or `None` before disk state is known.
+    /// Environment-only keys are deliberately excluded, matching the picker.
+    pub(in crate::app) fn configured_providers(&self) -> Option<Vec<String>> {
+        if !self.disk_loaded {
+            return None;
+        }
+        let mut providers: Vec<String> = self
+            .saved_auth
+            .iter()
+            .map(|a| a.provider.clone())
+            .chain(self.custom_providers.iter().map(|c| c.id.clone()))
+            .collect();
+        providers.sort();
+        providers.dedup();
+        Some(providers)
+    }
+
     pub(in crate::app) fn is_provider_configured(&self, provider: &str) -> bool {
         if !self.disk_loaded {
             return true;

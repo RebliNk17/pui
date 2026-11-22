@@ -99,6 +99,15 @@ pub(super) struct Settings {
     pub keep_recent_tokens: u32,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    /// Runtime-only: the models the picker shows (configured providers minus
+    /// hidden models). Auto's classifier never selects anything outside it.
+    #[serde(skip)]
+    pub model_scope: Option<ModelScope>,
+}
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(super) struct ModelScope {
+    pub providers: Vec<String>,
+    pub hidden: Vec<String>,
 }
 fn default_auto_check_updates() -> bool {
     true
@@ -112,12 +121,18 @@ impl Default for Settings {
             compact_percent: 85,
             keep_recent_tokens: 20000,
             auto_check_updates: true,
+            model_scope: None,
         }
     }
 }
 impl Settings {
     pub fn payload(&self) -> Value {
-        json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)})
+        let mut payload = json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)});
+        if let Some(scope) = &self.model_scope {
+            payload["classifierProviders"] = json!(scope.providers);
+            payload["hiddenModels"] = json!(scope.hidden);
+        }
+        payload
     }
     pub fn hash_payload(&self, state: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
@@ -125,6 +140,10 @@ impl Settings {
         self.permission_classifier.hash(state);
         self.compact_percent.clamp(50, 95).hash(state);
         self.keep_recent_tokens.clamp(1000, 200000).hash(state);
+        if let Some(scope) = &self.model_scope {
+            scope.providers.hash(state);
+            scope.hidden.hash(state);
+        }
     }
 }
 mod appearance;
@@ -154,6 +173,22 @@ mod tests {
             "google/gemini-flash"
         );
         assert_eq!(restored.payload()["permission"], "auto");
+    }
+    #[test]
+    fn model_scope_reaches_runtime_but_is_never_persisted() {
+        let mut settings = Settings::default();
+        assert!(settings.payload().get("classifierProviders").is_none());
+        settings.model_scope = Some(ModelScope {
+            providers: vec!["anthropic".into(), "antigravity".into()],
+            hidden: vec!["anthropic/old".into()],
+        });
+        let payload = settings.payload();
+        assert_eq!(payload["classifierProviders"], json!(["anthropic", "antigravity"]));
+        assert_eq!(payload["hiddenModels"], json!(["anthropic/old"]));
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("model_scope").is_none());
+        let restored: Settings = serde_json::from_value(saved).unwrap();
+        assert!(restored.model_scope.is_none());
     }
     #[test]
     fn defaults_and_shortcuts_are_complementary() {

@@ -2419,6 +2419,7 @@ impl eframe::App for Pui {
         self.frames += 1;
         self.remember_navigation();
         self.poll();
+        self.sync_model_scope();
         self.panel_resize_inputs(ctx);
         self.chat_section_drag_inputs(ctx);
         self.section_drag_inputs(ctx);
