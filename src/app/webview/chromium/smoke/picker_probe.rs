@@ -68,6 +68,8 @@ impl Probe {
                 &Events {
                     state: tab.state.clone(),
                     ctx: tab.ctx.clone(),
+                    key: String::new(),
+                    snapshots: None,
                 },
             );
             let next_epoch = tab.state.lock().unwrap().inspection.epoch;
@@ -92,6 +94,8 @@ impl Probe {
             let mut observer = ClickReply::new(Events {
                 state: tab.state.clone(),
                 ctx: tab.ctx.clone(),
+                key: String::new(),
+                snapshots: None,
             });
             tab.diagnostics.probe.observed = tab
                 .host()

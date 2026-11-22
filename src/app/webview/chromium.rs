@@ -323,6 +323,8 @@ impl Tab {
             &Events {
                 state: self.state.clone(),
                 ctx: self.ctx.clone(),
+                key: String::new(),
+                snapshots: None,
             },
         );
         if !self.container.isHidden() {
@@ -429,6 +431,8 @@ impl Engine {
                 &Events {
                     state: tab.state.clone(),
                     ctx: tab.ctx.clone(),
+                    key: String::new(),
+                    snapshots: None,
                 },
             );
         }
@@ -688,6 +692,8 @@ impl Engine {
             &Events {
                 state: tab.state.clone(),
                 ctx: tab.ctx.clone(),
+                key: String::new(),
+                snapshots: None,
             },
         );
         tab.emulate(options, rect);
