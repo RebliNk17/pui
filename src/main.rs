@@ -13,6 +13,7 @@ mod inspector;
 mod markdown;
 mod media;
 mod protocol;
+mod pi_migration;
 mod pulls;
 mod rpc;
 mod runtime;

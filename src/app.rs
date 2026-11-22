@@ -29,6 +29,7 @@ mod notifications;
 mod panel_resize;
 mod permission_picker;
 mod permission_worker;
+mod pi_folder;
 #[cfg(test)]
 mod persistence_tests;
 mod prompt_ui;
@@ -114,6 +115,12 @@ struct Preferences {
     /// Antigravity accounts), learned from Pi and kept app-wide so Settings
     /// never depends on a running chat.
     extension_models: Vec<protocol::Model>,
+    /// Folder to move into Pui's own Pi folder at the next launch.
+    pi_migration_pending: Option<PathBuf>,
+    /// "Not now" on the migration offer; Settings → General can reopen it.
+    pi_migration_dismissed: bool,
+    /// Give Pi provider API keys from environment variables (off by default).
+    use_environment_keys: bool,
 }
 
 impl Preferences {
@@ -154,6 +161,7 @@ pub struct Pui {
     updates: updates::Updates,
     /// App-level model catalog and Pi defaults; never tied to a chat.
     catalog: catalog::AppCatalog,
+    pi_folder: pi_folder::PiFolder,
     completion_run: notifications::CompletionRun,
     attention: attention::Attention,
     attention_observed: attention::Observed,
@@ -263,6 +271,13 @@ impl Pui {
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
         prefs.normalize_default_permission();
+        // Before any Pi process or session discovery: adopt or offer Pui's Pi folder.
+        let pi_folder = if options.demo || cfg!(test) {
+            pi_folder::PiFolder::default()
+        } else {
+            prefs.setup_pi_folder()
+        };
+        crate::runtime::set_use_environment_keys(prefs.use_environment_keys);
         diff_viewer::wrap_preference::init(&cc.egui_ctx, prefs.diff_wrap);
         prefs
             .color_styles
@@ -299,6 +314,7 @@ impl Pui {
             navigation: Default::default(),
             updates: Default::default(),
             catalog: Default::default(),
+            pi_folder,
             completion_run: Default::default(),
             attention: attention::Attention::restore(
                 cc.storage
@@ -2724,6 +2740,7 @@ impl eframe::App for Pui {
             }
             self.history_confirmation(ctx);
         }
+        self.pi_folder_prompt(ctx);
         if !theater {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);

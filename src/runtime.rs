@@ -123,7 +123,117 @@ pub(crate) fn pi_version() -> Option<String> {
         .clone()
 }
 
+/// Marker written once Pui owns Pi's configuration and sessions.
+pub(crate) const MANAGED_MARKER: &str = ".pui-managed.json";
+static MANAGED_AGENT_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Pui's own Pi folder: providers, logins, models, defaults, resources, sessions.
+pub(crate) fn pui_agent_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|dir| dir.join("pui").join("pi-agent"))
+}
+
+/// Adopt Pui's Pi folder if it has been set up (migrated or created fresh).
+/// Every Pi process Pui starts then uses it; `~/.pi/agent` is not consulted.
+pub(crate) fn load_managed_agent_dir() -> Option<PathBuf> {
+    let dir = pui_agent_dir().filter(|dir| dir.join(MANAGED_MARKER).is_file());
+    if let Ok(mut managed) = MANAGED_AGENT_DIR.write() {
+        managed.clone_from(&dir);
+    }
+    dir
+}
+
+pub(crate) fn managed_agent_dir() -> Option<PathBuf> {
+    MANAGED_AGENT_DIR.read().ok().and_then(|dir| dir.clone())
+}
+
+/// Provider API-key variables Pi reads from its environment (pi-ai
+/// env-api-keys). Pi cannot tell a mislabelled key (e.g. an NVIDIA key in
+/// OPENAI_API_KEY) from a real login, so Pui only gives Pi its own logins.
+pub(crate) const PROVIDER_KEY_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "NVIDIA_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_CLOUD_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "XAI_API_KEY",
+    "TYPESAFE_API_KEY",
+    "RADIUS_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "ZAI_API_KEY",
+    "ZAI_CODING_CN_API_KEY",
+    "MISTRAL_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "MOONSHOT_API_KEY",
+    "HF_TOKEN",
+    "FIREWORKS_API_KEY",
+    "TOGETHER_API_KEY",
+    "BASETEN_API_KEY",
+    "OPENCODE_API_KEY",
+    "KIMI_API_KEY",
+    "META_API_KEY",
+    "CLOUDFLARE_API_KEY",
+    "XIAOMI_API_KEY",
+    "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+    "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+    "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+    "ANT_LING_API_KEY",
+    "QWEN_TOKEN_PLAN_API_KEY",
+    "QWEN_TOKEN_PLAN_CN_API_KEY",
+    "QWEN_TOKEN_PLAN_TEAM_API_KEY",
+    "QWEN_TOKEN_PLAN_TEAM_CN_API_KEY",
+    "QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY",
+    "QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+];
+
+/// Off by default: Settings → General → "Use provider keys from environment".
+static USE_ENVIRONMENT_KEYS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_use_environment_keys(enabled: bool) {
+    USE_ENVIRONMENT_KEYS.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn strip_environment_keys() -> bool {
+    !USE_ENVIRONMENT_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Keys withheld from Pi, restored for commands the agent runs (JSON object).
+pub(crate) fn shell_provider_env() -> Option<String> {
+    if !strip_environment_keys() {
+        return None;
+    }
+    let vars: serde_json::Map<String, serde_json::Value> = PROVIDER_KEY_VARS
+        .iter()
+        .filter_map(|name| {
+            let value = std::env::var(name).ok().filter(|v| !v.is_empty())?;
+            Some(((*name).to_owned(), serde_json::Value::String(value)))
+        })
+        .collect();
+    (!vars.is_empty()).then(|| serde_json::Value::Object(vars).to_string())
+}
+
+/// Provider key variables present in Pui's environment (names only).
+pub(crate) fn environment_key_names() -> Vec<&'static str> {
+    PROVIDER_KEY_VARS
+        .iter()
+        .copied()
+        .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+        .collect()
+}
+
 pub(crate) fn agent_dir() -> Option<PathBuf> {
+    if let Some(dir) = managed_agent_dir() {
+        return Some(dir);
+    }
     std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
@@ -142,6 +252,17 @@ pub(crate) fn prepend_bundle_path(inherited: &OsStr, bundle: Option<&Path>) -> V
 pub(crate) fn configure(command: &mut Command) {
     if let Some(path) = crate::rpc::child_path() {
         command.env("PATH", path);
+    }
+    if let Some(dir) = managed_agent_dir() {
+        // Pui's own folder for config and sessions alike.
+        command
+            .env("PI_CODING_AGENT_DIR", dir)
+            .env_remove("PI_CODING_AGENT_SESSION_DIR");
+    }
+    if strip_environment_keys() {
+        for name in PROVIDER_KEY_VARS {
+            command.env_remove(name);
+        }
     }
     if active_bundle().is_some() {
         command.env("JITI_FS_CACHE", "false");
@@ -232,6 +353,21 @@ mod tests {
         assert!(!root.join("bin/pi").exists());
         assert_eq!(resolve_pi(None, Some(&root), None), root.join("bin/pi"));
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn pi_processes_never_receive_provider_keys_from_the_environment() {
+        let mut command = Command::new("true");
+        configure(&mut command);
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for name in ["OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"] {
+            assert!(removed.iter().any(|r| r == name), "{name} must be withheld from Pi");
+        }
+        assert!(!removed.iter().any(|r| r == "PATH" || r == "HOME"));
     }
 
     #[test]

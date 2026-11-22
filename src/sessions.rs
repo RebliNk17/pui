@@ -21,6 +21,9 @@ pub struct Session {
 }
 
 pub fn session_root() -> Option<PathBuf> {
+    if let Some(dir) = crate::runtime::managed_agent_dir() {
+        return Some(dir.join("sessions"));
+    }
     if let Some(path) = std::env::var_os("PI_CODING_AGENT_SESSION_DIR") {
         return Some(path.into());
     }

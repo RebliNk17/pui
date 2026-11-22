@@ -444,11 +444,12 @@ fn show_loaded_resources(
                 }
             }
         }
+        if crate::runtime::agent_dir().is_some_and(|agent| agent.join("AGENTS.md").is_file()) {
+            memory_files.push(("Pi AGENTS.md".into(), None));
+        }
         if let Some(home) = dirs::home_dir() {
-            for rel in [".pi/agent/AGENTS.md", ".claude/CLAUDE.md"] {
-                if home.join(rel).is_file() {
-                    memory_files.push((format!("~/{rel}"), None));
-                }
+            if home.join(".claude/CLAUDE.md").is_file() {
+                memory_files.push(("~/.claude/CLAUDE.md".into(), None));
             }
         }
     }

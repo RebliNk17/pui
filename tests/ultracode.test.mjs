@@ -9,13 +9,14 @@ async function host(readonly = false, taskRole = '') {
   const { stripTypeScriptTypes } = await import('node:module');
   let raw = await readFile(new URL('../scripts/ultracode.ts', import.meta.url), 'utf8');
   const urls = {};
-  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'visual', 'workflows', 'antigravity', 'accounts']) {
+  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'visual', 'workflows', 'antigravity', 'accounts', 'shellenv']) {
     let text = await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8');
     // Dependencies may import earlier adapter modules (accounts.ts → antigravity.ts).
     for (const [known, url] of Object.entries(urls)) text = text.replace(`"./${known}.ts"`, JSON.stringify(url));
     const dependency = stripTypeScriptTypes(text
       .replace('import { Type } from "typebox";', 'const Type = new Proxy({}, { get: () => (...args) => ({args}) });')
-      .replace(/import\s*\{[^}]*\}\s*from\s*"@earendil-works\/pi-ai";/s, 'const createAssistantMessageEventStream = () => ({}), getCurrentSystemPrompt = () => "", getCurrentTools = () => [];'));
+      .replace(/import\s*\{[^}]*\}\s*from\s*"@earendil-works\/pi-ai";/s, 'const createAssistantMessageEventStream = () => ({}), getCurrentSystemPrompt = () => "", getCurrentTools = () => [];')
+      .replace(/import\s*\{[^}]*\}\s*from\s*"@earendil-works\/pi-coding-agent";/s, 'const createBashToolDefinition = undefined;'));
     urls[name] = `data:text/javascript;base64,${Buffer.from(dependency).toString('base64')}`;
     raw = raw.replace(`"./${name}.ts"`, JSON.stringify(urls[name]));
   }
@@ -29,8 +30,10 @@ async function host(readonly = false, taskRole = '') {
   process.env.PUI_AGENT_ACCESS = readonly ? 'read-only' : 'worktree'; process.env.PUI_TASK_ROLE = taskRole;
   // Hermetic: a host Pui chat's own settings (mode, picker scope) must not leak in.
   delete process.env.PUI_SETTINGS;
+  const oldShellEnv = process.env.PUI_SHELL_PROVIDER_ENV; delete process.env.PUI_SHELL_PROVIDER_ENV;
   try { extension(pi); } finally {
     if (oldSettings === undefined) delete process.env.PUI_SETTINGS; else process.env.PUI_SETTINGS = oldSettings;
+    if (oldShellEnv !== undefined) process.env.PUI_SHELL_PROVIDER_ENV = oldShellEnv;
     if (old === undefined) delete process.env.PUI_AGENT_ACCESS; else process.env.PUI_AGENT_ACCESS = old;
     if (oldRole === undefined) delete process.env.PUI_TASK_ROLE; else process.env.PUI_TASK_ROLE = oldRole;
   }

@@ -33,9 +33,7 @@ fn identity(cwd: &std::path::Path) -> u64 {
         cwd.join(".pi/settings.json"),
         cwd.join(".pi/models.json"),
     ];
-    let home = std::env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|p| p.join(".pi/agent")));
+    let home = crate::runtime::agent_dir();
     if let Some(home) = home {
         paths.extend([
             home.join("settings.json"),

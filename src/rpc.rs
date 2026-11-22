@@ -279,6 +279,12 @@ fn run(
     if let Some(data) = dirs::data_local_dir() {
         command.env("PUI_CHECKPOINT_DIR", data.join("pui/checkpoints-v1"));
     }
+    if let Some(vars) = crate::runtime::shell_provider_env() {
+        // Withheld from Pi's provider discovery; restored for agent shell commands.
+        command.env("PUI_SHELL_PROVIDER_ENV", vars);
+    } else {
+        command.env_remove("PUI_SHELL_PROVIDER_ENV");
+    }
     command.env(
         "PUI_SETTINGS",
         if launch.settings.is_object() {

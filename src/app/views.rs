@@ -1092,8 +1092,8 @@ struct McpConnector {
 fn load_mcp_connectors(cwd: &std::path::Path, diagnostics: &[String]) -> Vec<McpConnector> {
     let mut names = std::collections::BTreeSet::new();
     let mut candidates = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".pi/agent/mcp.json"));
+    if let Some(agent) = crate::runtime::agent_dir() {
+        candidates.push(agent.join("mcp.json"));
     }
     if !cwd.as_os_str().is_empty() {
         candidates.push(cwd.join(".pi/mcp.json"));

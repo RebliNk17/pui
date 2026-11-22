@@ -171,6 +171,10 @@ mod providers;
 mod resources;
 mod scale;
 pub(super) use page::{View, search_entries};
+pub(super) use page::{
+    card as page_card, row as page_row, section as page_section, separator as page_separator,
+    toggle as toggle_switch,
+};
 
 #[cfg(test)]
 mod tests {

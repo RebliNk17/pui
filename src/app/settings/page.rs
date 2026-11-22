@@ -260,7 +260,7 @@ impl View {
     }
 }
 
-pub(super) fn section(ui: &mut egui::Ui, title: &str, description: &str) {
+pub(in crate::app) fn section(ui: &mut egui::Ui, title: &str, description: &str) {
     let colors = crate::theme::palette(ui.ctx());
     ui.add_space(24.0);
     ui.label(RichText::new(title).size(13.0).strong().color(colors.text));
@@ -269,7 +269,7 @@ pub(super) fn section(ui: &mut egui::Ui, title: &str, description: &str) {
     }
     ui.add_space(6.0);
 }
-pub(super) fn card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+pub(in crate::app) fn card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     let colors = crate::theme::palette(ui.ctx());
     egui::Frame::new()
         .fill(colors.settings_card)
@@ -296,7 +296,7 @@ pub(super) fn note(ui: &mut egui::Ui, title: &str, description: &str) {
     });
 }
 
-pub(super) fn separator(ui: &mut egui::Ui) {
+pub(in crate::app) fn separator(ui: &mut egui::Ui) {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(
@@ -365,7 +365,7 @@ pub(super) fn provider_row(
         });
 }
 
-pub(super) fn row(
+pub(in crate::app) fn row(
     ui: &mut egui::Ui,
     title: &str,
     description: &str,
@@ -419,7 +419,7 @@ pub(super) fn row(
             );
         });
 }
-pub(super) fn toggle(ui: &mut egui::Ui, value: &mut bool, title: &str) {
+pub(in crate::app) fn toggle(ui: &mut egui::Ui, value: &mut bool, title: &str) {
     let colors = theme::palette(ui.ctx());
     let (target, response) =
         ui.allocate_exact_size(Vec2::new(38.0, theme::CONTROL_HEIGHT), Sense::click());
@@ -896,6 +896,7 @@ impl Pui {
                 },
             )
         });
+        self.settings_pi_folder(ui);
         section(ui, "Updates", "");
         card(ui, |ui| {
             row(
