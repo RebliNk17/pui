@@ -7,10 +7,31 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ### Added
 
+- Bundled Pi upgraded to 1.6.0; Settings → General shows the Pi version in use.
+- Pui can keep its own Pi folder (providers, logins, models, defaults, skills, extensions and chats). On first launch it finds an existing `~/.pi/agent` and offers to move it in, copying settings and moving chats with a link left behind, so nothing is deleted. **Settings → General → Pi data** can copy settings again later.
+- Pi only uses logins saved in Pui. Provider API keys from environment variables (for example a key exported as `OPENAI_API_KEY`) are no longer treated as logins; agent shell commands still receive them. An option re-enables environment keys.
+- Settings no longer depend on the open chat: the model list, defaults for new chats (model and thinking effort) and the Auto classifier read Pi's configuration directly and refresh when providers change.
+- Inline visuals are interactive: hover to scroll, click and type inside them; tall visuals show a scrollbar.
+- Inline photos, screenshot thumbnails on activity rows, HTML file cards and Browser preview cards in chat, plus the `pui_visual` tool for inline HTML/SVG visuals.
+- Auto classifier uses the same searchable, priced model picker as the composer, and is always visible in Settings → Permissions.
+- New chats start in the last permission mode you chose (Auto the first time). Bypass is never remembered as a default.
+- "Don't ask again" on the Bypass confirmation, with a reset in Settings → Permissions.
+- Subagents can be started in the parent's mode or a stricter one, never a looser one.
+
+### Changed
+
+- Auto mode blocks more credential files (`.netrc`, `.npmrc`, `.kube`, `.docker`, `gh`, Pi's own config, and symlinks to them), catches disguised deletes (`/bin/rm`, `command rm`, `find -delete`, `git -C … push`, `sh -c "rm …"`), sends overwriting `cp`/`mv` to the classifier, and allows read-only `ls`/`git status`/`git log` without a classifier.
+- The Auto classifier only uses models shown in the model picker, fails over to the next cheapest model when a provider errors, and reports the reason (for example "authentication failed").
+- Settings → Permissions no longer has a mode dropdown; the mode is chosen per chat in the composer.
+- The README is rewritten as a short guide with screenshots; the previous detailed text lives in `docs/reference.md`.
+
 - Context breakdown now mirrors the full category list: Messages, MCP tools, System tools, System prompt, Skills, MCP server instructions, Memory files and Custom agents, plus the autocompact buffer, free space and deferred (registered but unloaded) MCP/system tools, with expandable per-tool, per-skill and per-file token lists.
 
 ### Fixed
 
+- New providers appear in every chat within seconds, without restarting Pui, including in chats that are busy or in the background.
+- Chats released after being idle can change model or effort again (they reconnect) instead of showing "Connect to Pi".
+- The Background tasks card no longer widens the inspector, and durations stay clear of the scrollbar.
 - Antigravity now persists each account's live model catalog, so Gemini 4 Neon/Argon/Hydrogen, orchestrators and other entitled models are listed at startup (and after a failed refresh) instead of only the five built-in fallback models.
 
 ## [0.1.1] - 2026-11-19
