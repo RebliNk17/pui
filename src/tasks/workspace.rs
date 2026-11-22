@@ -6,25 +6,82 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
+thread_local! {
+    static OPERATION: std::cell::RefCell<Option<(Arc<AtomicBool>,Instant)>> = const {std::cell::RefCell::new(None)};
+}
+pub(crate) fn with_operation<T>(
+    cancel: Arc<AtomicBool>,
+    deadline: Instant,
+    work: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OPERATION.with(|scope| *scope.borrow_mut() = None);
+        }
+    }
+    OPERATION.with(|scope| *scope.borrow_mut() = Some((cancel, deadline)));
+    let _reset = Reset;
+    work()
+}
+pub(super) fn check_operation() -> Result<(), String> {
+    OPERATION.with(|scope| {
+        if scope.borrow().as_ref().is_some_and(|(cancel,deadline)|cancel.load(Ordering::Acquire)||Instant::now()>=*deadline) {
+            Err("Workflow filesystem operation cancelled or timed out; partial preparation may remain retained. Nothing was replayed.".into())
+        } else {Ok(())}
+    })
+}
+fn bounded_output(command: &mut Command) -> Result<std::process::Output, String> {
+    check_operation()?;
+    let (cancel, deadline) = OPERATION
+        .with(|scope| scope.borrow().clone())
+        .unwrap_or_else(|| {
+            (
+                Arc::new(AtomicBool::new(false)),
+                Instant::now() + Duration::from_secs(30),
+            )
+        });
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let (stdout, status) = crate::workspace::read_only::run(
+        command,
+        &cancel,
+        deadline,
+        MAX_BYTES as usize,
+        "Workflow Git operation",
+        "Workflow Git output exceeds 256 MiB.",
+    )?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr: Vec::new(),
+    })
+}
 
 const MAX_FILES: usize = 30000;
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 fn git(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("git")
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .map_err(|e| format!("Cannot inspect Git: {e}"))
+    bounded_output(
+        Command::new("git")
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0"),
+    )
 }
 #[derive(Debug)]
 pub struct Inspection {
@@ -105,24 +162,23 @@ pub fn prepare(
     let before = snapshot::capture(&inspection.root, None)?;
     fs::create_dir_all(home).map_err(|e| e.to_string())?;
     let target = home.join(format!("task-{id}"));
-    let output = Command::new("git")
-        // Populate files ourselves: no checkout filters, hooks, or destination symlinks.
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "worktree",
-            "add",
-            "--detach",
-            "--no-checkout",
-        ])
-        .arg(&target)
-        .arg(&inspection.head)
-        .current_dir(&inspection.root)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = bounded_output(
+        Command::new("git")
+            // Populate files ourselves: no checkout filters, hooks, or destination symlinks.
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "worktree",
+                "add",
+                "--detach",
+                "--no-checkout",
+            ])
+            .arg(&target)
+            .arg(&inspection.head)
+            .current_dir(&inspection.root),
+    )?;
     if !output.status.success() {
         return Err(
             "Cannot create isolated worktree. Source files were not changed; no fallback was used."
@@ -311,6 +367,7 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
     let mut hash = Sha256::new();
     let mut total = 0;
     for relative in &initial_paths {
+        check_operation()?;
         let name = relative.to_str().ok_or("Non-UTF-8 source path")?;
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
@@ -389,6 +446,7 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
         let mut buffer = [0; 65536];
         let mut read = 0;
         loop {
+            check_operation()?;
             let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
@@ -441,6 +499,28 @@ mod tests {
         let b = fingerprint(&root).unwrap();
         fs::remove_file(root.join("new.rs")).unwrap();
         assert_ne!(b, fingerprint(&root).unwrap());
+    }
+    #[test]
+    fn cancelled_or_expired_filesystem_job_does_not_spawn_git() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        with_operation(cancel, Instant::now() + Duration::from_secs(1), || {
+            assert!(
+                bounded_output(&mut Command::new("/does/not/exist"))
+                    .unwrap_err()
+                    .contains("cancelled")
+            )
+        });
+        with_operation(Arc::new(AtomicBool::new(false)), Instant::now(), || {
+            assert!(
+                bounded_output(&mut Command::new("/does/not/exist"))
+                    .unwrap_err()
+                    .contains("timed out")
+            )
+        });
+        assert!(
+            check_operation().is_ok(),
+            "operation scope resets after completion"
+        );
     }
     #[test]
     fn dirty_source_is_allowed_but_head_must_match() {

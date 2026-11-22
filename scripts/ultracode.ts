@@ -4,10 +4,11 @@ import { Type } from "typebox";
 import { installPermissions, localPath, unmanagedAgentLaunch } from "./permissions.ts";
 import { installCompaction } from "./compaction.ts";
 import { installContext } from "./context.ts";
+import { installTitles } from "./titles.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
-import { installWorkflows } from "./workflows.ts";
+import { installWorkflows, WORKFLOW_GUIDANCE } from "./workflows.ts";
 import { installAntigravity } from "./antigravity.ts";
 import { installAccounts } from "./accounts.ts";
 
@@ -16,9 +17,9 @@ Do not launch delegated agents through Bash, Python subprocesses, detached pi --
 Reduce model round trips: issue independent read, grep, find and bounded inspection commands together in one tool-call batch rather than waiting for another model response after each small action. Pi runs sibling tool calls concurrently by default; if codemode is active, use bounded Promise.allSettled batches through its tools API and inspect every result. For independent CLI checks, prefer separate bash tool calls in the same batch so each retains its own permission check, timeout, output and exit status. Do not use detached/background shell jobs or unmanaged agents to create parallelism. Keep dependent commands, edits to the same file, Git/index mutations and shared build/test resources ordered; never parallelize destructive actions or bypass approvals. Batch only a few genuinely independent calls, not an unbounded fan-out.
 Use the fewest useful workers, including zero. Give each a bounded task, relevant context/paths, acceptance criteria and constraints; review its results. Worktree workers start from committed HEAD, not uncommitted edits. No automatic commits, pushes, merges, deployments or destructive cleanup. Use event-driven waits instead of status polling; do not mirror worker transcripts into the parent.
 Use pui_create_monitor for a non-AI background shell condition (exit 0 fires once, exit 1 keeps waiting), pui_create_cron for scheduled prompts, and pui_jobs/pui_update_job to inspect/manage your own jobs. Checks and scheduling do not consume context or call models. Only delivered events/prompts wake you. Jobs run while Pui is open; active jobs reconnect their creator on relaunch. Cron uses five numeric fields in UTC and skips missed occurrences. Use bounded side-effect-free checks; never use monitors to launch unmanaged agents. Tell the user that event handling consumes tokens.
-For development that benefits from structured checks and independent review, offer pui_workflow with a very short reason why it is better than regular development for this change. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.`;
+${WORKFLOW_GUIDANCE} For an eligible hard/high-risk change only, give a very short, specific reason why a workflow is warranted. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.`;
 
-export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan a compact workflow using your tools and codemode.
+export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan compactly using your tools and codemode. This is ordinary coordination, not a reason to call pui_workflow or ask for workflow consent. Reserve that offer for genuinely hard, high-risk work or an explicit user request.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
 Prefer independent bounded tasks with explicit acceptance criteria, relevant paths, constraints, dependencies and a concise result contract.
 Do not overwhelm one worker with unrelated responsibilities; split only when scope or context warrants it. Reuse existing workers.
@@ -37,13 +38,14 @@ export default function puiExtension(pi: any) {
   installOpen(pi);
   installWorkflows(pi);
   installContext(pi);
+  installTitles(pi);
   installAntigravity(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",
     handler: (args: string, ctx: any) => {
       const next = JSON.parse(args);
       compaction.update(next, ctx);
-      permissions.update(next.permission, ctx);
+      permissions.update(next, ctx);
       process.env.PUI_SETTINGS = JSON.stringify(next);
     },
   });
@@ -61,12 +63,25 @@ export default function puiExtension(pi: any) {
   let refreshController: AbortController | undefined;
   const readonly = process.env.PUI_AGENT_ACCESS === "read-only";
   const taskRole = process.env.PUI_TASK_ROLE || "";
+  pi.registerTool({
+    name:"pui_run_check",label:"Run focused workflow check",executionMode:"sequential",
+    description:"Workflow builders only: request one frozen check by criterion ID through the host. Exact command permission still applies; bounded to four calls per implementation attempt. Feedback is not final acceptance evidence. No arbitrary commands, installs or delegation.",
+    parameters:Type.Object({criterion:Type.String({minLength:1,maxLength:64})}),
+    async execute(_id:string,args:any,signal:AbortSignal|undefined,_update:any,ctx:any){
+      if(taskRole!=="builder")throw new Error("Focused workflow checks are builder-only.");
+      signal?.throwIfAborted();
+      const value=await ctx.ui.input("Pui workflow check",JSON.stringify({criterion:args.criterion}),{signal});
+      signal?.throwIfAborted(); if(value===undefined)throw new Error("Focused check cancelled; no replay.");
+      const result=JSON.parse(value);if(result.error)throw new Error(result.error);
+      return {content:[{type:"text",text:JSON.stringify(result)}],details:{feedback:result}};
+    }
+  });
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
-  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_workflow"];
+  const orchestrationTools=["pui_spawn_agent","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_workflow","pui_workflow_control","pui_run_check"];
   const setMode = (on: boolean) => {
     enabled = on && !readonly && !taskRole;
     const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
-    const controls = taskRole ? [] : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
+    const controls = taskRole ? (taskRole==="builder" ? ["pui_run_check"] : []) : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
     pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
   };
   pi.on("session_start", (_event: any, ctx: any) => {
@@ -80,6 +95,7 @@ export default function puiExtension(pi: any) {
       void ctx.modelRegistry.refresh({ allowNetwork: true, signal: controller.signal })
         .then(() => {
           if (!controller.signal.aborted) {
+            permissions.refresh(ctx);
             ctx.ui.setStatus("pui-models", JSON.stringify({ refreshed: true }));
           }
         })
@@ -118,7 +134,7 @@ export default function puiExtension(pi: any) {
     if (taskRole === "router") return { block: true, reason: "Model router has no tool access." };
     if (taskRole === "checks") return { block: true, reason: "Task check runner executes only host-submitted, approved commands; model tools are disabled." };
     if (taskRole === "builder" && ["bash", "codemode", "pui_spawn_agent"].includes(event.toolName)) return { block: true, reason: "Verified-task builders use bounded file tools only. Approved tests execute in the independent check runner; no shell, codemode, delegation or Git mutations." };
-    if (taskRole === "builder" && !["read", "grep", "find", "ls", "edit", "write", "pui_ask_questions"].includes(event.toolName)) return { block: true, reason: "Tool outside verified-task builder allowlist." };
+    if (taskRole === "builder" && !["read", "grep", "find", "ls", "edit", "write", "pui_ask_questions", "pui_run_check"].includes(event.toolName)) return { block: true, reason: "Tool outside verified-task builder allowlist." };
     if (taskRole === "builder" && ["edit", "write"].includes(event.toolName) && !await localPath(ctx.cwd, event.input?.path)) return { block: true, reason: "Verified-task edits must stay in the canonical workspace and cannot target protected paths or symlinks." };
   });
   pi.on("user_bash", () => taskRole && taskRole !== "checks" ? { result: { output: "Shell is reserved for the verified-task check runner.", exitCode: 1, cancelled: false, truncated: false } } : undefined);

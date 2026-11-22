@@ -127,7 +127,7 @@ impl Changes {
         self.git_mode_inputs(ctx, visible);
         self.index_inputs(ctx, visible);
         self.commit_inputs(ctx, visible);
-        self.conflict_inputs(visible);
+        self.conflict_inputs(ctx, visible);
         self.initialize_inputs(ctx, visible);
         self.clone_inputs(ctx, visible);
         self.fetch_inputs(ctx, visible);
@@ -245,6 +245,7 @@ impl Changes {
         {
             document.2.stale_comments();
         }
+        self.conflict.begin_rows();
         self.bind_inline_revision(ctx, outputs, revision);
         let wt_popup_open = egui::Popup::is_id_open(ctx, egui::Id::new("changes-worktrees-popup"));
         self.worktrees.poll(ctx, workspace, wt_popup_open);
@@ -595,8 +596,7 @@ impl Changes {
                                             if self.header_with_read(
                                                 ui,
                                                 &file.path,
-                                                &file.added.to_string(),
-                                                &file.removed.to_string(),
+                                                (&file.added.to_string(), &file.removed.to_string()),
                                                 false,
                                                 (is_read, summary_sig, diff_sig),
                                                 None,
@@ -642,12 +642,12 @@ impl Changes {
                                         .stroke(Stroke::new(1.0, colors.border))
                                         .corner_radius(7)
                                         .show(ui, |ui| {
-                                            self.conflict_row(ui, workspace, file);
+                                            self.conflict_row(ui, workspace, file, loading);
                                             if self.header_with_read(
                                                 ui,
                                                 &file.path,
-                                                if self.git_mode==workspace::DiffMode::Combined{&file.added}else{"?"},
-                                                if self.git_mode==workspace::DiffMode::Combined{&file.removed}else{"?"},
+                                                (if self.git_mode==workspace::DiffMode::Combined{&file.added}else{"?"},
+                                                if self.git_mode==workspace::DiffMode::Combined{&file.removed}else{"?"}),
                                                 true,
                                                 (is_read, summary_sig, diff_sig),
                                                 Some((workspace, file, loading)),
@@ -1350,19 +1350,19 @@ impl Changes {
         removed: &str,
         git: bool,
     ) -> bool {
-        self.header_with_read(ui, path, added, removed, git, (false, 0, None), None)
+        self.header_with_read(ui, path, (added, removed), git, (false, 0, None), None)
     }
 
     fn header_with_read(
         &mut self,
         ui: &mut egui::Ui,
         path: &str,
-        added: &str,
-        removed: &str,
+        counts: (&str, &str),
         git: bool,
         read_info: (bool, u64, Option<u64>),
         git_row: Option<(&Workspace, &workspace::FileChange, bool)>,
     ) -> bool {
+        let (added, removed) = counts;
         let (is_read, summary_sig, diff_sig) = read_info;
         let colors = theme::palette(ui.ctx());
         let key = (git, path.to_owned());

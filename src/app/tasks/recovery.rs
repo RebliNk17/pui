@@ -398,6 +398,10 @@ impl Pui {
             let mut scope = task.clone();
             // Only runtime-owned progress/evidence may evolve under this consent.
             scope.phase = active.expected.phase;
+            scope.reason = active.expected.reason;
+            scope.pause_requested = active.expected.pause_requested;
+            scope.operations = active.expected.operations.clone();
+            scope.feedback = active.expected.feedback.clone();
             scope.note = active.expected.note.clone();
             scope.runs.truncate(active.expected.runs.len());
             if !active.initial_resume {
@@ -553,7 +557,7 @@ impl Pui {
             reply: rx,
         });
     }
-    fn task_recovery_reconcile(
+    pub(super) fn task_recovery_reconcile(
         &mut self,
         before: Task,
         submitted: Task,
@@ -564,6 +568,7 @@ impl Pui {
         // Nothing from this transition may continue, and failure handling must never
         // enqueue a stale Save over an authoritative record from another writer.
         self.tasks.retire();
+        self.tasks.continuation = Default::default();
         self.tasks.job = None;
         self.tasks.live = None;
         self.tasks.recovery.cancel_pending();
@@ -845,6 +850,7 @@ impl Pui {
                 request.detail
             ));
         }
+        task.pause_requested = false;
         task.phase = if request.initial_resume {
             Phase::Preparing
         } else {
@@ -985,6 +991,11 @@ impl Pui {
                 };
                 execution.note = if pass { "Explicit checks and fresh independent verification passed for the unchanged retained candidate." } else { "Explicit recovery checks/review did not pass. No builder or automatic repair was started; repair budget and old evidence are unchanged." }.into();
                 task.phase = if pass { Phase::Ready } else { Phase::Failed };
+                task.reason = Some(if pass {
+                    domain::decision::Reason::Verified
+                } else {
+                    domain::decision::Reason::VerificationFailed
+                });
                 task.note = execution.note.clone();
                 self.tasks.save();
                 self.tasks.retire();

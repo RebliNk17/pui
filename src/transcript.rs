@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
+mod new_messages;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindTarget {
     pub query: String,
@@ -60,6 +62,7 @@ pub struct Transcript {
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     pub find: Option<FindTarget>,
     progress_phase: Option<(Progress, f64)>,
+    new_messages: new_messages::NewMessages,
 }
 
 #[derive(
@@ -168,6 +171,31 @@ fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
     }
 }
 
+fn agent_message_title(text: &str) -> String {
+    let header = text.lines().next().unwrap_or_default();
+    if let Some(sender) = header
+        .strip_prefix("Agent message from ")
+        .and_then(|header| header.strip_suffix(':'))
+    {
+        format!("Message from {sender}")
+    } else if let Some((sender, _)) = header
+        .strip_prefix("Worker ")
+        .and_then(|header| header.split_once(" settled."))
+    {
+        format!("Report from {sender}")
+    } else {
+        "Agent message received".into()
+    }
+}
+
+fn agent_message(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    crate::section::Section::new(agent_message_title(text))
+        .id_salt("agent-message")
+        .icon(Icon::Branch)
+        .grouped()
+        .show(ui, |ui| markdown::show(ui, text))
+}
+
 fn compaction_separator(ui: &mut egui::Ui) {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, response) =
@@ -253,6 +281,8 @@ impl Transcript {
     }
     /// Keep the same visible turn when the saved tail is replaced by full RPC history.
     pub fn replace_history(&mut self, old: &[Message], new: &[Message]) {
+        // Loading older history is not an incoming message.
+        self.new_messages.rebase();
         let at_bottom = self.total - self.viewport - self.scroll < 32.0;
         let anchor = self
             .positions
@@ -300,6 +330,7 @@ impl Transcript {
         session: &str,
         footer: impl FnOnce(&mut egui::Ui),
     ) {
+        self.new_messages.observe(messages, session);
         let colors = crate::theme::palette(ui.ctx());
         let now = ui.input(|i| i.time);
         let elapsed = if let Some(progress) = self.progress {
@@ -339,6 +370,10 @@ impl Transcript {
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .stick_to_bottom(true);
+        let jump_to_latest = std::mem::take(&mut self.new_messages.jump_to_latest);
+        if jump_to_latest {
+            area = area.animated(false);
+        }
         if let Some(jump) = self.jump.take() {
             area = area.vertical_scroll_offset(jump).stick_to_bottom(false);
         }
@@ -453,14 +488,7 @@ impl Transcript {
                                     compaction_separator(ui);
                                 } else if group[0].role == "custom" {
                                     scope_find(ui.ctx(), find_target.as_ref(), start, &find_rect);
-                                    egui::Frame::new()
-                                        .fill(colors.sidebar)
-                                        .corner_radius(8)
-                                        .inner_margin(10)
-                                        .show(ui, |ui| {
-                                            ui.label(crate::theme::small(ui, "Agent message"));
-                                            markdown::show(ui, &group[0].text);
-                                        });
+                                    layout_changed |= agent_message(ui, &group[0].text).changed();
                                 } else {
                                     let (changed, fork) = assistant(
                                         ui,
@@ -487,7 +515,11 @@ impl Transcript {
                             });
                         },
                     );
-                    ui.add_space(if group[0].role == "user" { 16.0 } else { 20.0 });
+                    ui.add_space(match group[0].role.as_str() {
+                        "user" => 16.0,
+                        "custom" => 8.0,
+                        _ => 20.0,
+                    });
                     self.heights
                         .insert(start, (signature, column, ui.cursor().top() - before));
                 }
@@ -577,6 +609,10 @@ impl Transcript {
                     find.scroll_to_active = false;
                 }
             }
+            if jump_to_latest {
+                // Use this frame's measured tail; egui resumes sticky scrolling at the end.
+                ui.scroll_with_delta(egui::vec2(0.0, -ui.min_rect().height()));
+            }
         });
         markdown::set_find_highlight(ui.ctx(), None);
         // Disclosures only change their owning, visible turn. Keep all other
@@ -600,6 +636,20 @@ impl Transcript {
             .rposition(|y| *y <= self.scroll + 32.0)
             .unwrap_or(0);
         self.rail(ui, rail);
+        if self.total - self.viewport - self.scroll < 32.0 {
+            self.new_messages.unread = false;
+        }
+        if self
+            .new_messages
+            .show(ui, output.inner_rect)
+            .is_some_and(|r| r.clicked())
+        {
+            self.new_messages.unread = false;
+            self.new_messages.jump_to_latest = true;
+            self.jump = None;
+            self.restore = None;
+            ui.ctx().request_repaint();
+        }
         ui.advance_cursor_after_rect(rect);
     }
 
@@ -1452,6 +1502,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
         })
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "transcript/agent_message_tests.rs"]
+mod agent_message_tests;
 
 #[cfg(test)]
 #[path = "transcript/reasoning_tests.rs"]

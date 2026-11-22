@@ -29,6 +29,92 @@ fn app() -> Pui {
     app
 }
 #[test]
+fn background_start_returns_handle_only_after_persistence_and_closing_tool_does_not_cancel() {
+    let mut app = app();
+    let (client, _, replies) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    let (store, commands) = mpsc::channel();
+    app.tasks.store = Some(store);
+    let mut request = request("background");
+    let mut body: Value = serde_json::from_str(request["placeholder"].as_str().unwrap()).unwrap();
+    body["background"] = json!(true);
+    request["placeholder"] = json!(body.to_string());
+    app.control_request(&request);
+    app.workflow_answer(
+        &json!({"type":"extension_ui_response","id":"background","value":"Use workflow"}),
+    );
+    assert!(replies.try_recv().is_err());
+    loop {
+        if let StoreCommand::SaveAcknowledged { reply, .. } =
+            commands.recv_timeout(Duration::from_secs(2)).unwrap()
+        {
+            reply.send(Ok(())).unwrap();
+            break;
+        }
+    }
+    app.finish_workflow_requests();
+    let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+    let result: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+    assert_eq!(result["started"], true);
+    assert_eq!(result["verified"], false);
+    let id = app.tasks.live.clone().unwrap();
+    assert_eq!(result["workflow_id"], id);
+    app.control_request(&json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-workflow","statusText":json!({"closed":"background"}).to_string()}));
+    assert_eq!(app.tasks.live.as_ref(), Some(&id));
+    let control = |operation: &str| json!({"type":"extension_ui_request","method":"input","title":"Pui agent control","id":operation,"placeholder":json!({"action":"workflow_control","workflow_id":id,"operation":operation}).to_string()});
+    assert!(app.control_request(&control("wait")));
+    assert_eq!(app.tasks.waits.len(), 1, "wait must register");
+    assert!(replies.try_recv().is_err());
+    app.control_request(&control("cancel"));
+    assert_eq!(
+        app.tasks.waits.len(),
+        1,
+        "cancel retains wait until terminal handoff"
+    );
+    app.finish_workflow_requests();
+    assert_eq!(app.tasks.current().unwrap().phase, Phase::Cancelled);
+    assert!(app.tasks.waits.is_empty());
+    let results = (0..2)
+        .map(|_| replies.recv_timeout(Duration::from_secs(2)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|r| r["id"] == "wait").count(),
+        1,
+        "{results:?}"
+    );
+    app.finish_workflow_requests();
+    assert!(replies.try_recv().is_err());
+}
+
+#[test]
+fn repository_profile_checks_are_visible_before_consent_and_drift_invalidates_approval() {
+    let mut app = app();
+    let root = std::env::temp_dir().join(format!("pui-profile-consent-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("pui-workflow.json");
+    std::fs::write(&path,r#"{"version":1,"name":"Repository tests","steps":["Implement with coverage"],"checks":{"criteria":[{"id":"C1","description":"Behavior","command":"npm test"}]}}"#).unwrap();
+    app.prefs.cwd = root;
+    let mut request = request("profile");
+    let mut value: Value = serde_json::from_str(request["placeholder"].as_str().unwrap()).unwrap();
+    value["profile"] = json!(true);
+    request["placeholder"] = json!(value.to_string());
+    app.control_request(&request);
+    assert!(
+        app.state.dialogs[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("npm test")
+    );
+    std::fs::write(&path, "{}").unwrap();
+    app.workflow_answer(
+        &json!({"type":"extension_ui_response","id":"profile","value":"Use workflow"}),
+    );
+    assert!(
+        app.tasks.records.is_empty() && app.tasks.processes.is_empty() && app.tasks.job.is_none()
+    );
+}
+
+#[test]
 fn unsupported_catalog_is_rejected_before_consent_or_task_creation() {
     let mut app = app();
     let (client, _, replies) = rpc::Client::stub_with_records();

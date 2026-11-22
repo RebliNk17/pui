@@ -6,8 +6,8 @@ use super::*;
 mod tests;
 
 pub(super) struct Request {
-    source: String,
-    rpc_id: String,
+    pub(super) source: String,
+    pub(super) rpc_id: String,
     control_id: String,
     objective: String,
     constraints: String,
@@ -18,6 +18,8 @@ pub(super) struct Request {
     plan: Option<domain::plan::ExecutionPlan>,
     permission: settings::PermissionMode,
     revision: bool,
+    background: bool,
+    profile: Option<domain::profile::Receipt>,
     task: Option<String>,
 }
 
@@ -25,6 +27,16 @@ impl Pui {
     pub(in crate::app) fn workflow_control(&mut self, record: &Value) -> bool {
         if record["type"] != "extension_ui_request" {
             return false;
+        }
+        if record["method"] == "setStatus" && record["statusKey"] == "pui-workflow-wait" {
+            if let Ok(value) = serde_json::from_str::<Value>(protocol::string(record, "statusText"))
+            {
+                let source = self.agents.active.clone();
+                self.tasks.waits.retain(|wait| {
+                    wait.source != source || wait.control != protocol::string(&value, "closed")
+                });
+            }
+            return true;
         }
         if record["method"] == "setStatus" && record["statusKey"] == "pui-workflow" {
             if let Ok(value) = serde_json::from_str::<Value>(protocol::string(record, "statusText"))
@@ -41,6 +53,14 @@ impl Pui {
                 for id in ids {
                     if let Some(request) = self.tasks.requests.remove(&id) {
                         self.state.dialogs.retain(|d| d["id"] != id);
+                        if self
+                            .tasks
+                            .start
+                            .as_ref()
+                            .is_some_and(|start| start.request == id)
+                        {
+                            self.tasks.start = None;
+                        }
                         if request.task.as_ref() == self.tasks.live.as_ref()
                             && request.task.is_some()
                         {
@@ -58,6 +78,9 @@ impl Pui {
         else {
             return false;
         };
+        if self.workflow_handle_control(record, &value) {
+            return true;
+        }
         if value["action"] != "workflow_request" {
             return false;
         }
@@ -124,6 +147,17 @@ impl Pui {
                 return true;
             }
         };
+        let profile = if value["profile"] == true {
+            match domain::profile::load(&self.prefs.cwd) {
+                Ok(Some(profile)) => Some(profile),
+                _ => {
+                    self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":"Requested pui-workflow.json profile is absent or invalid; no consent or execution."}).to_string()}));
+                    return true;
+                }
+            }
+        } else {
+            None
+        };
         let plan = match domain::plan::ExecutionPlan::from_request(&value) {
             Ok(plan) => plan,
             Err(error) => {
@@ -131,8 +165,15 @@ impl Pui {
                 return true;
             }
         };
+        let plan = plan.or_else(|| {
+            profile.as_ref().map(|receipt| domain::plan::ExecutionPlan {
+                steps: receipt.profile.steps.clone(),
+                checks: receipt.profile.checks.clone(),
+            })
+        });
         let plan_description = plan.as_ref().map(|plan| format!("{}\n\n", plan.description()))
             .unwrap_or_else(|| "First establish concrete acceptance checks, then implement and verify under this approval. No implementation plan was supplied.\n\n".into());
+        let profile_description=profile.as_ref().map(|receipt|format!("Repository profile: {} · SHA-256 {}\nSetup suggestions (NOT execution approval):\n{}\n\n",receipt.profile.name,receipt.digest,receipt.profile.setup.join("\n"))).unwrap_or_default();
         let policy_description = approval.description();
         self.tasks.requests.insert(
             rpc_id.clone(),
@@ -149,6 +190,8 @@ impl Pui {
                 plan,
                 permission,
                 revision: false,
+                background: value["background"] == true,
+                profile,
                 task: None,
             },
         );
@@ -168,7 +211,7 @@ impl Pui {
         };
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
-            "title":title, "message":format!("{reason}\n\n{objective}\n\n{transition}{plan_description}Agent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
+            "title":title, "message":format!("{reason}\n\n{objective}\n\n{transition}{profile_description}{plan_description}Agent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
             "options":options
         }));
         true
@@ -186,7 +229,12 @@ impl Pui {
         if request.source != self.agents.active || request.task.is_some() {
             return false;
         }
-        let context_changed = request.permission != self.active_permission()
+        let context_changed = request.profile.as_ref().is_some_and(|receipt| {
+            domain::profile::load(&request.cwd)
+                .ok()
+                .flatten()
+                .is_none_or(|current| current.digest != receipt.digest)
+        }) || request.permission != self.active_permission()
             || request.cwd != self.prefs.cwd
             || request.provider != self.state.provider
             || request.model != self.state.model
@@ -295,6 +343,7 @@ impl Pui {
         let constraints = request.constraints.clone();
         let approval = request.approval.clone();
         let plan = request.plan.clone();
+        let profile = request.profile.clone();
         request.task = self.tasks.selected.clone();
         let Some(task) = self.tasks.current_mut() else {
             return true;
@@ -302,6 +351,7 @@ impl Pui {
         task.objective = objective;
         task.constraints = constraints;
         task.initial_approved = true;
+        task.profile = profile;
         if let Some(plan) = plan {
             task.proposed = plan.checks.clone();
             task.execution_plan = Some(plan);
@@ -313,6 +363,33 @@ impl Pui {
             return true;
         }
         self.tasks.save();
+        if self.tasks.requests[&id].background {
+            if let Some(store) = self.tasks.store.as_ref() {
+                let task = self.tasks.current().unwrap().clone();
+                let (reply, rx) = mpsc::channel();
+                if store
+                    .send(StoreCommand::SaveAcknowledged {
+                        expected: Box::new(task.clone()),
+                        task: Box::new(task.clone()),
+                        reply,
+                    })
+                    .is_ok()
+                {
+                    self.tasks.start = Some(control::Start {
+                        request: id.clone(),
+                        task: task.id,
+                        reply: rx,
+                        owner: self.agents.active.clone(),
+                        permission: self.active_permission(),
+                    });
+                }
+            }
+            if self.tasks.start.is_none() && !cfg!(test) {
+                let request = self.tasks.requests.remove(&id).unwrap();
+                self.workflow_reply(&request,json!({"error":"Workflow background start could not be persisted; no execution started."}));
+                return true;
+            }
+        }
         self.task_propose();
         if let Some(error) = self.tasks.error.clone() {
             if let Some(t) = self.tasks.current_mut() {
@@ -325,6 +402,15 @@ impl Pui {
     }
 
     pub(in crate::app) fn cancel_workflows_for(&mut self, source: &str) {
+        if self
+            .tasks
+            .live
+            .as_ref()
+            .and_then(|id| self.tasks.parents.get(id))
+            .is_some_and(|owner| owner == source)
+        {
+            self.tasks.stop();
+        }
         let ids: Vec<_> = self
             .tasks
             .requests
@@ -359,11 +445,21 @@ impl Pui {
     }
 
     pub(super) fn finish_workflow_requests(&mut self) {
+        self.poll_workflow_handles();
         let finished: Vec<_> = self
             .tasks
             .requests
             .iter()
             .filter_map(|(id, r)| {
+                if r.background
+                    && self
+                        .tasks
+                        .start
+                        .as_ref()
+                        .is_some_and(|start| &start.request == id)
+                {
+                    return None;
+                }
                 let task = self
                     .tasks
                     .records

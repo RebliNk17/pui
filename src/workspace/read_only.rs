@@ -137,7 +137,7 @@ fn filter_check(
     Err("Cannot verify Git filter configuration. Working-tree inspection is unavailable.".into())
 }
 
-pub(super) fn run(
+pub(crate) fn run(
     command: &mut Command,
     cancel: &AtomicBool,
     deadline: Instant,
@@ -157,7 +157,9 @@ fn check(cancel: &AtomicBool, deadline: Instant, label: &str) -> Result<(), Stri
         return Err(format!("{label} cancelled."));
     }
     if Instant::now() >= deadline {
-        return Err(format!("{label} timed out (3 seconds). Refresh to retry."));
+        return Err(format!(
+            "{label} timed out. Inspect the outcome before explicitly requesting another operation; nothing was retried."
+        ));
     }
     Ok(())
 }
@@ -199,7 +201,7 @@ fn drain(
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(format!("Cannot prepare bounded {label}."));
     }
-    let mut bytes = Vec::with_capacity(max_bytes + 1);
+    let mut bytes = Vec::with_capacity((max_bytes + 1).min(65536));
     let mut eof = false;
     loop {
         check(cancel, deadline, label)?;

@@ -61,6 +61,7 @@ fn save_lock_conflict_releases_projection_and_stops_only_rejected_owner_without_
     tasks.job = Some(Job {
         task: original.id.clone(),
         rx: result,
+        cancel: Default::default(),
     });
     tasks.persist_loaded();
     assert!(!tasks.storage_failed);

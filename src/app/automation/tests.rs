@@ -60,6 +60,7 @@ fn monitor_completion_drains_before_creator_readiness_and_reconnect_has_deadline
         Running {
             cancel: Arc::new(AtomicBool::new(false)),
             rx,
+            provenance: None,
         },
     );
     a.poll_automation();
@@ -157,6 +158,7 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
         Running {
             cancel: Arc::new(AtomicBool::new(false)),
             rx,
+            provenance: None,
         },
     );
     // Clear startup repaints so this verifies the completion path rearms itself.
@@ -184,6 +186,7 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
         Running {
             cancel: Arc::new(AtomicBool::new(false)),
             rx,
+            provenance: None,
         },
     );
     a.poll_automation();
@@ -199,6 +202,7 @@ fn monitor_only_sends_on_success_once_and_cancellation_discards_result() {
         Running {
             cancel: cancel.clone(),
             rx,
+            provenance: None,
         },
     );
     a.change_job(&id, "delete").unwrap();

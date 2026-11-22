@@ -164,11 +164,21 @@ fn parse_porcelain(stdout: &str) -> Vec<WorktreeEntry> {
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
-            flush(&mut entries, &mut current_path, &mut current_branch, &mut bare);
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut bare,
+            );
             continue;
         }
         if let Some(path) = line.strip_prefix("worktree ") {
-            flush(&mut entries, &mut current_path, &mut current_branch, &mut bare);
+            flush(
+                &mut entries,
+                &mut current_path,
+                &mut current_branch,
+                &mut bare,
+            );
             current_path = Some(PathBuf::from(path));
         } else if let Some(branch_ref) = line.strip_prefix("branch ") {
             current_branch = branch_ref
@@ -179,7 +189,12 @@ fn parse_porcelain(stdout: &str) -> Vec<WorktreeEntry> {
             bare = true;
         }
     }
-    flush(&mut entries, &mut current_path, &mut current_branch, &mut bare);
+    flush(
+        &mut entries,
+        &mut current_path,
+        &mut current_branch,
+        &mut bare,
+    );
     entries
 }
 

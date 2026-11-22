@@ -11,6 +11,7 @@ fn evidence_is_bounded_unicode_roundtrip_and_legacy_defaults_without_execution()
     assert!(evidence.valid());
     assert!(evidence.output.len() <= 4000);
     assert_eq!(evidence.error.as_ref().unwrap().len(), 512);
+    assert_eq!(evidence.error_truncated, Some(true));
     let restored: Evidence =
         serde_json::from_slice(&serde_json::to_vec(&evidence).unwrap()).unwrap();
     assert_eq!(restored.output, evidence.output);
@@ -42,11 +43,16 @@ fn observed_check_persists_latest_excerpt_without_delivery_or_reexecution() {
         Running {
             cancel: Arc::new(AtomicBool::new(false)),
             rx,
+            provenance: Provenance::capture(&app.automation.jobs[0], None, Origin::Scheduled, 100),
         },
     );
     app.poll_automation();
     let job = &app.automation.jobs[0];
     assert_eq!(job.evidence.as_ref().unwrap().output, "exit-one observed");
+    assert_eq!(
+        job.evidence.as_ref().unwrap().origin_label(),
+        "Scheduled execution"
+    );
     assert!(job.pending.is_none());
     assert_eq!(job.deliveries, 0);
     let home = std::env::temp_dir().join(format!("pui-check-evidence-{}", uuid::Uuid::new_v4()));
@@ -68,6 +74,7 @@ fn legacy_result_metadata_remains_unknown_and_new_fields_roundtrip() {
     assert_eq!(legacy.exit_code, None);
     assert_eq!(legacy.elapsed_ms, None);
     assert_eq!(legacy.truncated, None);
+    assert_eq!(legacy.error_truncated, None);
     let current = Evidence::new(
         &runner::Check {
             success: false,
@@ -84,6 +91,7 @@ fn legacy_result_metadata_remains_unknown_and_new_fields_roundtrip() {
     assert_eq!(restored.exit_code, Some(1));
     assert_eq!(restored.elapsed_ms, Some(42));
     assert_eq!(restored.truncated, Some(false));
+    assert_eq!(restored.error_truncated, None);
 }
 #[test]
 fn check_history_is_four_total_evicts_oldest_and_persists_without_replay() {
@@ -155,7 +163,8 @@ fn history_ui_themes_zoom_keeps_job_state_and_dispatch_unchanged() {
                         ..Default::default()
                     },
                     |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| job.show_check_history(ui));
+                        egui::CentralPanel::default()
+                            .show(ctx, |ui| job.show_check_history(ui, None, false, None));
                     },
                 );
                 assert!(output.platform_output.commands.is_empty());
@@ -164,6 +173,43 @@ fn history_ui_themes_zoom_keeps_job_state_and_dispatch_unchanged() {
         }
     }
 }
+#[test]
+fn per_check_retention_never_implies_delivery_acknowledgement_or_task_verification() {
+    let mut app = super::super::tests::app(&egui::Context::default());
+    super::super::tests::create(&mut app, "monitor");
+    let job = &mut app.automation.jobs[0];
+    let provenance = Provenance::capture(job, None, Origin::Scheduled, 122);
+    job.record_captured_check(
+        &runner::Check {
+            success: true,
+            exit_code: Some(0),
+            ..Default::default()
+        },
+        123,
+        provenance,
+    );
+    let historical = serde_json::to_value(&job.evidence).unwrap();
+    assert!(job.delivery_state().contains("not established"));
+    job.pending = Some("saved follow-up".into());
+    assert!(job.delivery_state().contains("no acceptance acknowledged"));
+    job.dispatching = true;
+    assert!(
+        job.delivery_state()
+            .contains("acknowledgement not observed")
+    );
+    job.dispatching = false;
+    job.error = Some("Delivery acknowledgement lost on restart".into());
+    assert!(job.delivery_state().contains("acceptance may be uncertain"));
+    job.pending = None;
+    job.deliveries = 10;
+    assert!(job.delivery_state().contains("not established"));
+    assert_eq!(serde_json::to_value(&job.evidence).unwrap(), historical);
+    assert_eq!(
+        job.evidence.as_ref().unwrap().origin_label(),
+        "Scheduled execution"
+    );
+}
+
 #[test]
 fn literal_evidence_theme_zoom_narrow_has_no_clipboard_or_execution() {
     for mode in [theme::Theme::Light, theme::Theme::Dark] {

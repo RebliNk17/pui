@@ -103,6 +103,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     let mut created = None;
     let mut prompt = None;
     let mut name = None;
+    let mut initial_title = None;
     for line in reader.lines().map_while(Result::ok) {
         prefix_bytes += line.len() + 1;
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
@@ -128,6 +129,9 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
                         .then(|| "Image attachment".into())
                 })
             });
+        }
+        if initial_title.is_none() {
+            initial_title = stored_initial_title(&entry);
         }
         if string(&entry, "type") == "session_info" {
             name = entry["name"]
@@ -163,10 +167,164 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         path: path.to_path_buf(),
         cwd: cwd.clone()?,
         project: cwd?,
-        title: name.or(prompt).unwrap_or_else(|| "New conversation".into()),
+        // Explicit Pui renames live in preferences. Mutable harness names must
+        // not replace the durable first-request marker.
+        title: initial_title
+            .or(name)
+            .or(prompt)
+            .unwrap_or_else(|| "New conversation".into()),
         created,
         modified,
     })
+}
+
+pub const AUTO_TITLE_CHARS: usize = 48;
+
+fn stored_initial_title(entry: &Value) -> Option<String> {
+    (entry["type"] == "custom"
+        && entry["customType"] == "pui.initial-title.v1"
+        && entry["data"]["version"] == 1)
+        .then(|| entry["data"]["title"].as_str())
+        .flatten()
+        .filter(|title| {
+            valid_initial_title(title)
+                && entry["data"]["sessionId"].as_str().is_some_and(|id| {
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && id.is_ascii()
+                        && !id.chars().any(char::is_control)
+                })
+                && entry["data"]["initialRequest"]
+                    .as_str()
+                    .is_some_and(|digest| {
+                        digest.len() == 64
+                            && digest
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    })
+        })
+        .map(str::to_owned)
+}
+
+/// Unicode General_Category=Cf plus line/paragraph separators. Keep consistent
+/// with the extension's property escape; no invisible/bidi control in auto names.
+pub fn title_format_character(c: char) -> bool {
+    matches!(c, '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+        | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{180e}' | '\u{200b}'..='\u{200f}'
+        | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206f}'
+        | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}'
+        | '\u{13430}'..='\u{1343f}' | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}'
+        | '\u{e0001}' | '\u{e0020}'..='\u{e007f}')
+}
+
+pub fn valid_initial_title(title: &str) -> bool {
+    !crate::protocol::title_placeholder(title)
+        && title.chars().count() <= AUTO_TITLE_CHARS
+        && !title
+            .chars()
+            .any(|c| c.is_control() || title_format_character(c))
+}
+
+/// New automatic titles use only the initial request's first meaningful line,
+/// never context bodies, tool output, summary prose or subsequent user turns.
+/// Legacy prompt fallbacks below keep their old cap; explicit names are uncapped.
+pub fn initial_title(text: &str) -> Option<String> {
+    if text.chars().any(title_format_character) {
+        return None;
+    }
+    let mut context = false;
+    let line = text.lines().map(str::trim).find(|line| {
+        if line.starts_with("[Context:") {
+            context = true;
+            return false;
+        }
+        if *line == "[/Context]" {
+            context = false;
+            return false;
+        }
+        !context && !line.is_empty()
+    })?;
+    if line.starts_with('<')
+        || line.starts_with("```")
+        || line.starts_with("[Attached files]")
+        || line.starts_with("Parent agent ")
+        || line.starts_with("Agent message from ")
+        || line.starts_with("The conversation so far")
+        || line.starts_with("This conversation is being continued")
+    {
+        return None;
+    }
+    // Keep linked subjects useful without spending the whole sidebar on URL
+    // schemes/query strings. This is extractive, not a speculative summary.
+    let mut paragraph = line.to_owned();
+    // Soft-wrapped request lines belong together; context/code/blank boundaries
+    // do not. The result remains a single line and is capped below.
+    for following in text
+        .lines()
+        .skip_while(|candidate| candidate.trim() != line)
+        .skip(1)
+        .map(str::trim)
+    {
+        if following.is_empty()
+            || following.starts_with("[Context:")
+            || following.starts_with("```")
+            || following.starts_with('<')
+        {
+            break;
+        }
+        paragraph.push(' ');
+        paragraph.push_str(following);
+        if paragraph.chars().count() > 1024 {
+            break;
+        }
+    }
+    let normalized = paragraph
+        .split_whitespace()
+        .map(|word| {
+            url::Url::parse(word)
+                .ok()
+                .filter(|url| matches!(url.scheme(), "http" | "https"))
+                .and_then(|url| {
+                    if matches!(url.host_str(), Some("github.com" | "www.github.com")) {
+                        let path: Vec<_> = url
+                            .path_segments()?
+                            .filter(|s| !s.is_empty())
+                            .take(2)
+                            .collect();
+                        (!path.is_empty()).then(|| path.join("/"))
+                    } else {
+                        url.host_str()
+                            .map(|host| host.trim_start_matches("www.").to_owned())
+                    }
+                })
+                .unwrap_or_else(|| word.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = normalized.trim_start_matches(['#', ' ', '*']);
+    if crate::protocol::title_placeholder(normalized)
+        || matches!(
+            normalized.to_lowercase().as_str(),
+            "hello" | "hi" | "help" | "continue" | "ok" | "thanks"
+        )
+    {
+        return None;
+    }
+    let mut title: String = normalized
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(AUTO_TITLE_CHARS)
+        .collect();
+    if normalized.chars().count() > AUTO_TITLE_CHARS {
+        // Prefer a word boundary, but never let a long URL/CJK/token bypass cap.
+        if let Some((byte, _)) = title.char_indices().rev().find(|(_, c)| c.is_whitespace())
+            && title[..byte].chars().count() >= AUTO_TITLE_CHARS / 2
+        {
+            title.truncate(byte);
+        }
+    }
+    title.truncate(title.trim_end().len());
+    valid_initial_title(&title).then_some(title)
 }
 
 pub fn prompt_title(text: &str) -> Option<String> {
@@ -492,6 +650,85 @@ mod tests {
             Some("Hello world".into())
         );
         assert_eq!(prompt_title(&"界".repeat(200)), Some("界".repeat(100)));
+    }
+    #[test]
+    fn initial_request_titles_are_relevant_short_single_line_and_unicode_safe() {
+        assert_eq!(
+            initial_title("Fix Hebrew sidebar\n[Context: logs]\nwrong tool output\n[/Context]"),
+            Some("Fix Hebrew sidebar".into())
+        );
+        assert_eq!(
+            initial_title("[Context: logs]\nTool output title\n[/Context]\nRepair JSON exports"),
+            Some("Repair JSON exports".into())
+        );
+        assert_eq!(
+            initial_title(
+                "https://www.onorca.dev/ https://github.com/stablyai/orca lets research this app lets take some ideas"
+            ),
+            Some("onorca.dev stablyai/orca lets research this app".into())
+        );
+        for text in [
+            "continue",
+            "New conversation",
+            "```tool output",
+            "<summary>compacted request",
+            "This conversation is being continued from a summary",
+            "[Context: log]\nonly tool output\n[/Context]",
+        ] {
+            assert_eq!(initial_title(text), None, "{text}");
+        }
+        for text in [
+            "界".repeat(200),
+            "🦀".repeat(200),
+            "abcdefgh".repeat(200),
+            "a\u{301}".repeat(200),
+        ] {
+            let title = initial_title(&text).unwrap();
+            assert!(title.chars().count() <= AUTO_TITLE_CHARS);
+            assert!(!title.chars().any(char::is_control));
+            assert!(text.starts_with(&title));
+        }
+    }
+    #[test]
+    fn malformed_marker_never_overrides_preserved_legacy_title() {
+        let valid = serde_json::json!({"version":1,"title":"Fix Hebrew sidebar","sessionId":"session-a","initialRequest":"a".repeat(64)});
+        for (key, value) in [
+            ("title", serde_json::json!("x".repeat(49))),
+            ("title", serde_json::json!("Two\nlines")),
+            ("title", serde_json::json!("Invisible\u{200b}name")),
+            ("title", serde_json::json!("Bidi\u{202e}name")),
+            ("title", serde_json::json!("Line\u{2028}separator")),
+            ("title", serde_json::json!("New conversation")),
+            ("initialRequest", serde_json::json!("not-a-digest")),
+            ("sessionId", serde_json::json!("")),
+        ] {
+            let mut data = valid.clone();
+            data[key] = value;
+            let session = fixture(&[
+                serde_json::json!({"type":"session_info","name":"Preserved existing title"}),
+                serde_json::json!({"type":"custom","customType":"pui.initial-title.v1","data":data}),
+                serde_json::json!({"type":"message","message":{"role":"user","content":"Original request"}}),
+            ]);
+            assert_eq!(session.title, "Preserved existing title");
+        }
+        for text in [
+            "Fix \u{200b}sidebar",
+            "Fix \u{202e}sidebar",
+            "Fix\u{2028}sidebar",
+        ] {
+            assert_eq!(initial_title(text), None);
+        }
+    }
+    #[test]
+    fn durable_initial_title_survives_later_metadata_and_large_compacted_history() {
+        let session = fixture(&[
+            serde_json::json!({"type":"custom","customType":"pui.initial-title.v1","data":{"version":1,"title":"Fix Hebrew sidebar","sessionId":"first","initialRequest":"a".repeat(64)}}),
+            serde_json::json!({"type":"message","message":{"role":"user","content":"Fix Hebrew sidebar\nextra context"}}),
+            serde_json::json!({"type":"message","message":{"role":"assistant","content":"x".repeat(200000)}}),
+            serde_json::json!({"type":"compaction","summary":"Unrelated summary"}),
+            serde_json::json!({"type":"session_info","name":"Wrong generated name"}),
+        ]);
+        assert_eq!(session.title, "Fix Hebrew sidebar");
     }
     #[test]
     fn project_subfolders_resolve_to_repository_folder() {

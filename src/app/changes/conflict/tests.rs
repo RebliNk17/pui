@@ -11,6 +11,7 @@ fn conflict_inspector_escape_themes_zoom_no_write_or_resolution() {
                 index_writable: true,
                 ..Default::default()
             };
+            changes.conflict.owner = Some(changes.identity.clone());
             changes.conflict.review = Some(workspace::conflict::Review {
                 root: "/fixture".into(),
                 path: "untrusted 世界.txt".into(),

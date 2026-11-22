@@ -6,6 +6,7 @@ mod activity;
 mod dates;
 #[cfg(test)]
 mod disclosure_tests;
+mod menu_keys;
 pub(super) mod sections;
 const ROW_HEIGHT: f32 = 28.0;
 
@@ -13,6 +14,8 @@ const ROW_HEIGHT: f32 = 28.0;
 #[serde(default)]
 pub(super) struct ChatPrefs {
     pub(super) title: Option<String>,
+    /// Stable automatic/legacy assignment, independent of explicit user rename.
+    pub(super) initial_title: Option<String>,
     pub(super) project: Option<PathBuf>,
     pub(super) pinned: bool,
     pub(super) archived: bool,
@@ -980,6 +983,12 @@ impl Pui {
             .chats
             .get(&session.path)
             .and_then(|meta| meta.title.clone())
+            .or_else(|| {
+                self.prefs
+                    .chats
+                    .get(&session.path)
+                    .and_then(|meta| meta.initial_title.clone())
+            })
             .or_else(live_title)
             .unwrap_or_else(|| session.title.clone())
     }
@@ -1032,6 +1041,7 @@ impl Pui {
         let title = self.session_title(s);
         let meta = self.prefs.chats.entry(path.clone()).or_default();
         let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
+        let mut renamed = None;
         let compact = !self.prefs.sidebar_view.metadata || self.projects;
         let (_, rect) = ui.allocate_space(Vec2::new(
             ui.available_width(),
@@ -1111,7 +1121,9 @@ impl Pui {
                 if self.rename_text.trim().is_empty() {
                     edit.request_focus();
                 } else {
-                    meta.title = Some(self.rename_text.trim().into());
+                    let title = self.rename_text.trim().to_owned();
+                    meta.title = Some(title.clone());
+                    renamed = Some(title);
                     edit.surrender_focus();
                     self.rename_chat = None;
                 }
@@ -1198,21 +1210,25 @@ impl Pui {
         let mut menu_contents = |ui: &mut egui::Ui| {
             theme::menu_controls(ui);
             ui.set_min_width(200.0);
-            if ui.button("Rename").clicked() {
+            let shortcut = menu_keys::read(ui);
+            if menu_keys::button(ui, "Rename", egui::Key::R, shortcut) {
                 action = Some(Action::Rename(path.clone()));
                 ui.close();
             }
-            if ui
-                .button(if meta.pinned { "Unpin" } else { "Pin" })
-                .clicked()
-            {
+            if menu_keys::button(
+                ui,
+                if meta.pinned { "Unpin" } else { "Pin" },
+                egui::Key::P,
+                shortcut,
+            ) {
                 meta.pinned = !meta.pinned;
                 ui.close();
             }
             if ui
-                .button("Move to project…")
+                .add(egui::Button::new("Move to project…").shortcut_text("M"))
                 .on_hover_text("Organize in Pui; does not change Pi's working directory")
                 .clicked()
+                || shortcut == Some(egui::Key::M)
             {
                 action = Some(Action::Move(path.clone()));
                 ui.close();
@@ -1220,49 +1236,55 @@ impl Pui {
             if section_root {
                 sections::assignment_menu(ui, sections, meta);
             }
-            if ui.button("Copy session path").clicked() {
+            if menu_keys::button(ui, "Copy session path", egui::Key::C, shortcut) {
                 ui.ctx().copy_text(path.display().to_string());
                 ui.close();
             }
             self.prefs.transcript_view.menu(ui);
-            if ui.button("Export as Markdown").clicked() {
+            if menu_keys::button(ui, "Export as Markdown", egui::Key::E, shortcut) {
                 action = Some(Action::Export(path.clone()));
                 ui.close();
             }
             ui.separator();
-            if ui
-                .button(if meta.archived {
+            if menu_keys::button(
+                ui,
+                if meta.archived {
                     "Unarchive"
                 } else {
                     "Archive"
-                })
-                .clicked()
-            {
+                },
+                egui::Key::A,
+                shortcut,
+            ) {
                 meta.archived = !meta.archived;
                 ui.close();
             }
             if meta.hidden {
-                if ui.button("Restore chat").clicked() {
+                if menu_keys::button(ui, "Restore chat", egui::Key::H, shortcut) {
                     action = Some(Action::Restore(path.clone()));
                     ui.close();
                 }
             } else if ui
                 .add_enabled(
                     !meta.pinned,
-                    egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red)),
+                    egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red))
+                        .shortcut_text("H"),
                 )
                 .on_hover_text("Does not delete your Pi session file")
                 .on_disabled_hover_text("Unpin this chat before hiding it")
                 .clicked()
+                || (!meta.pinned && shortcut == Some(egui::Key::H))
             {
                 action = Some(Action::Hide(path.clone()));
                 ui.close();
             }
             ui.separator();
-            if ui
-                .button(RichText::new("Delete chat…").color(colors.red))
-                .clicked()
-            {
+            if menu_keys::button(
+                ui,
+                RichText::new("Delete chat…").color(colors.red),
+                egui::Key::D,
+                shortcut,
+            ) {
                 action = Some(Action::Delete(deletion::Target::Chat(path.clone())));
                 ui.close();
             }
@@ -1284,6 +1306,18 @@ impl Pui {
             )
         });
         self.chat_section_source(ui, &path, &response, menu_rect, disclosure_rect);
+        if let Some(title) = renamed {
+            self.invalidate_title_publication(&path);
+            // Explicit user rename only; automatic metadata never takes this path.
+            if self
+                .state
+                .session_file
+                .as_deref()
+                .is_some_and(|p| PathBuf::from(p) == path)
+            {
+                self.remote_action(sync::Action::Rename(title));
+            }
+        }
         if response.clicked()
             && !(disclosure.is_some()
                 && disclosure_rect
@@ -1682,7 +1716,7 @@ mod tests {
         }
     }
     #[test]
-    fn live_prompt_and_pi_names_replace_stale_discovery_titles_without_changing_local_rename() {
+    fn assigned_prompt_ignores_later_pi_names_and_preserves_local_rename() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);
         app.sessions.truncate(1);
@@ -1690,6 +1724,7 @@ mod tests {
         app.sessions[0].title = "Untitled session".into();
         app.state.session_file = Some(path.display().to_string());
         app.state.session_name = "Untitled session".into();
+        app.state.preserve_title("Fix the sidebar");
         app.state.messages = vec![Message {
             role: "user".into(),
             text: "Fix\n the sidebar".into(),
@@ -1697,11 +1732,11 @@ mod tests {
         }];
         app.prefs.chats.entry(path.clone()).or_default().title = Some("My local name".into());
         app.update_session_title();
-        assert_eq!(app.state.session_name, "Fix the sidebar");
+        assert_eq!(app.state.session_name, "Untitled session");
         assert_eq!(app.sessions[0].title, "Fix the sidebar");
         app.state.session_name = "Pi named this chat".into();
         app.update_session_title();
-        assert_eq!(app.sessions[0].title, "Pi named this chat");
+        assert_eq!(app.sessions[0].title, "Fix the sidebar");
         assert_eq!(
             app.prefs.chats[&path].title.as_deref(),
             Some("My local name")
@@ -1716,6 +1751,7 @@ mod tests {
         app.new_chat = false;
         app.state = State {
             session_file: Some("/fixture/running.jsonl".into()),
+            title_request: Some("a".repeat(64)),
             ..Default::default()
         };
         app.sessions = vec![Session {
@@ -1729,6 +1765,8 @@ mod tests {
         let (client, events) = rpc::Client::stub_with_events();
         app.client = Some(client);
         let id = app.ensure_agent();
+        let data = json!({"version":1,"sessionFile":"/fixture/running.jsonl","sessionId":null,"title":"Fix the sidebar name","initialRequest":"a".repeat(64)});
+        events.send(rpc::Event::Record(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-initial-title","statusText":data.to_string()}))).unwrap();
         events.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":"Fix the sidebar name"}}))).unwrap();
         events
             .send(rpc::Event::Record(json!({"type":"agent_start"})))
@@ -1747,10 +1785,10 @@ mod tests {
             ))
             .unwrap();
         app.poll_other_agents();
-        assert_eq!(app.session_title(&app.sessions[0]), "Sidebar naming fix");
-        assert_eq!(app.agents.nodes[&id].name, "Sidebar naming fix");
+        assert_eq!(app.session_title(&app.sessions[0]), "Fix the sidebar name");
+        assert_eq!(app.agents.nodes[&id].name, "Fix the sidebar name");
         app.projects = false;
-        app.search = "Sidebar naming fix".into();
+        app.search = "Fix the sidebar name".into();
         for _ in 0..2 {
             frame(&ctx, &mut app, vec![]);
         }
@@ -1766,7 +1804,7 @@ mod tests {
             output
                 .shapes
                 .iter()
-                .any(|shape| contains(&shape.shape, "Sidebar naming fix"))
+                .any(|shape| contains(&shape.shape, "Fix the sidebar name"))
         );
         assert!(
             !output

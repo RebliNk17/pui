@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Write;
+use std::process::Stdio;
 
 fn command(root: &Path, args: &[&str]) -> Vec<u8> {
     let out = git(root, args).unwrap();

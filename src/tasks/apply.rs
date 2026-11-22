@@ -506,8 +506,8 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
         if before.is_some() && old.is_none() || after.is_some() && new.is_none() {
             unsupported.push("Binary/non-UTF-8 content is unsupported.");
         }
-        if !transaction::parent_available(&identity.original, path) {
-            unsupported.push("Additions require an existing real parent directory; new directories are unsupported.");
+        if transaction::missing_directories(&identity.original, path).is_err() {
+            unsupported.push("Target parents must be ordinary directories or safely creatable missing directories.");
         }
         if conflict {
             blockers.push(format!(

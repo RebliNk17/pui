@@ -156,7 +156,12 @@ impl Pui {
     fn work_item_status(&mut self, ui: &mut egui::Ui, task: &Task, view: &mut View) {
         let colors = theme::palette(ui.ctx());
         let waiting = self.work_item_waiting(task);
-        let (title, explanation) = status(task.phase, waiting);
+        let (mut title, explanation) = status(task.phase, waiting);
+        if !waiting && matches!(task.phase, Phase::Failed | Phase::Blocked) {
+            if let Some(reason) = task.reason {
+                title = reason.label();
+            }
+        }
         let explanation = if matches!(task.phase, Phase::Ready | Phase::Accepted) && !task.isolated
         {
             "Checks and review passed for the captured candidate. Non-Git work runs in place, so edits may already be present; nothing was committed or deployed."
@@ -230,6 +235,15 @@ impl Pui {
     }
 
     fn work_item_overview(&mut self, ui: &mut egui::Ui, task: &Task, view: &mut View) {
+        if let Some(profile) = &task.profile {
+            ui.label(theme::small(
+                ui,
+                format!(
+                    "Execution profile: {} · {}",
+                    profile.profile.name, profile.digest
+                ),
+            ));
+        }
         if let Some(plan) = &task.execution_plan {
             ui.label(RichText::new("Reviewed implementation plan").strong());
             for (index, step) in plan.steps.iter().enumerate() {
@@ -262,7 +276,11 @@ impl Pui {
                     && (role == Role::Proposal
                         || task.latest().is_some_and(|a| a.number == r.attempt))
             });
-            let summary = run.map(|r| r.status.as_str()).unwrap_or("Not started");
+            let summary = if role == Role::Proposal && task.approved.is_some() {
+                task.acceptance_status()
+            } else {
+                run.map(|r| r.status.as_str()).unwrap_or("Not started")
+            };
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(role.label()).size(12.0));
                 ui.label(theme::small(ui, summary));
@@ -518,7 +536,7 @@ fn status(phase: Phase, waiting: bool) -> (&'static str, &'static str) {
         ),
         Phase::Failed => (
             "Verification failed · work retained",
-            "The repair limit was reached. Inspect the evidence and changes before deciding what to do next.",
+            "Checks or review did not pass. Inspect the recorded reason, evidence and changes before deciding what to do next.",
         ),
         Phase::Interrupted => (
             "Interrupted · nothing was replayed",
@@ -666,6 +684,36 @@ fn evidence(ui: &mut egui::Ui, task: &Task) {
     }
     if task.attempts.is_empty() {
         ui.add(egui::Label::new(theme::small(ui, "No executed check or independent review yet. Proposed commands are not execution results.")).wrap());
+    }
+    for operation in task.operations.iter().rev() {
+        ui.label(theme::small(
+            ui,
+            format!(
+                "{} · {} · {:?} · {}",
+                operation.role.label(),
+                operation.method,
+                operation.state,
+                operation.id
+            ),
+        ));
+    }
+    for continuation in task.continuations.iter().rev() {
+        ui.add(
+            egui::Label::new(theme::small(
+                ui,
+                format!(
+                    "Continuation {} · {:?} · candidate {} · separately confirmed",
+                    continuation.id, continuation.boundary, continuation.fingerprint
+                ),
+            ))
+            .wrap(),
+        );
+    }
+    for feedback in task.feedback.iter().rev() {
+        crate::section::Section::new(format!("Focused feedback · {} · attempt {}",feedback.criterion,feedback.attempt+1))
+            .id_salt((&task.id,&feedback.id,"focused-feedback"))
+            .summary("Development feedback only · not acceptance evidence")
+            .show(ui,|ui|{approval_view::arguments(ui,&json!({"command":feedback.check.command,"exit":feedback.check.exit_code,"fingerprint":feedback.fingerprint,"output":feedback.check.output,"truncated":feedback.check.truncated}));});
     }
     for setup in task.setup.iter().rev() {
         crate::section::Section::new(format!("Environment setup · {:?}", setup.status))

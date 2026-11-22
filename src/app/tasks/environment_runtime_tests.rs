@@ -24,6 +24,107 @@ fn cargo_environment_patterns_require_specific_prerequisite_diagnostics() {
 }
 
 #[test]
+fn quoted_diagnostics_and_project_imports_are_repairable_not_environment_failures() {
+    let mut check = Check {
+        criterion: "C1".into(),
+        command: "npm test".into(),
+        exit_code: Some(1),
+        output: String::new(),
+        truncated: false,
+        cancelled: false,
+        duration_ms: 1,
+    };
+    for (command, output) in [
+        (
+            "npm test",
+            "assertion failed: diagnostic should contain cannot find module",
+        ),
+        ("npm test", "Error: Cannot find module './new-component'"),
+        (
+            "npm test",
+            "Error: Cannot find module '/workspace/src/new-component'",
+        ),
+        (
+            "npm test",
+            "Error: Cannot find module 'C:\\project\\component'",
+        ),
+        ("cargo test", "Error: Cannot find module 'test-fixture'"),
+        (
+            "pytest",
+            "AssertionError: expected ModuleNotFoundError: No module named 'fixture'",
+        ),
+        ("npm test", "test command not found diagnostic ... FAILED"),
+    ] {
+        check.command = command.into();
+        check.output = output.into();
+        assert!(failed_requirement(&check).is_none(), "{command}: {output}");
+    }
+    for (command, output) in [
+        ("npm test", "Error: Cannot find module 'fixture-only'"),
+        (
+            "node test.mjs",
+            "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'fixture-only' imported from test.mjs",
+        ),
+        (
+            "pytest",
+            "ModuleNotFoundError: No module named 'fixture_only'",
+        ),
+        ("cargo test", "error: linker `cc` not found"),
+    ] {
+        check.command = command.into();
+        check.output = output.into();
+        assert!(failed_requirement(&check).is_some(), "{command}: {output}");
+    }
+}
+
+#[test]
+fn project_import_failure_keeps_following_checks_and_independent_diagnosis_eligible() {
+    let root = fixture();
+    let mut app = app(&root, Phase::Checking);
+    app.tasks.live_mut().unwrap().attempts.push(Attempt::new(0));
+    app.tasks
+        .live_mut()
+        .unwrap()
+        .approved
+        .as_mut()
+        .unwrap()
+        .criteria
+        .push(domain::Criterion {
+            id: "C2".into(),
+            description: "Independent remaining check".into(),
+            command: "node second.mjs".into(),
+        });
+    app.task_launch(Role::Checks);
+    let (client, _, sent) = rpc::Client::stub_with_records();
+    app.tasks.processes[0].client = client;
+    let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
+    app.task_event(0, rpc::Event::Record(json!({"type":"response","command":"get_state","id":id,"success":true,"data":{"model":{"id":"claude-haiku-5-5","provider":"fixture-provider"},"thinkingLevel":"high"}})));
+    assert_eq!(
+        sent.recv_timeout(Duration::from_secs(2)).unwrap()["command"],
+        "npm test"
+    );
+    let id = app.tasks.processes[0].pending.as_ref().unwrap().id.clone();
+    app.task_event(0, rpc::Event::Record(json!({"type":"response","command":"bash","id":id,"success":true,"data":{"exitCode":1,"output":"Error: Cannot find module './new-component'","cancelled":false}})));
+    assert_eq!(app.tasks.live_task().unwrap().phase, Phase::Checking);
+    assert_eq!(
+        sent.recv_timeout(Duration::from_secs(2)).unwrap()["command"],
+        "node second.mjs"
+    );
+    assert_eq!(
+        app.tasks
+            .live_task()
+            .unwrap()
+            .latest()
+            .unwrap()
+            .checks
+            .len(),
+        1
+    );
+    assert_eq!(app.tasks.live_task().unwrap().attempts.len(), 1);
+    app.tasks.stop();
+}
+
+#[test]
 fn missing_prerequisite_cancel_or_uncertain_check_stops_before_next_command_or_repairs() {
     for (check_command, number, data) in [
         (

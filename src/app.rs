@@ -867,6 +867,7 @@ impl Pui {
                 .find(|s| s.path == path)
                 .map(|s| s.title.clone())
                 .unwrap_or_else(|| "Opening chat…".into());
+            self.state.preserve_title(&self.state.session_name.clone());
             let (tx, rx) = mpsc::channel();
             self.preview_rx = Some(rx);
             let ctx = ctx.clone();
@@ -997,6 +998,9 @@ impl Pui {
             self.preview_partial = false;
             self.state.session_name = session.title;
             self.state.session_file = Some(path.display().to_string());
+            self.state.title_request = None;
+            self.state.session_id = None;
+            self.state.preserve_title(&self.state.session_name.clone());
             self.state.messages.clear();
             self.state.cost = 0.0;
             self.state.context_tokens = None;
@@ -1479,6 +1483,7 @@ impl Pui {
             images: self.draft_images.images(),
             mode,
         };
+        self.prepare_initial_title(&message);
         if !self.deliver_message(message, "prompt") {
             return;
         }
@@ -2567,6 +2572,7 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
+                self.prepare_file_block_capture(ctx);
                 let capture_owner = self.review_comment_owner();
                 context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
@@ -2620,15 +2626,7 @@ impl eframe::App for Pui {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);
         }
-        if !self.settings_open
-            && !self.kanban.open
-            && !self.automation.open
-            && !theater
-            && !confirming
-            && !self.section_view.confirming()
-            && !self.search_open
-            && self.state.dialogs.is_empty()
-        {
+        if self.web_preview_allowed(theater, confirming) {
             self.files.show_web(frame, ctx);
         } else {
             self.files.hide_web();

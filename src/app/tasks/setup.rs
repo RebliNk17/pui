@@ -187,6 +187,23 @@ fn npm_suggestion(root: &Path) -> Result<Option<String>, String> {
 /// Read-only off-thread plan generation. Merely viewing this never starts Pi.
 pub(super) fn plan(task: &Task) -> Result<Plan, String> {
     let binding = binding(task)?;
+    if let Some(receipt) = &task.profile {
+        let current = domain::profile::load(&binding.workspace)?
+            .ok_or("Reviewed execution profile disappeared.")?;
+        if current.digest != receipt.digest {
+            return Err("Execution profile changed; setup was not authorized.".into());
+        }
+        if !receipt.profile.setup.is_empty() {
+            return Ok(Plan {
+                binding,
+                commands: receipt.profile.setup.clone(),
+                explanation: format!(
+                    "Repository profile {} · SHA-256 {}. These exact setup commands are suggestions, not authority. Review network, lifecycle scripts and shared-cache effects before separate confirmation.",
+                    receipt.profile.name, receipt.digest
+                ),
+            });
+        }
+    }
     let (commands, explanation) = match npm_suggestion(&binding.workspace) {
         Ok(Some(command)) => (vec![command], "Supported npm package-lock v2/v3 root declarations match package.json. Proposed frozen install: npm ci --ignore-scripts. This can use the network and shared npm cache and replaces node_modules. Lifecycle scripts are disabled; packages needing generated/native artifacts may remain unusable. Review/edit to npm ci only if you explicitly authorize lifecycle scripts. Lockfile consistency and dependency usability are not established until execution/checks.".to_owned()),
         Ok(None) => (vec![], "No supported unambiguous npm frozen-lockfile plan was found. Requirements remain unknown. Supply explicit project-specific commands yourself, or cancel; no install command is inferred.".to_owned()),

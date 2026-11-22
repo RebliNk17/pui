@@ -51,24 +51,14 @@ impl Changes {
                 && !egui::Popup::is_any_open(ui.ctx())
                 && ui.memory(|m| m.top_modal_layer().is_none());
             let (label, fg, bg, border) = match action {
-                Action::Stage => (
-                    "+ Stage",
-                    colors.muted,
-                    colors.surface,
-                    colors.border,
-                ),
+                Action::Stage => ("+ Stage", colors.muted, colors.surface, colors.border),
                 Action::Unstage => (
                     "✓ Staged",
                     colors.green,
                     colors.green.gamma_multiply(0.10),
                     colors.green.gamma_multiply(0.45),
                 ),
-                Action::Discard => (
-                    "Discard",
-                    colors.muted,
-                    colors.surface,
-                    colors.border,
-                ),
+                Action::Discard => ("Discard", colors.muted, colors.surface, colors.border),
             };
             let response = ui
                 .push_id(
@@ -81,15 +71,12 @@ impl Changes {
                         action.label(),
                     ),
                     |ui| {
-                        let btn = egui::Button::new(
-                            RichText::new(label).size(10.5).color(fg),
-                        )
-                        .fill(bg)
-                        .stroke(Stroke::new(1.0, border))
-                        .corner_radius(5)
-                        .min_size(Vec2::new(0.0, 22.0));
-                        ui.add_enabled(enabled, btn)
-                            .on_hover_text(action.label())
+                        let btn = egui::Button::new(RichText::new(label).size(10.5).color(fg))
+                            .fill(bg)
+                            .stroke(Stroke::new(1.0, border))
+                            .corner_radius(5)
+                            .min_size(Vec2::new(0.0, 22.0));
+                        ui.add_enabled(enabled, btn).on_hover_text(action.label())
                     },
                 )
                 .inner;
@@ -115,7 +102,7 @@ impl Changes {
         file: &workspace::FileChange,
         loading: bool,
     ) {
-        self.conflict_row(ui, workspace, file);
+        self.conflict_row(ui, workspace, file, loading);
         ui.horizontal_wrapped(|ui| {
             ui.label(theme::small(ui, format!("Index/worktree: {}", file.status)));
             for action in [Action::Stage, Action::Unstage, Action::Discard] {

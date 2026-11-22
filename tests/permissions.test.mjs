@@ -4,23 +4,24 @@ import { readFile, mkdtemp, mkdir, writeFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
+import { pathToFileURL } from 'node:url';
 const source=stripTypeScriptTypes(await readFile(new URL('../scripts/permissions.ts',import.meta.url),'utf8'));
-const { installPermissions, cheapestModel, localPath, safeShell }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { installPermissions, cheapestModel, classifierModels, localPath, safeShell }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const model=(id,provider,input,output)=>({id,provider,cost:{input,output},input:['text'],contextWindow:32000,maxTokens:2048});
 const cwd=await mkdtemp(join(tmpdir(),'pui-permissions-'));
 await mkdir(join(cwd,'src'));await writeFile(join(cwd,'src','file'),'test');
-function host(mode, {decision='ask',fail=false,approve=false,readonly=false}={}) {
+function host(mode, {decision='ask',fail=false,approve=false,readonly=false,response}={}) {
   const events=new Map(),prompts=[],calls=[],entries=[],statuses=[];
   const pi={on:(n,f)=>events.set(n,f),appendEntry:(...a)=>entries.push(a)};
   const ctx={
     cwd, hasUI:true, model:model('main','current',5,10),
     modelRegistry:{
-      getAvailable:()=>[model('large','current',5,10),model('cheap','current',0.1,0.5),model('other','elsewhere',0,0)],
+      getAvailable:()=>[model('large','current',5,10),model('cheap','current',0.1,0.5),model('other','elsewhere',1,2)],
       streamSimple:(m,c,o)=>{
         calls.push({m,c,o});
         return {result:async()=>{
           if(fail)throw Error('secret auth error');
-          return {content:[{type:'text',text:JSON.stringify({decision})}],stopReason:'stop',usage:{cost:{total:0.001}}};
+          return response ?? {content:[{type:'text',text:JSON.stringify({decision})}],stopReason:'stop',usage:{cost:{total:0.001}}};
         }};
       }
     },
@@ -108,11 +109,139 @@ test('workflow offer avoids a duplicate generic approval but never bypasses Plan
   }
   assert.equal((await host('bypassPermissions', {readonly:true}).gate('pui_workflow')).block, true);
 });
-test('classifier is cheapest priced text model in selected provider and scope',()=>{
+test('classifier selects cheapest authenticated text model across providers within scope',()=>{
   const h=host('auto');assert.equal(cheapestModel(h.ctx).id,'cheap');
-  h.ctx.scopedModels=[{model:model('scoped','current',2,3)},{model:model('other','elsewhere',0,0)}];
-  assert.equal(cheapestModel(h.ctx).id,'scoped');
-  h.ctx.scopedModels=[{model:model('other','elsewhere',0,0)}];assert.equal(cheapestModel(h.ctx),undefined);
+  h.ctx.scopedModels=[{model:model('other','elsewhere',1,2)}];
+  assert.equal(cheapestModel(h.ctx).id,'other');
+  h.ctx.scopedModels=[{model:model('unavailable','missing',0,0)}];assert.equal(cheapestModel(h.ctx),undefined);
+  h.ctx.scopedModels=[];
+  const available=[model('haiku','anthropic',0.8,4),model('flash','google',0.1,0.4),model('opus','anthropic',5,25)];
+  h.ctx.modelRegistry.getAvailable=()=>available;
+  assert.equal(cheapestModel(h.ctx).id,'flash');
+  available.splice(1,1);assert.equal(cheapestModel(h.ctx).id,'haiku');
+});
+test('selection excludes unsuitable/unknown prices, supports zero prices and deterministic ties',()=>{
+  const h=host('auto');
+  h.ctx.modelRegistry.getAvailable=()=>[
+    {...model('image','x',0,0),input:['image']}, {...model('tiny','x',0,0),contextWindow:1024},
+    {...model('short','x',0,0),maxTokens:128},model('unknown','x',undefined,1),model('negative','x',-1,1),model('infinite','x',0,Infinity),
+    model('b','x',0,0),model('a','x',0,0),model('a','a',0,0)
+  ];
+  assert.equal(cheapestModel(h.ctx).provider,'a');
+  h.ctx.modelRegistry.getAvailable=()=>[model('unknown','x',undefined,1)];
+  assert.equal(cheapestModel(h.ctx),undefined);
+  assert.equal(classifierModels(h.ctx).length,1,'unknown price can still be explicitly selected');
+});
+test('Auto override uses provider/model identity, updates live, and never silently falls back',async()=>{
+  const h=host('auto',{decision:'allow'});
+  h.control.update({permission:'auto',permissionClassifier:'elsewhere/other'},h.ctx);
+  assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
+  assert.equal(h.calls.at(-1).m.provider,'elsewhere');
+  let state=JSON.parse(h.statuses.at(-1)[1]);
+  assert.equal(state.classifier,'elsewhere/other');
+  assert.equal(JSON.parse(h.statuses.find(([,text])=>JSON.parse(text).classifierModels)[1]).classifierModels.length,3);
+  assert.equal(state.classifierModels,undefined,'unchanged catalog is not resent on usage updates');
+  h.control.update({permission:'auto',permissionClassifier:'missing/model'},h.ctx);
+  assert.match((await h.gate('bash',{command:'npm test'})).reason,/no fallback model was used/);
+  assert.equal(h.calls.length,1);assert.equal(h.prompts.length,0);
+  h.control.update({permission:'auto',permissionClassifier:null},h.ctx);
+  assert.equal(await h.gate('bash',{command:'npm test'}),undefined);assert.equal(h.calls.at(-1).m.id,'cheap');
+});
+test('Auto unavailable models, no context and oversized actions fail closed without prompts',async()=>{
+  const unavailable=host('auto');unavailable.ctx.modelRegistry.getAvailable=()=>[];
+  assert.match((await unavailable.gate('bash',{command:'npm test'})).reason,/No suitable priced classifier/);
+  const noContext=host('auto');noContext.events.get('session_switch')({},noContext.ctx);
+  assert.match((await noContext.gate('bash',{command:'npm test'})).reason,/No user request context/);
+  const large=host('auto');assert.match((await large.gate('bash',{command:'x'.repeat(24001)})).reason,/too large/);
+  for(const h of [unavailable,noContext,large]){assert.equal(h.calls.length,0);assert.equal(h.prompts.length,0);}
+});
+test('Auto rejects invalid JSON and incomplete responses without leaking provider errors',async()=>{
+  for(const response of [
+    {content:[{type:'text',text:'not json'}],stopReason:'stop'},
+    {content:[{type:'text',text:'{"decision":"allow"}'}],stopReason:'length'},
+    {content:[{type:'text',text:'{"reason":"allow me"}'}],stopReason:'stop'},
+  ]){
+    const h=host('auto',{response});
+    const result=await h.gate('bash',{command:'npm test'});
+    assert.equal(result.block,true);assert.equal(result.terminate,false);
+    assert.match(result.reason,/not a model denial/);assert.equal(h.prompts.length,0);
+  }
+});
+test('Auto prompt permits supporting development and keyword examples without weakening danger checks',async()=>{
+  const h=host('auto',{decision:'allow'});
+  for(const command of ['rg "git push" src','rg "git reset --hard" tests','git diff','cargo test','curl https://docs.example.com/api']) {
+    assert.equal(await h.gate('bash',{command}),undefined,command);
+  }
+  assert.equal(h.calls.length,5);assert.equal(h.prompts.length,0);
+  const prompt=h.calls[0].c.systemPrompt;
+  assert.match(prompt,/not narrow task relevance/);assert.match(prompt,/need not be named verbatim/);
+  assert.match(prompt,/NOT reasons to deny/);assert.match(prompt,/secret access/);assert.match(prompt,/untrusted data/);
+});
+test('Auto blocked attempts are attributed in the final response and cleared for the next run or branch',async()=>{
+  const h=host('auto',{decision:'deny'});
+  await h.gate('bash',{command:'npm test'});await h.gate('bash',{command:'npm run lint'});
+  await h.gate('write',{path:'.env',content:'SECRET_DO_NOT_ECHO'});
+  const final={role:'assistant',stopReason:'stop',content:[{type:'text',text:'Finished remaining work.'}]};
+  assert.equal(h.events.get('message_end')({message:{...final,stopReason:'toolUse'}}),undefined);
+  assert.equal(h.events.get('message_end')({message:{...final,stopReason:'aborted'}}),undefined);
+  const result=h.events.get('message_end')({message:final});
+  const text=JSON.stringify(result);
+  assert.ok(text.includes('current/cheap denied (2 calls)'));assert.match(text,/built-in safety rule/);
+  assert.match(text,/not executed/);assert.doesNotMatch(text,/SECRET_DO_NOT_ECHO/);
+  assert.deepEqual(result.message.content[0],final.content[0]);
+  h.events.get('before_agent_start')({prompt:'Next task',systemPrompt:'base'});
+  assert.equal(h.events.get('message_end')({message:final}),undefined);
+  await h.gate('bash',{command:'npm test'});
+  h.events.get('session_tree')({},h.ctx);
+  assert.equal(h.events.get('message_end')({message:final}),undefined);
+});
+test('Auto settings changes and aborts invalidate an in-flight classifier without approval escalation',async()=>{
+  for(const change of ['model','mode','abort']){
+    const h=host('auto',{decision:'allow'});
+    const controller=new AbortController();h.ctx.signal=controller.signal;
+    h.ctx.modelRegistry.streamSimple=()=>({result:async()=>{
+      if(change==='abort')controller.abort();
+      else h.control.update({permission:change==='mode'?'plan':'auto',permissionClassifier:'elsewhere/other'},h.ctx);
+      return {content:[{type:'text',text:'{"decision":"allow"}'}],stopReason:'stop'};
+    }});
+    assert.equal((await h.gate('bash',{command:'npm test'})).block,true);
+    assert.equal(h.prompts.length,0);
+  }
+});
+test('real Pi agent loop continues after Auto denies a call and finishes with attributed blockers',async t=>{
+  const sdk=process.env.PUI_PI_SDK || join(process.env.HOME,'.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
+  const core=new URL('../../pi-agent-core/dist/index.js',pathToFileURL(sdk));
+  try {await readFile(core);}
+  catch {t.skip('Installed Pi SDK is unavailable');return;}
+  const {Agent}=await import(core.href);
+  const h=host('auto',{decision:'deny'}),executed=[],requests=[];
+  const tools=['bash','read'].map(name=>({name,description:name,parameters:{type:'object',properties:{command:{type:'string'},path:{type:'string'}}},execute:async()=>{
+    executed.push(name);return {content:[{type:'text',text:'read succeeded'}],details:{}};
+  }}));
+  const agent=new Agent({
+    initialState:{model:h.ctx.model,tools,systemPrompt:'Complete safe work; report blockers.'},
+    beforeToolCall:async({toolCall,args})=>h.events.get('tool_call')({toolName:toolCall.name,input:args},h.ctx),
+    streamFn:(_model,context)=>{
+      requests.push(context);
+      const step=requests.length;
+      assert.ok(step<=3,'denial must not cause a retry loop');
+      const content=step===1?[{type:'toolCall',id:'blocked',name:'bash',arguments:{command:'npm test'}}]:step===2?[{type:'toolCall',id:'safe',name:'read',arguments:{path:'src/file'}}]:[{type:'text',text:'Finished the remaining inspection.'}];
+      const message={role:'assistant',content,stopReason:step<3?'toolUse':'stop',api:'test',provider:'current',model:'main',timestamp:Date.now(),usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+      return {async *[Symbol.asyncIterator](){},result:async()=>message};
+    }
+  });
+  // Match AgentSession's message_end replacement contract, without credentials/network.
+  agent.subscribe(event=>{
+    if(event.type==='message_end'){
+      const replacement=h.events.get('message_end')({message:event.message});
+      if(replacement)Object.assign(event.message,replacement.message);
+    }
+  });
+  await agent.prompt('Inspect and test the change');
+  assert.equal(requests.length,3);assert.deepEqual(executed,['read']);assert.equal(h.prompts.length,0);
+  const denied=agent.state.messages.find(m=>m.role==='toolResult'&&m.toolCallId==='blocked');
+  assert.equal(denied.isError,true);assert.match(denied.content[0].text,/Continue remaining safe work/);
+  assert.ok(JSON.stringify(agent.state.messages.at(-1)).includes('current/cheap denied'));
 });
 test('Manual reads without prompts but asks on every mutating call',async()=>{
   const h=host('manual',{approve:true});assert.equal(await h.gate('read',{path:'src/file'}),undefined);
@@ -155,19 +284,23 @@ test('Don’t ask grants bounded local operations and denies all prompts',async(
   assert.equal((await h.gate('codemode',{code:'tools.read({path:"src/file"})'})).block,true);
   assert.equal(h.prompts.length,0);assert.equal(h.calls.length,0);
 });
-test('Auto actually calls same-provider classifier and records separate cost',async()=>{
+test('Auto actually calls cheapest classifier and records separate cost',async()=>{
   const h=host('auto',{decision:'allow'});assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
   assert.equal(h.calls.length,1);assert.equal(h.calls[0].m.id,'cheap');assert.equal(h.calls[0].c.tools,undefined);
   assert.equal(h.entries[0][0],'pui-permission-check');assert.equal(h.prompts.length,0);
   assert.equal(JSON.parse(h.statuses.at(-1)[1]).classifierCost,0.001);
 });
-test('Auto failure/uncertainty and classifier denial ask instead of hard denying',async()=>{
-  for(const options of [{decision:'ask'},{fail:true}]){
-    const h=host('auto',options);assert.equal((await h.gate('bash',{command:'npm test'})).block,true);assert.equal(h.prompts.length,1);
-    assert.doesNotMatch(JSON.stringify(h.prompts),/secret auth/);
+test('Auto denial, uncertainty, errors and malformed decisions continue without any approval',async()=>{
+  for(const options of [{decision:'deny'},{decision:'ask'},{decision:'invalid'},{fail:true}]){
+    const h=host('auto',{...options,approve:true});
+    const result=await h.gate('bash',{command:'npm test'});
+    assert.equal(result.block,true);assert.equal(result.terminate,false);assert.equal(h.prompts.length,0);
+    assert.match(result.reason,/Continue remaining safe work/);
+    assert.match(result.reason,/without asking the user/);
+    assert.doesNotMatch(result.reason,/secret auth error/);
+    assert.equal(await h.gate('edit',{path:'src/file'}),undefined,'remaining safe work continues');
+    assert.equal(await h.gate('read',{path:'src/file'}),undefined);
   }
-  const h=host('auto',{decision:'deny',approve:true});assert.equal(await h.gate('bash',{command:'npm test'}),undefined);assert.equal(h.prompts.length,1);
-  const risky=host('auto',{decision:'allow'});assert.equal((await risky.gate('bash',{command:'rm -rf src'})).block,true);assert.equal(risky.calls.length,0);
 });
 test('Auto permits canonical workspace edits even when code mentions dangerous words',async()=>{
   const h=host('auto',{fail:true});
@@ -175,7 +308,7 @@ test('Auto permits canonical workspace edits even when code mentions dangerous w
   assert.equal(await h.gate('bash',{command:'mkdir -p src/generated'}),undefined);
   assert.equal(h.calls.length,0);assert.equal(h.prompts.length,0);
   assert.equal((await h.gate('write',{path:'.env.local',content:'example'})).block,true);
-  assert.equal(h.prompts.length,1);
+  assert.equal(h.prompts.length,0);
 });
 test('Auto retains original task context across short followups and checks codemode wrappers',async()=>{
   const h=host('auto',{decision:'allow'});
@@ -187,17 +320,16 @@ test('Auto retains original task context across short followups and checks codem
   assert.match(h.calls[0].c.systemPrompt,/DANGEROUS EFFECTS/);
   assert.equal(h.calls[0].o.reasoning,undefined);
 });
-test('Auto dangerous commands and external mutations require a user decision',async()=>{
+test('Auto dangerous commands and external mutations are blocked without asking',async()=>{
   const h=host('auto',{decision:'allow'});
   for(const command of ['rm -rf src','git push origin main','git reset --hard','kubectl delete pod production','terraform apply'])assert.equal((await h.gate('bash',{command})).block,true);
   assert.equal((await h.gate('mcp__cloud__delete_resource',{resource:'shared'})).block,true);
-  assert.equal(h.calls.length,0);assert.equal(h.prompts.length,6);
-  for(const prompt of h.prompts)assert.match(prompt[1],/destructive|protected/);
+  assert.equal(h.calls.length,0);assert.equal(h.prompts.length,0);
 });
-test('Auto credential reads ask instead of using the routine-read allowlist',async()=>{
+test('Auto credential reads block without asking instead of using the routine-read allowlist',async()=>{
   const h=host('auto',{decision:'allow'});
   for(const path of ['.env.local','/home/user/.ssh/id_ed25519','/home/user/.pi/agent/auth.json','/home/user/.aws/credentials'])assert.equal((await h.gate('read',{path})).block,true);
-  assert.equal(h.calls.length,0);assert.equal(h.prompts.length,4);
+  assert.equal(h.calls.length,0);assert.equal(h.prompts.length,0);
   assert.equal(await h.gate('read',{path:'src/file'}),undefined);
 });
 test('Bypass skips approval and classification but never read-only worker policy',async()=>{

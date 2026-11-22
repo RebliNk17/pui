@@ -195,6 +195,16 @@ impl Pui {
         }
     }
     pub(super) fn restore_agents(&mut self) {
+        // Restoration is bounded independently of retention. Reserve every saved
+        // numeric identity so a new worker cannot replace an unloaded record.
+        self.agents.next = self.agents.next.max(
+            self.prefs
+                .agent_tree
+                .iter()
+                .filter_map(|record| record.id.strip_prefix("agent-")?.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0),
+        );
         for record in self.prefs.agent_tree.clone().into_iter().take(128) {
             if record
                 .id
@@ -219,13 +229,14 @@ impl Pui {
                 .then(|| worker_launch(record.access == "read-only", &record.name, None, None));
             let state = State {
                 session_file: Some(record.path.display().to_string()),
-                // Root names may have come from a compacted context. Rediscover
-                // their original title instead of treating that label as a rename.
-                session_name: if record.parent.is_some() {
-                    record.name.clone()
-                } else {
-                    String::new()
-                },
+                // Existing names are assigned, even when their provenance is
+                // unknown. Never migrate them from a compacted projection.
+                session_name: record.name.clone(),
+                title: (!protocol::title_placeholder(&record.name)).then(|| protocol::ChatTitle {
+                    session_file: record.path.display().to_string(),
+                    title: record.name.clone(),
+                    initial_request: None,
+                }),
                 ..Default::default()
             };
             self.agents.parked.insert(
@@ -337,22 +348,29 @@ impl Pui {
         }
     }
     pub(super) fn agent_records(&self) -> Vec<AgentRecord> {
-        self.agents
-            .nodes
-            .values()
-            .filter_map(|n| {
-                n.path.clone().map(|path| AgentRecord {
-                    id: n.id.clone(),
-                    parent: n.parent.clone(),
-                    name: n.name.clone(),
-                    cwd: n.cwd.clone(),
-                    path,
-                    access: n.access.clone(),
-                    permission: n.permission,
-                    worktree: n.worktree.clone(),
-                })
+        let mut retained = self
+            .prefs
+            .agent_tree
+            .iter()
+            .cloned()
+            .map(|record| (record.id.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let live = self.agents.nodes.values().filter_map(|n| {
+            n.path.clone().map(|path| AgentRecord {
+                id: n.id.clone(),
+                parent: n.parent.clone(),
+                name: n.name.clone(),
+                cwd: n.cwd.clone(),
+                path,
+                access: n.access.clone(),
+                permission: n.permission,
+                worktree: n.worktree.clone(),
             })
-            .collect()
+        });
+        for record in live {
+            retained.insert(record.id.clone(), record);
+        }
+        retained.into_values().collect()
     }
     pub(super) fn take_chat(&mut self) -> Chat {
         Chat {
@@ -874,8 +892,23 @@ impl Pui {
                 {
                     return Err("Dependencies must be existing descendants".into());
                 }
-                if self.agents.nodes.len() >= 128 {
-                    return Err("128 retained agent sessions reached; finish this workflow before creating another".into());
+                // Retained conversations are history, not execution capacity.
+                // Bound only unfinished children; the separate concurrency ceiling
+                // still controls live launches. Nothing is deleted to make room.
+                let unfinished = self
+                    .agents
+                    .nodes
+                    .values()
+                    .filter(|node| {
+                        node.parent.is_some()
+                            && !node.stopped
+                            && node.failure.is_none()
+                            && node.result.is_none()
+                            && !node.settled
+                    })
+                    .count();
+                if unfinished >= 128 {
+                    return Err("128 unfinished workers reached. Wait for completion or explicitly stop unneeded workers; retained history does not count. No chat or worktree was deleted.".into());
                 }
                 let cwd = match request.get("cwd") {
                     None => self.prefs.cwd.clone(),
@@ -1778,6 +1811,65 @@ mod tests {
         assert!(app.agents.parked[&parent].state.busy);
     }
     #[test]
+    fn retained_workers_do_not_consume_unfinished_worker_capacity_or_get_deleted() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let parent = app.agents.active.clone();
+        for _ in 0..130 {
+            let id = spawn(&mut app, &parent);
+            let node = app.agents.nodes.get_mut(&id).unwrap();
+            node.settled = true;
+            node.result = Some("Retained result".into());
+            node.status = "Idle".into();
+        }
+        assert_eq!(app.agents.nodes.len(), 131);
+        for _ in 0..128 {
+            spawn(&mut app, &parent);
+        }
+        let count = app.agents.nodes.len();
+        let request =
+            json!({"action":"spawn","name":"reader","task":"Inspect source","access":"read-only"});
+        assert!(
+            app.agent_control(&parent, &request)
+                .unwrap_err()
+                .contains("unfinished workers")
+        );
+        assert_eq!(app.agents.nodes.len(), count);
+        assert_eq!(
+            app.agents
+                .nodes
+                .values()
+                .filter(|node| node.result.is_some())
+                .count(),
+            130
+        );
+    }
+    #[test]
+    fn bounded_tree_restoration_preserves_unloaded_records_and_reserves_their_ids() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        app.prefs.agent_tree = (1..=140)
+            .map(|n| AgentRecord {
+                id: format!("agent-{n}"),
+                parent: None,
+                name: format!("Retained {n}"),
+                cwd: app.prefs.cwd.clone(),
+                path: path.clone(),
+                access: "workspace".into(),
+                permission: None,
+                worktree: None,
+            })
+            .collect();
+        app.agents = Default::default();
+        app.restore_agents();
+        assert_eq!(app.agents.nodes.len(), 128);
+        assert_eq!(app.agent_records().len(), 140);
+        assert!(app.agents.next >= 140);
+        let records = app.agent_records();
+        assert!(records.iter().any(|record| record.id == "agent-140"));
+    }
+    #[test]
     fn explicit_worker_workspace_preserves_parent_ownership_and_validates_paths() {
         let ctx = egui::Context::default();
         let mut app = app(&ctx);
@@ -1840,7 +1932,11 @@ mod tests {
         app.start_waiting_agents();
         let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
         app.agents.nodes.get_mut(&parent).unwrap().path = Some(path.clone());
-        app.agents.nodes.get_mut(&child).unwrap().path = Some(path);
+        app.agents.nodes.get_mut(&child).unwrap().path = Some(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/Cargo.lock"
+        )));
+        app.agents.nodes.get_mut(&parent).unwrap().name = "Preserved root name".into();
         let records = app.agent_records();
         app.agents = Default::default();
         app.prefs.agent_tree =
@@ -1854,7 +1950,10 @@ mod tests {
         assert!(app.agents.parked[&child].client.is_none());
         assert!(app.agents.nodes[&child].launch.as_ref().unwrap().readonly);
         assert!(app.agents.nodes[&child].stopped);
-        assert!(app.agents.parked[&parent].state.session_name.is_empty());
+        assert_eq!(
+            app.agents.parked[&parent].state.session_name,
+            app.agents.nodes[&parent].name
+        );
         let session = Session {
             path: app.agents.nodes[&parent].path.clone().unwrap(),
             cwd: app.prefs.cwd.clone(),
@@ -1863,10 +1962,7 @@ mod tests {
             created: None,
             modified: std::time::SystemTime::now(),
         };
-        assert_eq!(
-            app.session_title(&session),
-            "Original prompt before compaction"
-        );
+        assert_eq!(app.session_title(&session), "Preserved root name");
         assert_eq!(
             app.agents.parked[&child].state.session_name,
             "Scoped reader"

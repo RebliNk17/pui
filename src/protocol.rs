@@ -8,8 +8,10 @@ pub use context::{ContextBreakdown, ContextDetail, ContextItem};
 #[cfg(test)]
 mod retry_tests;
 mod stream;
+mod titles;
 mod usage;
 pub use answers::QuestionAnswers;
+pub use titles::{ChatTitle, placeholder as title_placeholder};
 pub use usage::PromptUsage;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -179,6 +181,12 @@ pub struct State {
     pub levels: Vec<String>,
     pub session_file: Option<String>,
     pub session_name: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<ChatTitle>,
+    #[serde(skip)]
+    pub title_request: Option<String>,
     pub busy: bool,
     pub(crate) run_observed: bool,
     /// Live provider retry state only; raw error text stays out of status labels.
@@ -188,6 +196,7 @@ pub struct State {
     pub(crate) stream: Option<stream::Stream>,
     pub compacting: bool,
     pub permission_classifier: Option<String>,
+    pub permission_classifier_models: Vec<Model>,
     pub permission_mode: Option<String>,
     pub permission_cost: f64,
     pub compaction_settings_error: Option<String>,
@@ -326,6 +335,12 @@ impl State {
     }
 
     pub fn chat_title(&self) -> Option<String> {
+        if let Some(title) = self.assigned_title() {
+            return Some(title.into());
+        }
+        if self.title_request.is_some() {
+            return None;
+        }
         if !self.session_name.trim().is_empty()
             && !matches!(
                 self.session_name.as_str(),
@@ -334,11 +349,15 @@ impl State {
         {
             return Some(self.session_name.clone());
         }
+        // A projected history after compaction is not the initial request.
+        if self.session_file.is_some() || self.messages.iter().any(|m| m.role == "compaction") {
+            return None;
+        }
         self.messages
             .iter()
-            .filter(|message| message.role == "user")
-            .find_map(|message| {
-                crate::sessions::prompt_title(&message.text)
+            .find(|message| message.role == "user")
+            .and_then(|message| {
+                crate::sessions::initial_title(crate::transcript::user_display_text(message))
                     .or_else(|| (!message.images.is_empty()).then(|| "Image attachment".into()))
             })
     }
@@ -425,11 +444,19 @@ impl State {
                         self.permission_mode = mode;
                         self.permission_classifier =
                             value["classifier"].as_str().map(str::to_owned);
+                        if let Some(models) = value["classifierModels"].as_array() {
+                            self.permission_classifier_models =
+                                models.iter().map(Model::from_json).collect();
+                        }
                         self.permission_cost = value["classifierCost"].as_f64().unwrap_or(0.0);
                         return;
                     }
                     "pui-context" => {
                         self.apply_context(&value);
+                        return;
+                    }
+                    "pui-initial-title" => {
+                        self.title_status(&value);
                         return;
                     }
                     "pui-compaction" => {
@@ -471,11 +498,13 @@ impl State {
                         if self.session_file.is_some() && self.session_file != session_file {
                             self.context_breakdown = None;
                             self.retrying = false;
+                            self.title_request = None;
                         }
                         if !self.busy {
                             self.retrying = false;
                         }
                         self.session_file = session_file;
+                        self.session_id = data["sessionId"].as_str().map(str::to_owned);
                     }
                     "get_entries" => {
                         self.stream = None;
@@ -922,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_title_uses_first_prompt_until_pi_names_the_session() {
+    fn chat_title_preview_uses_first_request_and_raw_metadata_until_assignment() {
         let mut state = State::default();
         assert_eq!(state.chat_title(), None);
         state.apply(json!({"type":"message_start","message":{"role":"user","content":"  Fix the\n sidebar name  "}}));
@@ -946,7 +975,7 @@ mod tests {
         });
         assert_eq!(state.chat_title(), None);
         state.messages[0].text = "🦀".repeat(120);
-        assert_eq!(state.chat_title().unwrap().chars().count(), 100);
+        assert_eq!(state.chat_title().unwrap().chars().count(), 48);
     }
     #[test]
     fn mcp_notifications_are_deduplicated_diagnostics_not_composer_notices() {
@@ -1026,6 +1055,33 @@ mod tests {
         assert_eq!(state.model, "gemini-4-argon");
         assert_eq!(state.model_name, "Gemini 4 Argon");
         assert_eq!(state.provider, "local");
+    }
+    #[test]
+    fn auto_classifier_catalog_is_distinct_from_the_conversation_model() {
+        let mut state = State {
+            model: "opus".into(),
+            provider: "anthropic".into(),
+            ..Default::default()
+        };
+        let data = json!({"mode":"auto","classifier":"google/flash","classifierCost":0.002,"classifierModels":[{"id":"flash","name":"Flash","provider":"google","contextWindow":32000,"cost":{"input":0.1,"output":0.4}}]});
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-permissions","statusText":data.to_string()}));
+        assert_eq!(state.permission_classifier.as_deref(), Some("google/flash"));
+        assert_eq!(state.permission_classifier_models.len(), 1);
+        assert_eq!(state.permission_classifier_models[0].provider, "google");
+        assert_eq!(state.permission_classifier_models[0].input_cost, 0.1);
+        assert_eq!(state.permission_cost, 0.002);
+        assert_eq!(state.model, "opus");
+        assert_eq!(state.provider, "anthropic");
+        let restored: State =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(restored.permission_classifier_models.len(), 1);
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-permissions","statusText":json!({"mode":"auto","classifier":"google/flash","classifierCost":0.003}).to_string()}));
+        assert_eq!(
+            state.permission_classifier_models.len(),
+            1,
+            "usage-only updates preserve the catalog"
+        );
+        assert_eq!(state.permission_cost, 0.003);
     }
     #[test]
     fn model_metadata_comes_from_pi() {

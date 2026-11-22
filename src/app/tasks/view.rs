@@ -8,6 +8,7 @@ impl Pui {
                 .show_separator_line(false)
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 10)))
                 .show_inside(ui, |ui| self.task_header(ui));
+            if let Some(warning) = &self.tasks.history_warning { ui.add(egui::Label::new(warning).wrap()); }
             let Some(task) = self.tasks.current().cloned() else { return; };
             let linked = self.task_in_chat(&task);
             if linked {
