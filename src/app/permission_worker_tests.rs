@@ -124,7 +124,9 @@ fn worker_modes_are_independent_and_survive_restore_and_reconnect() {
     app.view_agent(&sibling);
     app.choose_permission(PermissionMode::Manual);
     assert!(app.active_permission() == PermissionMode::Manual);
-    assert!(app.prefs.settings.permission == PermissionMode::Bypass);
+    // The last selection becomes the default for new chats; chats that were
+    // inheriting the previous default keep it explicitly.
+    assert!(app.prefs.settings.permission == PermissionMode::Manual);
     assert!(app.agent_settings(&child).permission == PermissionMode::Plan);
     assert!(app.agent_settings(&parent).permission == PermissionMode::Bypass);
     let records = app.agent_records();

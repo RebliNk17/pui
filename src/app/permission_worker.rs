@@ -59,6 +59,33 @@ impl Pui {
             self.prefs.settings.permission = mode;
         }
     }
+    /// New chats start in the most recently selected mode (Auto on first launch),
+    /// like the model. Chats still inheriting the old default keep it explicitly.
+    /// A user's explicit mode choice: applies to this chat and becomes the
+    /// default for new chats. Host actions (e.g. plan approval) use
+    /// `set_permission` and never change the default.
+    pub(super) fn select_permission(&mut self, mode: PermissionMode) {
+        let writable_local = self.agents.nodes.contains_key(&self.agents.active)
+            && !self.readonly_worker()
+            && !self.is_mirror();
+        self.set_permission(mode);
+        if writable_local && self.active_permission() == mode {
+            self.remember_default_permission(mode);
+            self.prefs.agent_tree = self.agent_records();
+        }
+    }
+    fn remember_default_permission(&mut self, mode: PermissionMode) {
+        let previous = self.prefs.settings.permission;
+        if previous == mode {
+            return;
+        }
+        for node in self.agents.nodes.values_mut() {
+            if node.permission.is_none() && node.access != "read-only" {
+                node.permission = Some(previous);
+            }
+        }
+        self.prefs.settings.permission = mode;
+    }
     fn worker_upgrade_blocked(&self) -> Option<&'static str> {
         if self.agents.exiting {
             return Some("Pui is exiting. Worker access cannot be changed now.");

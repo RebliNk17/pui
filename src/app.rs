@@ -89,6 +89,8 @@ struct Preferences {
     agent_tree: Vec<agents::AgentRecord>,
     hide_sidebar: bool,
     hide_inspector: bool,
+    /// Set by "Don't ask again" on the Bypass confirmation; reset in Settings → Permissions.
+    skip_bypass_confirmation: bool,
     cards: CardLayout,
     chats: std::collections::BTreeMap<PathBuf, sidebar::ChatPrefs>,
     projects: Vec<PathBuf>,

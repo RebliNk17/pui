@@ -26,10 +26,13 @@ impl Pui {
         self.bypass_pending = None;
         if self.readonly_worker() && mode != PermissionMode::Plan {
             self.worker_upgrade_pending = Some((self.permission_scope(), mode));
-        } else if mode == PermissionMode::Bypass && self.active_permission() != mode {
+        } else if mode == PermissionMode::Bypass
+            && self.active_permission() != mode
+            && !self.prefs.skip_bypass_confirmation
+        {
             self.bypass_pending = Some(self.permission_scope());
         } else {
-            self.set_permission(mode);
+            self.select_permission(mode);
         }
     }
     pub(super) fn propagate_settings(&mut self, before: &Settings) {
@@ -148,14 +151,40 @@ impl Pui {
             ui.add_space(14.0);
             confirmations::note(ui, "This chat can run commands, change or delete files, access credentials and use the network without asking. Other workers keep their own modes. This does not override OS permissions.");
             ui.add_space(18.0);
+            let mut remember = false;
             let choice = if prompt_ui::keyboard_available(ui) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
                 Some(confirmations::Choice::Cancel)
             } else {
-                confirmations::actions(ui, "Cancel", "Enable bypass", true, true, first)
+                // One footer, visual right-to-left order; Cancel keeps initial focus.
+                prompt_ui::footer(ui, |ui| {
+                    let mut choice = None;
+                    if prompt_ui::button(ui, "Enable bypass", prompt_ui::Button::Danger, true).clicked() {
+                        choice = Some(confirmations::Choice::Confirm);
+                    }
+                    let cancel = prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true);
+                    if first {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        choice = Some(confirmations::Choice::Cancel);
+                    }
+                    if prompt_ui::button(ui, "Don't ask again", prompt_ui::Button::Secondary, true)
+                        .on_hover_text("Enable bypass now and skip this confirmation in the future. Reset in Settings → Permissions.")
+                        .clicked()
+                    {
+                        remember = true;
+                        choice = Some(confirmations::Choice::Confirm);
+                    }
+                    choice
+                })
+                .inner
             };
+            if remember {
+                self.prefs.skip_bypass_confirmation = true;
+            }
             match choice {
                 Some(confirmations::Choice::Confirm) => {
-                    self.set_permission(PermissionMode::Bypass);
+                    self.select_permission(PermissionMode::Bypass);
                     self.bypass_pending = None;
                 }
                 Some(confirmations::Choice::Cancel) => self.bypass_pending = None,
@@ -306,5 +335,62 @@ mod tests {
         app.choose_permission(PermissionMode::Plan);
         assert!(app.prefs.settings.permission == PermissionMode::Plan);
         assert_eq!(PermissionMode::Bypass.key(), "bypassPermissions");
+    }
+    #[test]
+    fn dont_ask_again_skips_future_bypass_confirmations_until_reset() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.choose_permission(PermissionMode::Bypass);
+        let mut buttons = Vec::new();
+        let output = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.permission_confirmation(ui));
+        });
+        for shape in output.shapes {
+            texts(&shape.shape, &mut buttons);
+        }
+        let remember = buttons
+            .iter()
+            .find(|(t, _)| t == "Don't ask again")
+            .expect("Don't ask again button")
+            .1;
+        for pressed in [true, false] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::PointerMoved(remember.center()),
+                        egui::Event::PointerButton {
+                            pos: remember.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.permission_confirmation(ui));
+                },
+            );
+        }
+        assert!(app.prefs.skip_bypass_confirmation);
+        assert!(app.prefs.settings.permission == PermissionMode::Bypass);
+        assert!(app.bypass_pending.is_none());
+        // Later switches go straight to Bypass without a confirmation.
+        app.choose_permission(PermissionMode::Auto);
+        app.choose_permission(PermissionMode::Bypass);
+        assert!(app.bypass_pending.is_none());
+        assert!(app.prefs.settings.permission == PermissionMode::Bypass);
+        // Resetting restores the confirmation.
+        app.prefs.skip_bypass_confirmation = false;
+        app.choose_permission(PermissionMode::Auto);
+        app.choose_permission(PermissionMode::Bypass);
+        assert!(app.bypass_pending.is_some());
+        assert!(app.prefs.settings.permission == PermissionMode::Auto);
     }
 }

@@ -172,6 +172,11 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "manual auto accept edits plan dont ask bypass classifier safety approval tools",
         ),
         (
+            "Bypass confirmation",
+            "Permissions",
+            "dont ask again reset remember bypass warning confirmation",
+        ),
+        (
             "Models and thinking levels",
             "Models",
             "reasoning effort pricing context",
@@ -214,6 +219,9 @@ pub(in crate::app) struct View {
     scale: super::scale::Scale,
     pub(in crate::app) resources: resources::Resources,
     pub(in crate::app) providers: super::providers::ProvidersManager,
+    /// The Auto classifier uses the composer's model list, with its own filters.
+    classifier_open: bool,
+    classifier_list: crate::app::model_picker::ListState,
 }
 
 impl View {
@@ -512,6 +520,7 @@ impl Pui {
             && (self.settings_view.page != Page::Resources
                 || !self.settings_view.resources.escape())
             && !self.settings_view.providers.escape()
+            && !std::mem::take(&mut self.settings_view.classifier_open)
         {
             self.settings_open = false;
             self.focus_composer = true;
@@ -1076,78 +1085,20 @@ impl Pui {
             "Tool access",
             "Permission checks include nested codemode calls. They are not an OS sandbox.",
         );
-        ui.label(theme::small(ui, "Changes apply to subsequent tool calls. Commands already executing are not interrupted."));
-        ui.add_space(6.0);
-        card(ui, |ui| {
-            ui.scope(|ui|row(ui,"Permission mode","Only this chat changes. Each subagent keeps its own mode; enabling writes on a read-only worker requires confirmation.",|ui|{
-            egui::ComboBox::from_id_salt("settings-permission-mode").selected_text(self.permission_label()).width(140.0).show_ui(ui,|ui|{
-                for mode in PermissionMode::ALL {if ui.selectable_label(self.active_permission() == mode, if self.readonly_worker() && mode == PermissionMode::Plan { "Read-only" } else { mode.label() }).clicked(){self.choose_permission(mode);}}
-            });
-        }));
-        });
-        self.permission_confirmation(ui);
-        ui.add_space(12.0);
-        note(
-            ui,
-            self.permission_label(),
-            if self.readonly_worker() {
-                "This worker currently has no shell or write tools. Choose a writable mode above to explicitly reconnect in an isolated Git worktree."
-            } else {
-                self.active_permission().description()
-            },
-        );
-        if self.active_permission() == PermissionMode::Auto {
+        ui.label(theme::small(ui, "Choose each chat's agent mode from the composer. New chats start in the mode you selected last (Auto on first launch). Changes apply to subsequent tool calls; commands already executing are not interrupted."));
+        // Always shown: the mode itself is chosen per chat from the composer.
+        {
             section(
                 ui,
                 "Auto classifier",
-                "Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
+                "Used by chats in Auto mode. Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
             );
             card(ui, |ui| {
                 row(
                     ui,
                     "Classifier model",
                     "Automatic uses the lowest input + output price across connected providers within Pi's model scope. Sends the proposed call and recent requests to that provider. Applies to all chats, without changing their conversation models.",
-                    |ui| {
-                        let selected = self
-                            .prefs
-                            .settings
-                            .permission_classifier
-                            .as_deref()
-                            .unwrap_or("Automatic · cheapest available");
-                        let response = egui::ComboBox::from_id_salt("settings-auto-classifier")
-                            .selected_text(selected)
-                            .width(190.0)
-                            .truncate()
-                            .show_ui(ui, |ui| {
-                                let automatic = ui.selectable_value(
-                                    &mut self.prefs.settings.permission_classifier,
-                                    None,
-                                    "Automatic · cheapest available",
-                                );
-                                #[cfg(test)]
-                                ui.ctx().data_mut(|d| {
-                                    d.insert_temp(
-                                        egui::Id::new("auto-classifier-automatic-rect"),
-                                        automatic.rect,
-                                    )
-                                });
-                                let _ = automatic;
-                                for model in &self.state.permission_classifier_models {
-                                    let key = format!("{}/{}", model.provider, model.id);
-                                    ui.selectable_value(
-                                        &mut self.prefs.settings.permission_classifier,
-                                        Some(key),
-                                        format!("{} · {}", model.name, model.provider),
-                                    );
-                                }
-                            })
-                            .response;
-                        #[cfg(test)]
-                        ui.ctx().data_mut(|d| {
-                            d.insert_temp(egui::Id::new("auto-classifier-rect"), response.rect)
-                        });
-                        let _ = response;
-                    },
+                    |ui| self.classifier_picker(ui),
                 );
                 separator(ui);
                 row(
@@ -1180,12 +1131,183 @@ impl Pui {
                 );
             });
         }
+        section(ui, "Confirmations", "");
+        card(ui, |ui| {
+            row(
+                ui,
+                "Bypass confirmation",
+                if self.prefs.skip_bypass_confirmation {
+                    "Skipped: you chose \"Don't ask again\". Reset to confirm before every switch to Bypass."
+                } else {
+                    "Pui asks before switching a chat to Bypass all permissions."
+                },
+                |ui| {
+                    if ui
+                        .add_enabled(
+                            self.prefs.skip_bypass_confirmation,
+                            egui::Button::new("Reset"),
+                        )
+                        .clicked()
+                    {
+                        self.prefs.skip_bypass_confirmation = false;
+                    }
+                },
+            );
+        });
         section(ui, "Safety", "");
         note(
             ui,
             "Trusted extensions",
             "Extensions can run their own code. Bypass skips Pui approvals, not OS permissions or read-only worker restrictions. These are tool-level controls, not a security sandbox.",
         );
+    }
+    /// The composer's searchable model list with a leading Automatic entry.
+    fn classifier_picker(&mut self, ui: &mut egui::Ui) {
+        use crate::app::model_picker::{ModelList, Pick, model_list};
+        const AUTOMATIC: &str = "Automatic · cheapest available";
+        let colors = theme::palette(ui.ctx());
+        let models = &self.state.permission_classifier_models;
+        let label = match &self.prefs.settings.permission_classifier {
+            None => AUTOMATIC.to_owned(),
+            Some(key) => models
+                .iter()
+                .find(|m| format!("{}/{}", m.provider, m.id) == *key)
+                .map(|m| {
+                    format!(
+                        "{} · {}",
+                        if m.name.is_empty() { &m.id } else { &m.name },
+                        crate::accounts::display_provider(&m.provider)
+                    )
+                })
+                .unwrap_or_else(|| key.clone()),
+        };
+        let width = 230.0_f32.min(ui.available_width());
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(width, theme::CONTROL_HEIGHT), Sense::click());
+        let open = self.settings_view.classifier_open;
+        ui.painter().rect(
+            rect,
+            7,
+            if open || response.hovered() { colors.hover } else { colors.surface },
+            Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
+            egui::StrokeKind::Inside,
+        );
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            label.clone(),
+            FontId::proportional(12.0),
+            colors.text,
+        );
+        job.wrap.max_width = (rect.width() - 34.0).max(0.0);
+        job.wrap.max_rows = 1;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            colors.text,
+        );
+        icons::chevron(
+            ui,
+            egui::Rect::from_center_size(
+                rect.right_center() - egui::vec2(14.0, 0.0),
+                Vec2::splat(10.0),
+            ),
+            false,
+            colors.dim,
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("Classifier model: {label}"),
+            )
+        });
+        let response = response
+            .on_hover_text(label.as_str())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new("auto-classifier-rect"), response.rect));
+        if response.clicked() {
+            self.settings_view.classifier_open = !open;
+            if !open {
+                self.settings_view.classifier_list.query.clear();
+                self.settings_view.classifier_list.focus = true;
+            }
+        }
+        if !self.settings_view.classifier_open {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let popup_width = 340.0_f32.min((ctx.screen_rect().width() - 16.0).max(120.0));
+        // The provider filter is a child popup; its click must not close this one.
+        let close_behavior = if egui::Popup::is_any_open(&ctx) {
+            egui::PopupCloseBehavior::IgnoreClicks
+        } else {
+            egui::PopupCloseBehavior::CloseOnClickOutside
+        };
+        let selected = self
+            .prefs
+            .settings
+            .permission_classifier
+            .as_deref()
+            .and_then(|key| key.split_once('/'))
+            .map(|(p, i)| (p.to_owned(), i.to_owned()));
+        let automatic_selected = self.prefs.settings.permission_classifier.is_none();
+        let list_state = &mut self.settings_view.classifier_list;
+        if !list_state.provider.is_empty()
+            && !models.iter().any(|m| m.provider == list_state.provider)
+        {
+            list_state.provider.clear();
+        }
+        let mut still_open = true;
+        let mut pick = None;
+        egui::Popup::new(
+            egui::Id::new("settings-classifier-picker"),
+            ctx.clone(),
+            response.rect,
+            ui.layer_id(),
+        )
+        .open_bool(&mut still_open)
+        .align(egui::emath::RectAlign::BOTTOM_END)
+        .align_alternatives(&[egui::emath::RectAlign::TOP_END])
+        .close_behavior(close_behavior)
+        .width(popup_width)
+        .frame(prompt_ui::popup(&ctx).inner_margin(6))
+        .gap(6.0)
+        .show(|ui| {
+            theme::menu_controls(ui);
+            ui.set_width(popup_width - 12.0);
+            let refs: Vec<&protocol::Model> = models.iter().collect();
+            pick = model_list(
+                ui,
+                list_state,
+                ModelList {
+                    salt: "classifier",
+                    models: &refs,
+                    selected: selected.as_ref().map(|(p, i)| (p.as_str(), i.as_str())),
+                    enabled: true,
+                    automatic: Some((
+                        AUTOMATIC,
+                        "Lowest-priced connected model; skips providers that fail.",
+                        automatic_selected,
+                    )),
+                },
+                |_| {},
+                |_| 260.0,
+                "No classifier models available. Connect a provider in Settings → Providers.",
+            );
+        });
+        match pick {
+            Some(Pick::Automatic) => {
+                self.prefs.settings.permission_classifier = None;
+                self.settings_view.classifier_open = false;
+            }
+            Some(Pick::Model { provider, id }) => {
+                self.prefs.settings.permission_classifier = Some(format!("{provider}/{id}"));
+                self.settings_view.classifier_open = false;
+            }
+            None => self.settings_view.classifier_open = still_open,
+        }
     }
     fn settings_models(&mut self, ui: &mut egui::Ui) {
         section(
@@ -1621,14 +1743,14 @@ mod tests {
                     .unwrap();
                 click(&mut app, actual.center());
                 assert!(
-                    egui::Popup::is_any_open(&ctx),
+                    app.settings_view.classifier_open,
                     "did not open: {actual:?} label {automatic:?}"
                 );
                 frame(&mut app, vec![]);
                 let text = labels(frame(&mut app, vec![]));
                 let flash = text
                     .iter()
-                    .find(|(t, _)| t == "Flash · google")
+                    .find(|(t, _)| t == "Flash")
                     .unwrap_or_else(|| {
                         panic!("Live eligible classifier at {width}/{zoom}: {text:?}")
                     })
@@ -1640,7 +1762,7 @@ mod tests {
                     Some("google/flash")
                 );
                 let text = labels(frame(&mut app, vec![]));
-                let selected = text.iter().find(|(t, _)| t == "google/flash").unwrap().1;
+                let selected = text.iter().find(|(t, _)| t == "Flash · google").unwrap().1;
                 let actual = ctx
                     .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
                     .unwrap();
@@ -1660,7 +1782,7 @@ mod tests {
                     app.prefs.settings.permission_classifier.as_deref(),
                     Some("google/flash")
                 );
-                assert!(!egui::Popup::is_any_open(&ctx));
+                assert!(!app.settings_view.classifier_open);
                 // Disconnected overrides stay visible, and can return to Automatic.
                 app.state.permission_classifier_models.clear();
                 app.state.permission_classifier = None;
@@ -1681,7 +1803,7 @@ mod tests {
                     .1;
                 let actual = ctx
                     .data(|d| {
-                        d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-automatic-rect"))
+                        d.get_temp::<egui::Rect>(egui::Id::new(("classifier", "automatic-rect")))
                     })
                     .unwrap();
                 assert!(
