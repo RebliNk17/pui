@@ -152,6 +152,49 @@ fn load_local_is_read_only_and_refuses_ambiguous_or_missing_identity() {
     assert!(load_local(&root, &cancel).is_err());
 }
 #[test]
+fn batched_identity_snapshot_preserves_duplicate_and_control_value_refusals() {
+    for (key, value) in [
+        ("author.name", "Foreign author"),
+        ("committer.email", "foreign@example.invalid"),
+        ("extensions.worktreeConfig", "false"),
+        ("user.name", "First\nSecond"),
+    ] {
+        let root = fixture();
+        crate::workspace::tests::git(&root, &["config", key, value]);
+        let before = fs::read(root.join(".git/config")).unwrap();
+        assert!(
+            inspect_override(
+                &root,
+                "Local",
+                "local@example.invalid",
+                true,
+                &AtomicBool::new(false),
+            )
+            .is_err(),
+            "Must refuse {key}"
+        );
+        assert_eq!(fs::read(root.join(".git/config")).unwrap(), before);
+    }
+    let root = fixture();
+    let inherited = root.join(".git/duplicate-identity");
+    fs::write(&inherited, "[user]\n name = Same\n name = Same\n").unwrap();
+    crate::workspace::tests::git(
+        &root,
+        &["config", "include.path", inherited.to_str().unwrap()],
+    );
+    assert!(
+        inspect_override(
+            &root,
+            "Local",
+            "local@example.invalid",
+            true,
+            &AtomicBool::new(false),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn config_change_foreign_lock_and_invalid_inputs_refuse() {
     for case in 0..2 {
         let root = fixture();

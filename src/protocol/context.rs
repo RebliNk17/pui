@@ -148,7 +148,10 @@ impl State {
             return;
         }
         let mut parts = value["parts"].clone();
-        if let Some(object) = parts.as_object_mut().filter(|_| value["detail"].is_object()) {
+        if let Some(object) = parts
+            .as_object_mut()
+            .filter(|_| value["detail"].is_object())
+        {
             object.insert("detail".into(), value["detail"].clone());
         }
         self.context_breakdown = serde_json::from_value::<ContextBreakdown>(parts)

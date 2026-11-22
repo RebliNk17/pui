@@ -1106,31 +1106,33 @@ mod tests {
     #[test]
     fn warning_banner_triggers_above_eighty_percent_and_prefers_active_provider() {
         let now = 1_700_000_000_000.0;
-        let mut usage = Usage::default();
-        usage.providers = vec![
-            ProviderUsage {
-                id: "claude".into(),
-                name: "Claude".into(),
-                windows: vec![UsageWindow {
-                    label: "5-hour session".into(),
-                    used: 84.0,
-                    resets: Some(now + 3_600_000.0),
-                    detail: None,
-                }],
-                ..Default::default()
-            },
-            ProviderUsage {
-                id: "openai".into(),
-                name: "OpenAI".into(),
-                windows: vec![UsageWindow {
-                    label: "Weekly".into(),
-                    used: 96.0,
-                    resets: Some(now + 7_200_000.0),
-                    detail: None,
-                }],
-                ..Default::default()
-            },
-        ];
+        let mut usage = Usage {
+            providers: vec![
+                ProviderUsage {
+                    id: "claude".into(),
+                    name: "Claude".into(),
+                    windows: vec![UsageWindow {
+                        label: "5-hour session".into(),
+                        used: 84.0,
+                        resets: Some(now + 3_600_000.0),
+                        detail: None,
+                    }],
+                    ..Default::default()
+                },
+                ProviderUsage {
+                    id: "openai".into(),
+                    name: "OpenAI".into(),
+                    windows: vec![UsageWindow {
+                        label: "Weekly".into(),
+                        used: 96.0,
+                        resets: Some(now + 7_200_000.0),
+                        detail: None,
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
 
         let claude = usage
             .warning_banner_at("anthropic", now)

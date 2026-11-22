@@ -23,7 +23,10 @@ impl Changes {
     ) {
         if workspace.is_git {
             if self.repo_sheet == Some(RepoSheet::Initialize) {
-                ui.label(theme::small(ui, "This project is already a Git repository."));
+                ui.label(theme::small(
+                    ui,
+                    "This project is already a Git repository.",
+                ));
                 Self::qm_divider(ui);
                 prompt_ui::footer(ui, |ui| {
                     if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked()

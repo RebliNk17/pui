@@ -39,11 +39,11 @@ fn setup() -> (egui::Context, Pui) {
     }
     (ctx, app)
 }
-fn controls(app: &Pui) -> [egui::Id; 2] {
+fn toggle(app: &Pui) -> egui::Id {
     let Some(Ok(Content::Svg(preview))) = &app.files.tabs.last().unwrap().content else {
         panic!()
     };
-    [preview.controls[0].unwrap(), preview.controls[1].unwrap()]
+    preview.controls[0].expect("preview/source toggle")
 }
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
@@ -57,7 +57,7 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 #[test]
 fn svg_foreign_popup_hidden_panel_and_replaced_preview_do_not_claim_input() {
     let (ctx, mut app) = setup();
-    let owner = controls(&app)[1];
+    let owner = toggle(&app);
     ctx.memory_mut(|memory| memory.request_focus(owner));
     egui::Popup::open_id(&ctx, egui::Id::new("foreign-svg-popup"));
     let event = key(egui::Key::Enter, egui::Modifiers::COMMAND);
@@ -109,7 +109,7 @@ fn svg_control_pointer_chords_and_plain_activation_never_send_approve_stop() {
         app.client = Some(client);
         app.state.busy = true;
         app.state.dialogs.push_back(json!({"id":"svg-approval","method":"confirm","title":"Allow bash?","message":"Controlled fixture"}));
-        let id = controls(&app)[1];
+        let id = toggle(&app);
         let pos = ctx.read_response(id).unwrap().interact_rect.center();
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer")));
         for pressed in [true, false] {
@@ -146,14 +146,21 @@ fn svg_native_tab_reverse_escape_and_new_question_do_not_reuse_keys_or_steal_foc
     let (client, _, commands) = rpc::Client::stub_with_records();
     app.client = Some(client);
     app.state.busy = true;
-    let ids = controls(&app);
-    ctx.memory_mut(|memory| memory.request_focus(ids[0]));
+    let id = toggle(&app);
+    ctx.memory_mut(|memory| memory.request_focus(id));
+    frame(
+        &ctx,
+        &mut app,
+        vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    assert!(app.files.tabs.last().unwrap().source);
+    frame(&ctx, &mut app, vec![]);
     frame(
         &ctx,
         &mut app,
         vec![key(egui::Key::Tab, egui::Modifiers::NONE)],
     );
-    assert_eq!(ctx.memory(|memory| memory.focused()), Some(ids[1]));
+    assert_ne!(ctx.memory(|memory| memory.focused()), Some(id));
     frame(
         &ctx,
         &mut app,
@@ -164,9 +171,9 @@ fn svg_native_tab_reverse_escape_and_new_question_do_not_reuse_keys_or_steal_foc
         &mut app,
         vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
     );
-    assert!(ctx.memory(|memory| memory.focus_lost_by_escape(ids[0])));
+    assert!(ctx.memory(|memory| memory.focus_lost_by_escape(id)));
     assert!(app.state.busy);
-    ctx.memory_mut(|memory| memory.request_focus(ids[1]));
+    ctx.memory_mut(|memory| memory.request_focus(id));
     let mut dialog = questions::demo_dialog();
     let mut payload: Value = serde_json::from_str(dialog["placeholder"].as_str().unwrap()).unwrap();
     payload["questions"] = json!([payload["questions"][0].clone()]);
@@ -182,7 +189,7 @@ fn svg_native_tab_reverse_escape_and_new_question_do_not_reuse_keys_or_steal_foc
     );
     assert_eq!(app.state.dialogs.len(), 1);
     assert!(app.pending_dialog.is_none());
-    assert_eq!(ctx.memory(|memory| memory.focused()), Some(ids[1]));
+    assert_eq!(ctx.memory(|memory| memory.focused()), Some(id));
     assert!(commands.try_recv().is_err());
     assert_eq!(app.draft, "Kept draft");
     assert!(app.state.busy);

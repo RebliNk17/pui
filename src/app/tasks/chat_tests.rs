@@ -111,6 +111,8 @@ fn add_workflow(app: &mut Pui) {
     app.prefs.hide_inspector = false;
     app.prefs.cards.hidden.remove(&Card::Workflow);
     app.prefs.cards.collapsed.remove(&Card::Workflow);
+    // Keep the card under test in view as other inspector sections are added.
+    app.prefs.cards.move_to(Card::Workflow, Card::Environment);
 }
 
 fn proposal(app: &mut Pui) {

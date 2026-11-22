@@ -99,8 +99,16 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
     let demo_cats = [
         ("Messages", 410000.0, colors.blue),
         ("MCP tools", 25700.0, colors.accent),
-        ("System tools", 18700.0, egui::Color32::from_rgb(47, 157, 143)),
-        ("System prompt", 10800.0, egui::Color32::from_rgb(214, 158, 46)),
+        (
+            "System tools",
+            18700.0,
+            egui::Color32::from_rgb(47, 157, 143),
+        ),
+        (
+            "System prompt",
+            10800.0,
+            egui::Color32::from_rgb(214, 158, 46),
+        ),
         ("Skills", 9900.0, grey(150)),
         ("MCP server instructions", 3300.0, grey(125)),
         ("Memory files", 455.0, grey(105)),
@@ -116,8 +124,16 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
                 colors.blue,
             ),
             ("MCP tools", p.mcp_tools, colors.accent),
-            ("System tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
-            ("System prompt", p.system, egui::Color32::from_rgb(214, 158, 46)),
+            (
+                "System tools",
+                p.tools,
+                egui::Color32::from_rgb(47, 157, 143),
+            ),
+            (
+                "System prompt",
+                p.system,
+                egui::Color32::from_rgb(214, 158, 46),
+            ),
             ("Skills", p.skills, grey(150)),
             ("MCP server instructions", p.mcp_instructions, grey(125)),
             ("Memory files", p.memory, grey(105)),
@@ -361,7 +377,11 @@ fn demo_detail() -> crate::protocol::ContextDetail {
             .map(|(name, tokens)| item(&format!("mcp__launchdarkly__{name}"), *tokens))
             .collect(),
         mcp_tools_count: 748,
-        system_tools: vec![item("bash", 4100.0), item("edit", 2300.0), item("read", 900.0)],
+        system_tools: vec![
+            item("bash", 4100.0),
+            item("edit", 2300.0),
+            item("read", 900.0),
+        ],
         skills: vec![item("deploy", 1800.0), item("find-skills", 900.0)],
         memory: vec![
             item("~/.claude/CLAUDE.md", 14.0),
@@ -396,7 +416,11 @@ fn named_items(list: &[crate::protocol::ContextItem], pretty: bool) -> Vec<(Stri
     list.iter()
         .map(|i| {
             (
-                if pretty { pretty_tool(&i.name) } else { i.name.clone() },
+                if pretty {
+                    pretty_tool(&i.name)
+                } else {
+                    i.name.clone()
+                },
                 Some(i.tokens),
             )
         })
@@ -488,21 +512,32 @@ fn show_loaded_resources(
     for list in lists.iter().filter(|l| !l.items.is_empty()) {
         let id = ui.make_persistent_id(list.key);
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        // Register the row as focusable once. Upgrading a hover-only child UI
+        // response afterward surrenders its focus before every native Tab move.
         let row = ui
-            .horizontal(|ui| {
-                let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                crate::icons::chevron(ui, chev_rect, open, colors.dim);
-                ui.label(RichText::new(list.label).size(11.0).color(colors.muted));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(list.count.to_string())
-                            .size(11.0)
-                            .color(colors.dim),
-                    );
-                });
-            })
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(list.key)
+                    .max_rect(egui::Rect::from_min_size(
+                        ui.next_widget_position(),
+                        Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                    ))
+                    .layout(Layout::left_to_right(Align::Center))
+                    .sense(Sense::click()),
+                |ui| {
+                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    crate::icons::chevron(ui, chev_rect, open, colors.dim);
+                    ui.label(RichText::new(list.label).size(11.0).color(colors.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(list.count.to_string())
+                                .size(11.0)
+                                .color(colors.dim),
+                        );
+                    });
+                },
+            )
             .response
-            .interact(Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if row.clicked() {
             open = !open;

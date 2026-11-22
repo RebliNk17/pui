@@ -4,7 +4,6 @@
 use super::*;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 

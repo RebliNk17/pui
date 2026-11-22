@@ -754,17 +754,27 @@ impl Pui {
             let id = ui.make_persistent_id("bg-tasks-finished");
             let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
             let header = ui
-                .horizontal(|ui| {
-                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    icons::chevron(ui, chev_rect, open, colors.dim);
-                    ui.label(
-                        RichText::new(format!("{finished_count} finished"))
-                            .size(11.0)
-                            .color(colors.muted),
-                    );
-                })
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("bg-tasks-finished-row")
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.next_widget_position(),
+                            Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                        ))
+                        .layout(Layout::left_to_right(Align::Center))
+                        .sense(Sense::click()),
+                    |ui| {
+                        let (chev_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                        icons::chevron(ui, chev_rect, open, colors.dim);
+                        ui.label(
+                            RichText::new(format!("{finished_count} finished"))
+                                .size(11.0)
+                                .color(colors.muted),
+                        );
+                    },
+                )
                 .response
-                .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if header.clicked() {
                 open = !open;
@@ -1012,7 +1022,7 @@ fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui
     if response.hovered() {
         ui.painter().rect_filled(rect, 4, colors.hover);
     }
-    let (file_icon, file_tint) = files::file_icon(std::path::Path::new(path), &colors);
+    let (file_icon, file_tint) = files::file_icon(std::path::Path::new(path), colors);
     icons::draw(
         ui,
         egui::Rect::from_center_size(rect.left_center() + egui::vec2(8.0, 0.0), Vec2::splat(14.0)),

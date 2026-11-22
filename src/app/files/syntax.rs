@@ -108,7 +108,7 @@ pub(super) fn galley(ui: &egui::Ui, path: &Path, content: &str) -> Arc<Galley> {
         return cached.galley;
     }
     let colors = theme::palette(ui.ctx());
-    let job = highlight_job(content, path, &colors);
+    let job = highlight_job(content, path, colors);
     let galley = ui.fonts(|fonts| fonts.layout_job(job));
     ui.ctx().data_mut(|d| {
         d.insert_temp(
@@ -830,7 +830,7 @@ mod tests {
         let ctx = egui::Context::default();
         let colors = theme::palette(&ctx);
         let yaml = "# comment\nname: \"pui\"\ncount: 42\nenabled: true\n";
-        let yaml_job = highlight_job(yaml, Path::new("macos.yml"), &colors);
+        let yaml_job = highlight_job(yaml, Path::new("macos.yml"), colors);
         assert_eq!(yaml_job.text, yaml);
         assert!(
             yaml_job
@@ -864,7 +864,7 @@ mod tests {
         );
 
         let rust = "pub fn main() -> Option<String> { let x = \"hi\"; /* ok */ None }\n";
-        let rust_job = highlight_job(rust, Path::new("main.rs"), &colors);
+        let rust_job = highlight_job(rust, Path::new("main.rs"), colors);
         assert_eq!(rust_job.text, rust);
         assert!(
             rust_job

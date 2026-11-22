@@ -38,6 +38,9 @@ fn prompts_popovers_and_actions_follow_every_selected_palette() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 button(ui, "Continue", Button::Primary, true);
                 button(ui, "Delete", Button::Danger, true);
+                let disabled = button(ui, "Unavailable", Button::Primary, false);
+                assert!(!disabled.enabled());
+                assert!(!disabled.clicked());
             });
         });
         for color in [colors.accent, colors.red] {
@@ -53,6 +56,9 @@ fn prompts_popovers_and_actions_follow_every_selected_palette() {
             if let egui::Shape::Text(text) = &s.shape {
                 if ["Continue", "Delete"].contains(&text.galley.job.text.as_str()) {
                     assert_eq!(text.galley.job.sections[0].format.color, colors.bg);
+                }
+                if text.galley.job.text == "Unavailable" {
+                    assert_ne!(text.galley.job.sections[0].format.color, colors.bg);
                 }
             }
         }
