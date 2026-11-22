@@ -11,6 +11,8 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+mod new_messages;
+
 #[derive(Default)]
 pub struct Transcript {
     heights: HashMap<usize, (u64, f32, f32)>,
@@ -33,6 +35,7 @@ pub struct Transcript {
     pub task_output: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     progress_phase: Option<(Progress, f64)>,
+    new_messages: new_messages::NewMessages,
 }
 
 #[derive(
@@ -251,6 +254,8 @@ impl Transcript {
     }
     /// Keep the same visible turn when the saved tail is replaced by full RPC history.
     pub fn replace_history(&mut self, old: &[Message], new: &[Message]) {
+        // Loading older history is not an incoming message.
+        self.new_messages.rebase();
         let at_bottom = self.total - self.viewport - self.scroll < 32.0;
         let anchor = self
             .positions
@@ -298,6 +303,7 @@ impl Transcript {
         session: &str,
         footer: impl FnOnce(&mut egui::Ui),
     ) {
+        self.new_messages.observe(messages, session);
         let colors = crate::theme::palette(ui.ctx());
         let now = ui.input(|i| i.time);
         let elapsed = if let Some(progress) = self.progress {
@@ -337,6 +343,10 @@ impl Transcript {
             .auto_shrink([false, false])
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .stick_to_bottom(true);
+        let jump_to_latest = std::mem::take(&mut self.new_messages.jump_to_latest);
+        if jump_to_latest {
+            area = area.animated(false);
+        }
         if let Some(jump) = self.jump.take() {
             area = area.vertical_scroll_offset(jump).stick_to_bottom(false);
         }
@@ -557,6 +567,10 @@ impl Transcript {
                 },
             );
             ui.add_space(12.0);
+            if jump_to_latest {
+                // Use this frame's measured tail; egui resumes sticky scrolling at the end.
+                ui.scroll_with_delta(egui::vec2(0.0, -ui.min_rect().height()));
+            }
         });
         // Disclosures only change their owning, visible turn. Keep all other
         // measured heights; a global revision caused full-history relayout.
@@ -579,6 +593,20 @@ impl Transcript {
             .rposition(|y| *y <= self.scroll + 32.0)
             .unwrap_or(0);
         self.rail(ui, rail);
+        if self.total - self.viewport - self.scroll < 32.0 {
+            self.new_messages.unread = false;
+        }
+        if self
+            .new_messages
+            .show(ui, output.inner_rect)
+            .is_some_and(|r| r.clicked())
+        {
+            self.new_messages.unread = false;
+            self.new_messages.jump_to_latest = true;
+            self.jump = None;
+            self.restore = None;
+            ui.ctx().request_repaint();
+        }
         ui.advance_cursor_after_rect(rect);
     }
 
