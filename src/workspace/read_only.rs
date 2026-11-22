@@ -227,8 +227,20 @@ fn drain(
         {
             return Ok((bytes, status));
         }
-        if eof || waiting {
-            std::thread::sleep(Duration::from_millis(10));
+        if eof {
+            std::thread::sleep(Duration::from_millis(1));
+        } else if waiting {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let timeout_ms = remaining.as_millis().min(10) as libc::c_int;
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: pfd is a valid stack struct and fd is owned by pipe for this scope.
+            unsafe {
+                libc::poll(&mut pfd, 1, timeout_ms.max(1));
+            }
         }
     }
 }

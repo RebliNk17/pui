@@ -27,8 +27,8 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Vec<u8> {
 // checkout's file count and history. Build it once, entirely in disposable
 // storage; tests still exercise real Git objects, merge ancestry and indexes.
 pub(crate) fn fixture() -> PathBuf {
-    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    let seed = SEED.get_or_init(|| {
+    static SEED: std::sync::OnceLock<(PathBuf, Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
+    let (seed, head, index) = SEED.get_or_init(|| {
         let root = history_fixture();
         fs::write(
             root.join("README.md"),
@@ -55,7 +55,15 @@ pub(crate) fn fixture() -> PathBuf {
                 "bounded index fixture",
             ],
         );
-        root
+        // The immutable history has exactly README.md and side.txt. Prepare its
+        // sparse index once, rather than querying/rewriting it for every clone.
+        git(
+            &root,
+            &["update-index", "--skip-worktree", "--", "side.txt"],
+        );
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        let index = fs::read(root.join(".git/index")).unwrap();
+        (root, head, index)
     });
     let root = std::env::temp_dir().join(format!("pui-git-review-{}", uuid::Uuid::new_v4()));
     assert!(
@@ -74,47 +82,11 @@ pub(crate) fn fixture() -> PathBuf {
         .1
         .success()
     );
-    // Give each disposable clone an independent writable branch/ref.
-    let oid = git(&root, &["rev-parse", "HEAD"]);
-    fs::write(root.join(".git/refs/heads/pui-fixture-root"), oid).unwrap();
+    // Each clone owns its ref and index bytes, not a hardlink or shared writable
+    // index. Object sharing remains read-only through Git's clone alternates.
+    fs::write(root.join(".git/refs/heads/pui-fixture-root"), head).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/pui-fixture-root\n").unwrap();
-    git(&root, &["read-tree", "HEAD"]);
-    // Keep the clone sparse without reporting every absent source file deleted.
-    // Only this private index changes; README remains a real tracked modification.
-    let cancel = AtomicBool::new(false);
-    let deadline = Instant::now() + DEADLINE;
-    let (paths, status) = read_only::run(
-        read_only::command(&root).args(["ls-files", "-z"]),
-        &cancel,
-        deadline,
-        1024 * 1024,
-        "fixture paths",
-        "fixture paths too large",
-    )
-    .unwrap();
-    assert!(status.success());
-    let list_path = root.join(".git/pui-fixture-paths");
-    fs::write(&list_path, paths).unwrap();
-    let mut skip = read_only::command(&root);
-    skip.args(["update-index", "--skip-worktree", "-z", "--stdin"])
-        .stdin(fs::File::open(&list_path).unwrap());
-    assert!(
-        read_only::run(
-            &mut skip,
-            &cancel,
-            deadline,
-            1024,
-            "fixture index",
-            "fixture output too large"
-        )
-        .unwrap()
-        .1
-        .success()
-    );
-    git(
-        &root,
-        &["update-index", "--no-skip-worktree", "--", "README.md"],
-    );
+    fs::write(root.join(".git/index"), index).unwrap();
     fs::write(root.join("README.md"), "fixture modified README\n").unwrap();
     root
 }
@@ -179,6 +151,45 @@ pub(crate) fn snapshot(root: &Path) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         fs::read(root.join(".git/index")).unwrap(),
         git(root, &["rev-parse", "HEAD"]),
     )
+}
+
+#[test]
+fn fixture_clones_have_independent_sparse_indexes_refs_and_working_files() {
+    let first = fixture();
+    let second = fixture();
+    let before = snapshot(&second);
+    let second_file = fs::read(second.join("README.md")).unwrap();
+    assert_eq!(
+        git(&first, &["ls-files", "-v"]),
+        b"H README.md\nS side.txt\n"
+    );
+    assert_eq!(
+        git(&second, &["ls-files", "-v"]),
+        b"H README.md\nS side.txt\n"
+    );
+    assert_eq!(before.0, b" M README.md\0");
+    assert!(!first.join("side.txt").exists());
+    assert!(!second.join("side.txt").exists());
+    fs::write(first.join("README.md"), "first clone only\n").unwrap();
+    git(&first, &["add", "--", "README.md"]);
+    git(
+        &first,
+        &["update-index", "--no-skip-worktree", "--", "side.txt"],
+    );
+    git(
+        &first,
+        &["update-ref", "refs/heads/pui-fixture-root", "HEAD^"],
+    );
+    assert_eq!(snapshot(&second), before);
+    assert_eq!(fs::read(second.join("README.md")).unwrap(), second_file);
+    // A later fixture still starts from the immutable baseline, not first's edits.
+    let third = fixture();
+    assert_eq!(git(&third, &["status", "--porcelain=v1", "-z"]), before.0);
+    assert_eq!(git(&third, &["rev-parse", "HEAD"]), before.2);
+    assert_eq!(
+        git(&third, &["ls-files", "-v"]),
+        b"H README.md\nS side.txt\n"
+    );
 }
 
 #[test]

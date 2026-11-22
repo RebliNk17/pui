@@ -472,3 +472,59 @@ fn revision_cancel_oversize_context_drift_and_original_call_abort_never_launch()
         assert!(app.active_permission() != settings::PermissionMode::Manual);
     }
 }
+
+#[test]
+fn plan_revision_history_binds_to_approved_task_and_read_only_recipes_reject_mutations() {
+    let mut app = app();
+    let (client, _, replies) = rpc::Client::stub_with_records();
+    app.client = Some(client);
+    app.control_request(&planned_request("rev-1"));
+    answer(&mut app, "rev-1", json!({"value":"Request changes"}));
+    let editor_id = app.state.dialogs[0]["id"].as_str().unwrap().to_owned();
+    answer(
+        &mut app,
+        &editor_id,
+        json!({"value":"Add narrow-window regression check"}),
+    );
+    let reply = replies.recv_timeout(Duration::from_secs(2)).unwrap();
+    let payload: Value = serde_json::from_str(reply["value"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["revision"], 1);
+    assert_eq!(payload["plan_revisions"].as_array().unwrap().len(), 1);
+
+    let mut second = planned_request("rev-2");
+    let mut inner: Value = serde_json::from_str(second["placeholder"].as_str().unwrap()).unwrap();
+    inner["recipe"] = json!("investigate");
+    second["placeholder"] = json!(inner.to_string());
+    app.control_request(&second);
+    let prompt = app.state.dialogs[0]["message"].as_str().unwrap();
+    assert!(
+        prompt.contains("Plan revision 2 · incorporates 1 prior change request(s)"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Recipe: Investigate"), "{prompt}");
+    answer(&mut app, "rev-2", json!({"value":"Use workflow"}));
+    let task = app.tasks.current().unwrap();
+    assert_eq!(task.recipe, domain::plan::Recipe::Investigate);
+    assert_eq!(task.plan_revisions.len(), 2);
+    assert!(!task.plan_revisions[0].approved);
+    assert_eq!(
+        task.plan_revisions[0].feedback.as_deref(),
+        Some("Add narrow-window regression check")
+    );
+    assert!(task.plan_revisions[1].approved);
+
+    // A read-only recipe must reject candidate file mutations at capture time.
+    app.tasks.job = None;
+    let task = app.tasks.live_mut().unwrap();
+    task.phase = Phase::Capturing;
+    task.prepared_fingerprint = Some("baseline-hash".into());
+    task.attempts.push(Attempt::new(0));
+    app.task_job_result(Ok(JobResult::Fingerprint(
+        FingerprintStep::Candidate,
+        "mutated-hash".into(),
+    )));
+    let task = app.tasks.current().unwrap();
+    assert_eq!(task.phase, Phase::Blocked);
+    assert_eq!(task.reason, Some(domain::decision::Reason::SourceChanged));
+    assert!(task.note.contains("Read-only workflow recipe modified"));
+}

@@ -28,60 +28,86 @@ fn absent(
     allow: bool,
     edit: bool,
 ) -> Result<Vec<(String, String)>, String> {
+    // One bounded snapshot instead of seven Git launches under the same deadline.
+    // NUL records preserve duplicate keys and embedded newlines for validation.
+    let values = identity_config(root, cancel, deadline, false)?;
+    if !(values.is_empty() || allow || edit)
+        || values
+            .keys()
+            .any(|key| !matches!(key.as_str(), "user.name" | "user.email"))
+    {
+        return Err("Identity settings already exist or worktree config is enabled. Existing identity is never replaced.".into());
+    }
+    let local = if values.is_empty() {
+        Default::default()
+    } else {
+        identity_config(root, cancel, deadline, true)?
+    };
     let mut inherited = Vec::new();
-    for key in [
-        "user.name",
-        "user.email",
-        "author.name",
-        "author.email",
-        "committer.name",
-        "committer.email",
-        "extensions.worktreeConfig",
-    ] {
-        let (out, status) = read_only::run(
-            read_only::command(root).args(["config", "--includes", "--get-all", key]),
-            cancel,
-            deadline,
-            16384,
-            "Identity configuration",
-            "Identity configuration exceeds limit",
-        )?;
-        if status.code() == Some(1) && out.is_empty() {
+    for key in ["user.name", "user.email"] {
+        let Some(entries) = values.get(key) else {
             continue;
-        }
-        if !(allow || edit) || !matches!(key, "user.name" | "user.email") || !status.success() {
-            return Err("Identity settings already exist or worktree config is enabled. Existing identity is never replaced.".into());
-        }
-        let (local, local_status) = read_only::run(
-            read_only::command(root).args(["config", "--local", "--no-includes", "--get-all", key]),
-            cancel,
-            deadline,
-            16384,
-            "Local identity",
-            "Local identity exceeds limit",
-        )?;
+        };
         if edit {
-            if !local_status.success() || local != out {
+            if local.get(key) != Some(entries) {
                 return Err(
                     "Editing requires one direct local value without inherited ambiguity.".into(),
                 );
             }
-        } else if local_status.code() != Some(1) || !local.is_empty() {
+        } else if local.contains_key(key) {
             return Err("Repository-local identity already exists; nothing replaced.".into());
         }
-        let value = String::from_utf8(out).map_err(|_| "Inherited identity is not UTF-8")?;
-        let value = value
-            .strip_suffix('\n')
-            .ok_or("Invalid inherited identity")?;
-        if value.len() > 512 || value.chars().any(char::is_control) {
+        if entries.len() != 1 || entries[0].len() > 512 || entries[0].chars().any(char::is_control)
+        {
             return Err("Inherited identity is ambiguous or oversized.".into());
         }
-        inherited.push((key.into(), value.into()));
+        inherited.push((key.into(), entries[0].clone()));
     }
     if edit && inherited.len() != 2 {
         return Err("Editing requires both existing local name and email.".into());
     }
     Ok(inherited)
+}
+fn identity_config(
+    root: &Path,
+    cancel: &AtomicBool,
+    deadline: Instant,
+    local: bool,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let mut command = read_only::command(root);
+    command.arg("config").arg("--null");
+    if local {
+        command.args(["--local", "--no-includes"]);
+    } else {
+        command.arg("--includes");
+    }
+    command.args([
+        "--get-regexp",
+        r"^((user|author|committer)\.(name|email)|extensions\.worktreeconfig)$",
+    ]);
+    let (out, status) = read_only::run(
+        &mut command,
+        cancel,
+        deadline,
+        16384,
+        "Identity configuration",
+        "Identity configuration exceeds limit",
+    )?;
+    if status.code() == Some(1) && out.is_empty() {
+        return Ok(Default::default());
+    }
+    if !status.success() || !out.ends_with(&[0]) {
+        return Err("Identity configuration unavailable or malformed.".into());
+    }
+    let mut values = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for record in out[..out.len() - 1].split(|byte| *byte == 0) {
+        let record = std::str::from_utf8(record).map_err(|_| "Inherited identity is not UTF-8")?;
+        let (key, value) = record
+            .split_once('\n')
+            .ok_or("Invalid inherited identity")?;
+        values.entry(key.into()).or_default().push(value.into());
+    }
+    Ok(values)
 }
 fn config(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<Vec<u8>, String> {
     let common = line(run(

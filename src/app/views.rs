@@ -596,43 +596,48 @@ impl Pui {
         } else {
             let mut reconnect = false;
             for conn in connectors {
-                ui.horizontal(|ui| {
-                    dot(
-                        ui,
-                        if conn.error.is_some() {
-                            colors.amber
-                        } else if self.connected {
-                            colors.green
-                        } else {
-                            colors.dim
-                        },
-                    );
-                    let label = ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
-                    if let Some(err) = &conn.error {
-                        label.on_hover_text(err);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let action_label = if conn.error.is_some() {
-                            "Reconnect"
-                        } else {
-                            "Reload"
-                        };
-                        if ui
-                            .add_enabled(
-                                !self.demo && self.connected,
-                                egui::Button::new(RichText::new(action_label).size(10.5).color(
-                                    if conn.error.is_some() {
-                                        colors.amber
-                                    } else {
-                                        colors.muted
-                                    },
-                                ))
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            reconnect = true;
+                ui.push_id(&conn.name, |ui| {
+                    ui.horizontal(|ui| {
+                        dot(
+                            ui,
+                            if conn.error.is_some() {
+                                colors.amber
+                            } else if self.connected {
+                                colors.green
+                            } else {
+                                colors.dim
+                            },
+                        );
+                        let label =
+                            ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
+                        if let Some(err) = &conn.error {
+                            label.on_hover_text(err);
                         }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let action_label = if conn.error.is_some() {
+                                "Reconnect"
+                            } else {
+                                "Reload"
+                            };
+                            if ui
+                                .add_enabled(
+                                    !self.demo && self.connected,
+                                    egui::Button::new(
+                                        RichText::new(action_label).size(10.5).color(
+                                            if conn.error.is_some() {
+                                                colors.amber
+                                            } else {
+                                                colors.muted
+                                            },
+                                        ),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                reconnect = true;
+                            }
+                        });
                     });
                 });
             }
@@ -716,76 +721,80 @@ impl Pui {
             ui.label(theme::small(ui, "No active background tasks."));
         } else {
             let active_w = (ui.available_width() - 12.0).max(40.0);
-            for (_id, title) in &active_tools {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(active_w, 20.0),
-                    Layout::right_to_left(Align::Center),
-                    |ui| {
-                        ui.set_max_width(active_w);
-                        if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
-                            stop_current = true;
-                        }
-                        ui.add_space(6.0);
-                        let left_w = ui.available_width().max(20.0);
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(left_w, 20.0),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.set_max_width(left_w);
-                                icons::inline(ui, Icon::Terminal, colors.accent);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(title).size(11.0).color(colors.text),
+            for (id, title) in &active_tools {
+                ui.push_id(id, |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(active_w, 20.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.set_max_width(active_w);
+                            if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
+                                stop_current = true;
+                            }
+                            ui.add_space(6.0);
+                            let left_w = ui.available_width().max(20.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(left_w, 20.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_max_width(left_w);
+                                    icons::inline(ui, Icon::Terminal, colors.accent);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(title).size(11.0).color(colors.text),
+                                        )
+                                        .truncate(),
                                     )
-                                    .truncate(),
-                                )
-                                .on_hover_text(title);
-                            },
-                        );
-                    },
-                );
+                                    .on_hover_text(title);
+                                },
+                            );
+                        },
+                    );
+                });
             }
             for (id, name, created) in &running_agents {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(active_w, 20.0),
-                    Layout::right_to_left(Align::Center),
-                    |ui| {
-                        ui.set_max_width(active_w);
-                        if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
-                            stop_agent_id = Some(id.clone());
-                        }
-                        if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
-                            ui.label(
-                                RichText::new(format_elapsed(elapsed))
-                                    .size(10.0)
-                                    .color(colors.muted),
-                            );
-                        }
-                        ui.add_space(6.0);
-                        let left_w = ui.available_width().max(20.0);
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(left_w, 20.0),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.set_max_width(left_w);
-                                dot(ui, colors.accent);
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(name).size(11.0).color(colors.text),
+                ui.push_id(id, |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(active_w, 20.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.set_max_width(active_w);
+                            if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
+                                stop_agent_id = Some(id.clone());
+                            }
+                            if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
+                                ui.label(
+                                    RichText::new(format_elapsed(elapsed))
+                                        .size(10.0)
+                                        .color(colors.muted),
+                                );
+                            }
+                            ui.add_space(6.0);
+                            let left_w = ui.available_width().max(20.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(left_w, 20.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_max_width(left_w);
+                                    dot(ui, colors.accent);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(name).size(11.0).color(colors.text),
+                                            )
+                                            .truncate()
+                                            .frame(false),
                                         )
-                                        .truncate()
-                                        .frame(false),
-                                    )
-                                    .on_hover_text(name)
-                                    .clicked()
-                                {
-                                    open_agent_id = Some(id.clone());
-                                }
-                            },
-                        );
-                    },
-                );
+                                        .on_hover_text(name)
+                                        .clicked()
+                                    {
+                                        open_agent_id = Some(id.clone());
+                                    }
+                                },
+                            );
+                        },
+                    );
+                });
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
@@ -796,17 +805,27 @@ impl Pui {
             let id = ui.make_persistent_id("bg-tasks-finished");
             let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
             let header = ui
-                .horizontal(|ui| {
-                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    icons::chevron(ui, chev_rect, open, colors.dim);
-                    ui.label(
-                        RichText::new(format!("{finished_count} finished"))
-                            .size(11.0)
-                            .color(colors.muted),
-                    );
-                })
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("bg-tasks-finished-row")
+                        .max_rect(egui::Rect::from_min_size(
+                            ui.next_widget_position(),
+                            Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                        ))
+                        .layout(Layout::left_to_right(Align::Center))
+                        .sense(Sense::click()),
+                    |ui| {
+                        let (chev_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                        icons::chevron(ui, chev_rect, open, colors.dim);
+                        ui.label(
+                            RichText::new(format!("{finished_count} finished"))
+                                .size(11.0)
+                                .color(colors.muted),
+                        );
+                    },
+                )
                 .response
-                .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if header.clicked() {
                 open = !open;
@@ -818,38 +837,40 @@ impl Pui {
                     let row_w = (ui.available_width() - 12.0).max(40.0);
                     ui.set_max_width(row_w);
                     for (id, name, status) in &finished_agents {
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(row_w, 18.0),
-                            Layout::right_to_left(Align::Center),
-                            |ui| {
-                                ui.set_max_width(row_w);
-                                ui.label(RichText::new(status).size(10.0).color(colors.dim));
-                                ui.add_space(8.0);
-                                let left_w = ui.available_width().max(20.0);
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(left_w, 18.0),
-                                    Layout::left_to_right(Align::Center),
-                                    |ui| {
-                                        ui.set_max_width(left_w);
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new(name)
-                                                        .size(10.5)
-                                                        .color(colors.muted),
+                        ui.push_id(id, |ui| {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(row_w, 18.0),
+                                Layout::right_to_left(Align::Center),
+                                |ui| {
+                                    ui.set_max_width(row_w);
+                                    ui.label(RichText::new(status).size(10.0).color(colors.dim));
+                                    ui.add_space(8.0);
+                                    let left_w = ui.available_width().max(20.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(left_w, 18.0),
+                                        Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            ui.set_max_width(left_w);
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(name)
+                                                            .size(10.5)
+                                                            .color(colors.muted),
+                                                    )
+                                                    .truncate()
+                                                    .frame(false),
                                                 )
-                                                .truncate()
-                                                .frame(false),
-                                            )
-                                            .on_hover_text(name)
-                                            .clicked()
-                                        {
-                                            open_agent_id = Some(id.clone());
-                                        }
-                                    },
-                                );
-                            },
-                        );
+                                                .on_hover_text(name)
+                                                .clicked()
+                                            {
+                                                open_agent_id = Some(id.clone());
+                                            }
+                                        },
+                                    );
+                                },
+                            );
+                        });
                     }
                     for (title, duration_ms, failed) in &finished_tools {
                         ui.allocate_ui_with_layout(

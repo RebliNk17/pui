@@ -2,6 +2,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+mod idle;
+
 pub(super) struct Node {
     pub id: String,
     pub parent: Option<String>,
@@ -129,6 +131,7 @@ pub(super) struct Agents {
     mail: BTreeMap<String, (String, Option<String>)>,
     waits: Vec<AgentWait>,
     retiring: Vec<Receiver<()>>,
+    pub(super) idle: idle::Idle,
 }
 impl Pui {
     pub(super) fn with_live_chat<R>(
@@ -309,6 +312,9 @@ impl Pui {
         self.refresh_session_titles();
     }
     pub(super) fn agents_still_retiring(&self) -> bool {
+        if !self.agents.idle.retiring.is_empty() {
+            return true;
+        }
         self.agents
             .retiring
             .iter()
@@ -323,6 +329,9 @@ impl Pui {
         for id in ids {
             self.agents.nodes.remove(id);
             self.agents.parked.remove(id);
+            self.agents.idle.since.remove(id);
+            self.agents.idle.dormant.remove(id);
+            self.agents.idle.wake.remove(id);
         }
         self.agents.recent_roots.retain(|id| !ids.contains(id));
         for node in self.agents.nodes.values_mut() {
@@ -342,6 +351,10 @@ impl Pui {
         self.agents.mail.retain(|_, (id, report)| {
             !ids.contains(id) && report.as_ref().is_none_or(|id| !ids.contains(id))
         });
+        self.agents
+            .idle
+            .mail
+            .retain(|key, _| self.agents.mail.contains_key(key));
         // Keep persisted-only unrelated records, not merely the restored subset.
         self.prefs.agent_tree.retain(|n| !ids.contains(&n.id));
         for record in &mut self.prefs.agent_tree {
@@ -524,13 +537,22 @@ impl Pui {
         self.put_chat(next);
         self.prefs.cwd = self.agents.nodes[id].cwd.clone();
         self.enter_session_layout();
-        if self.client.is_none()
+        self.agents.idle.since.remove(id);
+        if self.agents.idle.dormant.contains(id) {
+            if let Err(error) = self.wake_idle_agent(id) {
+                self.state.error = Some(error);
+            }
+        } else if self.client.is_none()
             && !self.resource_reload.pending()
             && self.agents.nodes[id].path.is_some()
         {
-            if self.agents.nodes[id].parent.is_some() {
+            if self.agents.nodes[id].parent.is_some()
+                && (!self.agents.nodes[id].stopped || self.agents.nodes[id].status == "Saved")
+            {
                 self.resume_agent();
-            } else {
+            } else if self.agents.nodes[id].parent.is_none()
+                && (!self.agents.nodes[id].stopped || self.agents.nodes[id].status == "Saved")
+            {
                 self.connect(&self.ctx.clone(), self.agents.nodes[id].path.clone());
             }
         }
@@ -544,6 +566,13 @@ impl Pui {
     }
     /// Reconnect a persisted automation owner without navigating or sending a prompt.
     pub(super) fn reconnect_job_owner(&mut self, id: &str) -> Result<(), String> {
+        if self.agents.idle.retiring.contains_key(id) {
+            return Err(
+                "Previous idle process is still shutting down; reconnect waits for its exit."
+                    .into(),
+            );
+        }
+        self.agents.idle.since.remove(id);
         if (id == self.agents.active && self.resource_reload.pending())
             || self
                 .agents
@@ -617,6 +646,18 @@ impl Pui {
         Ok(())
     }
     pub(super) fn resume_agent(&mut self) -> bool {
+        let id = self.agents.active.clone();
+        if self.agents.idle.dormant.contains(&id) {
+            if let Err(error) = self.wake_idle_agent(&id) {
+                self.state.error = Some(error);
+            }
+            return true;
+        }
+        if self.agents.idle.retiring.contains_key(&id) {
+            self.state.notice =
+                Some("Previous process is still shutting down. Your draft is preserved.".into());
+            return true;
+        }
         if self.resource_reload.pending() {
             return true;
         }
@@ -826,6 +867,9 @@ impl Pui {
         {
             return true;
         }
+        if self.agents.idle.dormant.contains(id) {
+            return false;
+        }
         self.agents.nodes.get(id).is_none_or(|node| {
             !node.stopped
                 || (node.needs_report && !node.reported)
@@ -854,6 +898,7 @@ impl Pui {
         false
     }
     pub(super) fn agent_user_turn(&mut self) {
+        self.agents.idle.since.remove(&self.agents.active);
         if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
             node.stopped = false;
             node.failure = None;
@@ -888,6 +933,8 @@ impl Pui {
                 format!("Failed: {error}")
             } else if node.stopped {
                 "Stopped".into()
+            } else if self.agents.idle.dormant.contains(&id) && self.client.is_none() {
+                "Idle · process released".into()
             } else if node.setup.is_some() {
                 "Preparing worktree".into()
             } else if node.needs_report && self.client.is_none() {
@@ -927,6 +974,7 @@ impl Pui {
                     | "auto_compaction_end"
             ) {
                 node.last_activity = Some(std::time::SystemTime::now());
+                self.agents.idle.since.remove(&self.agents.active);
             }
             if record["type"] == "agent_start" {
                 node.settled = false;
@@ -1115,9 +1163,25 @@ impl Pui {
                     json!({"agent_id":id,"state":"queued","access":access,"context":"fresh task brief only","note":"Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."}),
                 )
             }
-            "list" => Ok(
-                json!({"agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"name":n.name,"status":n.status,"access":n.access,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>()}),
-            ),
+            "list" => {
+                let unfinished = self
+                    .agents
+                    .nodes
+                    .values()
+                    .filter(|node| {
+                        node.parent.is_some()
+                            && !node.stopped
+                            && node.failure.is_none()
+                            && node.result.is_none()
+                            && !node.settled
+                    })
+                    .count();
+                let retained = self.agents.nodes.len().saturating_sub(unfinished);
+                Ok(json!({
+                    "agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"name":n.name,"status":n.status,"access":n.access,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>(),
+                    "capacity":{"unfinished_workers":unfinished,"max_unfinished_workers":128,"retained_history":retained,"concurrency_ceiling":self.prefs.agent_concurrency.clamp(1,16)}
+                }))
+            }
             "message" => {
                 let target = protocol::string(request, "agent_id");
                 let message = protocol::string(request, "message");
@@ -1212,6 +1276,18 @@ impl Pui {
         if self.agents.nodes.get(id).is_some_and(|n| n.stopped) {
             return Err("Target agent is stopped".into());
         }
+        self.agents.idle.since.remove(id);
+        if self.agents.idle.dormant.contains(id) {
+            if self.agents.idle.mail.len() >= 128 {
+                return Err("Idle-agent delivery queue is full; wait for reconnection.".into());
+            }
+            self.wake_idle_agent(id)?;
+            self.agents.idle.next_mail += 1;
+            let key = format!("idle-mail-{:020}", self.agents.idle.next_mail);
+            self.agents.idle.mail.insert(key.clone(), record);
+            self.agents.mail.insert(key.clone(), (id.into(), None));
+            return Ok(key);
+        }
         let request_id = if id == self.agents.active {
             self.client
                 .as_mut()
@@ -1254,6 +1330,26 @@ impl Pui {
                     "Wait for this worker's access change to finish before stopping it.".into(),
                 );
                 continue;
+            }
+            self.agents.idle.since.remove(&id);
+            self.agents.idle.dormant.remove(&id);
+            self.agents.idle.wake.remove(&id);
+            let queued: Vec<_> = self
+                .agents
+                .idle
+                .mail
+                .keys()
+                .filter(|key| {
+                    self.agents
+                        .mail
+                        .get(*key)
+                        .is_some_and(|(target, _)| target == &id)
+                })
+                .cloned()
+                .collect();
+            for key in queued {
+                self.agents.idle.mail.remove(&key);
+                self.agent_mail_response(&json!({"id": key, "success": false, "error": "Agent explicitly stopped before delivery"}));
             }
             self.cancel_workflows_for(&id);
             self.pause_agent_jobs(&id);
@@ -1772,6 +1868,9 @@ impl Pui {
             let _ = worker.join();
         }
         self.agents.permission_changes.clear();
+        for (_, (_, done)) in std::mem::take(&mut self.agents.idle.retiring) {
+            let _ = done.recv();
+        }
         let parked = std::mem::take(&mut self.agents.parked);
         let clients: Vec<_> = parked
             .into_values()
@@ -1923,7 +2022,7 @@ pub(super) fn create_worktree(cwd: &std::path::Path, label: &str) -> Result<Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn app(ctx: &egui::Context) -> Pui {
+    pub(super) fn app(ctx: &egui::Context) -> Pui {
         let mut app = Pui::new(
             &eframe::CreationContext::_new_kittest(ctx.clone()),
             Options {
@@ -1946,7 +2045,7 @@ mod tests {
         app.ensure_agent();
         app
     }
-    fn spawn(app: &mut Pui, parent: &str) -> String {
+    pub(super) fn spawn(app: &mut Pui, parent: &str) -> String {
         app.agent_control(parent,&json!({"action":"spawn","name":"Scoped reader","task":"Inspect just model selection and return file references","access":"read-only"})).unwrap()["agent_id"].as_str().unwrap().to_owned()
     }
     #[test]

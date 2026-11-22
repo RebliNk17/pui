@@ -306,6 +306,8 @@ impl Pui {
             ("Changing history…", crate::theme::palette(&self.ctx).accent)
         } else if self.loading_chat {
             ("Connecting", colors.accent)
+        } else if !self.connected && self.agents.idle.dormant.contains(&self.agents.active) {
+            ("Idle · process released", colors.dim)
         } else if !self.connected && !self.demo {
             (
                 if self.is_mirror() {
@@ -382,6 +384,7 @@ impl Pui {
     }
     pub(super) fn deliver_waiting_at_window(&mut self, window: bool) {
         if self.is_mirror()
+            || self.agents.idle.dormant.contains(&self.agents.active)
             || self.resource_reload.pending()
             || self.resource_reload.confirming()
             || !self.connected

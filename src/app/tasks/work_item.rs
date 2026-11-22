@@ -235,6 +235,9 @@ impl Pui {
     }
 
     fn work_item_overview(&mut self, ui: &mut egui::Ui, task: &Task, view: &mut View) {
+        if task.recipe != domain::plan::Recipe::VerifiedChange {
+            ui.label(theme::small(ui, format!("Recipe: {}", task.recipe.label())));
+        }
         if let Some(profile) = &task.profile {
             ui.label(theme::small(
                 ui,
@@ -250,6 +253,32 @@ impl Pui {
                 ui.add(egui::Label::new(format!("{}. {step}", index + 1)).wrap());
             }
             ui.add_space(12.0);
+        }
+        if !task.plan_revisions.is_empty() {
+            crate::section::Section::new("Plan revision history")
+                .id_salt((&task.id, "work-item-plan-revisions"))
+                .summary(format!("{} revision(s)", task.plan_revisions.len()))
+                .show(ui, |ui| {
+                    for rev in &task.plan_revisions {
+                        ui.add(
+                            egui::Label::new(format!(
+                                "Revision {} · {}{}",
+                                rev.number,
+                                if rev.approved {
+                                    "Approved"
+                                } else {
+                                    "Changes requested"
+                                },
+                                rev.feedback
+                                    .as_deref()
+                                    .map(|f| format!(" — {f}"))
+                                    .unwrap_or_default()
+                            ))
+                            .wrap(),
+                        );
+                    }
+                });
+            ui.add_space(8.0);
         }
         ui.label(RichText::new("The finish line").strong());
         let contract = task.approved.as_ref().unwrap_or(&task.proposed);

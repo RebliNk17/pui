@@ -15,6 +15,7 @@ pub(super) struct Request {
     provider: String,
     model: String,
     approval: domain::routing::Approval,
+    recipe: domain::plan::Recipe,
     plan: Option<domain::plan::ExecutionPlan>,
     permission: settings::PermissionMode,
     revision: bool,
@@ -165,13 +166,42 @@ impl Pui {
                 return true;
             }
         };
+        let recipe = match domain::plan::Recipe::from_request(&value) {
+            Ok(Some(recipe)) => recipe,
+            Ok(None) => profile
+                .as_ref()
+                .map_or(domain::plan::Recipe::VerifiedChange, |r| r.profile.recipe),
+            Err(error) => {
+                self.send(json!({"type":"extension_ui_response","id":rpc_id,"value":json!({"error":error}).to_string()}));
+                return true;
+            }
+        };
         let plan = plan.or_else(|| {
             profile.as_ref().map(|receipt| domain::plan::ExecutionPlan {
                 steps: receipt.profile.steps.clone(),
                 checks: receipt.profile.checks.clone(),
             })
         });
-        let plan_description = plan.as_ref().map(|plan| format!("{}\n\n", plan.description()))
+        let prior_revisions = self
+            .tasks
+            .pending_revisions
+            .get(&source)
+            .map_or(0, Vec::len);
+        let revision_banner = if plan.is_some() && prior_revisions > 0 {
+            format!(
+                "Plan revision {} · incorporates {} prior change request(s)\n\n",
+                prior_revisions + 1,
+                prior_revisions
+            )
+        } else {
+            String::new()
+        };
+        let recipe_description = if recipe != domain::plan::Recipe::VerifiedChange {
+            format!("{}\n\n", recipe.description())
+        } else {
+            String::new()
+        };
+        let plan_description = plan.as_ref().map(|plan| format!("{revision_banner}{}\n\n", plan.description()))
             .unwrap_or_else(|| "First establish concrete acceptance checks, then implement and verify under this approval. No implementation plan was supplied.\n\n".into());
         let profile_description=profile.as_ref().map(|receipt|format!("Repository profile: {} · SHA-256 {}\nSetup suggestions (NOT execution approval):\n{}\n\n",receipt.profile.name,receipt.digest,receipt.profile.setup.join("\n"))).unwrap_or_default();
         let policy_description = approval.description();
@@ -187,6 +217,7 @@ impl Pui {
                 provider: self.state.provider.clone(),
                 model: self.state.model.clone(),
                 approval,
+                recipe,
                 plan,
                 permission,
                 revision: false,
@@ -211,7 +242,7 @@ impl Pui {
         };
         self.state.dialogs.push_back(json!({
             "type":"extension_ui_request", "method":"select", "id":rpc_id,
-            "title":title, "message":format!("{reason}\n\n{objective}\n\n{transition}{profile_description}{plan_description}Agent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
+            "title":title, "message":format!("{reason}\n\n{objective}\n\n{transition}{recipe_description}{profile_description}{plan_description}Agent-managed checks, implementation and independent review (up to two repairs). {policy_description}\n\nNormal permissions apply. Read-only prerequisite inspection is bounded, not a guarantee of environment health. Missing ignored dependencies may block. Separately reviewed setup commands and explicit candidate-bound check reruns are available; neither runs automatically, and uncertain commands are never replayed. Isolated Git worktree with a snapshot of current files (including uncommitted changes; ignored files excluded), or non-Git in place. Initial execution leaves the original checkout untouched; applying reviewed changes requires a separate explicit confirmation. No commit, merge or deployment."),
             "options":options
         }));
         true
@@ -263,7 +294,25 @@ impl Pui {
             } else if feedback.is_empty() || feedback.len() > 4000 || feedback.contains('\0') {
                 json!({"error":"Plan feedback must contain 1–4,000 bytes. Nothing was approved or started."})
             } else {
-                json!({"approved":false,"revision_requested":true,"objective":request.objective,"plan":request.plan,"feedback":feedback,
+                let history = self
+                    .tasks
+                    .pending_revisions
+                    .entry(request.source.clone())
+                    .or_default();
+                if history.len() >= 16 {
+                    history.remove(0);
+                }
+                let number = history.last().map_or(1, |r| r.number + 1);
+                let plan_ref = request.plan.as_ref().unwrap();
+                history.push(domain::plan::PlanRevision {
+                    number,
+                    steps: plan_ref.steps.clone(),
+                    checks: plan_ref.checks.clone(),
+                    feedback: Some(feedback.into()),
+                    approved: false,
+                    created: domain::now(),
+                });
+                json!({"approved":false,"revision_requested":true,"revision":number,"plan_revisions":history,"objective":request.objective,"plan":request.plan,"feedback":feedback,
                     "instruction":"Revise only the plan using this feedback. Do not implement, change permission mode, run checks or replay actions. Submit a fresh concrete plan for a new native approval when ready."})
             };
             self.workflow_reply(&request, result);
@@ -338,10 +387,17 @@ impl Pui {
             }
         }
         self.create_workflow();
+        let source = self.tasks.requests[&id].source.clone();
+        let mut revisions = self
+            .tasks
+            .pending_revisions
+            .remove(&source)
+            .unwrap_or_default();
         let request = self.tasks.requests.get_mut(&id).unwrap();
         let objective = request.objective.clone();
         let constraints = request.constraints.clone();
         let approval = request.approval.clone();
+        let recipe = request.recipe;
         let plan = request.plan.clone();
         let profile = request.profile.clone();
         request.task = self.tasks.selected.clone();
@@ -351,10 +407,21 @@ impl Pui {
         task.objective = objective;
         task.constraints = constraints;
         task.initial_approved = true;
+        task.recipe = recipe;
         task.profile = profile;
         if let Some(plan) = plan {
+            let number = revisions.last().map_or(1, |r| r.number + 1);
+            revisions.push(domain::plan::PlanRevision {
+                number,
+                steps: plan.steps.clone(),
+                checks: plan.checks.clone(),
+                feedback: None,
+                approved: true,
+                created: domain::now(),
+            });
             task.proposed = plan.checks.clone();
             task.execution_plan = Some(plan);
+            task.plan_revisions = revisions;
         }
         if let Err(error) = approval.bind(task) {
             task.phase = Phase::Blocked;

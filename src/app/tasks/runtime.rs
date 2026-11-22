@@ -341,6 +341,17 @@ impl Pui {
             if t.phase != Phase::Capturing {
                 return;
             }
+            if t.recipe.is_read_only()
+                && t.prepared_fingerprint
+                    .as_ref()
+                    .is_some_and(|prep| prep != &fingerprint)
+            {
+                self.tasks.block_with_reason(
+                    "Read-only workflow recipe modified workspace files; candidate rejected.",
+                    domain::decision::Reason::SourceChanged,
+                );
+                return;
+            }
             t.attempts.last_mut().unwrap().fingerprint = Some(fingerprint);
             t.phase = Phase::Checking;
             self.tasks.save();
@@ -476,15 +487,19 @@ impl Pui {
             t.workspace.clone().unwrap()
         };
         let attempt = t.latest().map(|a| a.number).unwrap_or(0);
-        let readonly = routing_for.is_some() || matches!(role, Role::Proposal | Role::Verifier);
+        let readonly = routing_for.is_some()
+            || matches!(role, Role::Proposal | Role::Verifier)
+            || (role == Role::Builder && t.recipe.is_read_only());
         let task_role = match role {
             Role::Proposal => "proposal",
             Role::Builder => "builder",
             Role::Checks => "checks",
             Role::Verifier => "verifier",
         };
-        let tools = if role == Role::Builder {
+        let tools = if role == Role::Builder && !t.recipe.is_read_only() {
             "read,grep,find,ls,edit,write,pui_ask_questions,pui_run_check"
+        } else if role == Role::Builder {
+            "read,grep,find,ls,pui_ask_questions,pui_run_check"
         } else {
             "read,grep,find,ls"
         };
@@ -622,8 +637,13 @@ impl Pui {
             .nth(1)
             .map(|a| serde_json::to_string(a).unwrap())
             .unwrap_or_default();
+        let instruction = if t.recipe.is_read_only() {
+            "Perform only this bounded read-only workflow recipe (investigation or review) against its frozen acceptance contract. Use read/search tools and pui_run_check for bounded diagnostic feedback; do NOT edit or create files. The independent acceptance runner and fresh verifier validate your findings after you stop."
+        } else {
+            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: request pui_run_check with a frozen criterion ID for bounded focused feedback while implementing; the independent acceptance runner repeats all approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations."
+        };
         format!(
-            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: request pui_run_check with a frozen criterion ID for bounded focused feedback while implementing; the independent acceptance runner repeats all approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations.\nObjective:\n{}\nConstraints:\n{}\nReviewed implementation plan:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
+            "{instruction}\nObjective:\n{}\nConstraints:\n{}\nReviewed implementation plan:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
             t.objective,
             t.constraints,
             t.execution_plan

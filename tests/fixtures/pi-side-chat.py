@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent-process side-chat fixture; no model, tools, or saved history."""
 import json
+import os
 import sys
 
 def emit(record):
@@ -11,7 +12,7 @@ for line in sys.stdin:
     kind = command['type']
     data = {}
     if kind == 'get_state':
-        data = {'model': {'id': 'fixture-model'}, 'isStreaming': False}
+        data = {'model': {'id': 'fixture-model'}, 'isStreaming': False, 'fixturePid': os.getpid()}
     if kind == 'get_entries':
         # This fixture has no disk history. Keep in-memory messages authoritative.
         continue

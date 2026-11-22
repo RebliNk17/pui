@@ -799,6 +799,17 @@ impl Pui {
     }
 
     fn connect(&mut self, ctx: &egui::Context, session: Option<PathBuf>) {
+        if session.as_ref().is_some_and(|path| {
+            self.agents
+                .idle
+                .retiring
+                .values()
+                .any(|(old, _)| old == path)
+        }) {
+            self.state.notice =
+                Some("Previous process is still shutting down. Your draft is preserved.".into());
+            return;
+        }
         if session
             .as_deref()
             .is_some_and(|p| self.deletion.deleting_chat(p))
@@ -953,6 +964,15 @@ impl Pui {
                 self.view_agent(&id);
                 return;
             }
+            if self.agents.idle.dormant.contains(&id) {
+                if let Err(error) = self.wake_idle_agent(&id) {
+                    self.state.error = Some(error);
+                }
+                return;
+            }
+            if self.agents.nodes[&id].stopped && self.agents.nodes[&id].status != "Saved" {
+                return;
+            }
             if self.has_tree() {
                 if self.client.is_none() && !self.resume_agent() {
                     self.connect(&self.ctx.clone(), Some(path));
@@ -1075,6 +1095,7 @@ impl Pui {
         self.poll_views();
         self.publish_live();
         self.poll_window_sync();
+        self.poll_idle_agents(std::time::Instant::now());
     }
     fn poll_rpc(&mut self) -> bool {
         let mut title_dirty = false;
@@ -1482,6 +1503,15 @@ impl Pui {
         {
             return;
         }
+        if self.agents.idle.dormant.contains(&self.agents.active) {
+            let id = self.agents.active.clone();
+            // Capture this explicit Send before reconnect marks the chat loading.
+            self.queue_draft_mode(mode);
+            if let Err(error) = self.wake_idle_agent(&id) {
+                self.state.error = Some(error);
+            }
+            return;
+        }
         if !self.connected || self.client.is_none() {
             if self.client.is_none() {
                 if self.resume_agent() {
@@ -1582,23 +1612,28 @@ impl Pui {
                 "I'd like to build a new feature. First help me understand where to start.",
             ),
         ] {
-            let response = egui::Frame::new()
-                .fill(colors.sidebar)
-                .stroke(Stroke::new(1.0, colors.border))
-                .corner_radius(10)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        icons::inline(ui, icon, colors.accent);
-                        ui.label(RichText::new(title).size(12.0));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new("↗").color(colors.dim));
-                        });
-                    });
-                    ui.set_min_width((ui.available_width() - 2.0).max(0.0));
-                })
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new().id_salt(title).sense(Sense::click()),
+                    |ui| {
+                        egui::Frame::new()
+                            .fill(colors.sidebar)
+                            .stroke(Stroke::new(1.0, colors.border))
+                            .corner_radius(10)
+                            .inner_margin(14)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    icons::inline(ui, icon, colors.accent);
+                                    ui.label(RichText::new(title).size(12.0));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(RichText::new("↗").color(colors.dim));
+                                    });
+                                });
+                                ui.set_min_width((ui.available_width() - 2.0).max(0.0));
+                            });
+                    },
+                )
                 .response
-                .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 self.context_chips.clear();

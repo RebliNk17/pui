@@ -1271,7 +1271,6 @@ impl Browser {
                             &mut tab.line_target,
                             &mut tab.line_notice,
                         );
-                        preview.finish_inputs(ui.ctx());
                     }
                     Some(Ok(Content::Table(preview))) => {
                         preview.attach_projection_budget(&tab._budget);
@@ -1439,7 +1438,17 @@ impl Browser {
                                         if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
                                             preview.remember(0, &response);
                                         }
-                                        if response.clicked() {
+                                        let keyboard = response.has_focus()
+                                            && ui.input_mut(|input| {
+                                                input.consume_key(
+                                                    egui::Modifiers::NONE,
+                                                    egui::Key::Enter,
+                                                ) || input.consume_key(
+                                                    egui::Modifiers::NONE,
+                                                    egui::Key::Space,
+                                                )
+                                            });
+                                        if response.clicked() || keyboard {
                                             tab.source = !tab.source;
                                         }
                                     });
@@ -1502,6 +1511,11 @@ impl Browser {
                                     });
                             });
                     }
+                }
+                // The floating preview/source toggle renders after the content.
+                // Let it handle its keys before fencing them from the composer.
+                if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                    preview.finish_inputs(ui.ctx());
                 }
             });
     }

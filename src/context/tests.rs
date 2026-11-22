@@ -17,6 +17,62 @@ fn painted_labels(shape: &egui::Shape, labels: &mut Vec<(String, egui::Rect)>) {
 }
 
 #[test]
+fn resource_rows_allow_native_tab_to_leave_in_both_directions() {
+    for mode in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        mode.apply(&ctx);
+        let state = State::default();
+        let detail = demo_detail();
+        let mut ends = None;
+        let mut frame = |events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(360.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let before = ui.button("Before resources").id;
+                        show_loaded_resources(ui, &state, std::path::Path::new(""), Some(&detail));
+                        let after = ui.button("After resources").id;
+                        ends = Some((before, after));
+                    });
+                },
+            );
+            ends.unwrap()
+        };
+        let (before, after) = frame(vec![]);
+        for (start, target, modifiers) in [
+            (before, after, egui::Modifiers::NONE),
+            (after, before, egui::Modifiers::SHIFT),
+        ] {
+            ctx.memory_mut(|memory| memory.request_focus(start));
+            for _ in 0..24 {
+                frame(vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }]);
+                if ctx.memory(|memory| memory.has_focus(target)) {
+                    break;
+                }
+            }
+            assert!(
+                ctx.memory(|memory| memory.has_focus(target)),
+                "Resource disclosures must not trap native Tab focus"
+            );
+        }
+    }
+}
+
+#[test]
 fn collapsed_usage_uses_reported_or_estimated_context_and_bounds_the_bar() {
     let mut state = State {
         context_tokens: Some(209000.0),

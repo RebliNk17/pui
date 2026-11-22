@@ -134,26 +134,46 @@ pub(crate) fn prepare_target(
         return Err("Choose an existing named remote.".into());
     }
     // Refuse push-specific routing, mirror and custom refspecs rather than silently guessing.
-    for key in [
+    let forbidden = [
         format!(
-            "branch.{}.pushRemote",
+            "branch.{}.pushremote",
             branch.trim_start_matches("refs/heads/")
         ),
-        "remote.pushDefault".into(),
+        "remote.pushdefault".into(),
         format!("remote.{remote}.push"),
         format!("remote.{remote}.mirror"),
-    ] {
-        let (out, status) = read_only::run(
-            read_only::command(root).args(["config", "--get-all", &key]),
-            cancel,
-            deadline,
-            16384,
-            "Push routing inspection",
-            "Push routing exceeds limit",
-        )?;
-        if status.success() || !out.is_empty() || status.code() != Some(1) {
-            return Err("Custom push routing, mirror or push refspec configuration is unsupported in this review.".into());
+    ];
+    // Read the routing snapshot once under the unchanged shared deadline, not
+    // four subprocesses. Match exact returned keys: subsection names are literal.
+    let (routing, status) = read_only::run(
+        read_only::command(root).args([
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(branch\..*\.pushremote|remote\.pushdefault|remote\..*\.(push|mirror))$",
+        ]),
+        cancel,
+        deadline,
+        16384,
+        "Push routing inspection",
+        "Push routing exceeds limit",
+    )?;
+    if status.success() {
+        if !routing.ends_with(&[0]) {
+            return Err("Invalid push routing framing".into());
         }
+        for record in routing[..routing.len() - 1].split(|byte| *byte == 0) {
+            let record =
+                std::str::from_utf8(record).map_err(|_| "Invalid push routing encoding")?;
+            let (key, _) = record
+                .split_once('\n')
+                .ok_or("Invalid push routing framing")?;
+            if forbidden.iter().any(|forbidden| forbidden == key) {
+                return Err("Custom push routing, mirror or push refspec configuration is unsupported in this review.".into());
+            }
+        }
+    } else if status.code() != Some(1) || !routing.is_empty() {
+        return Err("Push routing inspection unavailable.".into());
     }
     let url = line(run(
         root,

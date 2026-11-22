@@ -512,21 +512,32 @@ fn show_loaded_resources(
     for list in lists.iter().filter(|l| !l.items.is_empty()) {
         let id = ui.make_persistent_id(list.key);
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        // Register the row as focusable once. Upgrading a hover-only child UI
+        // response afterward surrenders its focus before every native Tab move.
         let row = ui
-            .horizontal(|ui| {
-                let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                crate::icons::chevron(ui, chev_rect, open, colors.dim);
-                ui.label(RichText::new(list.label).size(11.0).color(colors.muted));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(list.count.to_string())
-                            .size(11.0)
-                            .color(colors.dim),
-                    );
-                });
-            })
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .id_salt(list.key)
+                    .max_rect(egui::Rect::from_min_size(
+                        ui.next_widget_position(),
+                        Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
+                    ))
+                    .layout(Layout::left_to_right(Align::Center))
+                    .sense(Sense::click()),
+                |ui| {
+                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    crate::icons::chevron(ui, chev_rect, open, colors.dim);
+                    ui.label(RichText::new(list.label).size(11.0).color(colors.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(list.count.to_string())
+                                .size(11.0)
+                                .color(colors.dim),
+                        );
+                    });
+                },
+            )
             .response
-            .interact(Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if row.clicked() {
             open = !open;
