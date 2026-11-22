@@ -3,6 +3,9 @@
 #[path = "sidebar_order_tests.rs"]
 mod tests;
 
+mod running;
+pub(super) use running::RunningOrder;
+
 use super::sidebar_tree::Branch;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, path::Path};
@@ -47,6 +50,9 @@ impl Options {
             Sort::Created => self.dates(a.created, b.created),
             Sort::Name => self.direction(a.title.to_lowercase().cmp(&b.title.to_lowercase())),
         }
+    }
+    pub fn compare_running(self, a: &Branch, b: &Branch, running: &RunningOrder) -> Ordering {
+        running.compare(a, b).then_with(|| self.compare(a, b))
     }
     pub fn compare_groups(
         self,

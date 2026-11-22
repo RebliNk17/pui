@@ -87,6 +87,83 @@ fn click(app: &mut Pui, point: egui::Pos2) {
     }
 }
 #[test]
+fn sidebar_running_rows_stay_above_idle_and_stable_across_activity_and_completion() {
+    for projects in [false, true] {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            let mut app = fixture();
+            mode.apply(&app.ctx);
+            app.ctx.set_zoom_factor(1.3);
+            app.projects = projects;
+            app.state.busy = true;
+            app.prefs.sidebar_view.metadata = false;
+            let root = app.agents.active.clone();
+            app.agents.nodes.get_mut(&root).unwrap().children.clear();
+            let ids: Vec<_> = app.agents.nodes.keys().cloned().collect();
+            for id in &ids {
+                let node = app.agents.nodes.get_mut(id).unwrap();
+                node.parent = None;
+                node.status = "Working…".into();
+            }
+            app.sessions
+                .push(session("/fixture/idle.jsonl", "Newest idle chat"));
+            let titles: Vec<_> = ids
+                .iter()
+                .map(|id| app.agents.nodes[id].name.clone())
+                .collect();
+            let positions = |output: &egui::FullOutput, running_count: usize| {
+                let mut text = Vec::new();
+                for shape in &output.shapes {
+                    labels(&shape.shape, &mut text);
+                }
+                let mut rows: Vec<_> = titles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, title)| {
+                        (
+                            i,
+                            text.iter()
+                                .find(|(label, _)| label == title)
+                                .unwrap()
+                                .1
+                                .center()
+                                .y,
+                        )
+                    })
+                    .collect();
+                rows.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let idle = text
+                    .iter()
+                    .find(|(label, _)| label == "Newest idle chat")
+                    .unwrap()
+                    .1
+                    .center()
+                    .y;
+                assert!(rows.iter().take(running_count).all(|(_, y)| *y < idle));
+                rows.into_iter().map(|(i, _)| i).collect::<Vec<_>>()
+            };
+            render(&mut app, vec![]);
+            let initial = positions(&render(&mut app, vec![]), 3);
+            for offset in 1..=3 {
+                let id = &ids[initial[2]];
+                app.agents.nodes.get_mut(id).unwrap().last_activity =
+                    Some(SystemTime::now() + Duration::from_secs(offset));
+                app.sessions.reverse();
+                assert_eq!(positions(&render(&mut app, vec![]), 3), initial);
+            }
+            let first = &ids[initial[0]];
+            app.agents.nodes.get_mut(first).unwrap().status = "Idle".into();
+            if *first == root {
+                app.state.busy = false;
+            }
+            assert_eq!(
+                positions(&render(&mut app, vec![]), 2),
+                [initial[1], initial[2], initial[0]]
+            );
+        }
+    }
+}
+
+#[test]
 fn pinned_and_hidden_descendants_are_reachable_once_without_their_parent() {
     let mut app = fixture();
     let hidden_path = app.sessions[0].path.clone();
