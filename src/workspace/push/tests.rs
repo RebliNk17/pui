@@ -89,6 +89,40 @@ fn local_review_exact_destination_without_remote_contact_or_repo_mutation() {
     assert_eq!(super::super::tests::snapshot(&root), before);
 }
 #[test]
+fn batched_routing_uses_literal_subsections_and_rejects_duplicate_or_empty_values() {
+    let root = fixture();
+    let branch = String::from_utf8(super::super::tests::git(
+        &root,
+        &["symbolic-ref", "--short", "HEAD"],
+    ))
+    .unwrap();
+    // Unrelated custom routing is not an authority to reroute this selected branch.
+    for (key, value) in [
+        ("remote.other.push", "refs/heads/other"),
+        ("branch.unrelated.pushRemote", "other"),
+    ] {
+        super::super::tests::git(&root, &["config", key, value]);
+    }
+    prepare(&root, &AtomicBool::new(false)).unwrap();
+    for key in [
+        format!("branch.{}.pushRemote", branch.trim()),
+        "remote.pushDefault".into(),
+        "remote.origin.push".into(),
+        "remote.origin.mirror".into(),
+    ] {
+        super::super::tests::git(&root, &["config", "--add", &key, ""]);
+        super::super::tests::git(&root, &["config", "--add", &key, "other"]);
+        let before = std::fs::read(root.join(".git/config")).unwrap();
+        assert!(
+            prepare(&root, &AtomicBool::new(false)).is_err(),
+            "Must refuse {key}"
+        );
+        assert_eq!(std::fs::read(root.join(".git/config")).unwrap(), before);
+        super::super::tests::git(&root, &["config", "--unset-all", &key]);
+    }
+}
+
+#[test]
 fn custom_routing_multiple_endpoints_and_embedded_credentials_refuse() {
     for case in 0..4 {
         let root = fixture();
