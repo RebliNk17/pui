@@ -90,7 +90,7 @@ impl Role {
         }
     }
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Criterion {
     pub id: String,
@@ -98,7 +98,7 @@ pub struct Criterion {
     /// Empty means independently inspected behavior, not an executed test.
     pub command: String,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contract {
     pub criteria: Vec<Criterion>,
@@ -253,9 +253,13 @@ pub struct Task {
     pub initial_approved: bool,
     #[serde(default)]
     pub pause_requested: bool,
+    #[serde(default)]
+    pub recipe: plan::Recipe,
     /// Optional lead-authored plan shown in the initial host consent.
     #[serde(default)]
     pub execution_plan: Option<plan::ExecutionPlan>,
+    #[serde(default)]
+    pub plan_revisions: Vec<plan::PlanRevision>,
     #[serde(default)]
     pub profile: Option<profile::Receipt>,
     pub workspace: Option<PathBuf>,
@@ -318,7 +322,9 @@ impl Task {
             parent_session: None,
             initial_approved: false,
             pause_requested: false,
+            recipe: plan::Recipe::VerifiedChange,
             execution_plan: None,
+            plan_revisions: vec![],
             profile: None,
             workspace: None,
             isolated: false,

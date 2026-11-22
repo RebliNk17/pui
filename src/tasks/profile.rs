@@ -8,6 +8,8 @@ use std::{fs, io::Read, path::Path};
 pub struct Profile {
     pub version: u32,
     pub name: String,
+    #[serde(default)]
+    pub recipe: plan::Recipe,
     pub steps: Vec<String>,
     pub checks: Contract,
     #[serde(default)]

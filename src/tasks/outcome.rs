@@ -11,8 +11,43 @@ pub fn summary(task: &Task) -> Value {
             .zip(evidence.as_ref())
             .is_some_and(|(contract, attempt)| attempt.passed(contract));
     let running = task.phase.active();
+    let outcome = if running {
+        "running"
+    } else if !verified {
+        "not_verified"
+    } else {
+        match task.recipe {
+            plan::Recipe::VerifiedChange => "verified_candidate",
+            plan::Recipe::Investigate => "verified_investigation",
+            plan::Recipe::Review => "verified_review",
+        }
+    };
+    let application_status = if task.recipe.is_read_only() {
+        "read_only_recipe_no_changes_to_apply"
+    } else if task.isolated {
+        "separate_confirmation_required_not_established_by_workflow_completion"
+    } else {
+        "in_place_edits_may_already_exist"
+    };
+    let delivery_readiness = if task.recipe.is_read_only() {
+        "read_only_no_apply"
+    } else if !verified {
+        "not_verified"
+    } else if !task.isolated {
+        "in_place"
+    } else if task.preparation_receipt.is_some() {
+        match apply::prepare(task) {
+            Ok(plan) if plan.blockers.is_empty() => "ready_to_apply",
+            Ok(_) => "manual_integration_required",
+            Err(_) => "candidate_verified_apply_uninspected",
+        }
+    } else {
+        "candidate_verified_apply_uninspected"
+    };
     let instruction = if running {
         "Workflow is still running, not verified. Use an event-driven wait when needed; do not poll or mutate its source/candidate concurrently."
+    } else if verified && task.recipe.is_read_only() {
+        "Report the verified read-only findings and executed check evidence. This recipe produces no file edits or apply-back."
     } else if verified {
         "Report the verified candidate and concrete checks/review. Clearly say isolated changes remain in the retained workspace unless a separate application is confirmed. Workflow success does not authorize applying, committing, merging or deploying."
     } else {
@@ -23,11 +58,11 @@ pub fn summary(task: &Task) -> Value {
         "checks":attempt.checks.iter().map(check_summary).collect::<Vec<_>>(),"review":attempt.review,"note":attempt.note
     })).collect::<Vec<_>>();
     json!({
-        "workflow_id":task.id,"approved":true,"phase":task.phase.label(),"reason":task.reason,"verified":verified,
-        "outcome":if running {"running"} else if verified {"verified_candidate"} else {"not_verified"}, "note":task.note,"pause_requested":task.pause_requested,
+        "workflow_id":task.id,"approved":true,"recipe":task.recipe,"phase":task.phase.label(),"reason":task.reason,"verified":verified,
+        "outcome":outcome, "note":task.note,"pause_requested":task.pause_requested,
         "workspace":task.workspace,"isolated":task.isolated,
-        "application_status":if task.isolated {"separate_confirmation_required_not_established_by_workflow_completion"} else {"in_place_edits_may_already_exist"},
-        "reported_cost":task.cost(),"profile":task.profile,"operations":task.operations,"continuations":task.continuations,"execution_plan":task.execution_plan,"checks":task.approved,"attempts":attempts,
+        "application_status":application_status,"delivery_readiness":delivery_readiness,
+        "reported_cost":task.cost(),"profile":task.profile,"operations":task.operations,"continuations":task.continuations,"execution_plan":task.execution_plan,"plan_revisions":task.plan_revisions,"focused_feedback":task.feedback,"checks":task.approved,"attempts":attempts,
         "current_evidence":evidence.as_ref().map(|attempt| json!({"number":attempt.number,"fingerprint":attempt.fingerprint,"invalidated":attempt.invalidated,
             "checks":attempt.checks.iter().map(check_summary).collect::<Vec<_>>(),"review":attempt.review,"note":attempt.note})),
         "instruction":instruction
@@ -149,5 +184,54 @@ mod evidence_tests {
             summary(&task)["current_evidence"]["note"],
             "New review failed"
         );
+    }
+    #[test]
+    fn investigate_and_review_recipes_report_read_only_outcomes_without_apply_back() {
+        let mut task = Task::new("/fixture".into(), "p".into(), "m".into(), "high".into());
+        let contract = Contract {
+            criteria: vec![Criterion {
+                id: "C1".into(),
+                description: "Inspect architecture".into(),
+                command: "cargo test".into(),
+            }],
+        };
+        let mut attempt = Attempt::new(0);
+        attempt.fingerprint = Some("captured".into());
+        attempt.checks.push(Check {
+            criterion: "C1".into(),
+            command: "cargo test".into(),
+            exit_code: Some(0),
+            output: "passed".into(),
+            truncated: false,
+            cancelled: false,
+            duration_ms: 1,
+        });
+        attempt.review = Some(Review {
+            summary: "Verified findings".into(),
+            criteria: vec![Finding {
+                id: "C1".into(),
+                status: Verdict::Pass,
+                evidence: "Inspected files and check output".into(),
+            }],
+        });
+        task.approved = Some(contract);
+        task.attempts.push(attempt);
+        task.phase = Phase::Ready;
+        task.isolated = true;
+        task.recipe = plan::Recipe::Investigate;
+        let inv = summary(&task);
+        assert_eq!(inv["verified"], true);
+        assert_eq!(inv["outcome"], "verified_investigation");
+        assert_eq!(
+            inv["application_status"],
+            "read_only_recipe_no_changes_to_apply"
+        );
+        assert_eq!(inv["delivery_readiness"], "read_only_no_apply");
+
+        task.recipe = plan::Recipe::Review;
+        let rev = summary(&task);
+        assert_eq!(rev["verified"], true);
+        assert_eq!(rev["outcome"], "verified_review");
+        assert_eq!(rev["delivery_readiness"], "read_only_no_apply");
     }
 }

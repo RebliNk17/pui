@@ -588,6 +588,7 @@ process.stdout.write(JSON.stringify({ ok: true, access, refresh, expiresIn, emai
     Ok(email)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_antigravity_browser_login(
     client: (&str, &str),
     authorize_url: &str,

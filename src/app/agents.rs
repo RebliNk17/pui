@@ -1163,9 +1163,25 @@ impl Pui {
                     json!({"agent_id":id,"state":"queued","access":access,"context":"fresh task brief only","note":"Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."}),
                 )
             }
-            "list" => Ok(
-                json!({"agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"name":n.name,"status":n.status,"access":n.access,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>()}),
-            ),
+            "list" => {
+                let unfinished = self
+                    .agents
+                    .nodes
+                    .values()
+                    .filter(|node| {
+                        node.parent.is_some()
+                            && !node.stopped
+                            && node.failure.is_none()
+                            && node.result.is_none()
+                            && !node.settled
+                    })
+                    .count();
+                let retained = self.agents.nodes.len().saturating_sub(unfinished);
+                Ok(json!({
+                    "agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"name":n.name,"status":n.status,"access":n.access,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>(),
+                    "capacity":{"unfinished_workers":unfinished,"max_unfinished_workers":128,"retained_history":retained,"concurrency_ceiling":self.prefs.agent_concurrency.clamp(1,16)}
+                }))
+            }
             "message" => {
                 let target = protocol::string(request, "agent_id");
                 let message = protocol::string(request, "message");

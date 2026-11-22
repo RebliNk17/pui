@@ -1,6 +1,59 @@
 //! A lead-authored plan reviewed before implementation, not a script or permission grant.
 use super::*;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Recipe {
+    #[default]
+    VerifiedChange,
+    Investigate,
+    Review,
+}
+impl Recipe {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::Investigate | Self::Review)
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VerifiedChange => "Verified change",
+            Self::Investigate => "Investigate",
+            Self::Review => "Review",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::VerifiedChange => {
+                "Recipe: Verified change (isolated implementation + executable checks + fresh independent review; separate confirmation required to apply)."
+            }
+            Self::Investigate => {
+                "Recipe: Investigate (read-only analysis + executable diagnostic checks + fresh independent verifier; no file edits or apply-back)."
+            }
+            Self::Review => {
+                "Recipe: Review (read-only code review + executable verification checks + fresh independent verifier; no file edits or apply-back)."
+            }
+        }
+    }
+    pub fn from_request(value: &serde_json::Value) -> Result<Option<Self>, String> {
+        let Some(v) = value.get("recipe") else {
+            return Ok(None);
+        };
+        serde_json::from_value(v.clone())
+            .map(Some)
+            .map_err(|_| "Workflow recipe must be verified_change, investigate or review.".into())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRevision {
+    pub number: u32,
+    pub steps: Vec<String>,
+    pub checks: Contract,
+    #[serde(default)]
+    pub feedback: Option<String>,
+    pub approved: bool,
+    pub created: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
@@ -88,5 +141,21 @@ mod tests {
         let mut invalid = plan;
         invalid.steps = vec!["x".repeat(2001)];
         assert!(invalid.validate().is_err());
+    }
+    #[test]
+    fn recipes_parse_strictly_and_distinguish_read_only_modes() {
+        assert_eq!(Recipe::from_request(&serde_json::json!({})).unwrap(), None);
+        for (raw, expected, read_only) in [
+            ("verified_change", Recipe::VerifiedChange, false),
+            ("investigate", Recipe::Investigate, true),
+            ("review", Recipe::Review, true),
+        ] {
+            let parsed = Recipe::from_request(&serde_json::json!({"recipe": raw}))
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.is_read_only(), read_only);
+        }
+        assert!(Recipe::from_request(&serde_json::json!({"recipe": "custom_script"})).is_err());
     }
 }

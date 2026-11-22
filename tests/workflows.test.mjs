@@ -208,3 +208,13 @@ test('revision, cancellation and abort never persist a decline or execution auth
   await assert.rejects(h.tool.execute('', args, controller.signal, null, h.ctx), /abort/i);
   assert.equal(h.requests.length, 1);
 });
+
+test('workflow recipes validate strictly and pass through to native consent', async () => {
+  for (const recipe of ['verified_change', 'investigate', 'review']) {
+    const h = host();
+    await h.tool.execute('', { ...args, recipe, plan: concretePlan }, undefined, null, h.ctx);
+    assert.equal(JSON.parse(h.requests[0][1]).recipe, recipe);
+  }
+  const h = host();
+  await assert.rejects(h.tool.execute('', { ...args, recipe: 'custom_graph' }, undefined, null, h.ctx), /recipe/);
+});
