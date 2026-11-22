@@ -693,3 +693,88 @@ fn provider_filter_grows_when_more_providers_load() {
     });
     assert!(visible, "openai option is clipped by a stale popup size");
 }
+
+#[test]
+fn model_picker_shows_only_providers_configured_in_settings() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    live(&mut app);
+    app.state.models = [
+        "anthropic",
+        "antigravity",
+        "google",
+        "openai",
+        "local-ollama",
+    ]
+    .into_iter()
+    .map(|provider| protocol::Model {
+        id: format!("{provider}-model"),
+        name: format!("{provider} model"),
+        provider: provider.into(),
+        context_window: 1000,
+        input_cost: 1.0,
+        output_cost: 2.0,
+    })
+    .collect();
+    app.settings_view
+        .providers
+        .set_configured_providers_for_test(&["anthropic", "antigravity"], &["local-ollama"]);
+    app.model_provider = "openai".into();
+    app.model_picker_open = true;
+    let output = settle(&ctx, &mut app);
+    assert!(
+        app.model_provider.is_empty(),
+        "unconfigured provider filter should be cleared"
+    );
+    let shown: Vec<String> = texts(&output).into_iter().map(|(s, _)| s).collect();
+    assert!(shown.iter().any(|s| s == "anthropic model"));
+    assert!(shown.iter().any(|s| s == "antigravity model"));
+    assert!(shown.iter().any(|s| s == "local-ollama model"));
+    assert!(
+        !shown
+            .iter()
+            .any(|s| s == "google model" || s == "openai model"),
+        "env-var providers not in settings must not appear: {shown:?}"
+    );
+
+    click(&ctx, &mut app, position(&output, "All providers"));
+    let dropdown = settle(&ctx, &mut app);
+    let dropdown_texts: Vec<String> = texts(&dropdown).into_iter().map(|(s, _)| s).collect();
+    assert!(dropdown_texts.iter().any(|s| s == "anthropic"));
+    assert!(dropdown_texts.iter().any(|s| s == "antigravity"));
+    assert!(dropdown_texts.iter().any(|s| s == "local-ollama"));
+    assert!(
+        !dropdown_texts
+            .iter()
+            .any(|s| s == "google" || s == "openai"),
+        "env-var providers must not appear in provider dropdown: {dropdown_texts:?}"
+    );
+}
+
+#[test]
+fn model_picker_shows_empty_configured_notice_when_only_env_var_models_exist() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    live(&mut app);
+    app.state.models = vec![protocol::Model {
+        id: "gpt-4o".into(),
+        name: "GPT-4o".into(),
+        provider: "openai".into(),
+        context_window: 1000,
+        input_cost: 1.0,
+        output_cost: 2.0,
+    }];
+    app.settings_view
+        .providers
+        .set_configured_providers_for_test(&[], &[]);
+    app.model_picker_open = true;
+    let output = settle(&ctx, &mut app);
+    let shown: Vec<String> = texts(&output).into_iter().map(|(s, _)| s).collect();
+    assert!(!shown.iter().any(|s| s == "GPT-4o"));
+    assert!(
+        shown
+            .iter()
+            .any(|s| s.contains("No configured providers. Add one in Settings")),
+        "expected empty configured providers notice, got: {shown:?}"
+    );
+}

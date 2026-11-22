@@ -511,16 +511,26 @@ impl Pui {
         } else {
             egui::PopupCloseBehavior::CloseOnClickOutside
         };
+        self.settings_view.providers.ensure_loaded(self.demo);
         egui::Popup::new(egui::Id::new("model-picker-dropdown"), ctx.clone(), anchor, layer)
             .open_bool(&mut open).align(egui::emath::RectAlign::TOP_START).align_alternatives(&[])
             .close_behavior(close_behavior).width(width)
             .frame(prompt_ui::popup(ctx).inner_margin(6)).gap(6.0).show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(width - 12.0);
-                let visible_models = self
+                let configured_models = self
                     .state
                     .models
                     .iter()
+                    .filter(|m| {
+                        self.settings_view
+                            .providers
+                            .is_provider_configured(&m.provider)
+                    })
+                    .collect::<Vec<_>>();
+                let visible_models = configured_models
+                    .iter()
+                    .copied()
                     .filter(|m| {
                         !self
                             .prefs
@@ -532,6 +542,14 @@ impl Pui {
                     .iter()
                     .map(|m| m.provider.clone())
                     .collect::<std::collections::BTreeSet<_>>();
+                if !self.model_provider.is_empty()
+                    && !self
+                        .settings_view
+                        .providers
+                        .is_provider_configured(&self.model_provider)
+                {
+                    self.model_provider.clear();
+                }
                 let search_frame = egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0, colors.border)).corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(7, 5)).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -576,7 +594,16 @@ impl Pui {
                 let ids = filtered.iter().map(|m| ui.id().with(("model", &m.provider, &m.id))).collect::<Vec<_>>();
                 let selected_index = filtered.iter().position(|m| m.id == self.state.model && m.provider == self.state.provider).unwrap_or(0);
                 let target = navigate(ui, &ids, selected_index, blocked.is_none());
-                if filtered.is_empty() { ui.add(egui::Label::new(theme::small(ui, if self.state.models.is_empty() { "Pi has not returned available models yet." } else { "No matching models." })).wrap()); }
+                if filtered.is_empty() {
+                    let message = if self.state.models.is_empty() {
+                        "Pi has not returned available models yet."
+                    } else if configured_models.is_empty() {
+                        "No configured providers. Add one in Settings → Providers."
+                    } else {
+                        "No matching models."
+                    };
+                    ui.add(egui::Label::new(theme::small(ui, message)).wrap());
+                }
                 ui.spacing_mut().item_spacing.y = 0.0;
                 // Reserve a useful result viewport even for a short catalog. Derive
                 // the bound from this menu's actual header, including status text.

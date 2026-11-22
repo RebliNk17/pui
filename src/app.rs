@@ -1225,6 +1225,9 @@ impl Pui {
                                 | "set_thinking_level"
                         )
                     {
+                        if command == "get_available_models" && !self.demo && !cfg!(test) {
+                            self.settings_view.providers.reload_from_disk();
+                        }
                         self.remember_model_catalog(&command);
                     }
                     if user_message || (kind == "response" && command == "get_entries") {

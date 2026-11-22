@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod accounts;
 
@@ -105,7 +107,30 @@ struct AntigravitySubscriptionFlow {
     exchanging: bool,
     listening: bool,
     rx: Option<Receiver<Result<String, String>>>,
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<std::process::Child>>>,
     error: Option<String>,
+}
+
+impl AntigravitySubscriptionFlow {
+    fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Ok(mut slot) = self.child.lock()
+            && let Some(mut child) = slot.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.rx = None;
+        self.exchanging = false;
+        self.listening = false;
+    }
+}
+
+impl Drop for AntigravitySubscriptionFlow {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 struct VertexModal {
@@ -182,6 +207,7 @@ struct ApiKeyModal {
 #[derive(Default)]
 pub(in crate::app) struct ProvidersManager {
     loaded: bool,
+    disk_loaded: bool,
     pub(in crate::app) custom_providers: Vec<CustomProviderSummary>,
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
     pub(in crate::app) model_context_overrides: std::collections::BTreeMap<(String, String), u64>,
@@ -422,7 +448,11 @@ fn exchange_antigravity_oauth_code(
     code: &str,
     verifier: &str,
     target: &str,
+    cancelled: &AtomicBool,
 ) -> Result<String, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Sign-in cancelled.".into());
+    }
     let (client_id, client_secret) = antigravity_client(client_id, client_secret);
     let (client_id, client_secret) = (client_id.as_str(), client_secret.as_str());
     let script = r#"
@@ -535,6 +565,9 @@ process.stdout.write(JSON.stringify({ ok: true, access, refresh, expiresIn, emai
     let now_ms = chrono::Utc::now().timestamp_millis();
     let expires = now_ms + expires_in * 1000 - 5 * 60 * 1000;
 
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Sign-in cancelled.".into());
+    }
     let auth_path = auth_json_path().ok_or("Cannot resolve ~/.pi/agent/auth.json path.")?;
     let mut auth = read_json_object(&auth_path);
     let mut entry = json!({
@@ -563,6 +596,8 @@ fn run_antigravity_browser_login(
     expected_state: &str,
     verifier: &str,
     target: &str,
+    cancelled: &AtomicBool,
+    child_slot: &Arc<Mutex<Option<std::process::Child>>>,
 ) -> Result<String, String> {
     let script = r#"
 import { createServer } from 'node:http';
@@ -613,11 +648,27 @@ setTimeout(() => {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     crate::runtime::configure(&mut command);
-    let output = command.output().map_err(|_| {
+    let mut child = command.spawn().map_err(|_| {
         "Cannot start local OAuth callback listener. Paste the callback URL below instead."
             .to_owned()
     })?;
-    let reply: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+    let mut stdout = child.stdout.take();
+    if let Ok(mut slot) = child_slot.lock() {
+        *slot = Some(child);
+    }
+    let mut raw = Vec::new();
+    if let Some(out) = stdout.as_mut() {
+        let _ = out.read_to_end(&mut raw);
+    }
+    if let Ok(mut slot) = child_slot.lock()
+        && let Some(mut child) = slot.take()
+    {
+        let _ = child.wait();
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Sign-in cancelled.".into());
+    }
+    let reply: Value = serde_json::from_slice(&raw).map_err(|_| {
         "Browser callback listener exited before completing sign-in. Paste the callback URL below if you signed in."
             .to_owned()
     })?;
@@ -631,7 +682,7 @@ setTimeout(() => {
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or("Callback did not contain an authorization code.")?;
-    exchange_antigravity_oauth_code(client_id, client_secret, code, verifier, target)
+    exchange_antigravity_oauth_code(client_id, client_secret, code, verifier, target, cancelled)
 }
 
 pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredModel> {
@@ -871,7 +922,45 @@ impl ProvidersManager {
         self.reload_from_disk();
     }
 
+    pub(in crate::app) fn is_provider_configured(&self, provider: &str) -> bool {
+        if !self.disk_loaded {
+            return true;
+        }
+        self.saved_auth.iter().any(|a| a.provider == provider)
+            || self.custom_providers.iter().any(|c| c.id == provider)
+    }
+
+    #[cfg(test)]
+    pub(in crate::app) fn set_configured_providers_for_test(
+        &mut self,
+        auth_ids: &[&str],
+        custom_ids: &[&str],
+    ) {
+        self.loaded = true;
+        self.disk_loaded = true;
+        self.saved_auth = auth_ids
+            .iter()
+            .map(|id| AuthSummary {
+                provider: (*id).to_owned(),
+                kind: "oauth".into(),
+                detail: None,
+            })
+            .collect();
+        self.custom_providers = custom_ids
+            .iter()
+            .map(|id| CustomProviderSummary {
+                id: (*id).to_owned(),
+                name: (*id).to_owned(),
+                base_url: "http://localhost:11434/v1".into(),
+                api: "openai-completions".into(),
+                api_key: String::new(),
+                models: Vec::new(),
+            })
+            .collect();
+    }
+
     pub(in crate::app) fn reload_from_disk(&mut self) {
+        self.disk_loaded = true;
         self.accounts.registry = None;
         self.custom_providers.clear();
         self.saved_auth.clear();
@@ -1156,6 +1245,7 @@ impl ProvidersManager {
             client_id.clear();
             client_secret.clear();
         }
+        self.antigravity.cancel();
         self.antigravity = AntigravitySubscriptionFlow {
             open: true,
             target: target.to_owned(),
@@ -1169,6 +1259,8 @@ impl ProvidersManager {
             exchanging: false,
             listening: false,
             rx: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
             error: None,
         };
     }
@@ -1482,10 +1574,7 @@ impl ProvidersManager {
         let mut root = read_json_object(&path);
         let additional = self.api_key_modal.additional && root[&provider].is_object();
         let provider = if additional {
-            let target = self.account_target(&provider);
-            self.registry().add(&target, None)?;
-            self.registry().save()?;
-            target
+            self.account_target(&provider)
         } else {
             provider
         };
@@ -1494,6 +1583,10 @@ impl ProvidersManager {
             "key": key,
         });
         write_json_atomic(&path, &root, true)?;
+        if additional {
+            self.registry().add(&provider, None)?;
+            self.registry().save()?;
+        }
         self.api_key_modal.open = false;
         self.api_key_modal.api_key.clear();
         self.reload_from_disk();
@@ -1770,6 +1863,9 @@ impl ProvidersManager {
             let (client_id, client_secret) =
                 antigravity_client(&self.antigravity.client_id, &self.antigravity.client_secret);
             {
+                self.antigravity.cancel();
+                self.antigravity.cancelled = Arc::new(AtomicBool::new(false));
+                self.antigravity.child = Arc::new(Mutex::new(None));
                 self.antigravity.exchanging = true;
                 self.antigravity.listening = true;
                 self.antigravity.error = None;
@@ -1781,6 +1877,8 @@ impl ProvidersManager {
                 let state = self.antigravity.state.clone();
                 let verifier = self.antigravity.verifier.clone();
                 let target = self.antigravity.target.clone();
+                let cancelled = self.antigravity.cancelled.clone();
+                let child = self.antigravity.child.clone();
                 let (tx, rx) = mpsc::channel();
                 self.antigravity.rx = Some(rx);
                 let ctx = ctx.clone();
@@ -1792,6 +1890,8 @@ impl ProvidersManager {
                         &state,
                         &verifier,
                         &target,
+                        &cancelled,
+                        &child,
                     ));
                     ctx.request_repaint();
                 });
@@ -1803,11 +1903,14 @@ impl ProvidersManager {
                 Ok((code, _)) => {
                     let client_id = self.antigravity.client_id.trim().to_owned();
                     let client_secret = self.antigravity.client_secret.trim().to_owned();
+                    self.antigravity.cancel();
+                    self.antigravity.cancelled = Arc::new(AtomicBool::new(false));
                     self.antigravity.exchanging = true;
                     self.antigravity.listening = false;
                     self.antigravity.error = None;
                     let verifier = self.antigravity.verifier.clone();
                     let target = self.antigravity.target.clone();
+                    let cancelled = self.antigravity.cancelled.clone();
                     let (tx, rx) = mpsc::channel();
                     self.antigravity.rx = Some(rx);
                     let ctx = ctx.clone();
@@ -1818,6 +1921,7 @@ impl ProvidersManager {
                             &code,
                             &verifier,
                             &target,
+                            &cancelled,
                         ));
                         ctx.request_repaint();
                     });
@@ -1829,9 +1933,7 @@ impl ProvidersManager {
         }
         if response.should_close() || response.inner {
             self.antigravity.open = false;
-            self.antigravity.rx = None;
-            self.antigravity.exchanging = false;
-            self.antigravity.listening = false;
+            self.antigravity.cancel();
         }
     }
 
@@ -2409,9 +2511,7 @@ impl ProvidersManager {
         }
         if self.antigravity.open {
             self.antigravity.open = false;
-            self.antigravity.rx = None;
-            self.antigravity.exchanging = false;
-            self.antigravity.listening = false;
+            self.antigravity.cancel();
             return true;
         }
         if self.vertex.open {
@@ -2802,5 +2902,60 @@ mod tests {
             }
         }
         assert!(found);
+    }
+
+    #[test]
+    fn cancelling_add_provider_modals_without_saving_never_adds_provider() {
+        let mut manager = ProvidersManager::default();
+        manager.set_configured_providers_for_test(&[], &[]);
+        assert!(!manager.is_provider_configured("openai"));
+        assert!(!manager.is_provider_configured("google-vertex"));
+        assert!(!manager.is_provider_configured("local-test"));
+        assert!(!manager.is_provider_configured("antigravity"));
+
+        // Open API key modal, enter draft data, cancel without saving.
+        manager.open_api_key_modal(Some("openai"));
+        manager.api_key_modal.api_key = "sk-unsaved".into();
+        assert!(manager.escape());
+        assert!(!manager.api_key_modal.open);
+        assert!(manager.saved_auth.is_empty());
+        assert!(!manager.is_provider_configured("openai"));
+
+        // Open Vertex modal, enter draft data, cancel without saving.
+        manager.open_vertex_modal();
+        manager.vertex.project_id = "unsaved-project".into();
+        assert!(manager.escape());
+        assert!(!manager.vertex.open);
+        assert!(manager.saved_auth.is_empty());
+        assert!(!manager.is_provider_configured("google-vertex"));
+
+        // Open custom endpoint modal, enter draft data, cancel without saving.
+        manager.open_add_endpoint(None);
+        manager.endpoint.id = "local-test".into();
+        manager.endpoint.base_url = "http://localhost:11434/v1".into();
+        assert!(manager.escape());
+        assert!(!manager.endpoint.open);
+        assert!(manager.custom_providers.is_empty());
+        assert!(!manager.is_provider_configured("local-test"));
+
+        // Open Antigravity modal, cancel without completing sign-in: cancellation flag is set so
+        // any in-flight exchange refuses to write to auth.json.
+        manager.open_antigravity_for("antigravity");
+        let cancelled = manager.antigravity.cancelled.clone();
+        assert!(!cancelled.load(Ordering::Relaxed));
+        assert!(manager.escape());
+        assert!(!manager.antigravity.open);
+        assert!(cancelled.load(Ordering::Relaxed));
+        let exchange_result = exchange_antigravity_oauth_code(
+            "",
+            "",
+            "fake-code",
+            "fake-verifier",
+            "antigravity",
+            &cancelled,
+        );
+        assert!(exchange_result.is_err());
+        assert!(manager.saved_auth.is_empty());
+        assert!(!manager.is_provider_configured("antigravity"));
     }
 }
