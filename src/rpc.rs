@@ -337,31 +337,37 @@ fn run(
         for line in BufReader::new(stdout).split(b'\n') {
             match line {
                 Ok(line) if line.is_empty() => continue,
-                Ok(line) => match serde_json::from_slice::<Value>(&line) {
-                    Ok(record) => {
-                        let event = if record["type"] == "response"
-                            && record["command"] == "get_entries"
-                            && record["success"] == true
-                        {
-                            Event::History(crate::history::from_entries(
-                                record["data"]["entries"]
-                                    .as_array()
-                                    .map(Vec::as_slice)
-                                    .unwrap_or_default(),
-                                record["data"]["leafId"].as_str(),
-                            ))
-                        } else {
-                            Event::Record(record)
-                        };
-                        if output_events.send(event).is_err() {
-                            break;
+                Ok(line) => {
+                    let parsed = serde_json::from_slice::<Value>(&line);
+                    drop(line);
+                    match parsed {
+                        Ok(record) => {
+                            let event = if record["type"] == "response"
+                                && record["command"] == "get_entries"
+                                && record["success"] == true
+                            {
+                                let history = crate::history::from_entries(
+                                    record["data"]["entries"]
+                                        .as_array()
+                                        .map(Vec::as_slice)
+                                        .unwrap_or_default(),
+                                    record["data"]["leafId"].as_str(),
+                                );
+                                drop(record);
+                                Event::History(history)
+                            } else {
+                                Event::Record(record)
+                            };
+                            if output_events.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = output_events
+                                .send(Event::Error("Pi emitted an invalid JSONL record.".into()));
                         }
                     }
-                    Err(_) => {
-                        let _ = output_events
-                            .send(Event::Error("Pi emitted an invalid JSONL record.".into()));
-                    }
-                },
+                }
                 Err(error) => {
                     let _ = output_events.send(Event::Error(format!("Pi stdout: {error}")));
                     break;

@@ -573,6 +573,36 @@ impl WindowSync {
             && self.error.is_none()
             && self.dock_epoch_accepted == Some(self.presence_epoch.load(Ordering::Acquire))
     }
+    pub(super) fn can_evict_owned(&self) -> bool {
+        !self.enabled() || (self.dock_single_window() && self.endpoints.is_empty())
+    }
+    pub(super) fn is_published_clean(&self, session_file: Option<&str>) -> bool {
+        if !self.enabled() {
+            return true;
+        }
+        let Some(raw) = session_file.map(Path::new) else {
+            return true;
+        };
+        self.owned
+            .get(raw)
+            .or_else(|| self.owned.get(&self.attention_identity(raw)))
+            .is_some_and(|owner| owner.revision > 0 && owner.stamp != 0)
+    }
+    pub(super) fn release(&mut self, path: &Path) {
+        let path = if self.owned.contains_key(path) {
+            path.to_path_buf()
+        } else {
+            let cached = self.attention_identity(path);
+            if self.owned.contains_key(&cached) {
+                cached
+            } else {
+                identity(path)
+            }
+        };
+        if self.owned.remove(&path).is_some() {
+            let _ = self.tx.send(Work::Forget(path));
+        }
+    }
     /// Reuse an owned lock or acquire a temporary lock. Never delete another
     /// window's live transcript, even if its cached status says Idle.
     pub(super) fn deletion_lock(&self, path: &Path) -> Result<Option<File>, String> {
@@ -778,16 +808,29 @@ impl Pui {
         }
     }
     pub(super) fn other_window_status(&self, path: &Path) -> Option<&str> {
-        if self.sync.endpoints.is_empty() {
+        if self.sync.endpoints.is_empty() || self.sync.owned.contains_key(path) {
             return None;
         }
-        let path = identity(path);
-        if self.sync.owned.contains_key(&path) {
+        let canonical;
+        let path = if self.sync.endpoints.contains_key(path) {
+            path
+        } else if self
+            .sync
+            .endpoints
+            .keys()
+            .any(|k| k.file_name() == path.file_name())
+        {
+            canonical = identity(path);
+            if self.sync.owned.contains_key(&canonical) {
+                return None;
+            }
+            canonical.as_path()
+        } else {
             return None;
-        }
+        };
         self.sync
             .endpoints
-            .get(&path)?
+            .get(path)?
             .paths
             .iter()
             .find(|p| p.path == path)
@@ -867,13 +910,19 @@ impl Pui {
         if self.demo || !self.sync.enabled() || self.client.is_none() || self.loading_chat {
             return;
         }
-        let Some(path) = self
-            .state
-            .session_file
-            .as_ref()
-            .map(|p| identity(Path::new(p)))
-        else {
+        let Some(raw) = self.state.session_file.as_deref() else {
             return;
+        };
+        let raw_path = Path::new(raw);
+        let path = if self.sync.owned.contains_key(raw_path) {
+            raw_path.to_path_buf()
+        } else {
+            let cached = self.sync.attention_identity(raw_path);
+            if self.sync.owned.contains_key(&cached) {
+                cached
+            } else {
+                identity(raw_path)
+            }
         };
         if !self.sync.owned.contains_key(&path) && !self.attach_or_claim(&path) {
             if let Some(client) = self.client.take() {
@@ -881,11 +930,24 @@ impl Pui {
             }
             return;
         }
-        let queue = self
-            .waiting
-            .iter()
-            .find(|(p, _)| identity(p) == path)
-            .map(|(_, q)| q);
+        let queue = if self.waiting.is_empty() {
+            None
+        } else {
+            self.waiting
+                .get(&path)
+                .or_else(|| {
+                    self.state
+                        .session_file
+                        .as_deref()
+                        .and_then(|s| self.waiting.get(Path::new(s)))
+                })
+                .or_else(|| {
+                    self.waiting
+                        .iter()
+                        .find(|(p, _)| identity(p) == path)
+                        .map(|(_, q)| q)
+                })
+        };
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         (
             self.state.transcript_revision,
@@ -915,11 +977,13 @@ impl Pui {
         self.attention.metadata(&path).hash(&mut hash);
         self.state.error.hash(&mut hash);
         self.state.notice.hash(&mut hash);
-        format!("{:?}", self.state.dialogs).hash(&mut hash);
+        if self.state.dialogs.is_empty() {
+            0usize.hash(&mut hash);
+        } else {
+            format!("{:?}", self.state.dialogs).hash(&mut hash);
+        }
         self.agent_settings(&self.agents.active)
-            .payload()
-            .to_string()
-            .hash(&mut hash);
+            .hash_payload(&mut hash);
         self.agents
             .nodes
             .get(&self.agents.active)

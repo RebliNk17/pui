@@ -196,6 +196,8 @@ pub struct Pui {
     show_hidden: bool,
     closed_projects: std::collections::BTreeSet<PathBuf>,
     expanded_projects: std::collections::BTreeSet<PathBuf>,
+    sidebar_cache: sidebar_tree::ListingCache,
+    sidebar_running: sidebar_order::RunningOrder,
     section_view: sidebar::sections::View,
     rename_chat: Option<PathBuf>,
     rename_text: String,
@@ -343,6 +345,8 @@ impl Pui {
             show_hidden: false,
             closed_projects,
             expanded_projects,
+            sidebar_cache: Default::default(),
+            sidebar_running: Default::default(),
             section_view: Default::default(),
             rename_chat: None,
             rename_text: String::new(),
@@ -1072,9 +1076,11 @@ impl Pui {
         self.publish_live();
         self.poll_window_sync();
     }
-    fn poll_rpc(&mut self) {
+    fn poll_rpc(&mut self) -> bool {
         let mut title_dirty = false;
+        let mut had_activity = false;
         if let Some(preview) = self.preview_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            had_activity = true;
             self.preview_rx = None;
             if let Ok(preview) = preview {
                 self.preview_partial = preview.partial;
@@ -1088,6 +1094,11 @@ impl Pui {
             .as_ref()
             .map(|c| c.events.try_iter().collect())
             .unwrap_or_default();
+        if !events.is_empty() {
+            had_activity = true;
+        } else if !had_activity && !self.resource_reload.pending() && self.agents.background {
+            return false;
+        }
         for event in events {
             match event {
                 rpc::Event::History(messages) => {
@@ -1331,6 +1342,7 @@ impl Pui {
         if title_dirty {
             self.update_session_title();
         }
+        had_activity
     }
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -2686,6 +2698,7 @@ impl eframe::App for Pui {
                 &attention::Stored(self.attention.persisted()),
             );
             self.prefs.agent_tree = self.agent_records();
+            self.prefs.chats.retain(|_, meta| !meta.is_empty());
             self.prefs.projects_view = self.projects;
             self.prefs.last_session = self.pending_session.clone().or_else(|| {
                 (!self.new_chat)

@@ -159,6 +159,9 @@ impl Attention {
             .collect()
     }
     pub fn metadata(&self, path: &Path) -> Option<Metadata> {
+        if self.entries.is_empty() {
+            return None;
+        }
         let path = lexical_identity(path);
         self.entries
             .iter()

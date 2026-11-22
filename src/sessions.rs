@@ -37,6 +37,12 @@ pub fn discover(retained: &[PathBuf]) -> Vec<Session> {
     discover_in(&root, retained)
 }
 
+type DiscoveryCache =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (SystemTime, u64, Session)>>;
+
+static DISCOVERY_CACHE: std::sync::LazyLock<DiscoveryCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
     let mut files = Vec::new();
     collect(root, &mut files);
@@ -48,11 +54,11 @@ fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
             collect(&dir.path(), &mut files);
         }
     }
-    files.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    files.sort_by_key(|(_, time, _)| std::cmp::Reverse(*time));
     // Pinned/hidden chats must remain reachable even after leaving the recent 150.
     files.truncate(150);
     let mut seen: std::collections::HashSet<_> =
-        files.iter().map(|(path, _)| path.clone()).collect();
+        files.iter().map(|(path, _, _)| path.clone()).collect();
     for path in retained {
         if seen.insert(path.clone()) {
             if let Ok(meta) = fs::metadata(path) {
@@ -60,16 +66,34 @@ fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
                     files.push((
                         path.clone(),
                         meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        meta.len(),
                     ));
                 }
             }
         }
     }
     let mut projects = std::collections::HashMap::new();
+    let mut cache = DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() > 512 {
+        cache.retain(|path, _| seen.contains(path));
+    }
     files
         .into_iter()
-        .filter_map(|(path, modified)| {
-            let mut session = read_session(&path, modified)?;
+        .filter_map(|(path, modified, len)| {
+            let mut session = match cache.get(&path) {
+                Some((cached_modified, cached_len, cached))
+                    if *cached_modified == modified && *cached_len == len =>
+                {
+                    cached.clone()
+                }
+                _ => {
+                    let parsed = read_session(&path, modified)?;
+                    cache.insert(path, (modified, len, parsed.clone()));
+                    parsed
+                }
+            };
             session.project = projects
                 .entry(session.cwd.clone())
                 .or_insert_with(|| repository_folder(&session.cwd))
@@ -79,13 +103,17 @@ fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
         .collect()
 }
 
-fn collect(root: &Path, files: &mut Vec<(PathBuf, SystemTime)>) {
+fn collect(root: &Path, files: &mut Vec<(PathBuf, SystemTime, u64)>) {
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "jsonl") {
                 if let Ok(meta) = entry.metadata() {
-                    files.push((path, meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+                    files.push((
+                        path,
+                        meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        meta.len(),
+                    ));
                 }
             }
         }
@@ -99,6 +127,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     // bound for image-heavy/malformed sessions. Discovery runs on a worker.
     let reader = BufReader::new(file.take(96 * 1024 * 1024));
     let mut prefix_bytes = 0;
+    let mut reached_eof = true;
     let mut cwd = None;
     let mut created = None;
     let mut prompt = None;
@@ -142,24 +171,27 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
                 .or(name);
         }
         if prefix_bytes >= 96 * 1024 && prompt.is_some() {
+            reached_eof = false;
             break;
         }
     }
-    let mut tail = fs::File::open(path).ok()?;
-    let len = tail.metadata().ok()?.len();
-    tail.seek(SeekFrom::Start(len.saturating_sub(32 * 1024)))
-        .ok()?;
-    let mut bytes = Vec::new();
-    tail.read_to_end(&mut bytes).ok()?;
-    for line in bytes.split(|b| *b == b'\n') {
-        if let Ok(entry) = serde_json::from_slice::<Value>(line) {
-            if string(&entry, "type") == "session_info" {
-                name = entry["name"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .or(name);
+    if !reached_eof {
+        let mut tail = fs::File::open(path).ok()?;
+        let len = tail.metadata().ok()?.len();
+        tail.seek(SeekFrom::Start(len.saturating_sub(32 * 1024)))
+            .ok()?;
+        let mut bytes = Vec::new();
+        tail.read_to_end(&mut bytes).ok()?;
+        for line in bytes.split(|b| *b == b'\n') {
+            if let Ok(entry) = serde_json::from_slice::<Value>(line) {
+                if string(&entry, "type") == "session_info" {
+                    name = entry["name"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or(name);
+                }
             }
         }
     }

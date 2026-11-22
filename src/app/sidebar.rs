@@ -23,6 +23,18 @@ pub(super) struct ChatPrefs {
     pub(super) section: Option<String>,
     pub(super) parent_session: Option<PathBuf>,
 }
+impl ChatPrefs {
+    pub(super) fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.initial_title.is_none()
+            && self.project.is_none()
+            && !self.pinned
+            && !self.archived
+            && !self.hidden
+            && self.section.is_none()
+            && self.parent_session.is_none()
+    }
+}
 #[derive(Clone)]
 enum Action {
     Rename(PathBuf),
@@ -43,7 +55,18 @@ impl Pui {
         let colors = crate::theme::palette(ctx);
         let mut action = None;
         let tasks_loading = self.tasks.loading_history();
-        let (mut pinned, branches) = sidebar_tree::listing(self);
+        let (mut pinned, mut branches) = sidebar_tree::cached_listing(self);
+        let mut running = std::mem::take(&mut self.sidebar_running);
+        running.update(&pinned, &branches, |branch| {
+            if matches!(branch.target, sidebar_tree::Target::Task(_, _)) {
+                theme::status::is_working(&branch.status)
+            } else {
+                theme::status::is_working(&self.sidebar_status(branch))
+            }
+        });
+        running.sort_children(&mut pinned);
+        running.sort_children(&mut branches);
+        self.sidebar_running = running;
         let fresh_chat = self.new_chat.then(|| self.agents.active.clone());
         let fresh_id = egui::Id::new("sidebar-fresh-chat");
         let reveal_new_chat = fresh_chat.is_some()
@@ -121,8 +144,10 @@ impl Pui {
                     .map(|(index, _)| index)
                     .collect();
                 let order = self.prefs.session_order;
-                pinned.sort_by(|a, b| order.compare(a, b));
-                visible.sort_by(|a, b| order.compare(&branches[*a], &branches[*b]));
+                let running = &self.sidebar_running;
+                pinned.sort_by(|a, b| order.compare_running(a, b, running));
+                visible
+                    .sort_by(|a, b| order.compare_running(&branches[*a], &branches[*b], running));
                 let section_groups = sections::partition(self, &branches, &mut visible);
                 let mut groups: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
                 if self.projects {
@@ -175,7 +200,11 @@ impl Pui {
                         if self.projects {
                             let mut groups: Vec<_> = groups.into_iter().collect();
                             groups.sort_by(|a, b| {
-                                order.compare_groups((&a.0, &a.1), (&b.0, &b.1), &branches)
+                                self.sidebar_running
+                                    .compare_groups(&a.1, &b.1, &branches)
+                                    .then_with(|| {
+                                        order.compare_groups((&a.0, &a.1), (&b.0, &b.1), &branches)
+                                    })
                             });
                             for (project, indices) in groups {
                                 let open = !self.closed_projects.contains(&project);
@@ -959,22 +988,18 @@ impl Pui {
     }
     pub(super) fn session_title(&self, session: &Session) -> String {
         let live_title = || {
-            if self
-                .state
-                .session_file
-                .as_deref()
-                .is_some_and(|path| std::path::Path::new(path) == session.path)
-            {
+            if self.state.session_file.as_deref().is_some_and(|path| {
+                sidebar_tree::same_path(std::path::Path::new(path), &session.path)
+            }) {
                 self.state.chat_title()
             } else {
                 self.agents
                     .parked
                     .values()
                     .find(|chat| {
-                        chat.state
-                            .session_file
-                            .as_deref()
-                            .is_some_and(|path| std::path::Path::new(path) == session.path)
+                        chat.state.session_file.as_deref().is_some_and(|path| {
+                            sidebar_tree::same_path(std::path::Path::new(path), &session.path)
+                        })
                     })
                     .and_then(|chat| chat.state.chat_title())
             }
@@ -982,13 +1007,7 @@ impl Pui {
         self.prefs
             .chats
             .get(&session.path)
-            .and_then(|meta| meta.title.clone())
-            .or_else(|| {
-                self.prefs
-                    .chats
-                    .get(&session.path)
-                    .and_then(|meta| meta.initial_title.clone())
-            })
+            .and_then(|meta| meta.title.clone().or_else(|| meta.initial_title.clone()))
             .or_else(live_title)
             .unwrap_or_else(|| session.title.clone())
     }
@@ -1012,13 +1031,13 @@ impl Pui {
                 .state
                 .session_file
                 .as_deref()
-                .is_some_and(|p| std::path::Path::new(p) == path)
+                .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), &path))
                 || self.demo && index == 0);
-        let node = self
-            .agents
-            .nodes
-            .values()
-            .find(|n| n.path.as_ref() == Some(&path));
+        let node = self.agents.nodes.values().find(|n| {
+            n.path
+                .as_deref()
+                .is_some_and(|p| sidebar_tree::same_path(p, &path))
+        });
         let shared = self.other_window_status(&path).map(str::to_owned);
         let (status, status_color) = if deleting {
             ("Deleting…", colors.red)
