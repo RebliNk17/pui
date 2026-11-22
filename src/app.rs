@@ -1582,23 +1582,28 @@ impl Pui {
                 "I'd like to build a new feature. First help me understand where to start.",
             ),
         ] {
-            let response = egui::Frame::new()
-                .fill(colors.sidebar)
-                .stroke(Stroke::new(1.0, colors.border))
-                .corner_radius(10)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        icons::inline(ui, icon, colors.accent);
-                        ui.label(RichText::new(title).size(12.0));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new("↗").color(colors.dim));
-                        });
-                    });
-                    ui.set_min_width((ui.available_width() - 2.0).max(0.0));
-                })
+            let response = ui
+                .scope_builder(
+                    egui::UiBuilder::new().id_salt(title).sense(Sense::click()),
+                    |ui| {
+                        egui::Frame::new()
+                            .fill(colors.sidebar)
+                            .stroke(Stroke::new(1.0, colors.border))
+                            .corner_radius(10)
+                            .inner_margin(14)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    icons::inline(ui, icon, colors.accent);
+                                    ui.label(RichText::new(title).size(12.0));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(RichText::new("↗").color(colors.dim));
+                                    });
+                                });
+                                ui.set_min_width((ui.available_width() - 2.0).max(0.0));
+                            });
+                    },
+                )
                 .response
-                .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 self.context_chips.clear();

@@ -51,6 +51,7 @@ export function installWorkflows(pi: any) {
     parameters: Type.Object({
       objective: Type.String({ minLength: 1, maxLength: 16000 }),
       constraints: Type.Optional(Type.String({ maxLength: 12000 })),
+      recipe: Type.Optional(Type.Union([Type.Literal("verified_change"), Type.Literal("investigate"), Type.Literal("review")], { description: "Optional workflow recipe. Default verified_change implements and verifies a candidate; investigate and review run read-only analysis + executable checks + fresh independent review without modifying files." })),
       profile: Type.Optional(Type.Boolean({description:"Use the versioned repository pui-workflow.json steps/checks. Contents are shown in native consent; setup still requires separate exact-command approval."})),
       plan: Type.Optional(Type.Object({
         steps: Type.Array(Type.String({ minLength: 1, maxLength: 2000 }), { minItems: 1, maxItems: 12, description: "Concrete implementation steps shown before approval; 12,000 UTF-8 bytes total." }),
@@ -69,6 +70,7 @@ export function installWorkflows(pi: any) {
       if (process.env.PUI_AGENT_ACCESS === "read-only" || process.env.PUI_TASK_ROLE) throw new Error("This worker cannot start workflows.");
       if (typeof args.objective !== "string" || !args.objective.trim() || Buffer.byteLength(args.objective) > 16000 || typeof args.reason !== "string" || !args.reason.trim() || Buffer.byteLength(args.reason) > 240 || (args.constraints !== undefined && (typeof args.constraints !== "string" || Buffer.byteLength(args.constraints) > 12000))) throw new Error("Supply a bounded objective, constraints and a very short reason.");
       if (args.policy !== undefined && args.policy !== "dynamic" && args.policy !== "pinned" && args.policy !== "selected") throw new Error("Workflow policy must be dynamic, pinned or selected; no silent fallback.");
+      if (args.recipe !== undefined && args.recipe !== "verified_change" && args.recipe !== "investigate" && args.recipe !== "review") throw new Error("Workflow recipe must be verified_change, investigate or review.");
       if (args.spend_limit !== undefined && (typeof args.spend_limit !== "number" || !Number.isFinite(args.spend_limit) || args.spend_limit <= 0)) throw new Error("Reported spend threshold must be finite and positive, not a hard billing cap.");
       if (args.plan !== undefined) {
         const plan = args.plan;
@@ -90,7 +92,7 @@ export function installWorkflows(pi: any) {
       const id = crypto.randomUUID();
       try {
         signal?.throwIfAborted();
-        const value = await ctx.ui.input("Pui agent control", JSON.stringify({ version: 1, action: "workflow_request", background: true, id, objective: args.objective, constraints: args.constraints, reason: args.reason, policy: args.policy ?? "selected", spend_limit: args.spend_limit, plan: args.plan, profile: args.profile }), { signal });
+        const value = await ctx.ui.input("Pui agent control", JSON.stringify({ version: 1, action: "workflow_request", background: true, id, objective: args.objective, constraints: args.constraints, reason: args.reason, policy: args.policy ?? "selected", spend_limit: args.spend_limit, recipe: args.recipe, plan: args.plan, profile: args.profile }), { signal });
         signal?.throwIfAborted();
         if (value === undefined) return { content: [{ type: "text", text: "Workflow request cancelled. Nothing was approved; wait for the user's next instruction." }], details: { cancelled: true }, terminate: true };
         const result = JSON.parse(value);

@@ -20,11 +20,11 @@ impl Card {
         Self::Environment,
         Self::Context,
         Self::Outputs,
+        Self::Workflow,
         Self::Connectors,
         Self::Pulls,
         Self::Changes,
         Self::BackgroundTasks,
-        Self::Workflow,
     ];
     pub fn label(self) -> &'static str {
         match self {

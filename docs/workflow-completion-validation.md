@@ -71,3 +71,30 @@ Finished combined-source validation, without changing production timeouts, asser
 - Homebrew Python discovery: **41 passed**, fixture ResourceWarnings only. `/tmp/pui-workflow-latest-master-python.log`. Printed release publications remain mocked tests, not deployments.
 
 Used the existing offline stable Rust/CEF/CMake/Ninja cache, explicit SDKROOT, target `/tmp/pui-job-delete-validation`, and unset the inherited proxy-CA override. This validation authorizes neither packaging/installation nor a claim that the full five-release redesign is finished. The user's original normal push request can proceed from this green combined snapshot, with remote ancestry checked again before publication.
+
+## Slice 3: workflow recipes, plan-revision trail, capacity reporting, and latest master integration (`c09ee75b`)
+
+### Implemented production paths
+
+- **Workflow recipes (`verified_change`, `investigate`, `review`)**:
+  - `src/tasks/plan.rs::Recipe` validates `verified_change` (default), `investigate`, and `review` across `pui_workflow` (`scripts/workflows.ts`), `pui-workflow.json` (`src/tasks/profile.rs`), and persisted `Task` records (`src/tasks.rs`).
+  - Read-only recipes (`investigate`, `review`) run the builder stage in read-only mode (without `edit`/`write` tools), supply investigation/review-specific builder instructions, and reject unexpected workspace modifications relative to `prepared_fingerprint` as `Reason::SourceChanged`.
+  - `src/tasks/outcome.rs` reports `recipe`, recipe-specific outcomes (`verified_candidate`, `verified_investigation`, `verified_review`), `application_status` (`read_only_recipe_no_changes_to_apply`), `delivery_readiness` (`ready_to_apply`, `manual_integration_required`, `read_only_no_apply`, `already_in_working_tree`, `not_ready`), `plan_revisions`, and `focused_feedback`.
+- **Persisted plan-revision trail (`PlanRevision`)**:
+  - `src/tasks/plan.rs::PlanRevision` records bounded user feedback and timestamp when `"Request changes"` is submitted on a concrete plan in `src/app/tasks/consent.rs`.
+  - Pending revisions are tracked per conversation in `Tasks.pending_revisions`, surfaced in subsequent native consent prompts (`"Revision N · incorporates earlier plan feedback"`), bound to `Task.plan_revisions` upon approval, and rendered in the Plan & Contract tab (`src/app/tasks/work_item.rs`).
+- **Explicit worker capacity reporting**:
+  - `pui_agents` (`"list"` in `src/app/agents.rs`) returns `"capacity": {"unfinished_workers", "max_unfinished_workers": 128, "retained_history", "concurrency_ceiling"}`.
+- **Non-spinning pipe supervision and upstream UI integration fixes**:
+  - `src/workspace/read_only.rs`: `drain` uses `libc::poll` on the non-blocking child stdout descriptor while waiting for output instead of blind 10 ms sleeps, waking immediately when short Git commands finish without burning CPU during stalled-child tests.
+  - `src/context.rs`, `src/app/views.rs`, `src/app.rs`: replaced `ui.horizontal(...).response.interact(Sense::click())` (which caused `egui 0.32` to call `surrender_focus` on `new_child` and trap forward `Tab` navigation) with `ui.scope_builder(UiBuilder::new().id_salt(...).sense(Sense::click()), ...)` and added `ui.push_id` inside connector/background-task loops.
+  - `src/app/prompt_ui.rs`: restored palette-aware `Button::Primary` colors (`(colors.accent, colors.bg, colors.accent)`) when enabled while preserving disabled button contrast.
+  - `src/app/files.rs`: restored the `Preview / Source` header bar for SVG tabs so keyboard-navigation and focus-ownership controls remain registered.
+  - `src/inspector.rs`: placed `Card::Workflow` right after `Card::Outputs` in `Card::ALL` so session workflow cards stay within the inspector viewport when unhidden.
+
+### Validation on integrated `c09ee75b`
+
+- Complete `PUI_TEST_THREADS=1 CARGO_BUILD_JOBS=2 ./scripts/test-rust.sh`: **2,118 binary + 10 integration passed (2,128 total), 0 failed, 2 pre-existing ignored** across all 23 scheduled groups (`/tmp/pui-recipes-full-rust-green.log`).
+- Full JS `node --test tests/*.test.mjs`: **149 passed, 0 failed, 1 pre-existing skipped** (`/tmp/pui-recipes-final-js.log`).
+- Python `/opt/homebrew/bin/python3 -m unittest discover -s tests`: **41 passed, 0 failed** (`/tmp/pui-recipes-final-python.log`).
+- Strict `cargo clippy --offline --locked --all-targets -- -D warnings`, `cargo fmt -- --check`, and `git diff --check`: **passed** (`/tmp/pui-recipes-clippy2.log`).

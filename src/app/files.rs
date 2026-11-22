@@ -1174,6 +1174,17 @@ impl Browser {
                 let html = matches!(extension.as_str(), "html" | "htm");
                 let svg = extension == "svg";
                 let pane_rect = ui.max_rect();
+                if svg {
+                    ui.horizontal(|ui| {
+                        let preview_response =
+                            ui.selectable_value(&mut tab.source, false, "Preview");
+                        let source_response = ui.selectable_value(&mut tab.source, true, "Source");
+                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                            preview.remember(0, &preview_response);
+                            preview.remember(1, &source_response);
+                        }
+                    });
+                }
                 if let Some(notice) = &tab.line_notice {
                     ui.label(theme::small(ui, notice));
                 }
@@ -1306,7 +1317,7 @@ impl Browser {
                             });
                     }
                 }
-                if markdown || svg {
+                if markdown {
                     let md_headings = if markdown && !tab.source {
                         if let Some(Ok(Content::Text(content))) = &tab.content {
                             markdown::headings(content)
@@ -1364,9 +1375,7 @@ impl Browser {
                                                 response.rect,
                                             );
                                         });
-                                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
-                                            preview.remember(0, &response);
-                                        }
+
                                         if response.clicked() {
                                             tab.source = !tab.source;
                                         }

@@ -596,43 +596,48 @@ impl Pui {
         } else {
             let mut reconnect = false;
             for conn in connectors {
-                ui.horizontal(|ui| {
-                    dot(
-                        ui,
-                        if conn.error.is_some() {
-                            colors.amber
-                        } else if self.connected {
-                            colors.green
-                        } else {
-                            colors.dim
-                        },
-                    );
-                    let label = ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
-                    if let Some(err) = &conn.error {
-                        label.on_hover_text(err);
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let action_label = if conn.error.is_some() {
-                            "Reconnect"
-                        } else {
-                            "Reload"
-                        };
-                        if ui
-                            .add_enabled(
-                                !self.demo && self.connected,
-                                egui::Button::new(RichText::new(action_label).size(10.5).color(
-                                    if conn.error.is_some() {
-                                        colors.amber
-                                    } else {
-                                        colors.muted
-                                    },
-                                ))
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            reconnect = true;
+                ui.push_id(&conn.name, |ui| {
+                    ui.horizontal(|ui| {
+                        dot(
+                            ui,
+                            if conn.error.is_some() {
+                                colors.amber
+                            } else if self.connected {
+                                colors.green
+                            } else {
+                                colors.dim
+                            },
+                        );
+                        let label =
+                            ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
+                        if let Some(err) = &conn.error {
+                            label.on_hover_text(err);
                         }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let action_label = if conn.error.is_some() {
+                                "Reconnect"
+                            } else {
+                                "Reload"
+                            };
+                            if ui
+                                .add_enabled(
+                                    !self.demo && self.connected,
+                                    egui::Button::new(
+                                        RichText::new(action_label).size(10.5).color(
+                                            if conn.error.is_some() {
+                                                colors.amber
+                                            } else {
+                                                colors.muted
+                                            },
+                                        ),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                reconnect = true;
+                            }
+                        });
                     });
                 });
             }
@@ -705,43 +710,49 @@ impl Pui {
         if active_tools.is_empty() && running_agents.is_empty() {
             ui.label(theme::small(ui, "No active background tasks."));
         } else {
-            for (_id, title) in &active_tools {
-                ui.horizontal(|ui| {
-                    icons::inline(ui, Icon::Terminal, colors.accent);
-                    ui.add(
-                        egui::Label::new(RichText::new(title).size(11.0).color(colors.text))
-                            .truncate(),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
-                            stop_current = true;
-                        }
+            for (id, title) in &active_tools {
+                ui.push_id(id, |ui| {
+                    ui.horizontal(|ui| {
+                        icons::inline(ui, Icon::Terminal, colors.accent);
+                        ui.add(
+                            egui::Label::new(RichText::new(title).size(11.0).color(colors.text))
+                                .truncate(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
+                                stop_current = true;
+                            }
+                        });
                     });
                 });
             }
             for (id, name, created) in &running_agents {
-                ui.horizontal(|ui| {
-                    dot(ui, colors.accent);
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(name).size(11.0).color(colors.text))
+                ui.push_id(id, |ui| {
+                    ui.horizontal(|ui| {
+                        dot(ui, colors.accent);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(name).size(11.0).color(colors.text),
+                                )
                                 .frame(false),
-                        )
-                        .clicked()
-                    {
-                        open_agent_id = Some(id.clone());
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
-                            stop_agent_id = Some(id.clone());
+                            )
+                            .clicked()
+                        {
+                            open_agent_id = Some(id.clone());
                         }
-                        if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
-                            ui.label(
-                                RichText::new(format_elapsed(elapsed))
-                                    .size(10.0)
-                                    .color(colors.muted),
-                            );
-                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
+                                stop_agent_id = Some(id.clone());
+                            }
+                            if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
+                                ui.label(
+                                    RichText::new(format_elapsed(elapsed))
+                                        .size(10.0)
+                                        .color(colors.muted),
+                                );
+                            }
+                        });
                     });
                 });
             }
@@ -754,17 +765,24 @@ impl Pui {
             let id = ui.make_persistent_id("bg-tasks-finished");
             let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
             let header = ui
-                .horizontal(|ui| {
-                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    icons::chevron(ui, chev_rect, open, colors.dim);
-                    ui.label(
-                        RichText::new(format!("{finished_count} finished"))
-                            .size(11.0)
-                            .color(colors.muted),
-                    );
-                })
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("bg-tasks-finished")
+                        .sense(Sense::click()),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            let (chev_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            icons::chevron(ui, chev_rect, open, colors.dim);
+                            ui.label(
+                                RichText::new(format!("{finished_count} finished"))
+                                    .size(11.0)
+                                    .color(colors.muted),
+                            );
+                        });
+                    },
+                )
                 .response
-                .interact(Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if header.clicked() {
                 open = !open;
@@ -773,20 +791,22 @@ impl Pui {
             if open {
                 ui.indent("bg-finished-list", |ui| {
                     for (id, name, status) in &finished_agents {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(name).size(10.5).color(colors.muted),
+                        ui.push_id(id, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(name).size(10.5).color(colors.muted),
+                                        )
+                                        .frame(false),
                                     )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                open_agent_id = Some(id.clone());
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(RichText::new(status).size(10.0).color(colors.dim));
+                                    .clicked()
+                                {
+                                    open_agent_id = Some(id.clone());
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(RichText::new(status).size(10.0).color(colors.dim));
+                                });
                             });
                         });
                     }

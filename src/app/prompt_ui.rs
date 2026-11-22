@@ -217,10 +217,7 @@ pub(super) fn button(
     } else {
         match kind {
             Button::Secondary => (background(ui.ctx()), colors.text, border(ui.ctx())),
-            Button::Primary => {
-                let bg = ui.visuals().selection.bg_fill;
-                (bg, Color32::WHITE, bg)
-            }
+            Button::Primary => (colors.accent, colors.bg, colors.accent),
             Button::Danger => (colors.red, colors.bg, colors.red),
         }
     };

@@ -189,6 +189,7 @@ pub(super) struct Tasks {
     pub current_dialog: String,
     questions: questions::View,
     requests: BTreeMap<String, consent::Request>,
+    pub(super) pending_revisions: BTreeMap<String, Vec<domain::plan::PlanRevision>>,
     waits: Vec<control::Wait>,
     start: Option<control::Start>,
     pub revalidate_at: Option<std::time::Instant>,
