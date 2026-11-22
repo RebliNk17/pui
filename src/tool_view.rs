@@ -44,14 +44,31 @@ fn duration(ms: u64) -> String {
 }
 
 pub fn row(ui: &mut egui::Ui, tool: &Tool) {
-    row_with_view(ui, tool, false);
+    row_with_view(ui, tool, false, None);
 }
 
-pub fn row_verbose(ui: &mut egui::Ui, tool: &Tool) {
-    row_with_view(ui, tool, true);
+pub fn row_with_gallery(
+    ui: &mut egui::Ui,
+    tool: &Tool,
+    gallery: &mut crate::media::Gallery,
+) {
+    row_with_view(ui, tool, false, Some(gallery));
 }
 
-fn row_with_view(ui: &mut egui::Ui, tool: &Tool, verbose: bool) {
+pub fn row_verbose_with_gallery(
+    ui: &mut egui::Ui,
+    tool: &Tool,
+    gallery: &mut crate::media::Gallery,
+) {
+    row_with_view(ui, tool, true, Some(gallery));
+}
+
+fn row_with_view(
+    ui: &mut egui::Ui,
+    tool: &Tool,
+    verbose: bool,
+    mut gallery: Option<&mut crate::media::Gallery>,
+) {
     let colors = crate::theme::palette(ui.ctx());
     let id = ui.make_persistent_id((&tool.id, "detail"));
     let kind = detail(tool);
@@ -192,7 +209,7 @@ fn row_with_view(ui: &mut egui::Ui, tool: &Tool, verbose: bool) {
             Detail::Error => code_block(ui, id, &tool.output),
             Detail::Script => {
                 for child in &tool.children {
-                    row_with_view(ui, child, verbose);
+                    row_with_view(ui, child, verbose, gallery.as_deref_mut());
                 }
                 if !tool.code.is_empty() {
                     code_block(ui, id.with("script"), &tool.code);
@@ -204,6 +221,15 @@ fn row_with_view(ui: &mut egui::Ui, tool: &Tool, verbose: bool) {
             Detail::None => {}
         });
         ui.add_space(5.0);
+    }
+    if !tool.images.is_empty()
+        && let Some(gallery) = gallery.as_deref_mut()
+    {
+        ui.add_space(4.0);
+        ui.indent(id.with("tool-images"), |ui| {
+            gallery.thumbnails(ui, &tool.images);
+        });
+        ui.add_space(4.0);
     }
     if verbose {
         if kind == Detail::None && !tool.args.is_empty() {

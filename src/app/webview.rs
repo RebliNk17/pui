@@ -126,6 +126,12 @@ pub(super) struct BrowserView {
     unavailable: bool,
 }
 impl BrowserView {
+    pub(super) fn set_snapshots(&mut self, snapshots: crate::inline_visual::PageSnapshots) {
+        #[cfg(target_os = "macos")]
+        self.engine.set_snapshots(snapshots);
+        #[cfg(not(target_os = "macos"))]
+        let _ = snapshots;
+    }
     pub(super) fn focused(&self) -> bool {
         // App-level Escape handling runs before browser UI: an open dimension
         // editor owns cancellation even when the native page has lost focus.

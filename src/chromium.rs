@@ -12,6 +12,23 @@ pub(crate) use privacy::{context_handler, context_settings};
 pub use mac::{Runtime, prepare_application};
 
 #[cfg(target_os = "macos")]
+thread_local! {
+    static SHARED_RUNTIME: std::cell::RefCell<std::rc::Weak<Runtime>> = Default::default();
+}
+
+#[cfg(target_os = "macos")]
+pub fn shared(ctx: &eframe::egui::Context) -> Result<std::rc::Rc<Runtime>, String> {
+    SHARED_RUNTIME.with(|shared| {
+        if let Some(runtime) = shared.borrow().upgrade() {
+            return Ok(runtime);
+        }
+        let runtime = std::rc::Rc::new(Runtime::initialize(ctx)?);
+        *shared.borrow_mut() = std::rc::Rc::downgrade(&runtime);
+        Ok(runtime)
+    })
+}
+
+#[cfg(target_os = "macos")]
 pub fn live_browser_created() {
     mac::LIVE_BROWSERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }

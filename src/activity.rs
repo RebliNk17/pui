@@ -72,6 +72,34 @@ impl Tool {
         self.path = args["path"].as_str().unwrap_or_default().to_owned();
         self.command = args["command"].as_str().unwrap_or_default().to_owned();
         self.code = args["code"].as_str().unwrap_or_default().to_owned();
+        self.visual = None;
+        self.open_target = None;
+        if self.name == "pui_visual" {
+            if let Some(html) = args["html"].as_str().filter(|s| !s.trim().is_empty()) {
+                let title = args["title"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_default()
+                    .to_owned();
+                let height = args["height"]
+                    .as_u64()
+                    .and_then(|h| u32::try_from(h).ok())
+                    .map(|h| h.clamp(120, 900));
+                self.visual = Some(crate::protocol::InlineVisual {
+                    title,
+                    html: html.to_owned(),
+                    height,
+                });
+            }
+        }
+        if self.name == "pui_open" {
+            self.open_target = args["target"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+        }
         if self.name == "edit" {
             let edits = args["edits"].as_array().cloned().unwrap_or_else(|| {
                 vec![json!({"oldText":args["oldText"],"newText":args["newText"]})]
@@ -102,6 +130,53 @@ impl Tool {
                 self.diff = content.lines().map(|l| format!("+{l}\n")).collect();
             }
         }
+    }
+
+    pub fn set_open_result(&mut self, raw: &Value) {
+        if self.name != "pui_open" {
+            return;
+        }
+        let details = &raw["details"];
+        if let Some(target) = details["target"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.open_target = Some(target.to_owned());
+        }
+        self.open_queued = details["queued"] == true;
+    }
+
+    /// Collect all unique images produced by this tool and any nested children.
+    pub fn all_images(&self) -> Vec<crate::media::Attachment> {
+        let mut out = Vec::new();
+        for image in self
+            .images
+            .iter()
+            .chain(self.children.iter().flat_map(|c| c.images.iter()))
+        {
+            if !out.iter().any(|existing: &crate::media::Attachment| existing.key == image.key) {
+                out.push(image.clone());
+            }
+        }
+        out
+    }
+
+    /// Collect unique `.html`/`.htm` paths edited or written by this tool (including nested calls).
+    pub fn edited_html_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for call in std::iter::once(self).chain(self.children.iter()) {
+            if call.finished
+                && !call.failed
+                && matches!(call.name.as_str(), "edit" | "write")
+                && !call.path.is_empty()
+                && is_html_path(&call.path)
+                && !out.iter().any(|p| p == &call.path)
+            {
+                out.push(call.path.clone());
+            }
+        }
+        out
     }
     pub fn set_nested(&mut self, raw: &Value) {
         let calls = raw["nestedCalls"]["calls"]
@@ -217,6 +292,25 @@ impl Tool {
             }
         }
     }
+}
+
+pub fn is_html_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+}
+
+pub fn is_image_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp"
+            )
+        })
 }
 
 pub fn recorded_files(messages: &[Message]) -> Vec<RecordedFile> {

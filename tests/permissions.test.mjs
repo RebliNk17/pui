@@ -90,11 +90,13 @@ test('local viewer opens are bounded host actions but web pages retain permissio
   for (const mode of ['manual', 'acceptEdits', 'plan', 'auto', 'dontAsk']) {
     const h = host(mode);
     assert.equal(await h.gate('pui_open', { target: '/tmp/review.md' }), undefined);
+    assert.equal(await h.gate('pui_visual', { html: '<div>chart</div>' }), undefined);
     assert.equal(h.prompts.length, 0);
     assert.equal(h.calls.length, 0);
     assert.equal((await h.gate('pui_open', { target: 'https://example.com' })).block, true);
     const readonly = host(mode, { readonly: true });
     assert.equal((await readonly.gate('pui_open', { target: '/tmp/review.md' })).block, true);
+    assert.equal((await readonly.gate('pui_visual', { html: '<div>chart</div>' })).block, true);
   }
 });
 test('workflow offer avoids a duplicate generic approval but never bypasses Plan, DontAsk or read-only', async () => {

@@ -872,6 +872,10 @@ impl Pui {
                 self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
                 self.transcript.progress = self.transcript_progress();
+                self.transcript.cwd =
+                    (!self.prefs.cwd.as_os_str().is_empty()).then(|| self.prefs.cwd.clone());
+                self.files
+                    .set_page_snapshots(self.transcript.visuals.page_snapshots.clone());
                 let has_tasks = self.tasks.records.iter().any(|t| self.task_in_chat(t));
                 if has_tasks {
                     let cards = self.chat_task_cards();
@@ -930,6 +934,47 @@ impl Pui {
                     );
                 }
                 self.attention_rendered(ui);
+                if let Some(action) = self.transcript.action.take() {
+                    match action {
+                        crate::transcript::TranscriptAction::OpenTarget(target) => {
+                            if let Err(error) =
+                                self.files.open_target(ctx, &self.prefs.cwd, &target)
+                            {
+                                self.state.notice = Some(error);
+                            } else {
+                                self.settings_open = false;
+                                self.inspector_panel = false;
+                            }
+                        }
+                        crate::transcript::TranscriptAction::OpenTargetSource(target) => {
+                            let candidate = std::path::Path::new(&target);
+                            let resolved = if candidate.is_absolute() {
+                                candidate.to_path_buf()
+                            } else {
+                                self.prefs
+                                    .cwd
+                                    .join(target.strip_prefix("./").unwrap_or(&target))
+                            };
+                            let result = self
+                                .files
+                                .open_workspace_source(ctx, &self.prefs.cwd, &resolved, None)
+                                .or_else(|_| self.files.open_target(ctx, &self.prefs.cwd, &target));
+                            if let Err(error) = result {
+                                self.state.notice = Some(error);
+                            } else {
+                                self.settings_open = false;
+                                self.inspector_panel = false;
+                            }
+                        }
+                        crate::transcript::TranscriptAction::OpenVisual { id, title, html } => {
+                            self.files
+                                .open_visual_html(ctx, &self.prefs.cwd, &id, &title, &html);
+                            self.settings_open = false;
+                            self.inspector_panel = false;
+                        }
+                    }
+                    ctx.request_repaint();
+                }
                 if self
                     .transcript
                     .find

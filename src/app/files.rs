@@ -210,6 +210,70 @@ impl Browser {
         });
     }
 
+    pub(super) fn set_page_snapshots(&mut self, snapshots: crate::inline_visual::PageSnapshots) {
+        self.web.set_snapshots(snapshots);
+    }
+
+    pub(super) fn open_visual_html(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        id: &str,
+        title: &str,
+        html: &str,
+    ) {
+        self.workspace(ctx, root);
+        self.activate_restored_tabs(ctx);
+        let slug: String = title
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' '))
+            .take(40)
+            .collect();
+        let slug = slug.trim().replace(' ', "-");
+        let name = if slug.is_empty() {
+            format!("visual-{}.html", id.chars().take(12).collect::<String>())
+        } else {
+            format!("{slug}.html")
+        };
+        let path = PathBuf::from(format!("pui-visual/{name}"));
+        let key = path.display().to_string();
+        self.open = true;
+        self.browser_mode = true;
+        self.address_error = None;
+        if !self.urls.iter().any(|u| u == &key) {
+            if self.urls.len() == MAX_TABS {
+                self.close_url_tab(0);
+            }
+            self.urls.push(key.clone());
+        }
+        self.selected_url = Some(key.clone());
+        self.address = key.clone();
+        if let Some(existing) = self.tabs.iter_mut().find(|tab| tab.path == path) {
+            existing.content = Some(Ok(Content::Text(html.to_owned())));
+            existing.source = false;
+            return;
+        }
+        if self.tabs.len() == MAX_TABS {
+            let old = self.tabs.remove(0);
+            let old_key = old.path.display().to_string();
+            self.web.close(&old_key);
+            self.urls.retain(|url| url != &old_key);
+        }
+        let budget = budget::Lease::new(ctx);
+        self.tabs.push(OpenFile {
+            path,
+            content: Some(Ok(Content::Text(html.to_owned()))),
+            rx: None,
+            texture: None,
+            source: false,
+            external: true,
+            line_target: None,
+            line_notice: None,
+            _budget: budget,
+            _load: None,
+        });
+    }
+
     pub(super) fn saved_layout(&self) -> SavedLayout {
         if let Some(saved) = &self.restored {
             return SavedLayout {
@@ -219,33 +283,39 @@ impl Browser {
                 ..saved.clone()
             };
         }
+        let is_virtual = |p: &Path| p.starts_with("pui-visual/");
         SavedLayout {
             open: self.open,
             expanded: self.expanded,
             browser_mode: self.browser_mode,
-            selected: self.selected.clone(),
-            selected_url: self.selected_url.clone(),
+            selected: self.selected.clone().filter(|p| !is_virtual(p)),
+            selected_url: self
+                .selected_url
+                .clone()
+                .filter(|u| !u.starts_with("pui-visual/")),
             paths: self
                 .tabs
                 .iter()
+                .filter(|tab| !is_virtual(&tab.path))
                 .take(MAX_TABS)
                 .map(|tab| tab.path.clone())
                 .collect(),
             external_paths: self
                 .tabs
                 .iter()
-                .filter(|tab| tab.external)
+                .filter(|tab| tab.external && !is_virtual(&tab.path))
                 .map(|tab| tab.path.clone())
                 .collect(),
             source_paths: self
                 .tabs
                 .iter()
-                .filter(|tab| tab.source)
+                .filter(|tab| tab.source && !is_virtual(&tab.path))
                 .map(|tab| tab.path.clone())
                 .collect(),
             urls: self
                 .urls
                 .iter()
+                .filter(|url| !url.starts_with("pui-visual/"))
                 .take(MAX_TABS)
                 .map(|url| url.chars().take(8192).collect())
                 .collect(),
@@ -610,7 +680,9 @@ impl Browser {
             self.selected.clone()
         };
         if let Some(path) = path {
-            if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            if !path.starts_with("pui-visual/")
+                && let Some(index) = self.tabs.iter().position(|tab| tab.path == path)
+            {
                 let tab = self.tabs.remove(index);
                 let (external, source) = (tab.external, tab.source);
                 drop(tab); // cancel/release old request before queueing its replacement

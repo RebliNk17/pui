@@ -52,6 +52,8 @@ pub(super) fn register(tab: &Tab) -> Option<Registration> {
         Events {
             state: tab.state.clone(),
             ctx: tab.ctx.clone(),
+            key: String::new(),
+            snapshots: None,
         },
         tab.browser.identifier(),
     );
@@ -81,6 +83,8 @@ pub(super) fn inspect(tab: &Tab, epoch: u64, query: &str) {
                 Events {
                     state: tab.state.clone(),
                     ctx: tab.ctx.clone(),
+                    key: String::new(),
+                    snapshots: None,
                 },
                 state.inspection.operation,
             );
@@ -99,6 +103,8 @@ pub(super) fn inspect(tab: &Tab, epoch: u64, query: &str) {
             &Events {
                 state: tab.state.clone(),
                 ctx: tab.ctx.clone(),
+                key: String::new(),
+                snapshots: None,
             },
             command,
         );

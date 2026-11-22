@@ -364,7 +364,54 @@ pub fn show_file(ui: &mut Ui, source: &str, path: &std::path::Path) {
         .data_mut(|data| data.remove::<std::path::PathBuf>(id));
 }
 
+pub struct InlineMedia<'a> {
+    pub gallery: &'a mut crate::media::Gallery,
+    pub base: Option<&'a std::path::Path>,
+}
+
+pub fn resolve_local_image(
+    dest_url: &str,
+    base: Option<&std::path::Path>,
+) -> Option<crate::media::Attachment> {
+    let trimmed = dest_url.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    let path = if trimmed.starts_with("file://") {
+        url::Url::parse(trimmed).ok()?.to_file_path().ok()?
+    } else if trimmed.contains("://")
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("javascript:")
+        || trimmed.starts_with("mailto:")
+    {
+        return None;
+    } else {
+        let stripped = trimmed.strip_prefix('@').unwrap_or(trimmed);
+        if let Some(rest) = stripped.strip_prefix("~/") {
+            dirs::home_dir()?.join(rest)
+        } else {
+            let candidate = std::path::Path::new(stripped);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base?.join(stripped.strip_prefix("./").unwrap_or(stripped))
+            }
+        }
+    };
+    crate::media::Attachment::from_local_image(path)
+}
+
+#[cfg(test)]
 pub fn show_reply(ui: &mut Ui, source: &str, identity: impl std::hash::Hash) {
+    show_reply_with_media(ui, source, identity, None);
+}
+
+pub fn show_reply_with_media(
+    ui: &mut Ui,
+    source: &str,
+    identity: impl std::hash::Hash,
+    mut media: Option<InlineMedia<'_>>,
+) {
     capture::scope(
         ui,
         ("assistant-reply", identity),
@@ -374,7 +421,7 @@ pub fn show_reply(ui: &mut Ui, source: &str, identity: impl std::hash::Hash) {
             let events = ui
                 .ctx()
                 .memory_mut(|m| m.caches.cache::<MarkdownCache>().get(source));
-            show_events(ui, &events, true, None);
+            show_events_with_media(ui, &events, true, None, media.as_mut());
         },
     );
 }
@@ -503,8 +550,34 @@ fn show_inner(ui: &mut Ui, source: &str) {
     show_events(ui, &events, false, None);
 }
 
-fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Option<reply::Item>) {
+fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, item: Option<reply::Item>) {
+    show_events_with_media(ui, events, reply, item, None);
+}
+
+fn show_events_with_media(
+    ui: &mut Ui,
+    events: &[Event<'static>],
+    reply: bool,
+    mut item: Option<reply::Item>,
+    mut media: Option<&mut InlineMedia<'_>>,
+) {
     let colors = crate::theme::palette(ui.ctx());
+    let photo_collection: Vec<crate::media::Attachment> = if let Some(media) = media.as_deref() {
+        let mut photos = Vec::new();
+        for event in events {
+            if let Event::Start(Tag::Image { dest_url, .. }) = event
+                && let Some(attachment) = resolve_local_image(dest_url, media.base)
+                && !photos
+                    .iter()
+                    .any(|p: &crate::media::Attachment| p.key == attachment.key)
+            {
+                photos.push(attachment);
+            }
+        }
+        photos
+    } else {
+        Vec::new()
+    };
     let text_format = |ctx: &egui::Context, bold, italic, heading, code, link| {
         let mut format = format(ctx, bold, italic, heading, code, link);
         if reply {
@@ -532,6 +605,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
     let mut links = Vec::new();
     let (mut bold, mut italic, mut heading) = (false, false, false);
     let mut link: Option<String> = None;
+    let mut image_dest: Option<(String, String)> = None;
     let mut code = false;
     let mut code_text = String::new();
     let mut language = String::new();
@@ -632,6 +706,52 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
             }
             Event::Start(Tag::Link { dest_url, .. }) => link = Some(dest_url.into_string()),
             Event::End(TagEnd::Link) => link = None,
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                image_dest = Some((dest_url.into_string(), String::new()));
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some((dest, alt)) = image_dest.take() {
+                    let rendered = if let Some(media) = media.as_deref_mut()
+                        && let Some(attachment) = resolve_local_image(&dest, media.base)
+                    {
+                        flush(ui, &mut job, &mut links);
+                        let index = photo_collection
+                            .iter()
+                            .position(|p| p.key == attachment.key)
+                            .unwrap_or(0);
+                        media.gallery.inline_photo(
+                            ui,
+                            &attachment,
+                            &photo_collection,
+                            index,
+                            (!alt.trim().is_empty()).then_some(alt.trim()),
+                        );
+                        true
+                    } else {
+                        false
+                    };
+                    if !rendered {
+                        let label = if alt.trim().is_empty() {
+                            dest.as_str()
+                        } else {
+                            alt.trim()
+                        };
+                        let start = job.text.len();
+                        let clickable = safe_url(&dest);
+                        job.append(
+                            label,
+                            0.0,
+                            text_format(ui.ctx(), bold, italic, heading, false, clickable),
+                        );
+                        if clickable {
+                            links.push(Link {
+                                range: start..job.text.len(),
+                                url: dest,
+                            });
+                        }
+                    }
+                }
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 flush(ui, &mut job, &mut links);
                 code = true;
@@ -746,6 +866,16 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                 if !in_item {
                     flush(ui, &mut job, &mut links);
                     ui.add_space(4.0);
+                }
+            }
+            Event::Text(text) if image_dest.is_some() => {
+                if let Some((_, alt)) = &mut image_dest {
+                    alt.push_str(&text);
+                }
+            }
+            Event::Code(text) if image_dest.is_some() => {
+                if let Some((_, alt)) = &mut image_dest {
+                    alt.push_str(&text);
                 }
             }
             Event::Text(text) if code => code_text.push_str(&text),

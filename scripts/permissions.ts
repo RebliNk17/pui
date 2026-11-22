@@ -149,6 +149,7 @@ export function installPermissions(pi: any, initial: any = {}) {
     // classifier decisions and remembered grants cannot create invisible agents.
     if (unmanagedAgentLaunch(name, args) || (name === "pui_create_monitor" && unmanagedAgentLaunch("bash", args))) return block(MANAGED_AGENTS_ONLY);
     if (name === "pui_ask_questions") return; // User decisions, never a permission grant.
+    if (!initial.readonly && name === "pui_visual") return; // Sandboxed display-only inline visual; zero disk/network/command effects.
     // The host always asks once for this exact workflow, even in bypass mode.
     // Avoid a redundant generic tool approval; worker commands retain their gates.
     if (name === "pui_run_check" && process.env.PUI_TASK_ROLE === "builder" && !initial.readonly && !["plan","dontAsk"].includes(mode)) return;

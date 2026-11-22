@@ -105,6 +105,7 @@ impl Runtime {
         let storage = privacy::settings()?;
         let settings = Settings {
             external_message_pump: 1,
+            windowless_rendering_enabled: 1,
             command_line_args_disabled: 1,
             browser_subprocess_path: CefString::from(helper.display().to_string().as_str()),
             framework_dir_path: CefString::from(

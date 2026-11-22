@@ -95,6 +95,14 @@ pub enum Block {
     Tool(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineVisual {
+    pub title: String,
+    pub html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Tool {
     pub id: String,
@@ -113,6 +121,14 @@ pub struct Tool {
     pub children: Vec<Tool>,
     #[serde(default)]
     pub answers: Option<QuestionAnswers>,
+    #[serde(default)]
+    pub images: Vec<crate::media::Attachment>,
+    #[serde(default)]
+    pub visual: Option<InlineVisual>,
+    #[serde(default)]
+    pub open_target: Option<String>,
+    #[serde(default)]
+    pub open_queued: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -744,6 +760,8 @@ impl State {
                         place_tool_images(
                             &mut self.messages,
                             owner,
+                            tool,
+                            id,
                             path.as_deref(),
                             crate::media::attachments(&event["result"]["content"]),
                         );
@@ -751,14 +769,14 @@ impl State {
                 }
                 if let Some(tool) = self.tool_mut(string(&event, "toolCallId")) {
                     let finished = string(&event, "type") == "tool_execution_end";
-                    tool.output = content_text(
-                        &event[if finished { "result" } else { "partialResult" }]["content"],
-                    );
+                    let result = &event[if finished { "result" } else { "partialResult" }];
+                    tool.output = content_text(&result["content"]);
                     if tool.name == "codemode" {
-                        tool.set_nested(&event[if finished { "result" } else { "partialResult" }]);
+                        tool.set_nested(result);
                     }
                     if finished {
-                        tool.set_answers(&event["result"]);
+                        tool.set_answers(result);
+                        tool.set_open_result(result);
                     }
                     tool.finished = finished;
                     tool.failed = event["isError"] == true;
@@ -812,10 +830,12 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
                 tool.failed = raw["isError"] == true;
                 tool.duration_ms = raw["durationMs"].as_u64();
                 tool.set_answers(raw);
+                tool.set_open_result(raw);
                 if tool.name == "codemode" {
                     tool.set_nested(raw);
                 }
                 let images = crate::media::attachments(&raw["content"]);
+                let tool_id = tool.id.clone();
                 let path = (tool.name == "read" && !tool.failed).then(|| tool.path.clone());
                 // Wrapper images lack per-image provenance. Recover a screenshot
                 // only when exactly one successful, referenced read is unambiguous.
@@ -839,7 +859,14 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
                         .collect();
                     (matches.len() == 1).then(|| matches[0].clone())
                 });
-                place_tool_images(&mut messages, message_index, path.as_deref(), images);
+                place_tool_images(
+                    &mut messages,
+                    message_index,
+                    tool_index,
+                    &tool_id,
+                    path.as_deref(),
+                    images,
+                );
             }
         } else if string(raw, "role") != "system"
             && !(string(raw, "role") == "custom" && raw["display"] == false)
@@ -858,9 +885,13 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
 /// Display-only recovery matching Harbor: a successful read of an exact path
 /// mentioned by the preceding user belongs inside that user's bubble. Reuse
 /// only bytes Pi already returned; never open a historical path on disk.
+/// Tool-produced images that were not referenced by the user attach directly to
+/// the producing tool so activity rows can render right-aligned thumbnails.
 fn place_tool_images(
     messages: &mut [Message],
     owner: usize,
+    tool_index: usize,
+    tool_id: &str,
     path: Option<&str>,
     images: Vec<crate::media::Attachment>,
 ) {
@@ -876,16 +907,39 @@ fn place_tool_images(
         if let Some((user, _)) = &matched {
             for message in &mut messages[user + 1..] {
                 message.images.retain(|im| im.key != image.key);
+                for tool in &mut message.tools {
+                    tool.images.retain(|im| im.key != image.key);
+                    for child in &mut tool.children {
+                        child.images.retain(|im| im.key != image.key);
+                    }
+                }
             }
             if !messages[*user].images.iter().any(|im| im.key == image.key) {
                 messages[*user].images.push(image);
             }
             messages[*user].revision = messages[*user].revision.wrapping_add(1);
-        } else if !messages[user.unwrap_or(owner)..]
-            .iter()
-            .any(|m| m.images.iter().any(|im| im.key == image.key))
-        {
-            messages[owner].images.push(image);
+        } else {
+            let duplicate = messages[user.unwrap_or(owner)..].iter().any(|m| {
+                m.images.iter().any(|im| im.key == image.key)
+                    || m.tools.iter().any(|t| {
+                        t.images.iter().any(|im| im.key == image.key)
+                            || t.children
+                                .iter()
+                                .any(|c| c.images.iter().any(|im| im.key == image.key))
+                    })
+            });
+            if !duplicate {
+                if let Some(wrapper) = messages[owner].tools.get_mut(tool_index) {
+                    if let Some(child) = wrapper.children.iter_mut().find(|c| c.id == tool_id) {
+                        child.images.push(image);
+                    } else {
+                        wrapper.images.push(image);
+                    }
+                } else {
+                    messages[owner].images.push(image);
+                }
+                messages[owner].revision = messages[owner].revision.wrapping_add(1);
+            }
         }
     }
     if let Some((user, path)) = matched {
@@ -1037,7 +1091,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        place_tool_images(&mut messages, 1, Some("/a/image.png"), Vec::new());
+        place_tool_images(&mut messages, 1, 0, "read-1", Some("/a/image.png"), Vec::new());
         assert_eq!(messages[0].text, "/a/image.png");
     }
     #[test]
@@ -1208,5 +1262,63 @@ mod tests {
         let tool = &s.messages[0].tools[0];
         assert!(tool.finished);
         assert_eq!(tool.output, "hello");
+    }
+
+    #[test]
+    fn agent_read_images_attach_to_producing_tool_in_live_and_history() {
+        let raw = vec![
+            json!({"role":"user","content":"Take screenshots of the menu"}),
+            json!({"role":"assistant","content":[{"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"shots/menu.png"}}]}),
+            json!({"role":"toolResult","toolCallId":"read-1","content":[{"type":"image","data":"aGVsbG8=","mimeType":"image/png"}],"isError":false}),
+        ];
+        let history = parse_history(&raw);
+        assert!(history[0].images.is_empty());
+        assert!(history[1].images.is_empty());
+        assert_eq!(history[1].tools[0].images.len(), 1);
+        assert_eq!(history[1].tools[0].all_images().len(), 1);
+
+        let mut state = State::default();
+        state.apply(json!({"type":"message_start","message":raw[0]}));
+        state.apply(json!({"type":"message_start","message":raw[1]}));
+        state.apply(json!({"type":"tool_execution_end","toolCallId":"read-1","result":{"content":raw[2]["content"]},"isError":false}));
+        assert!(state.messages[0].images.is_empty());
+        assert!(state.messages[1].images.is_empty());
+        assert_eq!(state.messages[1].tools[0].images.len(), 1);
+    }
+
+    #[test]
+    fn pui_visual_and_pui_open_metadata_survive_live_and_history() {
+        let raw = vec![
+            json!({"role":"assistant","content":[
+                {"type":"toolCall","id":"v1","name":"pui_visual","arguments":{"title":"Map picker","html":"<div>Design C</div>","height":420}},
+                {"type":"toolCall","id":"o1","name":"pui_open","arguments":{"target":"http://127.0.0.1:8765"}},
+                {"type":"toolCall","id":"w1","name":"write","arguments":{"path":"campaign-map-designs.html","content":"<html></html>"}},
+                {"type":"toolCall","id":"e1","name":"edit","arguments":{"path":"campaign-map-designs.html","oldText":"a","newText":"b"}}
+            ]}),
+            json!({"role":"toolResult","toolCallId":"v1","content":[{"type":"text","text":"Displayed"}],"isError":false}),
+            json!({"role":"toolResult","toolCallId":"o1","content":[{"type":"text","text":"Queued"}],"details":{"target":"http://127.0.0.1:8765/","queued":true},"isError":false}),
+            json!({"role":"toolResult","toolCallId":"w1","content":[{"type":"text","text":"ok"}],"isError":false}),
+            json!({"role":"toolResult","toolCallId":"e1","content":[{"type":"text","text":"ok"}],"isError":false}),
+        ];
+        let messages = parse_history(&raw);
+        let visual = messages[0].tools[0].visual.as_ref().expect("visual parsed");
+        assert_eq!(visual.title, "Map picker");
+        assert_eq!(visual.html, "<div>Design C</div>");
+        assert_eq!(visual.height, Some(420));
+
+        assert_eq!(
+            messages[0].tools[1].open_target.as_deref(),
+            Some("http://127.0.0.1:8765/")
+        );
+        assert!(messages[0].tools[1].open_queued);
+
+        assert_eq!(
+            messages[0].tools[2].edited_html_files(),
+            vec!["campaign-map-designs.html"]
+        );
+        assert_eq!(
+            messages[0].tools[3].edited_html_files(),
+            vec!["campaign-map-designs.html"]
+        );
     }
 }

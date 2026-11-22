@@ -12,9 +12,21 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
+mod inline_cards;
 mod new_messages;
 mod progress;
 pub use progress::Progress;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TranscriptAction {
+    OpenTarget(String),
+    OpenTargetSource(String),
+    OpenVisual {
+        id: String,
+        title: String,
+        html: String,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindTarget {
@@ -55,6 +67,9 @@ pub struct Transcript {
     pub expand_activity: bool,
     pub view: View,
     pub gallery: crate::media::Gallery,
+    pub visuals: crate::inline_visual::InlineVisualHost,
+    pub cwd: Option<std::path::PathBuf>,
+    pub action: Option<TranscriptAction>,
     positions: Vec<(usize, f32)>,
     restore: Option<(usize, f32)>,
     pub progress: Option<Progress>,
@@ -279,6 +294,7 @@ impl Transcript {
         // Textures replace fixed-size thumbnail slots; loading must not invalidate
         // every offscreen turn and restart image decoding across the whole history.
         self.gallery.poll(ui.ctx());
+        self.visuals.poll(ui.ctx());
         let rect = ui.available_rect_before_wrap();
         let rail = Rect::from_min_size(rect.min, Vec2::new(24.0, rect.height()));
         let content = Rect::from_min_max(rect.min + egui::vec2(24.0, 0.0), rect.max);
@@ -316,6 +332,9 @@ impl Transcript {
         let view = self.view;
         let task_output = self.task_output;
         let gallery = &mut self.gallery;
+        let visuals = &mut self.visuals;
+        let cwd = self.cwd.as_deref();
+        let mut action: Option<TranscriptAction> = None;
         let mut message_action = None;
         let actions_enabled = self.message_actions_enabled;
         let find_target = self.find.clone();
@@ -364,11 +383,16 @@ impl Transcript {
                         t.output.len().hash(&mut hasher);
                         t.duration_ms.hash(&mut hasher);
                         t.failed.hash(&mut hasher);
+                        t.images.len().hash(&mut hasher);
+                        t.visual.is_some().hash(&mut hasher);
+                        t.open_target.hash(&mut hasher);
+                        t.open_queued.hash(&mut hasher);
                         for child in &t.children {
                             child.finished.hash(&mut hasher);
                             child.failed.hash(&mut hasher);
                             child.output.len().hash(&mut hasher);
                             child.args.len().hash(&mut hasher);
+                            child.images.len().hash(&mut hasher);
                         }
                     }
                 }
@@ -418,7 +442,7 @@ impl Transcript {
                                     scope_find(ui.ctx(), find_target.as_ref(), start, &find_rect);
                                     layout_changed |= agent_message(ui, &group[0].text).changed();
                                 } else {
-                                    let (changed, fork) = assistant(
+                                    let (changed, fork) = assistant_with_media(
                                         ui,
                                         group,
                                         start,
@@ -432,6 +456,9 @@ impl Transcript {
                                         ),
                                         task_output,
                                         gallery,
+                                        Some(visuals),
+                                        cwd,
+                                        &mut action,
                                         find_target.as_ref(),
                                         &find_rect,
                                     );
@@ -549,6 +576,7 @@ impl Transcript {
             ui.ctx().request_repaint();
         }
         self.message_action = message_action;
+        self.action = action;
         self.positions = positions;
         if let Some(offset) = restored {
             self.jump = Some(offset);
@@ -897,6 +925,7 @@ fn user_footer(
     action
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn assistant(
     ui: &mut egui::Ui,
@@ -907,6 +936,40 @@ fn assistant(
     flags: (bool, bool, bool, View),
     task_output: bool,
     gallery: &mut crate::media::Gallery,
+    find: Option<&FindTarget>,
+    find_rect: &Arc<Mutex<Option<Rect>>>,
+) -> (bool, bool) {
+    let mut action = None;
+    assistant_with_media(
+        ui,
+        messages,
+        start,
+        model,
+        thinking,
+        flags,
+        task_output,
+        gallery,
+        None,
+        None,
+        &mut action,
+        find,
+        find_rect,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assistant_with_media(
+    ui: &mut egui::Ui,
+    messages: &[Message],
+    start: usize,
+    model: &str,
+    thinking: &str,
+    flags: (bool, bool, bool, View),
+    task_output: bool,
+    gallery: &mut crate::media::Gallery,
+    mut visuals: Option<&mut crate::inline_visual::InlineVisualHost>,
+    cwd: Option<&std::path::Path>,
+    action: &mut Option<TranscriptAction>,
     find: Option<&FindTarget>,
     find_rect: &Arc<Mutex<Option<Rect>>>,
 ) -> (bool, bool) {
@@ -957,6 +1020,22 @@ fn assistant(
     let mut changed = false;
     let mut pending: Vec<&crate::protocol::Tool> = Vec::new();
     let mut group_index = 0;
+    let flush_pending = |ui: &mut egui::Ui,
+                         pending: &mut Vec<&crate::protocol::Tool>,
+                         group_index: &mut usize,
+                         running_run: bool,
+                         gallery: &mut crate::media::Gallery,
+                         action: &mut Option<TranscriptAction>|
+     -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+        let changed = action_run(ui, pending, *group_index, running_run, expand, view, gallery);
+        inline_cards::html_file_cards(ui, pending, action);
+        pending.clear();
+        *group_index += 1;
+        changed
+    };
     for (message_index, message) in messages.iter().enumerate() {
         scope_find(ui.ctx(), find, start + message_index, find_rect);
         if message.blocks.is_empty() {
@@ -964,32 +1043,46 @@ fn assistant(
             // thinking must not split one action run into many summary rows.
             // Verbose retains legacy reasoning before the reply.
             if view == View::Verbose && !message.thinking.is_empty() {
-                if !pending.is_empty() {
-                    changed |= action_run(ui, &pending, group_index, false, expand, view);
-                    pending.clear();
-                    group_index += 1;
-                }
+                changed |= flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
                 changed |= thinking_text(ui, &message.thinking, (message_index, "legacy"));
             }
             if !message.text.is_empty() {
-                if !pending.is_empty() {
-                    changed |= action_run(ui, &pending, group_index, false, expand, view);
-                    pending.clear();
-                    group_index += 1;
-                }
+                changed |= flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
                 if !task_output || !crate::task_output::show(ui, &message.text) {
-                    markdown::show_reply(ui, &message.text, (message_index, "text"));
+                    markdown::show_reply_with_media(
+                        ui,
+                        &message.text,
+                        (message_index, "text"),
+                        Some(markdown::InlineMedia { gallery, base: cwd }),
+                    );
                 }
             }
 
             for tool in &message.tools {
                 if let Some(answers) = &tool.answers {
-                    if !pending.is_empty() {
-                        changed |= action_run(ui, &pending, group_index, false, expand, view);
-                        pending.clear();
-                        group_index += 1;
-                    }
+                    changed |=
+                        flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
                     crate::tool_view::answers::show(ui, answers);
+                } else if let Some(visual) = &tool.visual {
+                    changed |=
+                        flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
+                    if let Some(visuals) = visuals.as_deref_mut() {
+                        let outcome = visuals.show(ui, &tool.id, visual);
+                        changed |= outcome.changed;
+                        if outcome.expand {
+                            *action = Some(TranscriptAction::OpenVisual {
+                                id: tool.id.clone(),
+                                title: visual.title.clone(),
+                                html: visual.html.clone(),
+                            });
+                        }
+                    }
+                } else if tool.name == "pui_open" && !tool.failed && tool.open_target.is_some() {
+                    changed |=
+                        flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
+                    if let Some(visuals) = visuals.as_deref_mut() {
+                        inline_cards::open_card(ui, tool, gallery, visuals, cwd, action);
+                    }
                 } else {
                     pending.push(tool);
                 }
@@ -998,33 +1091,83 @@ fn assistant(
             for (block_index, block) in message.blocks.iter().enumerate() {
                 match block {
                     Block::Text(text) if !text.is_empty() => {
-                        if !pending.is_empty() {
-                            changed |= action_run(ui, &pending, group_index, false, expand, view);
-                            pending.clear();
-                            group_index += 1;
-                        }
+                        changed |= flush_pending(
+                            ui,
+                            &mut pending,
+                            &mut group_index,
+                            false,
+                            gallery,
+                            action,
+                        );
                         if !task_output || !crate::task_output::show(ui, text) {
-                            markdown::show_reply(ui, text, (message_index, "block", block_index));
+                            markdown::show_reply_with_media(
+                                ui,
+                                text,
+                                (message_index, "block", block_index),
+                                Some(markdown::InlineMedia { gallery, base: cwd }),
+                            );
                         }
                     }
                     Block::Thinking(text) if view == View::Verbose && !text.is_empty() => {
-                        if !pending.is_empty() {
-                            changed |= action_run(ui, &pending, group_index, false, expand, view);
-                            pending.clear();
-                            group_index += 1;
-                        }
+                        changed |= flush_pending(
+                            ui,
+                            &mut pending,
+                            &mut group_index,
+                            false,
+                            gallery,
+                            action,
+                        );
                         changed |= thinking_text(ui, text, (message_index, block_index));
                     }
                     Block::Tool(id) => {
                         if let Some(tool) = message.tools.iter().find(|t| t.id == *id) {
                             if let Some(answers) = &tool.answers {
-                                if !pending.is_empty() {
-                                    changed |=
-                                        action_run(ui, &pending, group_index, false, expand, view);
-                                    pending.clear();
-                                    group_index += 1;
-                                }
+                                changed |= flush_pending(
+                                    ui,
+                                    &mut pending,
+                                    &mut group_index,
+                                    false,
+                                    gallery,
+                                    action,
+                                );
                                 crate::tool_view::answers::show(ui, answers);
+                            } else if let Some(visual) = &tool.visual {
+                                changed |= flush_pending(
+                                    ui,
+                                    &mut pending,
+                                    &mut group_index,
+                                    false,
+                                    gallery,
+                                    action,
+                                );
+                                if let Some(visuals) = visuals.as_deref_mut() {
+                                    let outcome = visuals.show(ui, &tool.id, visual);
+                                    changed |= outcome.changed;
+                                    if outcome.expand {
+                                        *action = Some(TranscriptAction::OpenVisual {
+                                            id: tool.id.clone(),
+                                            title: visual.title.clone(),
+                                            html: visual.html.clone(),
+                                        });
+                                    }
+                                }
+                            } else if tool.name == "pui_open"
+                                && !tool.failed
+                                && tool.open_target.is_some()
+                            {
+                                changed |= flush_pending(
+                                    ui,
+                                    &mut pending,
+                                    &mut group_index,
+                                    false,
+                                    gallery,
+                                    action,
+                                );
+                                if let Some(visuals) = visuals.as_deref_mut() {
+                                    inline_cards::open_card(
+                                        ui, tool, gallery, visuals, cwd, action,
+                                    );
+                                }
                             } else {
                                 pending.push(tool);
                             }
@@ -1035,9 +1178,7 @@ fn assistant(
             }
         }
     }
-    if !pending.is_empty() {
-        changed |= action_run(ui, &pending, group_index, running, expand, view);
-    }
+    changed |= flush_pending(ui, &mut pending, &mut group_index, running, gallery, action);
     // Failed attempts remain available in history, but a later assistant message
     // supersedes them. While Pi is still working it may retry or compact first.
     if !running {
@@ -1049,7 +1190,9 @@ fn assistant(
         .iter()
         .flat_map(|m| m.images.iter().cloned())
         .collect();
-    gallery.thumbnails(ui, &images);
+    for (idx, image) in images.iter().enumerate() {
+        gallery.inline_photo(ui, image, &images, idx, None);
+    }
     if !running {
         let files = crate::activity::turn_files(messages);
         if !files.is_empty() {
@@ -1215,13 +1358,14 @@ fn action_run(
     running: bool,
     expand: bool,
     view: View,
+    gallery: &mut crate::media::Gallery,
 ) -> bool {
     if view == View::Normal {
-        activity(ui, tools, index, running, expand)
+        activity(ui, tools, index, running, expand, gallery)
     } else {
         ui.push_id(("verbose-actions", index), |ui| {
             for tool in tools {
-                crate::tool_view::row_verbose(ui, tool);
+                crate::tool_view::row_verbose_with_gallery(ui, tool, gallery);
             }
         });
         false
@@ -1273,6 +1417,7 @@ fn activity(
     index: usize,
     running: bool,
     expand: bool,
+    gallery: &mut crate::media::Gallery,
 ) -> bool {
     let colors = crate::theme::palette(ui.ctx());
     ui.add_space(4.0);
@@ -1284,8 +1429,14 @@ fn activity(
     let before = open;
     let mut earlier_changed = false;
     let mut summary = Summary::default();
+    let mut run_images: Vec<crate::media::Attachment> = Vec::new();
     for tool in items {
         summary.add(tool);
+        for image in tool.all_images() {
+            if !run_images.iter().any(|existing| existing.key == image.key) {
+                run_images.push(image);
+            }
+        }
     }
     egui::Frame::new()
         .stroke(if open {
@@ -1304,11 +1455,63 @@ fn activity(
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.spacing_mut().interact_size.y = 22.0;
             }
-            let (rect, response) = ui.allocate_exact_size(
+            let (rect, _) = ui.allocate_exact_size(
                 Vec2::new(ui.available_width(), if open { 24.0 } else { 27.0 }),
-                Sense::click(),
+                Sense::hover(),
             );
-            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            // Reserve space on the right for chevron, optional failed count, and up to 4 compact image thumbnails.
+            let right_reserved_base = if summary.failed > 0 { 92.0 } else { 24.0 };
+            let thumb_w = 38.0_f32;
+            let thumb_h = 22.0_f32;
+            let thumb_gap = 4.0_f32;
+            let max_thumbs = if run_images.is_empty() {
+                0
+            } else {
+                let avail_for_thumbs = (rect.width() - right_reserved_base - 140.0).max(0.0);
+                ((avail_for_thumbs / (thumb_w + thumb_gap)).floor() as usize).min(4)
+            };
+            let shown_thumbs = run_images.len().min(max_thumbs);
+            let extra_thumbs = run_images.len().saturating_sub(shown_thumbs);
+            let extra_w = if extra_thumbs > 0 { 24.0 } else { 0.0 };
+            let thumbs_total_w = if shown_thumbs > 0 {
+                shown_thumbs as f32 * thumb_w
+                    + shown_thumbs.saturating_sub(1) as f32 * thumb_gap
+                    + extra_w
+                    + 8.0
+            } else {
+                0.0
+            };
+            let thumbs_right = rect.right() - right_reserved_base;
+            let thumbs_left = (thumbs_right - thumbs_total_w).max(rect.left() + 28.0);
+            let toggle_left_rect = Rect::from_min_max(
+                rect.min,
+                egui::pos2(
+                    if shown_thumbs > 0 {
+                        thumbs_left
+                    } else {
+                        rect.right()
+                    },
+                    rect.max.y,
+                ),
+            );
+            let toggle_left = ui
+                .interact(toggle_left_rect, id.with("header"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let toggle_right = if shown_thumbs > 0 {
+                Some(
+                    ui.interact(
+                        Rect::from_min_max(
+                            egui::pos2(thumbs_right, rect.top()),
+                            rect.max,
+                        ),
+                        id.with("header-chevron"),
+                        Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand),
+                )
+            } else {
+                None
+            };
             icons::draw(
                 ui,
                 Rect::from_center_size(
@@ -1355,7 +1558,7 @@ fn activity(
                 }
             }
             job.wrap.max_width =
-                (rect.width() - if summary.failed > 0 { 110.0 } else { 50.0 }).max(20.0);
+                (rect.width() - right_reserved_base - thumbs_total_w - 30.0).max(20.0);
             job.wrap.max_rows = 1;
             let galley = ui.painter().layout_job(job);
             ui.painter().galley(
@@ -1363,6 +1566,31 @@ fn activity(
                 galley,
                 colors.muted,
             );
+            if shown_thumbs > 0 {
+                let mut cursor_x = thumbs_right - extra_w;
+                if extra_thumbs > 0 {
+                    ui.painter().text(
+                        egui::pos2(thumbs_right - 4.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("+{extra_thumbs}"),
+                        FontId::proportional(10.0),
+                        colors.dim,
+                    );
+                }
+                for rev_i in (0..shown_thumbs).rev() {
+                    let thumb_rect = Rect::from_min_size(
+                        egui::pos2(cursor_x - thumb_w, rect.center().y - thumb_h * 0.5),
+                        Vec2::new(thumb_w, thumb_h),
+                    );
+                    cursor_x = thumb_rect.left() - thumb_gap;
+                    if gallery
+                        .compact_thumb(ui, thumb_rect, &run_images[rev_i], id.with(("thumb", rev_i)))
+                        .clicked()
+                    {
+                        gallery.open(&run_images, rev_i);
+                    }
+                }
+            }
             if summary.failed > 0 {
                 ui.painter().text(
                     rect.right_center() - egui::vec2(25.0, 0.0),
@@ -1381,7 +1609,7 @@ fn activity(
                 open,
                 colors.dim,
             );
-            if response.clicked() {
+            if toggle_left.clicked() || toggle_right.is_some_and(|r| r.clicked()) {
                 open = !open;
                 ui.ctx().data_mut(|d| d.insert_temp(id, open));
             }
@@ -1399,7 +1627,7 @@ fn activity(
                 }
                 let hidden = if running && !all { earlier } else { 0 };
                 for (i, item) in items.iter().enumerate().skip(hidden) {
-                    ui.push_id(i, |ui| crate::tool_view::row(ui, item));
+                    ui.push_id(i, |ui| crate::tool_view::row_with_gallery(ui, item, gallery));
                     if i + 1 < items.len() {
                         ui.add(egui::Separator::default().spacing(1.0));
                     }
@@ -1434,6 +1662,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
 #[cfg(test)]
 #[path = "transcript/agent_message_tests.rs"]
 mod agent_message_tests;
+
+#[cfg(test)]
+#[path = "transcript/inline_media_tests.rs"]
+mod inline_media_tests;
 
 #[cfg(test)]
 #[path = "transcript/reasoning_tests.rs"]
@@ -2166,6 +2398,7 @@ mod tests {
                         data: "invalid".into(),
                         mime: "image/png".into(),
                         file: None,
+                        local_path: None,
                     }]
                 } else {
                     Vec::new()
@@ -2387,7 +2620,8 @@ mod tests {
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let top = ui.cursor().top();
-                        changed = activity(ui, &items, 0, true, false);
+                        let mut gallery = crate::media::Gallery::default();
+                        changed = activity(ui, &items, 0, true, false, &mut gallery);
                         height = ui.cursor().top() - top;
                     });
                 },
@@ -2575,7 +2809,15 @@ mod tests {
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let before = ui.cursor().top();
-                    activity(ui, &tools.iter().collect::<Vec<_>>(), 0, false, true);
+                    let mut gallery = crate::media::Gallery::default();
+                    activity(
+                        ui,
+                        &tools.iter().collect::<Vec<_>>(),
+                        0,
+                        false,
+                        true,
+                        &mut gallery,
+                    );
                     height = ui.cursor().top() - before;
                 });
             },
@@ -2634,7 +2876,15 @@ mod tests {
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let before = ui.cursor().top();
-                        activity(ui, &tools.iter().collect::<Vec<_>>(), 0, false, false);
+                        let mut gallery = crate::media::Gallery::default();
+                        activity(
+                            ui,
+                            &tools.iter().collect::<Vec<_>>(),
+                            0,
+                            false,
+                            false,
+                            &mut gallery,
+                        );
                         heights.push(ui.cursor().top() - before);
                     });
                 },

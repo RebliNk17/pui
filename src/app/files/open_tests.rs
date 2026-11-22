@@ -195,3 +195,22 @@ fn foreground_preview_still_acknowledges_opening_not_queued() {
     assert!(app.preview_opens.is_empty());
     assert!(app.files.open);
 }
+
+#[test]
+fn inline_visual_expand_opens_browser_tab_without_persisting_virtual_path() {
+    let ctx = egui::Context::default();
+    let mut app = tests::app(&ctx);
+    let cwd = app.prefs.cwd.clone();
+    app.files
+        .open_visual_html(&ctx, &cwd, "vis-1", "Map picker", "<div>Mockup</div>");
+    assert!(app.files.open);
+    assert!(app.files.browser_mode);
+    assert_eq!(
+        app.files.selected_url.as_deref(),
+        Some("pui-visual/Map-picker.html")
+    );
+    let saved = app.files.saved_layout();
+    assert!(saved.paths.is_empty());
+    assert!(saved.urls.is_empty());
+    assert!(saved.selected_url.is_none());
+}

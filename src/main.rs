@@ -8,6 +8,7 @@ mod context;
 mod file_watch;
 mod history;
 mod icons;
+mod inline_visual;
 mod inspector;
 mod markdown;
 mod media;

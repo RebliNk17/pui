@@ -8,6 +8,7 @@ import { installTitles } from "./titles.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
+import { installVisual } from "./visual.ts";
 import { installWorkflows, WORKFLOW_GUIDANCE } from "./workflows.ts";
 import { installAntigravity } from "./antigravity.ts";
 import { installAccounts } from "./accounts.ts";
@@ -17,7 +18,8 @@ Do not launch delegated agents through Bash, Python subprocesses, detached pi --
 Reduce model round trips: issue independent read, grep, find and bounded inspection commands together in one tool-call batch rather than waiting for another model response after each small action. Pi runs sibling tool calls concurrently by default; if codemode is active, use bounded Promise.allSettled batches through its tools API and inspect every result. For independent CLI checks, prefer separate bash tool calls in the same batch so each retains its own permission check, timeout, output and exit status. Do not use detached/background shell jobs or unmanaged agents to create parallelism. Keep dependent commands, edits to the same file, Git/index mutations and shared build/test resources ordered; never parallelize destructive actions or bypass approvals. Batch only a few genuinely independent calls, not an unbounded fan-out.
 Use the fewest useful workers, including zero. Give each a bounded task, relevant context/paths, acceptance criteria and constraints; review its results. Worktree workers start from committed HEAD, not uncommitted edits. No automatic commits, pushes, merges, deployments or destructive cleanup. Use event-driven waits instead of status polling; do not mirror worker transcripts into the parent.
 Use pui_create_monitor for a non-AI background shell condition (exit 0 fires once, exit 1 keeps waiting), pui_create_cron for scheduled prompts, and pui_jobs/pui_update_job to inspect/manage your own jobs. Checks and scheduling do not consume context or call models. Only delivered events/prompts wake you. Jobs run while Pui is open; active jobs reconnect their creator on relaunch. Cron uses five numeric fields in UTC and skips missed occurrences. Use bounded side-effect-free checks; never use monitors to launch unmanaged agents. Tell the user that event handling consumes tokens.
-${WORKFLOW_GUIDANCE} For an eligible hard/high-risk change only, give a very short, specific reason why a workflow is warranted. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.`;
+${WORKFLOW_GUIDANCE} For an eligible hard/high-risk change only, give a very short, specific reason why a workflow is warranted. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.
+To show local screenshots or images inline in chat replies, embed them with standard Markdown image syntax ![description](path/to/image.png) (workspace-relative or /tmp paths). To render rich inline HTML/CSS/SVG mockups, diagrams, or visual comparisons directly inside the chat, call pui_visual.`;
 
 export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan compactly using your tools and codemode. This is ordinary coordination, not a reason to call pui_workflow or ask for workflow consent. Reserve that offer for genuinely hard, high-risk work or an explicit user request.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
@@ -36,6 +38,7 @@ export default function puiExtension(pi: any) {
   installRewind(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only" });
   installQuestions(pi);
   installOpen(pi);
+  installVisual(pi);
   installWorkflows(pi);
   installContext(pi);
   installTitles(pi);

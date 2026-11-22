@@ -19,6 +19,8 @@ type Shared = Arc<Mutex<PageState>>;
 struct Events {
     state: Shared,
     ctx: egui::Context,
+    key: String,
+    snapshots: Option<crate::inline_visual::PageSnapshots>,
 }
 impl Events {
     fn update(&self, update: impl FnOnce(&mut PageState)) {
@@ -43,7 +45,13 @@ wrap_display_handler! {
             }
         }
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
-            if let Some(title) = title { self.events.update(|s| s.title = title.to_string().chars().take(200).collect()); }
+            if let Some(title) = title {
+                let title: String = title.to_string().chars().take(200).collect();
+                if let Some(snapshots) = &self.events.snapshots {
+                    snapshots.record_title(&self.events.key, title.clone());
+                }
+                self.events.update(|s| s.title = title);
+            }
         }
         fn on_console_message(&self, _browser: Option<&mut Browser>, level: LogSeverity, message: Option<&CefString>, source: Option<&CefString>, line: i32) -> i32 {
             let message = message.map(ToString::to_string).unwrap_or_default();
@@ -64,12 +72,31 @@ wrap_load_handler! {
         fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, back: i32, forward: i32) {
             self.events.update(|s| { s.loading = loading != 0; s.back = back != 0; s.forward = forward != 0; });
         }
-        fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status: i32) {
+        fn on_load_end(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status: i32) {
             if frame.is_some_and(|frame| frame.is_main() == 1) {
                 self.events.update(|state| {
                     if http_status >= 400 { state.error = Some(format!("Page returned HTTP {http_status}.")); }
                     else if http_status > 0 { state.error = None; }
                 });
+                if self.events.snapshots.is_some()
+                    && let Some(browser) = browser
+                    && let Some(host) = browser.host()
+                {
+                    let params = serde_json::json!({
+                        "format": "jpeg",
+                        "quality": 78,
+                        "fromSurface": true
+                    })
+                    .to_string();
+                    let cef_json = CefString::from(params.as_str());
+                    let mut dict = cef::parse_json(Some(&cef_json), JsonParserOptions::RFC)
+                        .and_then(|v| v.dictionary());
+                    host.execute_dev_tools_method(
+                        SNAPSHOT_MSG_ID,
+                        Some(&CefString::from("Page.captureScreenshot")),
+                        dict.as_mut(),
+                    );
+                }
             }
         }
         fn on_load_error(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, error_code: Errorcode, error_text: Option<&CefString>, _failed_url: Option<&CefString>) {
@@ -194,6 +221,61 @@ fn client(events: Events, initial: String, remote: bool, devtools: bool) -> Clie
         FileDialogs::new(),
     )
 }
+const SNAPSHOT_MSG_ID: i32 = 90_001;
+
+wrap_dev_tools_message_observer! {
+    struct SnapshotObserver { events: Events }
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_method_result(&self, _browser: Option<&mut Browser>, message_id: i32, success: i32, result: Option<&[u8]>) {
+            if message_id != SNAPSHOT_MSG_ID || success != 1 {
+                return;
+            }
+            let Some(snapshots) = self.events.snapshots.clone() else {
+                return;
+            };
+            let Some(bytes) = result else {
+                return;
+            };
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                return;
+            };
+            let Some(b64) = parsed["data"].as_str().map(str::to_owned) else {
+                return;
+            };
+            let key = self.events.key.clone();
+            let title = self
+                .events
+                .state
+                .lock()
+                .ok()
+                .map(|s| s.title.clone())
+                .filter(|t| !t.is_empty());
+            let ctx = self.events.ctx.clone();
+            std::thread::spawn(move || {
+                use base64::Engine as _;
+                let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+                    return;
+                };
+                let Ok(img) = image::load_from_memory(&raw) else {
+                    return;
+                };
+                let img = if img.width() > 960 || img.height() > 640 {
+                    img.resize(960, 640, image::imageops::FilterType::Triangle)
+                } else {
+                    img
+                }
+                .into_rgba8();
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width() as usize, img.height() as usize],
+                    img.as_raw(),
+                );
+                snapshots.record_image(&key, title, color);
+                ctx.request_repaint();
+            });
+        }
+    }
+}
+
 struct Tab {
     browser: Browser,
     state: Shared,
@@ -202,6 +284,7 @@ struct Tab {
     dimensions: (i32, i32),
     initial: String,
     inspection_observer: Option<Registration>,
+    _snapshot_observer: Option<Registration>,
     // CEF can resize its child during navigation. Its parent must be the pane,
     // never Pui's entire content view (which also contains chat and console).
     container: Retained<NSView>,
@@ -281,16 +364,16 @@ impl Tab {
 pub(super) struct Engine {
     tabs: BTreeMap<String, Tab>,
     active: String,
+    snapshots: Option<crate::inline_visual::PageSnapshots>,
     // Runtime drops after tabs, not before their asynchronous close callbacks.
     runtime: Option<std::rc::Rc<crate::chromium::Runtime>>,
     initialization_error: Option<String>,
 }
-thread_local! {
-    // CEF is process-global; session-local engines must share its lifetime.
-    static RUNTIME: std::cell::RefCell<std::rc::Weak<crate::chromium::Runtime>> = Default::default();
-}
 
 impl Engine {
+    pub fn set_snapshots(&mut self, snapshots: crate::inline_visual::PageSnapshots) {
+        self.snapshots = Some(snapshots);
+    }
     pub fn focused(&self) -> bool {
         self.tabs.values().any(|tab| {
             let Some(view) = tab
@@ -389,6 +472,8 @@ impl Engine {
                     let events = Events {
                         state: Arc::new(Mutex::new(PageState::default())),
                         ctx: tab.ctx.clone(),
+                        key: String::new(),
+                        snapshots: None,
                     };
                     let mut client = client(events, String::new(), false, true);
                     host.show_dev_tools(
@@ -427,15 +512,7 @@ impl Engine {
             return Err(error.clone());
         }
         if self.runtime.is_none() {
-            let runtime = RUNTIME.with(|shared| {
-                if let Some(runtime) = shared.borrow().upgrade() {
-                    return Ok(runtime);
-                }
-                let runtime = std::rc::Rc::new(crate::chromium::Runtime::initialize(ctx)?);
-                *shared.borrow_mut() = std::rc::Rc::downgrade(&runtime);
-                Ok::<_, String>(runtime)
-            });
-            match runtime {
+            match crate::chromium::shared(ctx) {
                 Ok(runtime) => self.runtime = Some(runtime),
                 Err(error) => {
                     self.initialization_error = Some(error.clone());
@@ -467,8 +544,10 @@ impl Engine {
             let events = Events {
                 state: state.clone(),
                 ctx: ctx.clone(),
+                key: key.to_owned(),
+                snapshots: self.snapshots.clone(),
             };
-            let mut client = client(events, initial.clone(), url.is_some(), false);
+            let mut client = client(events.clone(), initial.clone(), url.is_some(), false);
             let settings = BrowserSettings {
                 javascript_access_clipboard: State::DISABLED,
                 javascript_dom_paste: State::DISABLED,
@@ -518,6 +597,12 @@ impl Engine {
                 container.removeFromSuperview();
                 return Err("Chromium could not create the page".into());
             };
+            let snapshot_observer = self.snapshots.as_ref().and_then(|_| {
+                browser.host().and_then(|host| {
+                    let mut obs = SnapshotObserver::new(events.clone());
+                    host.add_dev_tools_message_observer(Some(&mut obs))
+                })
+            });
             self.tabs.insert(
                 key.into(),
                 Tab {
@@ -528,6 +613,7 @@ impl Engine {
                     dimensions: (0, 0),
                     initial,
                     inspection_observer: None,
+                    _snapshot_observer: snapshot_observer,
                     container,
                     #[cfg(debug_assertions)]
                     diagnostics: Default::default(),
