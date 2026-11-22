@@ -589,8 +589,7 @@ process.stdout.write(JSON.stringify({ ok: true, access, refresh, expiresIn, emai
 }
 
 fn run_antigravity_browser_login(
-    client_id: &str,
-    client_secret: &str,
+    client: (&str, &str),
     authorize_url: &str,
     expected_state: &str,
     verifier: &str,
@@ -598,6 +597,7 @@ fn run_antigravity_browser_login(
     cancelled: &AtomicBool,
     child_slot: &Arc<Mutex<Option<std::process::Child>>>,
 ) -> Result<String, String> {
+    let (client_id, client_secret) = client;
     let script = r#"
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -1883,8 +1883,7 @@ impl ProvidersManager {
                 let ctx = ctx.clone();
                 std::thread::spawn(move || {
                     let _ = tx.send(run_antigravity_browser_login(
-                        &client_id,
-                        &client_secret,
+                        (&client_id, &client_secret),
                         &auth_url,
                         &state,
                         &verifier,

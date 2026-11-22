@@ -159,7 +159,11 @@ fn draw_shimmer_label(
         let band = (1.0 - (u - sweep).abs() / SHIMMER_HALF_WIDTH).clamp(0.0, 1.0);
         let glow = band * band * (3.0 - 2.0 * band);
         let color = base.lerp_to_gamma(peak, glow).gamma_multiply(alpha);
-        job.append(&label[start..end], 0.0, TextFormat::simple(font.clone(), color));
+        job.append(
+            &label[start..end],
+            0.0,
+            TextFormat::simple(font.clone(), color),
+        );
     }
 
     let painter = ui.painter();

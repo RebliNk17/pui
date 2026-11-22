@@ -3,16 +3,24 @@ function (selector) {
   // Runs only in a CEF isolated world. Never accepts page functions or properties,
   // reads values/attributes, creates DOM, installs listeners, or performs actions.
   try {
-    const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
-    let node, selected = null, visited = 0;
-    while ((node = walker.nextNode())) {
-      if (++visited > 10000) return { error: "budget" };
-      if (Element.prototype.matches.call(node, selector)) {
-        if (selected) return { error: "multiple" };
-        selected = node;
+    let selected = null;
+    if (typeof selector === "string") {
+      const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+      let node, visited = 0;
+      while ((node = walker.nextNode())) {
+        if (++visited > 10000) return { error: "budget" };
+        if (Element.prototype.matches.call(node, selector)) {
+          if (selected) return { error: "multiple" };
+          selected = node;
+        }
       }
+      if (!selected) return { error: "no-match" };
+    } else {
+      // Only a CDP-resolved node in this same isolated top-document world.
+      selected = selector;
+      if (!selected || selected.nodeType !== Node.ELEMENT_NODE || selected.ownerDocument !== document || selected.getRootNode() !== document || !selected.isConnected)
+        return { error: "unavailable" };
     }
-    if (!selected) return { error: "no-match" };
     const sensitive = "input,textarea,select,option,button,output,datalist,fieldset,form,[contenteditable],[role=textbox],script,style,template,noscript";
     let ancestor = selected, depth = 0;
     while (ancestor) {
