@@ -33,7 +33,7 @@ impl Events {
 wrap_display_handler! {
     struct Display { events: Events }
     impl DisplayHandler {
-        fn on_address_change(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
+        fn on_address_change(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
             if frame.is_some_and(|f| f.is_main() == 1) {
                 if let Some(url) = url {
                     let url = url.to_string();
@@ -41,6 +41,7 @@ wrap_display_handler! {
                         state.inspection.cancel(Some("Page address changed. Inspect again for a new snapshot."));
                         if web_url(&url) { state.location = url; }
                     });
+                    if let Some(browser)=browser {inspection::cleanup(browser,&self.events);}
                 }
             }
         }
@@ -64,9 +65,10 @@ wrap_display_handler! {
 wrap_load_handler! {
     struct Loading { events: Events }
     impl LoadHandler {
-        fn on_load_start(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
+        fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
             if frame.is_some_and(|frame| frame.is_main() == 1) {
                 self.events.update(|state| state.inspection.cancel(Some("Page changed. Inspect again for a new snapshot.")));
+                if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
             }
         }
         fn on_loading_state_change(&self, _browser: Option<&mut Browser>, loading: i32, back: i32, forward: i32) {
@@ -153,12 +155,13 @@ wrap_life_span_handler! {
 wrap_request_handler! {
     struct Navigation { initial: String, remote: bool, devtools: bool, events: Events }
     impl RequestHandler {
-        fn on_before_browse(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32) -> i32 {
+        fn on_before_browse(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, request: Option<&mut Request>, _user_gesture: i32, _is_redirect: i32) -> i32 {
             let url = request.map(|r| CefString::from(&r.url()).to_string()).unwrap_or_default();
             let allowed = url == "about:blank" || url == self.initial || (self.remote && web_url(&url)) || (self.devtools && (url.starts_with("devtools://") || url.starts_with("chrome-devtools://")));
             if !allowed { self.events.update(|state| state.error = Some("Blocked navigation: only HTTP/HTTPS pages are allowed.".into())); }
             if allowed && frame.is_some_and(|frame| frame.is_main() == 1) {
                 self.events.update(|state| state.inspection.cancel(Some("Navigation cancelled inspection. Inspect again after loading.")));
+                if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
             }
             (!allowed) as i32
         }
@@ -166,8 +169,9 @@ wrap_request_handler! {
             self.events.update(|state| { state.loading = false; state.error = Some("Certificate validation failed. Check the site's certificate or your network trust settings; the connection was not bypassed.".into()); });
             0
         }
-        fn on_render_process_terminated(&self, _browser: Option<&mut Browser>, _status: TerminationStatus, error_code: i32, error_string: Option<&CefString>) {
+        fn on_render_process_terminated(&self, browser: Option<&mut Browser>, _status: TerminationStatus, error_code: i32, error_string: Option<&CefString>) {
             self.events.update(|state| { state.inspection.cancel(Some("Renderer stopped. Reload before inspecting.")); state.loading = false; state.error = Some(format!("Chromium renderer stopped ({error_code}): {}. Reload to retry.", error_string.map(ToString::to_string).unwrap_or_default())); });
+            if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
         }
     }
 }
@@ -305,12 +309,22 @@ impl Tab {
     }
     fn hide(&self) {
         if let Ok(mut state) = self.state.lock() {
-            if state.inspection.pending() || state.inspection.facts.is_some() {
+            if state.inspection.pending()
+                || state.inspection.facts.is_some()
+                || state.inspection.picking()
+            {
                 state
                     .inspection
                     .cancel(Some("Inspection cancelled because this page was hidden."));
             }
         }
+        inspection::cleanup(
+            &self.browser,
+            &Events {
+                state: self.state.clone(),
+                ctx: self.ctx.clone(),
+            },
+        );
         if !self.container.isHidden() {
             self.container.setHidden(true);
         }
@@ -410,6 +424,13 @@ impl Engine {
             if let Ok(mut state) = tab.state.lock() {
                 state.inspection.cancel(None);
             }
+            inspection::cleanup(
+                &tab.browser,
+                &Events {
+                    state: tab.state.clone(),
+                    ctx: tab.ctx.clone(),
+                },
+            );
         }
     }
     pub fn prepare_inspection(&mut self, key: &str) {
@@ -433,8 +454,18 @@ impl Engine {
                 .get(key)
                 .filter(|tab| tab.inspection_observer.is_some())
             {
-                inspection::inspect(tab, epoch, query);
+                inspection::inspect(tab, epoch, Some(query));
             }
+        }
+    }
+    pub fn pick(&self, key: &str, epoch: u64) {
+        if key == self.active
+            && let Some(tab) = self
+                .tabs
+                .get(key)
+                .filter(|t| t.inspection_observer.is_some())
+        {
+            inspection::inspect(tab, epoch, None);
         }
     }
     pub fn hide(&self) {
@@ -652,6 +683,13 @@ impl Engine {
                 tab.container.setHidden(false);
             }
         }
+        inspection::cleanup(
+            &tab.browser,
+            &Events {
+                state: tab.state.clone(),
+                ctx: tab.ctx.clone(),
+            },
+        );
         tab.emulate(options, rect);
         #[cfg(debug_assertions)]
         smoke::observe(tab);

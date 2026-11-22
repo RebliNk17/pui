@@ -5,7 +5,7 @@ use serde::Deserialize;
 mod transport;
 pub(super) use transport::State;
 #[cfg(target_os = "macos")]
-pub(super) use transport::{Command, command, message_id, receive};
+pub(super) use transport::{Command, command, event, message_id, pick, receive};
 
 const SELECTOR_LIMIT: usize = 256;
 const TEXT_LIMIT: usize = 512;
@@ -81,7 +81,7 @@ fn visible_data(value: &str) -> String {
 #[serde(deny_unknown_fields)]
 pub(super) struct Facts {
     tag: String,
-    text: String,
+    pub(in crate::app::webview) text: String,
     text_note: String,
     rect: [f64; 4],
     display: String,
@@ -136,6 +136,8 @@ impl Editor {
 pub(super) struct Decision {
     pub(super) inspect: Option<String>,
     pub(super) close: bool,
+    pub(super) pick: bool,
+    pub(super) cancel_pick: bool,
 }
 
 pub(super) fn show(
@@ -148,7 +150,7 @@ pub(super) fn show(
     let field_id = egui::Id::new(("inspection-selector", &editor.key));
     let mut owns_keys = ui.memory(|m| m.focused()).is_none_or(|id| {
         id == field_id
-            || ["Inspect", "Close"].iter().any(|name| {
+            || ["Inspect", "Close", "Picker"].iter().any(|name| {
                 ui.ctx()
                     .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("inspection-action", *name))))
                     == Some(id)
@@ -196,7 +198,7 @@ pub(super) fn show(
     prompt_ui::heading(
         ui,
         "Element inspection",
-        "Read-only · current top document · no page clicks or form values",
+        "Read-only facts · current top document · no form values",
     );
     ui.add(egui::Label::new(theme::small(ui, "Choose one element by tag, #id, .class, descendant or spaced > selector. Frames, shadow roots, attributes and pseudos are unsupported.")).wrap());
     let field = ui.add(
@@ -216,6 +218,35 @@ pub(super) fn show(
         ui.add(egui::Label::new(theme::small(ui, "Inspection unavailable while the page is loading, absent, or controls are disabled.")).wrap());
     } else if let Err(error) = validation {
         ui.add(egui::Label::new(theme::small(ui, error)).wrap());
+    }
+    ui.horizontal_wrapped(|ui| {
+        let label = if state.picking() {
+            "Cancel picker"
+        } else {
+            "Pick on page…"
+        };
+        let r = prompt_ui::button(
+            ui,
+            label,
+            prompt_ui::Button::Secondary,
+            keyboard && ui.is_enabled() && (state.picking() || enabled && !state.pending()),
+        );
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(("inspection-action", "Picker")), r.id));
+        if r.enabled() && (r.clicked() || (enter && r.has_focus())) {
+            if state.picking() {
+                decision.cancel_pick = true;
+            } else if !epoch_changed {
+                decision.pick = true;
+            }
+        }
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(egui::Id::new(("inspection-control", label)), (r.id, r.rect))
+        });
+    });
+    if state.picking() {
+        ui.add(egui::Label::new(theme::small(ui,"Chromium highlights the hovered element. Pick is one-shot; Cancel picker or Escape exits. The selection click is reserved by Chromium, not sent as a normal page action. Frames/shadow roots may refuse; nothing is captured to chat.")).wrap());
     }
     // Inspect requires its explicit button. Enter in the selector never reads
     // the DOM or leaks through to a composer beneath this native panel.
@@ -271,7 +302,7 @@ pub(super) fn show(
     ui.add(egui::Label::new(theme::small(ui, "Local, untrusted page data · never sent to a chat. Results are a snapshot; selectors may stop matching after page changes.")).wrap());
     if let Some((query, facts)) = &state.facts {
         for (name, value) in [
-            ("Selector", query.clone()),
+            ("Target", query.clone()),
             ("Tag", facts.tag.clone()),
             ("Direct text", facts.text.clone()),
             ("Text limits", facts.text_note.clone()),

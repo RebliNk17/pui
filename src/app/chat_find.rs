@@ -525,8 +525,10 @@ mod tests {
 
     #[test]
     fn chat_find_records_dedups_and_walks_search_history() {
-        let mut find = ChatFind::default();
-        find.query = "alpha".into();
+        let mut find = ChatFind {
+            query: "alpha".into(),
+            ..Default::default()
+        };
         find.push_history();
         find.query = "beta".into();
         find.push_history();

@@ -736,7 +736,7 @@ mod tests {
                     t.galley.rect.translate(t.pos.to_vec2()),
                 )),
                 egui::Shape::Rect(r) => rects.push(r.clone()),
-                egui::Shape::Circle(c) => circles.push(c.clone()),
+                egui::Shape::Circle(c) => circles.push(*c),
                 egui::Shape::Path(p) => arcs.push(p.clone()),
                 egui::Shape::LineSegment { points, stroke }
                     if (points[1].x - points[0].x).abs() > 100.0 && stroke.width == 1.0 =>

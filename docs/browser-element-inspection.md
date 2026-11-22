@@ -1,5 +1,7 @@
 # Read-only element inspection
 
+**Follow-up:** the current isolated browser-picker implementation and actual local CEF evidence are recorded in `browser-native-picker-validation.md`. It fixes a reentrant CDP request-ID rewrite discovered by runtime testing and adds native one-shot picking. Repository completion remains blocked by documented baseline UI regressions/Git deadline failures; do not treat feature-specific runtime success as a green full-suite release.
+
 The browser's Inspect icon now toggles a native, scroll-bounded inspection panel. Enter a conservative selector (`main > h1`, `#app`, `.title`) and explicitly press **Inspect**. **Close**, Escape while the inspector owns focus, or the icon disables it. Chrome DevTools remains a separate existing button. There is no click picker in this slice.
 
 ## Snapshot and safety bounds

@@ -3,6 +3,8 @@ use serde_json::json;
 use transport::{command, receive};
 
 include!("transport_tests.rs");
+#[path = "picker_tests.rs"]
+mod picker_tests;
 
 fn start(state: &mut State) -> i32 {
     let request = command(state, state.epoch, "main > h1").unwrap();
@@ -253,6 +255,8 @@ impl Panel {
                 )
                 .0;
             result.close |= next.close;
+            result.pick |= next.pick;
+            result.cancel_pick |= next.cancel_pick;
             if next.inspect.is_some() {
                 result.inspect = next.inspect;
             }

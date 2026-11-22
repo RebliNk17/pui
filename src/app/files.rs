@@ -1095,7 +1095,7 @@ impl Browser {
         let (icon, icon_color) = if entry.directory {
             (Icon::Folder, colors.muted)
         } else {
-            syntax::file_icon(&entry.path, &colors)
+            syntax::file_icon(&entry.path, colors)
         };
         icons::draw(
             ui,
