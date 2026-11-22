@@ -985,22 +985,72 @@ impl Pui {
             },
         );
         if self.active_permission() == PermissionMode::Auto {
-            section(ui, "Auto classifier", "");
+            section(
+                ui,
+                "Auto classifier",
+                "Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
+            );
             card(ui, |ui| {
                 row(
                     ui,
                     "Classifier model",
-                    "The lowest-priced suitable model from the current provider, using configured prices.",
+                    "Automatic uses the lowest input + output price across connected providers within Pi's model scope. Sends the proposed call and recent requests to that provider. Applies to all chats, without changing their conversation models.",
+                    |ui| {
+                        let selected = self
+                            .prefs
+                            .settings
+                            .permission_classifier
+                            .as_deref()
+                            .unwrap_or("Automatic · cheapest available");
+                        let response = egui::ComboBox::from_id_salt("settings-auto-classifier")
+                            .selected_text(selected)
+                            .width(190.0)
+                            .truncate()
+                            .show_ui(ui, |ui| {
+                                let automatic = ui.selectable_value(
+                                    &mut self.prefs.settings.permission_classifier,
+                                    None,
+                                    "Automatic · cheapest available",
+                                );
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(
+                                        egui::Id::new("auto-classifier-automatic-rect"),
+                                        automatic.rect,
+                                    )
+                                });
+                                let _ = automatic;
+                                for model in &self.state.permission_classifier_models {
+                                    let key = format!("{}/{}", model.provider, model.id);
+                                    ui.selectable_value(
+                                        &mut self.prefs.settings.permission_classifier,
+                                        Some(key),
+                                        format!("{} · {}", model.name, model.provider),
+                                    );
+                                }
+                            })
+                            .response;
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(egui::Id::new("auto-classifier-rect"), response.rect)
+                        });
+                        let _ = response;
+                    },
+                );
+                separator(ui);
+                row(
+                    ui,
+                    "Resolved model",
+                    "Uses configured prices, including zero-price entries. An unavailable override never silently falls back to another model.",
                     |ui| {
                         ui.add(
                             egui::Label::new(theme::small(
                                 ui,
-                                self.state
-                                    .permission_classifier
-                                    .as_deref()
-                                    .unwrap_or("Unavailable — asks for approval"),
+                                self.state.permission_classifier.as_deref().unwrap_or(
+                                    "Unavailable · calls needing classification are blocked",
+                                ),
                             ))
-                            .truncate(),
+                            .wrap(),
                         );
                     },
                 );
@@ -1115,6 +1165,173 @@ mod tests {
                 }
             }
             _ => {}
+        }
+    }
+    #[test]
+    fn auto_classifier_picker_changes_and_cancels_without_interrupting_work() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for (width, zoom) in [(520.0, 1.25), (900.0, 1.0)] {
+                let ctx = egui::Context::default();
+                let mut app = Pui::new(
+                    &eframe::CreationContext::_new_kittest(ctx.clone()),
+                    Options {
+                        demo: true,
+                        theme: Some(mode),
+                        ..Default::default()
+                    },
+                );
+                ctx.set_zoom_factor(zoom);
+                app.state.busy = true;
+                app.draft = "keep my draft".into();
+                app.state.permission_classifier = Some("google/flash".into());
+                app.state.permission_classifier_models = vec![protocol::Model {
+                    id: "flash".into(),
+                    name: "Flash".into(),
+                    provider: "google".into(),
+                    context_window: 32000,
+                    input_cost: 0.1,
+                    output_cost: 0.4,
+                }];
+                let frame = |app: &mut Pui, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(width, 1100.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default()
+                                .show(ctx, |ui| app.settings_permissions(ui));
+                        },
+                    )
+                };
+                fn visible_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+                    match shape {
+                        egui::Shape::Text(t) => out.push((
+                            t.galley.job.text.clone(),
+                            t.galley.rect.translate(t.pos.to_vec2()),
+                        )),
+                        egui::Shape::Vec(shapes) => {
+                            shapes.iter().for_each(|s| visible_text(s, out))
+                        }
+                        _ => {}
+                    }
+                }
+                let labels = |output: egui::FullOutput| {
+                    let mut labels = Vec::new();
+                    for shape in output.shapes {
+                        visible_text(&shape.shape, &mut labels);
+                    }
+                    labels
+                };
+                let click = |app: &mut Pui, pos| {
+                    for pressed in [true, false] {
+                        frame(
+                            app,
+                            vec![
+                                egui::Event::PointerMoved(pos),
+                                egui::Event::PointerButton {
+                                    pos,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::NONE,
+                                },
+                            ],
+                        );
+                    }
+                };
+                frame(&mut app, vec![]);
+                let text = labels(frame(&mut app, vec![]));
+                let automatic = text
+                    .iter()
+                    .find(|(t, _)| t == "Automatic · cheapest available")
+                    .expect("Automatic classifier choice")
+                    .1;
+                assert!(automatic.right() <= width + 0.1);
+                let actual = ctx
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .unwrap();
+                click(&mut app, actual.center());
+                assert!(
+                    egui::Popup::is_any_open(&ctx),
+                    "did not open: {actual:?} label {automatic:?}"
+                );
+                frame(&mut app, vec![]);
+                let text = labels(frame(&mut app, vec![]));
+                let flash = text
+                    .iter()
+                    .find(|(t, _)| t == "Flash · google")
+                    .unwrap_or_else(|| {
+                        panic!("Live eligible classifier at {width}/{zoom}: {text:?}")
+                    })
+                    .1;
+                assert!(flash.right() <= width + 0.1);
+                click(&mut app, flash.center());
+                assert_eq!(
+                    app.prefs.settings.permission_classifier.as_deref(),
+                    Some("google/flash")
+                );
+                let text = labels(frame(&mut app, vec![]));
+                let selected = text.iter().find(|(t, _)| t == "google/flash").unwrap().1;
+                let actual = ctx
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .unwrap();
+                assert!(selected.intersects(actual));
+                click(&mut app, actual.center());
+                frame(
+                    &mut app,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                assert_eq!(
+                    app.prefs.settings.permission_classifier.as_deref(),
+                    Some("google/flash")
+                );
+                assert!(!egui::Popup::is_any_open(&ctx));
+                // Disconnected overrides stay visible, and can return to Automatic.
+                app.state.permission_classifier_models.clear();
+                app.state.permission_classifier = None;
+                let text = labels(frame(&mut app, vec![]));
+                assert!(text.iter().any(|(t, _)| t.starts_with("Unavailable")));
+                let selected = text.iter().find(|(t, _)| t == "google/flash").unwrap().1;
+                let actual = ctx
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .unwrap();
+                assert!(selected.intersects(actual));
+                click(&mut app, actual.center());
+                frame(&mut app, vec![]);
+                let text = labels(frame(&mut app, vec![]));
+                let automatic = text
+                    .iter()
+                    .find(|(t, _)| t == "Automatic · cheapest available")
+                    .unwrap()
+                    .1;
+                let actual = ctx
+                    .data(|d| {
+                        d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-automatic-rect"))
+                    })
+                    .unwrap();
+                assert!(
+                    automatic.intersects(actual),
+                    "Automatic label vs hit rect at {width}/{zoom}: {automatic:?} vs {actual:?}. Labels: {text:?}"
+                );
+                click(&mut app, actual.center());
+                assert!(
+                    app.prefs.settings.permission_classifier.is_none(),
+                    "Automatic not selected at {width}/{zoom}: {actual:?}, {automatic:?}"
+                );
+                assert!(app.state.busy);
+                assert_eq!(app.draft, "keep my draft");
+                assert!(app.state.dialogs.is_empty());
+            }
         }
     }
     #[test]

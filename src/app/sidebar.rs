@@ -6,6 +6,7 @@ mod activity;
 mod dates;
 #[cfg(test)]
 mod disclosure_tests;
+mod menu_keys;
 pub(super) mod sections;
 const ROW_HEIGHT: f32 = 28.0;
 
@@ -1208,21 +1209,25 @@ impl Pui {
         let mut menu_contents = |ui: &mut egui::Ui| {
             theme::menu_controls(ui);
             ui.set_min_width(200.0);
-            if ui.button("Rename").clicked() {
+            let shortcut = menu_keys::read(ui);
+            if menu_keys::button(ui, "Rename", egui::Key::R, shortcut) {
                 action = Some(Action::Rename(path.clone()));
                 ui.close();
             }
-            if ui
-                .button(if meta.pinned { "Unpin" } else { "Pin" })
-                .clicked()
-            {
+            if menu_keys::button(
+                ui,
+                if meta.pinned { "Unpin" } else { "Pin" },
+                egui::Key::P,
+                shortcut,
+            ) {
                 meta.pinned = !meta.pinned;
                 ui.close();
             }
             if ui
-                .button("Move to project…")
+                .add(egui::Button::new("Move to project…").shortcut_text("M"))
                 .on_hover_text("Organize in Pui; does not change Pi's working directory")
                 .clicked()
+                || shortcut == Some(egui::Key::M)
             {
                 action = Some(Action::Move(path.clone()));
                 ui.close();
@@ -1230,49 +1235,55 @@ impl Pui {
             if section_root {
                 sections::assignment_menu(ui, sections, meta);
             }
-            if ui.button("Copy session path").clicked() {
+            if menu_keys::button(ui, "Copy session path", egui::Key::C, shortcut) {
                 ui.ctx().copy_text(path.display().to_string());
                 ui.close();
             }
             self.prefs.transcript_view.menu(ui);
-            if ui.button("Export as Markdown").clicked() {
+            if menu_keys::button(ui, "Export as Markdown", egui::Key::E, shortcut) {
                 action = Some(Action::Export(path.clone()));
                 ui.close();
             }
             ui.separator();
-            if ui
-                .button(if meta.archived {
+            if menu_keys::button(
+                ui,
+                if meta.archived {
                     "Unarchive"
                 } else {
                     "Archive"
-                })
-                .clicked()
-            {
+                },
+                egui::Key::A,
+                shortcut,
+            ) {
                 meta.archived = !meta.archived;
                 ui.close();
             }
             if meta.hidden {
-                if ui.button("Restore chat").clicked() {
+                if menu_keys::button(ui, "Restore chat", egui::Key::H, shortcut) {
                     action = Some(Action::Restore(path.clone()));
                     ui.close();
                 }
             } else if ui
                 .add_enabled(
                     !meta.pinned,
-                    egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red)),
+                    egui::Button::new(egui::RichText::new("Hide from Pui").color(colors.red))
+                        .shortcut_text("H"),
                 )
                 .on_hover_text("Does not delete your Pi session file")
                 .on_disabled_hover_text("Unpin this chat before hiding it")
                 .clicked()
+                || (!meta.pinned && shortcut == Some(egui::Key::H))
             {
                 action = Some(Action::Hide(path.clone()));
                 ui.close();
             }
             ui.separator();
-            if ui
-                .button(RichText::new("Delete chat…").color(colors.red))
-                .clicked()
-            {
+            if menu_keys::button(
+                ui,
+                RichText::new("Delete chat…").color(colors.red),
+                egui::Key::D,
+                shortcut,
+            ) {
                 action = Some(Action::Delete(deletion::Target::Chat(path.clone())));
                 ui.close();
             }

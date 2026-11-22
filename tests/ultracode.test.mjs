@@ -23,7 +23,7 @@ async function host(readonly = false, taskRole = '') {
   const { default: extension, ULTRACODE_GUIDANCE } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
   const tools = new Map(), commands = new Map(), events = new Map(), statuses = [], messages = [], requests = [];
   let active=['read', 'bash', 'subagent', 'mcp__agents__spawn_agent'];
-  const pi = {appendEntry:()=>{},getAllTools:()=>[{name:"codemode"}],getActiveTools:()=>active,setActiveTools:tools=>{active=tools;}, registerCommand: (n, v) => commands.set(n, v), registerTool: t => tools.set(t.name, t), on: (n, f) => { const prev=events.get(n); events.set(n, prev ? async (...args) => { const first=await prev(...args); return await f(...args) ?? first; } : f); }, sendMessage: (...args) => messages.push(args) };
+  const pi = {appendEntry:()=>{},getAllTools:()=>[{name:"codemode"}],getActiveTools:()=>active,setActiveTools:tools=>{active=tools;}, registerCommand: (n, v) => commands.set(n, v), registerTool: t => tools.set(t.name, t), on: (n, f) => { const prev=events.get(n); events.set(n, prev ? async (...args) => { const first=await prev(...args); if(n==='before_agent_start' && first?.systemPrompt) args[0]={...args[0],systemPrompt:first.systemPrompt}; return await f(...args) ?? first; } : f); }, sendMessage: (...args) => messages.push(args) };
   const ctx = { modelRegistry:{getAvailable:()=>[]}, ui: { setStatus: (...args) => statuses.push(args), input: async (...args) => { requests.push(args); return JSON.stringify({ agent_id: 'agent-2' }); } } };
   const old = process.env.PUI_AGENT_ACCESS, oldRole = process.env.PUI_TASK_ROLE;
   process.env.PUI_AGENT_ACCESS = readonly ? 'read-only' : 'worktree'; process.env.PUI_TASK_ROLE = taskRole;
@@ -34,6 +34,17 @@ async function host(readonly = false, taskRole = '') {
   await events.get('session_start')({}, ctx);
   return { tools, commands, events, statuses, messages, requests, ctx, ULTRACODE_GUIDANCE, active: () => active };
 }
+test('native Settings forwards the classifier override without changing the conversation model',async()=>{
+  const h=await host();
+  const candidate={id:'flash',name:'Flash',provider:'google',input:['text'],contextWindow:32000,maxTokens:1024,cost:{input:0.1,output:0.4}};
+  h.ctx.modelRegistry.getAvailable=()=>[candidate];
+  h.commands.get('pui-settings').handler(JSON.stringify({permission:'auto',permissionClassifier:'google/flash',compactPercent:85,keepRecentTokens:20000}),h.ctx);
+  const status=JSON.parse(h.statuses.filter(([key])=>key==='pui-permissions').at(-1)[1]);
+  assert.equal(status.classifier,'google/flash');assert.equal(status.classifierModels[0].id,'flash');
+  assert.equal(h.requests.length,0);assert.equal(h.messages.length,0);
+  const prompt=await h.events.get('before_agent_start')({systemPrompt:'base'});
+  assert.match(prompt.systemPrompt,/Pui Auto mode/);assert.match(prompt.systemPrompt,/use pui_spawn_agent/);
+});
 test('Ultracode does not silently change model thinking or spawn a team', async () => {
   const h = await host();
   const prompt = (await h.events.get('before_agent_start')({systemPrompt:'base'})).systemPrompt;

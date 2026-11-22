@@ -196,6 +196,7 @@ pub struct State {
     pub(crate) stream: Option<stream::Stream>,
     pub compacting: bool,
     pub permission_classifier: Option<String>,
+    pub permission_classifier_models: Vec<Model>,
     pub permission_mode: Option<String>,
     pub permission_cost: f64,
     pub compaction_settings_error: Option<String>,
@@ -443,6 +444,10 @@ impl State {
                         self.permission_mode = mode;
                         self.permission_classifier =
                             value["classifier"].as_str().map(str::to_owned);
+                        if let Some(models) = value["classifierModels"].as_array() {
+                            self.permission_classifier_models =
+                                models.iter().map(Model::from_json).collect();
+                        }
                         self.permission_cost = value["classifierCost"].as_f64().unwrap_or(0.0);
                         return;
                     }
@@ -1050,6 +1055,33 @@ mod tests {
         assert_eq!(state.model, "gemini-4-argon");
         assert_eq!(state.model_name, "Gemini 4 Argon");
         assert_eq!(state.provider, "local");
+    }
+    #[test]
+    fn auto_classifier_catalog_is_distinct_from_the_conversation_model() {
+        let mut state = State {
+            model: "opus".into(),
+            provider: "anthropic".into(),
+            ..Default::default()
+        };
+        let data = json!({"mode":"auto","classifier":"google/flash","classifierCost":0.002,"classifierModels":[{"id":"flash","name":"Flash","provider":"google","contextWindow":32000,"cost":{"input":0.1,"output":0.4}}]});
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-permissions","statusText":data.to_string()}));
+        assert_eq!(state.permission_classifier.as_deref(), Some("google/flash"));
+        assert_eq!(state.permission_classifier_models.len(), 1);
+        assert_eq!(state.permission_classifier_models[0].provider, "google");
+        assert_eq!(state.permission_classifier_models[0].input_cost, 0.1);
+        assert_eq!(state.permission_cost, 0.002);
+        assert_eq!(state.model, "opus");
+        assert_eq!(state.provider, "anthropic");
+        let restored: State =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(restored.permission_classifier_models.len(), 1);
+        state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-permissions","statusText":json!({"mode":"auto","classifier":"google/flash","classifierCost":0.003}).to_string()}));
+        assert_eq!(
+            state.permission_classifier_models.len(),
+            1,
+            "usage-only updates preserve the catalog"
+        );
+        assert_eq!(state.permission_cost, 0.003);
     }
     #[test]
     fn model_metadata_comes_from_pi() {

@@ -141,6 +141,31 @@ fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
     }
 }
 
+fn agent_message_title(text: &str) -> String {
+    let header = text.lines().next().unwrap_or_default();
+    if let Some(sender) = header
+        .strip_prefix("Agent message from ")
+        .and_then(|header| header.strip_suffix(':'))
+    {
+        format!("Message from {sender}")
+    } else if let Some((sender, _)) = header
+        .strip_prefix("Worker ")
+        .and_then(|header| header.split_once(" settled."))
+    {
+        format!("Report from {sender}")
+    } else {
+        "Agent message received".into()
+    }
+}
+
+fn agent_message(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    crate::section::Section::new(agent_message_title(text))
+        .id_salt("agent-message")
+        .icon(Icon::Branch)
+        .grouped()
+        .show(ui, |ui| markdown::show(ui, text))
+}
+
 fn compaction_separator(ui: &mut egui::Ui) {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, response) =
@@ -422,14 +447,7 @@ impl Transcript {
                                 ) {
                                     compaction_separator(ui);
                                 } else if group[0].role == "custom" {
-                                    egui::Frame::new()
-                                        .fill(colors.sidebar)
-                                        .corner_radius(8)
-                                        .inner_margin(10)
-                                        .show(ui, |ui| {
-                                            ui.label(crate::theme::small(ui, "Agent message"));
-                                            markdown::show(ui, &group[0].text);
-                                        });
+                                    layout_changed |= agent_message(ui, &group[0].text).changed();
                                 } else {
                                     let (changed, fork) = assistant(
                                         ui,
@@ -453,7 +471,11 @@ impl Transcript {
                             });
                         },
                     );
-                    ui.add_space(if group[0].role == "user" { 16.0 } else { 20.0 });
+                    ui.add_space(match group[0].role.as_str() {
+                        "user" => 16.0,
+                        "custom" => 8.0,
+                        _ => 20.0,
+                    });
                     self.heights
                         .insert(start, (signature, column, ui.cursor().top() - before));
                 }
@@ -1387,6 +1409,10 @@ fn time_label_at(timestamp: i64, now: chrono::DateTime<impl chrono::TimeZone>) -
         })
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "transcript/agent_message_tests.rs"]
+mod agent_message_tests;
 
 #[cfg(test)]
 #[path = "transcript/reasoning_tests.rs"]
