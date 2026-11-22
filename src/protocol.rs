@@ -795,6 +795,10 @@ impl State {
 
 /// Reconstruct a finalized history on a worker, with O(1) tool-result lookup.
 pub fn parse_history(raw: &[Value]) -> Vec<Message> {
+    parse_history_iter(raw.iter())
+}
+
+pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<Message> {
     let mut messages: Vec<Message> = Vec::new();
     let mut calls: std::collections::HashMap<String, (usize, usize)> =
         std::collections::HashMap::new();

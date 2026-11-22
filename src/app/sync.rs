@@ -910,13 +910,19 @@ impl Pui {
         if self.demo || !self.sync.enabled() || self.client.is_none() || self.loading_chat {
             return;
         }
-        let Some(path) = self
-            .state
-            .session_file
-            .as_ref()
-            .map(|p| identity(Path::new(p)))
-        else {
+        let Some(raw) = self.state.session_file.as_deref() else {
             return;
+        };
+        let raw_path = Path::new(raw);
+        let path = if self.sync.owned.contains_key(raw_path) {
+            raw_path.to_path_buf()
+        } else {
+            let cached = self.sync.attention_identity(raw_path);
+            if self.sync.owned.contains_key(&cached) {
+                cached
+            } else {
+                identity(raw_path)
+            }
         };
         if !self.sync.owned.contains_key(&path) && !self.attach_or_claim(&path) {
             if let Some(client) = self.client.take() {

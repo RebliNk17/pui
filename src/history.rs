@@ -1,9 +1,10 @@
 //! Fast, read-only tail preview while Pi initializes its tools and MCP connections.
 //! This is presentation only; full display history comes from Pi's raw active
 //! branch (`get_entries`), never its compacted model context (`get_messages`).
-use crate::protocol::{Message, parse_history};
+use crate::protocol::{Message, parse_history_iter};
 use serde_json::Value;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -67,7 +68,7 @@ fn parse(bytes: &[u8], mut partial: bool) -> Result<Preview, String> {
         leaf = entry["parentId"].as_str().map(str::to_owned);
     }
     chain.reverse();
-    let mut messages = parse_history(&chain);
+    let mut messages = parse_history_iter(chain.iter().map(Cow::as_ref));
     // Avoid starting a preview with a fragment of the preceding assistant turn.
     if partial {
         if let Some(user) = messages.iter().position(|m| m.role == "user") {
@@ -101,25 +102,29 @@ pub fn from_entries(entries: &[Value], leaf: Option<&str>) -> Vec<Message> {
         next = entry["parentId"].as_str();
     }
     chain.reverse();
-    parse_history(&chain)
+    parse_history_iter(chain.iter().map(Cow::as_ref))
 }
 
-fn entry_message(entry: &Value) -> Option<Value> {
-    let timestamp = entry["timestamp"]
-        .as_str()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.timestamp_millis())
-        .unwrap_or_default();
+fn entry_message(entry: &Value) -> Option<Cow<'_, Value>> {
     match entry["type"].as_str()? {
-        "message" => Some(entry["message"].clone()),
-        "compaction" => Some(serde_json::json!({"role":"compaction", "timestamp":timestamp})),
-        "custom_message" => Some(serde_json::json!({
-            "role":"custom", "content":entry["content"],
-            "display":entry["display"], "timestamp":timestamp
-        })),
-        "branch_summary" => Some(serde_json::json!({
-            "role":"branchSummary", "summary":entry["summary"], "timestamp":timestamp
-        })),
+        "message" => Some(Cow::Borrowed(&entry["message"])),
+        kind @ ("compaction" | "custom_message" | "branch_summary") => {
+            let timestamp = entry["timestamp"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.timestamp_millis())
+                .unwrap_or_default();
+            Some(Cow::Owned(match kind {
+                "compaction" => serde_json::json!({"role":"compaction", "timestamp":timestamp}),
+                "custom_message" => serde_json::json!({
+                    "role":"custom", "content":entry["content"],
+                    "display":entry["display"], "timestamp":timestamp
+                }),
+                _ => serde_json::json!({
+                    "role":"branchSummary", "summary":entry["summary"], "timestamp":timestamp
+                }),
+            }))
+        }
         _ => None,
     }
 }

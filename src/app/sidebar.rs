@@ -22,6 +22,17 @@ pub(super) struct ChatPrefs {
     pub(super) hidden: bool,
     pub(super) section: Option<String>,
 }
+impl ChatPrefs {
+    pub(super) fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.initial_title.is_none()
+            && self.project.is_none()
+            && !self.pinned
+            && !self.archived
+            && !self.hidden
+            && self.section.is_none()
+    }
+}
 #[derive(Clone)]
 enum Action {
     Rename(PathBuf),

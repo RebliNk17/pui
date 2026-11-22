@@ -2410,6 +2410,7 @@ impl eframe::App for Pui {
                 &attention::Stored(self.attention.persisted()),
             );
             self.prefs.agent_tree = self.agent_records();
+            self.prefs.chats.retain(|_, meta| !meta.is_empty());
             self.prefs.projects_view = self.projects;
             self.prefs.last_session = self.pending_session.clone().or_else(|| {
                 (!self.new_chat)
