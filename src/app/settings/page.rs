@@ -140,6 +140,11 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "updates github release download install version",
         ),
         (
+            "Pi version",
+            "General",
+            "pi runtime harness agent version bundled",
+        ),
+        (
             "Theme mode and colors",
             "Appearance",
             "dark light styles midnight ivory forest sage plum rose classic",
@@ -786,6 +791,17 @@ impl Pui {
                 if ui.button("Check for Updates…").clicked() {
                     self.updates.start(ui.ctx());
                 }
+            });
+            separator(ui);
+            let (pi_version, pi_source) = match crate::runtime::pi_version() {
+                Some(version) if crate::runtime::active_bundle().is_some() => {
+                    (version, "Bundled inside Pui; updated with Pui releases.")
+                }
+                Some(version) => (version, "External Pi installation."),
+                None => ("Unknown".to_owned(), "Pi package version could not be read."),
+            };
+            row(ui, "Pi version", pi_source, |ui| {
+                ui.label(theme::small(ui, format!("Pi {pi_version}")));
             });
         });
     }

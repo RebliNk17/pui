@@ -102,6 +102,27 @@ pub(crate) fn sdk() -> Option<PathBuf> {
     )
 }
 
+/// Version of the Pi package Pui runs, read from its own package.json beside
+/// the resolved SDK entry point (bundled runtime or installed release).
+fn pi_version_at(sdk: &Path) -> Option<String> {
+    let manifest = sdk.parent()?.parent()?.join("package.json");
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if value.get("name")?.as_str()? != "@earendil-works/pi-coding-agent" {
+        return None;
+    }
+    let version = value.get("version")?.as_str()?.trim();
+    (!version.is_empty() && version.len() <= 64).then(|| version.to_owned())
+}
+
+/// Cached for the process: the bundled runtime is immutable.
+pub(crate) fn pi_version() -> Option<String> {
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| sdk().and_then(|path| pi_version_at(&path)))
+        .clone()
+}
+
 pub(crate) fn agent_dir() -> Option<PathBuf> {
     std::env::var_os("PI_CODING_AGENT_DIR")
         .map(PathBuf::from)
@@ -210,6 +231,28 @@ mod tests {
         // Missing bundled binaries never cause a global fallback.
         assert!(!root.join("bin/pi").exists());
         assert_eq!(resolve_pi(None, Some(&root), None), root.join("bin/pi"));
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn pi_version_reads_sdk_package_manifest_only() {
+        let temp = std::env::temp_dir().join(format!("pui-pi-version-{}", uuid::Uuid::new_v4()));
+        let package = temp.join("node_modules/@earendil-works/pi-coding-agent");
+        std::fs::create_dir_all(package.join("dist")).unwrap();
+        let sdk = package.join("dist/index.js");
+        assert_eq!(pi_version_at(&sdk), None);
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"1.6.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(pi_version_at(&sdk).as_deref(), Some("1.6.0"));
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"other","version":"9.9.9"}"#,
+        )
+        .unwrap();
+        assert_eq!(pi_version_at(&sdk), None);
         std::fs::remove_dir_all(temp).unwrap();
     }
 
