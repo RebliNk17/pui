@@ -13,6 +13,8 @@ use std::{
 };
 
 mod new_messages;
+mod progress;
+pub use progress::Progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindTarget {
@@ -95,80 +97,6 @@ pub enum MessageAction {
     Edit,
     Fork,
     Rewind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Progress {
-    Interrupting,
-    Working,
-    Retrying,
-    Compacting,
-    Waiting,
-    Connecting,
-}
-impl Progress {
-    fn label(self, elapsed: f64) -> &'static str {
-        const WORDS: [&str; 12] = [
-            "Thinking…",
-            "Exploring…",
-            "Pondering…",
-            "Considering…",
-            "Tinkering…",
-            "Building…",
-            "Connecting the dots…",
-            "Working it out…",
-            "Crafting…",
-            "Untangling…",
-            "Refining…",
-            "Making progress…",
-        ];
-        match self {
-            Self::Interrupting => "Interrupting current run…",
-            Self::Working => WORDS[(elapsed.max(0.0) / 4.0) as usize % WORDS.len()],
-            Self::Retrying => "Provider interrupted · retrying…",
-            Self::Compacting => "Compacting context…",
-            Self::Waiting => "Waiting for input",
-            Self::Connecting => "Connecting…",
-        }
-    }
-}
-fn progress_row(ui: &mut egui::Ui, progress: Progress, elapsed: f64) {
-    let colors = crate::theme::palette(ui.ctx());
-    let color = if matches!(
-        progress,
-        Progress::Waiting | Progress::Interrupting | Progress::Retrying
-    ) {
-        colors.amber
-    } else {
-        colors.accent
-    };
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    // Vector glyph: native body fonts do not consistently contain sparkle symbols.
-    let brightness = if progress == Progress::Waiting {
-        1.0
-    } else {
-        [0.65, 0.85, 1.0, 0.85][(elapsed.max(0.0) * 4.0) as usize % 4]
-    };
-    icons::draw(
-        ui,
-        Rect::from_center_size(rect.left_center() + egui::vec2(9.0, 0.0), Vec2::splat(16.0)),
-        Icon::Spark,
-        color.gamma_multiply(brightness),
-    );
-    ui.painter().text(
-        rect.left_center() + egui::vec2(26.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        progress.label(elapsed),
-        FontId::proportional(12.0),
-        color,
-    );
-    if progress != Progress::Waiting {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(250));
-    }
 }
 
 fn agent_message_title(text: &str) -> String {
@@ -582,7 +510,7 @@ impl Transcript {
                         .layout(Layout::top_down(Align::LEFT)),
                     |ui| {
                         ui.set_width(column);
-                        progress_row(ui, progress, elapsed);
+                        progress::row(ui, progress, elapsed);
                     },
                 );
             }
