@@ -433,6 +433,9 @@ impl Pui {
     pub(super) fn model_change_blocked(&self) -> Option<&'static str> {
         if self.demo {
             Some("Design preview only. Start a real chat to change models.")
+        } else if self.idle_dormant() {
+            // An idle-released chat wakes on selection; not a connection error.
+            None
         } else if !self.connected || (!self.is_mirror() && self.client.is_none()) {
             Some("Connect to Pi before changing models.")
         } else if self.loading_chat || self.resource_reload.pending() {
@@ -444,6 +447,31 @@ impl Pui {
         } else {
             None
         }
+    }
+
+    /// The selected chat's Pi process was released after inactivity.
+    fn idle_dormant(&self) -> bool {
+        !self.is_mirror()
+            && self.client.is_none()
+            && self.agents.idle.dormant.contains(&self.agents.active)
+    }
+
+    /// Model/effort changes for a dormant chat first reconnect it, then queue
+    /// the command behind the reconnect's state requests.
+    pub(super) fn send_model_change(&mut self, record: Value) {
+        if self.idle_dormant() {
+            let id = self.agents.active.clone();
+            if let Err(error) = self.wake_idle_agent(&id) {
+                self.state.error = Some(error);
+                return;
+            }
+            if self.client.is_none() {
+                self.state.notice =
+                    Some("Reconnecting this chat… choose the model again in a moment.".into());
+                return;
+            }
+        }
+        self.send(record);
     }
 
     pub(super) fn close_model_popovers(&mut self) {
@@ -750,7 +778,7 @@ impl Pui {
             });
         self.model_picker_open = open;
         if let Some((provider, id)) = selection {
-            self.send(json!({"type":"set_model","provider":provider,"modelId":id}));
+            self.send_model_change(json!({"type":"set_model","provider":provider,"modelId":id}));
             self.model_picker_open = false;
             ctx.memory_mut(|m| m.request_focus(egui::Id::new("composer-model")));
         }
@@ -913,7 +941,7 @@ impl Pui {
         });
         self.effort_picker_open = open;
         if let Some(level) = effort {
-            self.send(json!({"type":"set_thinking_level","level":level}));
+            self.send_model_change(json!({"type":"set_thinking_level","level":level}));
             self.effort_picker_open = false;
             ctx.memory_mut(|m| m.request_focus(egui::Id::new("composer-effort")));
         }

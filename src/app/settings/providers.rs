@@ -206,6 +206,9 @@ struct ApiKeyModal {
 #[derive(Default)]
 pub(in crate::app) struct ProvidersManager {
     loaded: bool,
+    /// Last observed (mtime, len) of auth.json/models.json and when they were checked.
+    config_stamp: Option<Vec<Option<(std::time::SystemTime, u64)>>>,
+    config_checked: Option<std::time::Instant>,
     disk_loaded: bool,
     pub(in crate::app) custom_providers: Vec<CustomProviderSummary>,
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
@@ -937,6 +940,32 @@ impl ProvidersManager {
         providers.sort();
         providers.dedup();
         Some(providers)
+    }
+
+    /// Cheap metadata check (two stats, at most every 2s). Returns true when
+    /// Pi's provider files changed, e.g. a provider added here, by the Pi CLI
+    /// or by hand, so every chat can refresh without restarting Pui.
+    pub(in crate::app) fn config_changed(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .config_checked
+            .is_some_and(|at| now.saturating_duration_since(at) < std::time::Duration::from_secs(2))
+        {
+            return false;
+        }
+        self.config_checked = Some(now);
+        self.stamp_changed([auth_json_path(), models_json_path()])
+    }
+
+    fn stamp_changed(&mut self, paths: [Option<PathBuf>; 2]) -> bool {
+        let stamp: Vec<_> = paths
+            .into_iter()
+            .map(|path| {
+                let meta = std::fs::metadata(path?).ok()?;
+                Some((meta.modified().ok()?, meta.len()))
+            })
+            .collect();
+        let previous = self.config_stamp.replace(stamp.clone());
+        previous.is_some_and(|previous| previous != stamp)
     }
 
     pub(in crate::app) fn is_provider_configured(&self, provider: &str) -> bool {
@@ -2547,13 +2576,31 @@ impl ProvidersManager {
 }
 
 impl Pui {
+    /// Reload Pi's model registry in every live chat. Extension commands run
+    /// immediately even mid-run (an in-flight response keeps its model), so a
+    /// busy chat no longer keeps a stale catalog.
     pub(in crate::app) fn refresh_providers_catalog(&mut self) {
-        if self.state.ready() {
-            self.send(json!({"type": "prompt", "message": "/pui-reload-models"}));
+        let commands = [
+            json!({"type": "prompt", "message": "/pui-reload-models"}),
+            protocol::command("get_available_models"),
+            protocol::command("get_state"),
+            protocol::command("get_available_thinking_levels"),
+        ];
+        if self.client.is_some() {
+            for command in &commands {
+                self.send(command.clone());
+            }
         }
-        self.send(protocol::command("get_available_models"));
-        self.send(protocol::command("get_state"));
-        self.send(protocol::command("get_available_thinking_levels"));
+        if self.demo {
+            return;
+        }
+        for chat in self.agents.parked.values_mut() {
+            if let Some(client) = chat.client.as_mut() {
+                for command in &commands {
+                    let _ = client.send(command.clone());
+                }
+            }
+        }
     }
 
     pub(in crate::app) fn settings_providers(&mut self, ui: &mut egui::Ui) {
@@ -2973,5 +3020,29 @@ mod tests {
         assert!(exchange_result.is_err());
         assert!(manager.saved_auth.is_empty());
         assert!(!manager.is_provider_configured("antigravity"));
+    }
+}
+
+#[cfg(test)]
+mod config_watch_tests {
+    use super::*;
+    #[test]
+    fn provider_file_changes_are_detected_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("pui-config-watch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = || [Some(dir.join("auth.json")), Some(dir.join("models.json"))];
+        let mut manager = ProvidersManager::default();
+        assert!(!manager.stamp_changed(paths()), "first check records a baseline");
+        assert!(!manager.stamp_changed(paths()));
+        std::fs::write(dir.join("models.json"), r#"{"providers":{"Nvidia":{}}}"#).unwrap();
+        assert!(manager.stamp_changed(paths()), "new provider file is detected");
+        assert!(!manager.stamp_changed(paths()));
+        std::fs::write(dir.join("auth.json"), r#"{"nvidia":{}}"#).unwrap();
+        assert!(manager.stamp_changed(paths()), "new login is detected");
+        // The public check is rate limited to one pair of stats per 2 seconds.
+        let start = std::time::Instant::now();
+        manager.config_changed(start);
+        assert!(!manager.config_changed(start + std::time::Duration::from_millis(500)));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

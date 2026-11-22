@@ -778,3 +778,38 @@ fn model_picker_shows_empty_configured_notice_when_only_env_var_models_exist() {
         "expected empty configured providers notice, got: {shown:?}"
     );
 }
+
+#[test]
+fn provider_changes_reload_models_in_busy_and_background_chats() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let (_, active) = live(&mut app);
+    app.state.busy = true; // A running chat must not keep a stale catalog.
+    let (parked_client, _parked_events, parked) = rpc::Client::stub_with_records();
+    let mut chat = agents::Chat::default();
+    chat.client = Some(parked_client);
+    app.agents.parked.insert("agent-parked".into(), chat);
+    app.refresh_providers_catalog();
+    for requests in [&active, &parked] {
+        let sent: Vec<Value> = requests.try_iter().collect();
+        assert_eq!(sent[0]["message"], "/pui-reload-models", "{sent:?}");
+        assert!(sent.iter().any(|r| r["type"] == "get_available_models"));
+    }
+}
+
+#[test]
+fn idle_released_chat_can_change_models_instead_of_reporting_no_connection() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.demo = false;
+    app.connected = false;
+    app.loading_chat = false;
+    app.client = None;
+    assert_eq!(
+        app.model_change_blocked(),
+        Some("Connect to Pi before changing models.")
+    );
+    let id = app.agents.active.clone();
+    app.agents.idle.dormant.insert(id);
+    assert_eq!(app.model_change_blocked(), None);
+}

@@ -1101,6 +1101,18 @@ impl Pui {
         if self.settings_view.providers.reload_requested {
             self.settings_view.providers.reload_requested = false;
             self.refresh_providers_catalog();
+        } else if !self.demo
+            && self
+                .settings_view
+                .providers
+                .config_changed(std::time::Instant::now())
+        {
+            self.settings_view.providers.reload_from_disk();
+            self.refresh_providers_catalog();
+        }
+        if !self.demo {
+            // Low-frequency wake for the provider-file check; no model calls.
+            self.ctx.request_repaint_after(Duration::from_secs(2));
         }
         self.poll_chat_folder();
         self.poll_tasks();

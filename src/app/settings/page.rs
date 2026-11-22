@@ -1332,12 +1332,12 @@ impl Pui {
             ui.add_enabled_ui(blocked.is_none(), |ui|{
                 row(ui,"Model","Changing the conversation model does not change Pi authentication.",|ui|{
                     egui::ComboBox::from_id_salt("settings-model").selected_text(model_picker::selected_label(&self.state)).width(190.0).show_ui(ui,|ui|{
-                        for model in &models{if ui.selectable_label(model.id==self.state.model&&model.provider==self.state.provider,format!("{} · {}",model.name,model.provider)).clicked(){self.send(json!({"type":"set_model","provider":model.provider,"modelId":model.id}));}}
+                        for model in &models{if ui.selectable_label(model.id==self.state.model&&model.provider==self.state.provider,format!("{} · {}",model.name,model.provider)).clicked(){self.send_model_change(json!({"type":"set_model","provider":model.provider,"modelId":model.id}));}}
                     });
                 });separator(ui);
                 row(ui,"Thinking effort","Only levels supported by the selected model are offered.",|ui|{
                     let levels=self.state.levels.clone();
-                    ui.add_enabled_ui(!self.state.levels.is_empty(), |ui| {egui::ComboBox::from_id_salt("settings-effort").selected_text(thinking_label(&self.state.thinking)).width(120.0).show_ui(ui,|ui|{for level in levels{if ui.selectable_label(level==self.state.thinking,thinking_label(&level)).clicked(){self.send(json!({"type":"set_thinking_level","level":level}));}}});});
+                    ui.add_enabled_ui(!self.state.levels.is_empty(), |ui| {egui::ComboBox::from_id_salt("settings-effort").selected_text(thinking_label(&self.state.thinking)).width(120.0).show_ui(ui,|ui|{for level in levels{if ui.selectable_label(level==self.state.thinking,thinking_label(&level)).clicked(){self.send_model_change(json!({"type":"set_thinking_level","level":level}));}}});});
                 });
             });
         });
