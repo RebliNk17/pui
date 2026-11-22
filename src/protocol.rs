@@ -8,8 +8,10 @@ pub use context::ContextBreakdown;
 #[cfg(test)]
 mod retry_tests;
 mod stream;
+mod titles;
 mod usage;
 pub use answers::QuestionAnswers;
+pub use titles::{ChatTitle, placeholder as title_placeholder};
 pub use usage::PromptUsage;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -179,6 +181,12 @@ pub struct State {
     pub levels: Vec<String>,
     pub session_file: Option<String>,
     pub session_name: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<ChatTitle>,
+    #[serde(skip)]
+    pub title_request: Option<String>,
     pub busy: bool,
     pub(crate) run_observed: bool,
     /// Live provider retry state only; raw error text stays out of status labels.
@@ -327,6 +335,12 @@ impl State {
     }
 
     pub fn chat_title(&self) -> Option<String> {
+        if let Some(title) = self.assigned_title() {
+            return Some(title.into());
+        }
+        if self.title_request.is_some() {
+            return None;
+        }
         if !self.session_name.trim().is_empty()
             && !matches!(
                 self.session_name.as_str(),
@@ -335,11 +349,15 @@ impl State {
         {
             return Some(self.session_name.clone());
         }
+        // A projected history after compaction is not the initial request.
+        if self.session_file.is_some() || self.messages.iter().any(|m| m.role == "compaction") {
+            return None;
+        }
         self.messages
             .iter()
-            .filter(|message| message.role == "user")
-            .find_map(|message| {
-                crate::sessions::prompt_title(&message.text)
+            .find(|message| message.role == "user")
+            .and_then(|message| {
+                crate::sessions::initial_title(crate::transcript::user_display_text(message))
                     .or_else(|| (!message.images.is_empty()).then(|| "Image attachment".into()))
             })
     }
@@ -437,6 +455,10 @@ impl State {
                         self.apply_context(&value);
                         return;
                     }
+                    "pui-initial-title" => {
+                        self.title_status(&value);
+                        return;
+                    }
                     "pui-compaction" => {
                         self.compacting = value["working"] == true;
                         self.compact_percent = value["percent"]
@@ -476,11 +498,13 @@ impl State {
                         if self.session_file.is_some() && self.session_file != session_file {
                             self.context_breakdown = None;
                             self.retrying = false;
+                            self.title_request = None;
                         }
                         if !self.busy {
                             self.retrying = false;
                         }
                         self.session_file = session_file;
+                        self.session_id = data["sessionId"].as_str().map(str::to_owned);
                     }
                     "get_entries" => {
                         self.stream = None;
@@ -927,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_title_uses_first_prompt_until_pi_names_the_session() {
+    fn chat_title_preview_uses_first_request_and_raw_metadata_until_assignment() {
         let mut state = State::default();
         assert_eq!(state.chat_title(), None);
         state.apply(json!({"type":"message_start","message":{"role":"user","content":"  Fix the\n sidebar name  "}}));
@@ -951,7 +975,7 @@ mod tests {
         });
         assert_eq!(state.chat_title(), None);
         state.messages[0].text = "🦀".repeat(120);
-        assert_eq!(state.chat_title().unwrap().chars().count(), 100);
+        assert_eq!(state.chat_title().unwrap().chars().count(), 48);
     }
     #[test]
     fn mcp_notifications_are_deduplicated_diagnostics_not_composer_notices() {

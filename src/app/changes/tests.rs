@@ -171,7 +171,10 @@ fn second_toolbar_button_opens_changes_and_inline_recorded_diff_in_both_themes()
         frame(&ctx, &mut app, vec![]);
         let output = frame(&ctx, &mut app, vec![]);
         position(&output, "Changes");
-        assert!(ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-recorded"))).is_some());
+        assert!(
+            ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-recorded")))
+                .is_some()
+        );
         let git_tab = ctx
             .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-source-git")))
             .expect("Current Git icon rect")

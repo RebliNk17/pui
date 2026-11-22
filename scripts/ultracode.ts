@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { installPermissions, localPath, unmanagedAgentLaunch } from "./permissions.ts";
 import { installCompaction } from "./compaction.ts";
 import { installContext } from "./context.ts";
+import { installTitles } from "./titles.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
@@ -37,6 +38,7 @@ export default function puiExtension(pi: any) {
   installOpen(pi);
   installWorkflows(pi);
   installContext(pi);
+  installTitles(pi);
   installAntigravity(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",

@@ -19,6 +19,7 @@ fn orphan_delete_is_durable_cancels_only_its_check_and_preserves_other_jobs_and_
         Running {
             cancel: canceled.clone(),
             rx,
+            provenance: None,
         },
     );
     app.automation

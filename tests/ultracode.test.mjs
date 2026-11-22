@@ -9,7 +9,7 @@ async function host(readonly = false, taskRole = '') {
   const { stripTypeScriptTypes } = await import('node:module');
   let raw = await readFile(new URL('../scripts/ultracode.ts', import.meta.url), 'utf8');
   const urls = {};
-  for (const name of ['permissions', 'compaction', 'context', 'rewind', 'questions', 'open', 'workflows', 'antigravity', 'accounts']) {
+  for (const name of ['permissions', 'compaction', 'context', 'titles', 'rewind', 'questions', 'open', 'workflows', 'antigravity', 'accounts']) {
     let text = await readFile(new URL(`../scripts/${name}.ts`, import.meta.url), 'utf8');
     // Dependencies may import earlier adapter modules (accounts.ts → antigravity.ts).
     for (const [known, url] of Object.entries(urls)) text = text.replace(`"./${known}.ts"`, JSON.stringify(url));

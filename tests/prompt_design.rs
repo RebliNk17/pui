@@ -50,6 +50,7 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
     // ordinary page controls and the resizable diff viewer are not decision UI.
     for path in [
         "src/app/confirmations.rs",
+        "src/app/context_capture/file_blocks.rs",
         "src/app/resource_reload.rs",
         "src/app/about.rs",
         "src/app/attention.rs",
