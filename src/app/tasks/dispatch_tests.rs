@@ -33,12 +33,18 @@ fn dispatch_requires_matching_durable_receipt_and_cancel_fences_late_ack() {
         }
         reply.send(Ok(())).ok();
         app.task_poll_processes();
-        let dispatched = sent
-            .try_iter()
-            .filter(|v| v["type"] == "bash")
-            .collect::<Vec<_>>();
-        assert_eq!(dispatched.len(), usize::from(!cancel));
-        if cancel {
+        if !cancel {
+            // enqueue hands off to the stub's worker thread; an immediate
+            // try_iter can race that forwarding even after dispatch succeeded.
+            let dispatched = sent.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(dispatched["type"], "bash");
+            assert_eq!(dispatched["command"], "exact test");
+            assert!(
+                sent.try_recv().is_err(),
+                "one receipt authorizes one command"
+            );
+        } else {
+            assert!(sent.try_iter().all(|v| v["type"] != "bash"));
             assert_eq!(
                 app.tasks
                     .current()

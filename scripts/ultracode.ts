@@ -43,7 +43,7 @@ export default function puiExtension(pi: any) {
     handler: (args: string, ctx: any) => {
       const next = JSON.parse(args);
       compaction.update(next, ctx);
-      permissions.update(next.permission, ctx);
+      permissions.update(next, ctx);
       process.env.PUI_SETTINGS = JSON.stringify(next);
     },
   });
@@ -83,6 +83,7 @@ export default function puiExtension(pi: any) {
       void ctx.modelRegistry.refresh({ allowNetwork: true, signal: controller.signal })
         .then(() => {
           if (!controller.signal.aborted) {
+            permissions.refresh(ctx);
             ctx.ui.setStatus("pui-models", JSON.stringify({ refreshed: true }));
           }
         })

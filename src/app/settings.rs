@@ -78,7 +78,7 @@ impl PermissionMode {
                 "Strict read-only tools and a small allowlist of inspection commands. Approve the written plan, then change mode to implement."
             }
             Self::Auto => {
-                "Routine development actions proceed automatically. The lowest-priced suitable model in the current provider checks for dangerous effects using your recent requests. Dangerous or uncertain actions ask for approval, not an automatic denial. Classifier calls incur provider usage."
+                "Routine development actions proceed automatically. The cheapest available suitable model (or your override) checks for dangerous effects. Blocked or uncertain calls return to the agent without asking; it continues safe work and reports blocked attempts. Classifier calls incur provider usage."
             }
             Self::DontAsk => {
                 "Allow reads, safe inspection commands and workspace edits/moves. Automatically deny everything requiring approval; no permission dialogs."
@@ -94,6 +94,7 @@ impl PermissionMode {
 pub(super) struct Settings {
     pub delivery: DeliveryMode,
     pub permission: PermissionMode,
+    pub permission_classifier: Option<String>,
     pub compact_percent: u32,
     pub keep_recent_tokens: u32,
     #[serde(default = "default_auto_check_updates")]
@@ -107,6 +108,7 @@ impl Default for Settings {
         Self {
             delivery: DeliveryMode::Steer,
             permission: PermissionMode::Auto,
+            permission_classifier: None,
             compact_percent: 85,
             keep_recent_tokens: 20000,
             auto_check_updates: true,
@@ -115,7 +117,7 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn payload(&self) -> Value {
-        json!({"permission":self.permission.key(),"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)})
+        json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)})
     }
 }
 mod appearance;
@@ -128,6 +130,24 @@ pub(super) use page::{View, search_entries};
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auto_classifier_override_roundtrips_and_reaches_runtime() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.permission_classifier.is_none());
+        assert!(settings.payload()["permissionClassifier"].is_null());
+        settings.permission_classifier = Some("google/gemini-flash".into());
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored.permission_classifier,
+            settings.permission_classifier
+        );
+        assert_eq!(
+            restored.payload()["permissionClassifier"],
+            "google/gemini-flash"
+        );
+        assert_eq!(restored.payload()["permission"], "auto");
+    }
     #[test]
     fn defaults_and_shortcuts_are_complementary() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
