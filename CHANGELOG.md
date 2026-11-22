@@ -5,6 +5,14 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+### Added
+
+- Context breakdown now mirrors the full category list: Messages, MCP tools, System tools, System prompt, Skills, MCP server instructions, Memory files and Custom agents, plus the autocompact buffer, free space and deferred (registered but unloaded) MCP/system tools, with expandable per-tool, per-skill and per-file token lists.
+
+### Fixed
+
+- Antigravity now persists each account's live model catalog, so Gemini 4 Neon/Argon/Hydrogen, orchestrators and other entitled models are listed at startup (and after a failed refresh) instead of only the five built-in fallback models.
+
 ## [0.1.1] - 2026-11-19
 
 ### Added

@@ -22,6 +22,98 @@ impl Changes {
         loading: bool,
     ) {
         if workspace.is_git {
+            if self.repo_sheet == Some(RepoSheet::Initialize) {
+                ui.label(theme::small(ui, "This project is already a Git repository."));
+                Self::qm_divider(ui);
+                prompt_ui::footer(ui, |ui| {
+                    if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked()
+                    {
+                        self.repo_sheet = None;
+                    }
+                });
+            }
+            return;
+        }
+        let sheet_open = self.repo_sheet == Some(RepoSheet::Initialize);
+        let enabled = self.index_writable
+            && !loading
+            && self.initialize.pending.is_none()
+            && self.initialize.applying.is_none()
+            && self.initialize.review.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
+        if sheet_open {
+            self.initialize.controls.clear();
+            let total_w = ui.available_width();
+            let mut submit = false;
+            let mut cancel_sheet = false;
+            ui.add_enabled_ui(enabled, |ui| {
+                Self::qm_field_label(ui, "Initial branch", Some("For example main"));
+                ui.add_space(4.0);
+                let input = Self::qm_text_input(
+                    ui,
+                    &mut self.initialize.branch,
+                    "main",
+                    1000,
+                    true,
+                    total_w,
+                );
+                self.initialize.controls.push(input.id);
+            });
+            if let Some(notice) = &self.initialize.notice {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
+            }
+            Self::qm_divider(ui);
+            let valid = enabled && workspace::branches::create::valid_name(&self.initialize.branch);
+            prompt_ui::footer(ui, |ui| {
+                let review_btn = prompt_ui::button(
+                    ui,
+                    "Review Git initialization…",
+                    prompt_ui::Button::Primary,
+                    valid,
+                );
+                self.initialize.controls.push(review_btn.id);
+                if review_btn.clicked() {
+                    submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
+                }
+            });
+            if cancel_sheet {
+                self.repo_sheet = None;
+            } else if submit {
+                let s = &mut self.initialize;
+                let Some(permit) = branches::permit(ui.ctx()) else {
+                    s.notice = Some("Git busy; retry explicitly.".into());
+                    return;
+                };
+                let root = self.identity.0.clone();
+                let branch = s.branch.clone();
+                let (tx, rx) = mpsc::channel();
+                let cancel = Arc::new(AtomicBool::new(false));
+                s.owner = Some(self.identity.clone());
+                s.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                let ctx = ui.ctx().clone();
+                if std::thread::Builder::new()
+                    .name("pui-init-review".into())
+                    .spawn(move || {
+                        let result = workspace::initialize::inspect(&root, &branch, &cancel);
+                        drop(permit);
+                        if !cancel.load(Ordering::Acquire) {
+                            let _ = tx.send(result);
+                            ctx.request_repaint();
+                        }
+                    })
+                    .is_err()
+                {
+                    s.pending = None;
+                    s.notice = Some("Cannot start initialization review.".into());
+                } else {
+                    self.repo_sheet = None;
+                }
+            }
             return;
         }
         let s = &mut self.initialize;
@@ -30,13 +122,6 @@ impl Changes {
             ui,
             "This project is not a Git repository. Initialization does not stage or publish files.",
         ));
-        let enabled = self.index_writable
-            && !loading
-            && s.pending.is_none()
-            && s.applying.is_none()
-            && s.review.is_none()
-            && !egui::Popup::is_any_open(ui.ctx())
-            && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
         ui.add_enabled_ui(enabled, |ui| {
             let input = ui.add(
                 egui::TextEdit::singleline(&mut s.branch)

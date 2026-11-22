@@ -46,9 +46,62 @@ impl Changes {
             && self.push.create.pending.is_none()
             && !egui::Popup::is_any_open(ui.ctx())
             && (self.repo_sheet.is_some() || ui.memory(|m| m.top_modal_layer().is_none()));
+        if self.repo_sheet == Some(RepoSheet::CreateRemote) {
+            let total_w = ui.available_width();
+            let mut submit = false;
+            let mut cancel_sheet = false;
+            ui.add_enabled_ui(available, |ui| {
+                Self::qm_field_label(ui, "Remote name", None);
+                ui.add_space(4.0);
+                let name_r = Self::qm_text_input(
+                    ui,
+                    &mut self.push.create.name,
+                    "origin",
+                    64,
+                    false,
+                    total_w,
+                );
+                self.push.controls.push(name_r.id);
+                ui.add_space(10.0);
+                Self::qm_field_label(ui, "Remote URL", Some("No embedded credentials"));
+                ui.add_space(4.0);
+                let url_r = Self::qm_text_input(
+                    ui,
+                    &mut self.push.create.url,
+                    "https://github.com/org/repo.git",
+                    8192,
+                    true,
+                    total_w,
+                );
+                self.push.controls.push(url_r.id);
+            });
+            Self::qm_divider(ui);
+            let valid = available
+                && workspace::push::remote::valid_name(&self.push.create.name)
+                && workspace::push::remote::valid_url(&self.push.create.url);
+            prompt_ui::footer(ui, |ui| {
+                let review_btn =
+                    prompt_ui::button(ui, "Review new remote…", prompt_ui::Button::Primary, valid);
+                self.push.controls.push(review_btn.id);
+                if review_btn.clicked() {
+                    submit = true;
+                }
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    cancel_sheet = true;
+                }
+            });
+            if cancel_sheet {
+                self.repo_sheet = None;
+            } else if submit {
+                self.push.owner = Some(self.identity.clone());
+                self.push.create_root = Some(workspace.root.clone());
+                self.push.create.confirm = true;
+                self.repo_sheet = None;
+            }
+            return;
+        }
         egui::CollapsingHeader::new("Create remote…")
             .id_salt("create-push-remote")
-            .default_open(self.repo_sheet == Some(RepoSheet::CreateRemote))
             .show(ui, |ui| {
                 ui.add_enabled_ui(available, |ui| {
                     for (label, value, limit) in [

@@ -39,7 +39,7 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" assets/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$resources/Pui.icns"
-cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/context.ts scripts/titles.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts scripts/workflows.ts scripts/antigravity.ts scripts/accounts.ts "$resources/"
+cp scripts/ultracode.ts scripts/permissions.ts scripts/compaction.ts scripts/context.ts scripts/titles.ts scripts/rewind.ts scripts/questions.ts scripts/open.ts scripts/workflows.ts scripts/antigravity.ts scripts/accounts.ts scripts/dictation.swift "$resources/"
 cp -R assets/pui-engineering "$resources/pui-engineering"
 # Retain the new renderer's original notices in distributed local/CI bundles.
 mkdir -p "$resources/ThirdParty"

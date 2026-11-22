@@ -472,18 +472,13 @@ fn button_frame(
 }
 
 fn paint_default_icon(painter: &Painter, rect: Rect, visuals: &WidgetVisuals) {
-    let rect = Rect::from_center_size(
-        rect.center(),
-        vec2(rect.width() * 0.7, rect.height() * 0.45),
-    );
-
-    // Downward pointing triangle
-    // Previously, we would show an up arrow when we expected the popup to open upwards
-    // (due to lack of space below the button), but this could look weird in edge cases, so this
-    // feature was removed. (See https://github.com/emilk/egui/pull/5713#issuecomment-2654420245)
-    painter.add(Shape::convex_polygon(
-        vec![rect.left_top(), rect.right_top(), rect.center_bottom()],
-        visuals.fg_stroke.color,
-        Stroke::NONE,
+    let c = rect.center();
+    painter.add(Shape::line(
+        vec![
+            c + vec2(-3.5, -1.5),
+            c + vec2(0.0, 2.0),
+            c + vec2(3.5, -1.5),
+        ],
+        Stroke::new(1.25_f32, visuals.fg_stroke.color),
     ));
 }

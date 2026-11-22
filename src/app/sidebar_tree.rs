@@ -310,7 +310,18 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
             row.archived = meta.archived;
         }
         order.push(key.clone());
-        rows.insert(key, row);
+        rows.insert(key.clone(), row);
+        if let Some(parent_path) = app
+            .prefs
+            .chats
+            .get(&s.path)
+            .and_then(|meta| meta.parent_session.as_ref())
+        {
+            let parent_key = session_key(parent_path);
+            if parent_key != key {
+                parents.insert(key, parent_key);
+            }
+        }
     }
     // Reuse discovered session rows for known agents rather than duplicating a
     // second "agent workflows" list. Unsaved/queued workers still get a row.

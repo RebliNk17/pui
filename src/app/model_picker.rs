@@ -345,6 +345,23 @@ impl Pui {
                 },
             );
             text.min.x += 18.0;
+        } else {
+            let hint = if !self.state.provider.is_empty() {
+                self.state.provider.as_str()
+            } else {
+                self.state.model.as_str()
+            };
+            if icons::has_provider_logo(hint) {
+                icons::draw_provider(
+                    ui,
+                    egui::Rect::from_center_size(
+                        rect.left_center() + egui::vec2(10.0, 0.0),
+                        Vec2::splat(14.0),
+                    ),
+                    hint,
+                );
+                text.min.x += 18.0;
+            }
         }
         text.max.x -= 14.0;
         paint_text(ui, label, text, 11.0, colors.muted);
@@ -392,12 +409,23 @@ impl Pui {
             .x
             + 40.0;
         let label = model_label(&self.state);
+        let hint = if !self.state.provider.is_empty() {
+            self.state.provider.as_str()
+        } else {
+            self.state.model.as_str()
+        };
+        let logo_pad = if icons::has_provider_logo(hint) {
+            18.0
+        } else {
+            0.0
+        };
         let natural = ui
             .painter()
             .layout_no_wrap(label.clone(), FontId::proportional(11.0), colors.muted)
             .size()
             .x
-            + 22.0;
+            + 22.0
+            + logo_pad;
         let width = natural.min((ui.available_width() - effort_width - 170.0).max(45.0));
         let response = self
             .composer_choice(
@@ -489,7 +517,21 @@ impl Pui {
             .frame(prompt_ui::popup(ctx).inner_margin(6)).gap(6.0).show(|ui| {
                 theme::menu_controls(ui);
                 ui.set_width(width - 12.0);
-                let providers = self.state.models.iter().map(|m| m.provider.clone()).collect::<std::collections::BTreeSet<_>>();
+                let visible_models = self
+                    .state
+                    .models
+                    .iter()
+                    .filter(|m| {
+                        !self
+                            .prefs
+                            .hidden_models
+                            .contains(&format!("{}/{}", m.provider, m.id))
+                    })
+                    .collect::<Vec<_>>();
+                let providers = visible_models
+                    .iter()
+                    .map(|m| m.provider.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
                 let search_frame = egui::Frame::new().fill(colors.bg).stroke(Stroke::new(1.0, colors.border)).corner_radius(6)
                     .inner_margin(egui::Margin::symmetric(7, 5)).show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -521,8 +563,16 @@ impl Pui {
                 if let Some(reason) = blocked { ui.add(egui::Label::new(theme::small(ui, reason)).wrap()); }
                 if let Some(error) = &self.state.error { ui.add(egui::Label::new(RichText::new(error).size(11.0).color(colors.red)).wrap()); }
                 let query = self.model_query.to_lowercase();
-                let filtered = self.state.models.iter().filter(|m| (self.model_provider.is_empty() || m.provider == self.model_provider)
-                    && format!("{} {} {}", m.id, m.name, m.provider).to_lowercase().contains(&query)).collect::<Vec<_>>();
+                let filtered = visible_models
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        (self.model_provider.is_empty() || m.provider == self.model_provider)
+                            && format!("{} {} {}", m.id, m.name, m.provider)
+                                .to_lowercase()
+                                .contains(&query)
+                    })
+                    .collect::<Vec<_>>();
                 let ids = filtered.iter().map(|m| ui.id().with(("model", &m.provider, &m.id))).collect::<Vec<_>>();
                 let selected_index = filtered.iter().position(|m| m.id == self.state.model && m.provider == self.state.provider).unwrap_or(0);
                 let target = navigate(ui, &ids, selected_index, blocked.is_none());
@@ -550,8 +600,16 @@ impl Pui {
                             let rect = response.rect;
                             let price_width = ui.painter().layout_no_wrap(prices.clone(), FontId::proportional(10.0), colors.muted).size().x.min(rect.width() * 0.45);
                             let text_right = rect.right() - price_width - MODEL_PRICE_RIGHT_INSET - 6.0;
-                            paint_text(ui, name, egui::Rect::from_min_max(rect.min + egui::vec2(7.0, 0.0), egui::pos2(text_right, rect.top() + 17.0)), 11.5, if blocked.is_none() { colors.text } else { colors.dim });
-                            paint_text(ui, &metadata, egui::Rect::from_min_max(rect.min + egui::vec2(7.0, 17.0), egui::pos2(text_right, rect.bottom())), 9.0, colors.dim);
+                            icons::draw_provider(
+                                ui,
+                                egui::Rect::from_center_size(
+                                    egui::pos2(rect.left() + 14.0, rect.center().y),
+                                    Vec2::splat(14.0),
+                                ),
+                                &model.provider,
+                            );
+                            paint_text(ui, name, egui::Rect::from_min_max(rect.min + egui::vec2(26.0, 0.0), egui::pos2(text_right, rect.top() + 17.0)), 11.5, if blocked.is_none() { colors.text } else { colors.dim });
+                            paint_text(ui, &metadata, egui::Rect::from_min_max(rect.min + egui::vec2(26.0, 17.0), egui::pos2(text_right, rect.bottom())), 9.0, colors.dim);
                             let price_rect = egui::Rect::from_min_max(egui::pos2(rect.right() - price_width - MODEL_PRICE_RIGHT_INSET, rect.top()), egui::pos2(rect.right() - MODEL_PRICE_RIGHT_INSET, rect.bottom()));
                             paint_text(ui, &prices, price_rect, 10.0, colors.muted);
                             #[cfg(test)]

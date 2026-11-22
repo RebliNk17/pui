@@ -143,11 +143,14 @@ fn structured_reasoning_is_provider_independent_and_plain_reply_is_not_reclassif
                             assistant(
                                 ui,
                                 &messages,
+                                0,
                                 model,
                                 "off",
                                 (running, false, false, view),
                                 false,
                                 &mut gallery,
+                                None,
+                                &std::sync::Arc::new(std::sync::Mutex::new(None)),
                             );
                         });
                     });

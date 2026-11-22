@@ -28,7 +28,7 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                     );
                     let mut rect = egui::Rect::NOTHING;
                     let mut console = egui::Rect::NOTHING;
-                    let mut status_bottom = 0.0_f32;
+                    let mut status_bottom = f32::INFINITY;
                     for _ in 0..3 {
                         let output = ctx.run(
                             egui::RawInput {
@@ -63,9 +63,9 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                         for shape in output.shapes {
                             if let egui::Shape::Text(text) = shape.shape {
                                 if text.galley.job.text.contains("Loading page")
-                                    || text.galley.job.text.contains("Certificate checks")
+                                    || text.galley.job.text.contains("Page returned HTTP")
                                 {
-                                    status_bottom = text.pos.y + text.galley.size().y;
+                                    status_bottom = status_bottom.min(text.pos.y);
                                 }
                             }
                         }
@@ -75,7 +75,7 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                         "{device:?} {zoom}: {rect:?}"
                     );
                     assert!(
-                        status_bottom > 0.0 && rect.top() >= status_bottom,
+                        status_bottom < f32::INFINITY && rect.bottom() <= status_bottom,
                         "Page obscures status: {device:?} {zoom}: {rect:?} / {status_bottom}"
                     );
                     assert!(

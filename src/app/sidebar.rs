@@ -21,6 +21,7 @@ pub(super) struct ChatPrefs {
     pub(super) archived: bool,
     pub(super) hidden: bool,
     pub(super) section: Option<String>,
+    pub(super) parent_session: Option<PathBuf>,
 }
 impl ChatPrefs {
     pub(super) fn is_empty(&self) -> bool {

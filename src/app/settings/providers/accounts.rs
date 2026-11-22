@@ -203,6 +203,24 @@ impl ProvidersManager {
         }
     }
 
+    pub(in crate::app) fn reconnect_account(&mut self, ctx: &egui::Context, target: &str) {
+        let base = target.split('~').next().unwrap_or(target);
+        let auth_kind = self
+            .saved_auth
+            .iter()
+            .find(|a| a.provider == target)
+            .map(|a| a.kind.as_str());
+        if base == "antigravity" {
+            self.open_antigravity_for(target);
+        } else if base == "google-vertex" {
+            self.open_vertex_modal();
+        } else if auth_kind == Some("oauth") || matches!(base, "anthropic" | "openai-codex") {
+            self.accounts.login = Some(start_browser_login(ctx, target, base));
+        } else {
+            self.open_api_key_modal(Some(base));
+        }
+    }
+
     /// Records a signed-in account; the email becomes the default label.
     pub(super) fn account_signed_in(&mut self, target: &str, email: Option<&str>) {
         let registry = self.registry();
@@ -511,16 +529,26 @@ impl ProvidersManager {
 
 impl Pui {
     pub(super) fn settings_accounts(&mut self, ui: &mut egui::Ui) {
+        let mut model_counts = std::collections::BTreeMap::<String, usize>::new();
+        for model in &self.state.models {
+            *model_counts.entry(model.provider.clone()).or_default() += 1;
+        }
+        let current_provider = self.state.provider.clone();
         let providers = &mut self.settings_view.providers;
         let rows = providers.account_rows();
+        let saved_auth = providers.saved_auth.clone();
+        let custom_list = providers.custom_providers.clone();
         page::section(
             ui,
             "Accounts",
-            "Use several accounts of the same provider, e.g. personal and work. Each appears separately in the model picker.",
+            "Connected subscriptions, API keys and custom endpoints. Each account appears separately in the model picker.",
         );
-        let mut add = None;
+        let mut reconnect = None;
         let mut rename = None;
         let mut remove = None;
+        let mut remove_auth = None;
+        let mut edit_endpoint = None;
+        let mut remove_endpoint = None;
         let mut fallback = providers.registry().fallback;
         let before = fallback;
         page::card(ui, |ui| {
@@ -536,41 +564,140 @@ impl Pui {
                     )
                 },
             );
+            let mut listed_ids = std::collections::BTreeSet::new();
             for (id, title, detail) in &rows {
+                listed_ids.insert(id.clone());
+                let count = model_counts.get(id).copied().unwrap_or(0);
+                let is_current = id == &current_provider;
+                let has_auth = saved_auth.iter().any(|a| &a.provider == id);
+                let is_oauth = saved_auth
+                    .iter()
+                    .find(|a| &a.provider == id)
+                    .is_some_and(|a| a.kind == "oauth");
+                let mut full_detail = detail.clone();
+                if count > 0 {
+                    full_detail.push_str(&format!(" · {count} models"));
+                }
+                if is_current {
+                    full_detail.push_str(" · Current");
+                }
                 page::separator(ui);
-                page::row(ui, title, detail, |ui| {
+                page::provider_row(ui, id, title, &full_detail, |ui| {
                     if ui.button("Remove").clicked() {
                         remove = Some(id.clone());
                     }
                     if ui.button("Rename…").clicked() {
                         rename = Some(id.clone());
                     }
+                    let action_label = if !has_auth {
+                        "Sign in…"
+                    } else if is_oauth {
+                        "Reconnect…"
+                    } else {
+                        "Edit…"
+                    };
+                    if ui.button(action_label).clicked() {
+                        reconnect = Some(id.clone());
+                    }
                 });
             }
-            page::separator(ui);
-            page::row(
-                ui,
-                "Add an account",
-                "Sign in with another subscription, or add another API key under Provider API Key.",
-                |ui| {
-                    for (base, name) in SUBSCRIPTIONS.iter().rev() {
-                        let short = name.split(' ').next().unwrap_or(name);
-                        if ui
-                            .button(format!("{short}…"))
-                            .on_hover_text(*name)
-                            .clicked()
-                        {
-                            add = Some(*base);
+            for auth in &saved_auth {
+                if listed_ids.contains(&auth.provider)
+                    || custom_list.iter().any(|c| c.id == auth.provider)
+                {
+                    continue;
+                }
+                listed_ids.insert(auth.provider.clone());
+                let count = model_counts.get(&auth.provider).copied().unwrap_or(0);
+                let is_current = auth.provider == current_provider;
+                let mut detail = match (&auth.detail, auth.kind.as_str()) {
+                    (Some(d), "oauth") => format!("Signed in ({d}) · {}", auth.provider),
+                    (None, "oauth") => format!("Signed in · {}", auth.provider),
+                    (Some(d), _) => format!("{d} · {}", auth.provider),
+                    (None, _) => format!("API key · {}", auth.provider),
+                };
+                if count > 0 {
+                    detail.push_str(&format!(" · {count} models"));
+                }
+                if is_current {
+                    detail.push_str(" · Current");
+                }
+                page::separator(ui);
+                page::provider_row(
+                    ui,
+                    &auth.provider,
+                    &crate::accounts::display_provider(&auth.provider),
+                    &detail,
+                    |ui| {
+                        if ui.button("Remove").clicked() {
+                            remove_auth = Some(auth.provider.clone());
                         }
-                    }
-                },
-            );
+                        let action_label = if auth.kind == "oauth" {
+                            "Reconnect…"
+                        } else {
+                            "Edit…"
+                        };
+                        if ui.button(action_label).clicked() {
+                            reconnect = Some(auth.provider.clone());
+                        }
+                    },
+                );
+            }
+            for item in &custom_list {
+                let model_names: Vec<&str> =
+                    item.models.iter().take(4).map(|m| m.id.as_str()).collect();
+                let mut summary = if item.models.is_empty() {
+                    format!("{} · {} · no models listed", item.base_url, item.api)
+                } else if item.models.len() > 4 {
+                    format!(
+                        "{} · {} models ({}, +{} more)",
+                        item.base_url,
+                        item.models.len(),
+                        model_names.join(", "),
+                        item.models.len() - 4
+                    )
+                } else {
+                    format!(
+                        "{} · {} model(s): {}",
+                        item.base_url,
+                        item.models.len(),
+                        model_names.join(", ")
+                    )
+                };
+                if item.id == current_provider {
+                    summary.push_str(" · Current");
+                }
+                page::separator(ui);
+                page::provider_row(
+                    ui,
+                    &item.id,
+                    &format!("{} ({})", item.name, item.id),
+                    &summary,
+                    |ui| {
+                        if ui.button("Remove").clicked() {
+                            remove_endpoint = Some(item.id.clone());
+                        }
+                        if ui.button("Edit / Discover…").clicked() {
+                            edit_endpoint = Some(item.clone());
+                        }
+                    },
+                );
+            }
+            if listed_ids.is_empty() && custom_list.is_empty() {
+                page::separator(ui);
+                page::row(
+                    ui,
+                    "No connected accounts yet",
+                    "Connect a provider above to load models from Pi.",
+                    |_| {},
+                );
+            }
         });
         if fallback != before {
             providers.set_fallback(fallback);
         }
-        if let Some(base) = add {
-            providers.add_account(ui.ctx(), base);
+        if let Some(id) = reconnect {
+            providers.reconnect_account(ui.ctx(), &id);
         }
         if let Some(id) = rename {
             let current = providers
@@ -582,6 +709,15 @@ impl Pui {
         }
         if let Some(id) = remove {
             providers.accounts.remove = Some(id);
+        }
+        if let Some(id) = remove_auth {
+            providers.remove_saved_auth(&id);
+        }
+        if let Some(target) = edit_endpoint {
+            providers.open_edit_endpoint(&target);
+        }
+        if let Some(id) = remove_endpoint {
+            providers.remove_custom_provider(&id);
         }
     }
 }

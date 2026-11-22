@@ -212,15 +212,17 @@ pub(super) fn button(
     enabled: bool,
 ) -> egui::Response {
     let colors = theme::palette(ui.ctx());
-    let (fill, text) = match kind {
-        Button::Secondary => (background(ui.ctx()), colors.text),
-        // Palette accents/status colors contrast with the page background in every style.
-        Button::Primary => (colors.accent, colors.bg),
-        Button::Danger => (colors.red, colors.bg),
-    };
-    let stroke = match kind {
-        Button::Secondary => border(ui.ctx()),
-        _ => fill,
+    let (fill, text, stroke) = if !enabled {
+        (subtle(ui.ctx()), colors.muted, border(ui.ctx()))
+    } else {
+        match kind {
+            Button::Secondary => (background(ui.ctx()), colors.text, border(ui.ctx())),
+            Button::Primary => {
+                let bg = ui.visuals().selection.bg_fill;
+                (bg, Color32::WHITE, bg)
+            }
+            Button::Danger => (colors.red, colors.bg, colors.red),
+        }
     };
     ui.add_enabled(
         enabled,

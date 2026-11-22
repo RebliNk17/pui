@@ -153,9 +153,13 @@ fn fork_targets_assistant_and_new_chat_contains_no_replayed_response_draft() {
     let mut app = app(&ctx);
     let original = app.ensure_agent();
     app.draft = "Original chat draft".into();
+    // User turns can also be forked directly.
     app.transcript.message_action = Some((0, MessageAction::Fork));
     app.history_action();
-    assert!(app.history_view.request.is_none());
+    let user_fork = app.history_view.request.clone().unwrap();
+    assert_eq!(user_fork.operation, MessageAction::Fork);
+    assert_eq!(user_fork.message.role, "user");
+    app.history_view = Default::default();
     app.transcript.message_action = Some((1, MessageAction::Fork));
     app.history_action();
     let request = app.history_view.request.clone().unwrap();
@@ -480,15 +484,15 @@ fn response_footer_copy_and_fork_remain_distinct_from_user_inline_actions() {
     for shape in render(&mut app, vec![]).shapes {
         text(&shape.shape, &mut labels);
     }
-    let fork = labels
-        .iter()
-        .find(|(t, _)| t == "Fork")
-        .expect("Fork after assistant response")
-        .1;
     let response = labels
         .iter()
         .find(|(t, _)| t == "Completed response")
         .unwrap()
+        .1;
+    let fork = labels
+        .iter()
+        .find(|(t, r)| t == "Fork" && r.top() > response.bottom())
+        .expect("Fork after assistant response")
         .1;
     assert!(fork.top() > response.bottom());
     let copy = labels

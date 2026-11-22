@@ -24,8 +24,8 @@ impl Page {
         Self::Notifications,
         Self::Shortcuts,
         Self::Permissions,
-        Self::Models,
         Self::Providers,
+        Self::Models,
         Self::Resources,
     ];
     fn title(self) -> &'static str {
@@ -115,6 +115,11 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "steer queue delivery enter",
         ),
         (
+            "Model context window",
+            "General",
+            "context window max tokens limit override model",
+        ),
+        (
             "Auto compact at",
             "General",
             "context summarizing tokens threshold percentage compaction",
@@ -200,6 +205,7 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
 pub(in crate::app) struct View {
     page: Page,
     search: String,
+    models_search: String,
     scale: super::scale::Scale,
     pub(in crate::app) resources: resources::Resources,
     pub(in crate::app) providers: super::providers::ProvidersManager,
@@ -278,6 +284,66 @@ pub(super) fn separator(ui: &mut egui::Ui) {
         Stroke::new(1.0, colors.border.gamma_multiply(0.65)),
     );
 }
+pub(super) fn provider_row(
+    ui: &mut egui::Ui,
+    provider: &str,
+    title: &str,
+    description: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    let colors = crate::theme::palette(ui.ctx());
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            let width = ui.available_width();
+            let controls = (width * 0.46).clamp(190.0, 340.0);
+            let origin = ui.cursor().min;
+            let icon_w = 24.0;
+            let label_width = (width - controls - icon_w - 18.0).max(80.0);
+            let mut labels = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt((provider, title, "label"))
+                    .max_rect(egui::Rect::from_min_size(
+                        origin + Vec2::new(icon_w, 0.0),
+                        Vec2::new(label_width, 30.0),
+                    ))
+                    .layout(Layout::top_down(Align::LEFT)),
+            );
+            labels.set_width(label_width);
+            labels.spacing_mut().item_spacing.y = 3.0;
+            labels.add(egui::Label::new(RichText::new(title).size(13.0).color(colors.text)).wrap());
+            if !description.is_empty() {
+                labels.add(
+                    egui::Label::new(RichText::new(description).size(11.5).color(colors.muted))
+                        .wrap(),
+                );
+            }
+            let height = labels.min_rect().height().max(theme::CONTROL_HEIGHT);
+            crate::icons::draw_provider(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(origin.x + 8.0, origin.y + height * 0.5),
+                    Vec2::splat(16.0),
+                ),
+                provider,
+            );
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt((provider, title, "control"))
+                    .max_rect(egui::Rect::from_min_size(
+                        egui::pos2(origin.x + width - controls, origin.y),
+                        Vec2::new(controls, height),
+                    ))
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            right.set_width(controls);
+            right.set_height(height);
+            right.spacing_mut().item_spacing.x = 8.0;
+            body(&mut right);
+            ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+        });
+}
+
 pub(super) fn row(
     ui: &mut egui::Ui,
     title: &str,
@@ -617,8 +683,38 @@ impl Pui {
             ui,
             "Changes apply at the next context check. A summary already running is left alone.",
         ));
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let active_model = self
+            .state
+            .models
+            .iter()
+            .find(|m| {
+                m.id == self.state.model
+                    && (self.state.provider.is_empty() || m.provider == self.state.provider)
+            })
+            .or_else(|| self.state.models.iter().find(|m| m.id == self.state.model))
+            .cloned();
         card(ui, |ui| {
             ui.scope(|ui| {
+                if let Some(model) = active_model {
+                    row(
+                        ui,
+                        "Model context window",
+                        &format!(
+                            "Maximum context limit for {} (saved in ~/.pi/agent/models.json).",
+                            model.name
+                        ),
+                        |ui| {
+                            self.model_context_editor(
+                                ui,
+                                &model.provider,
+                                &model.id,
+                                model.context_window,
+                            );
+                        },
+                    );
+                    separator(ui);
+                }
                 row(
                     ui,
                     "Auto compact at",
@@ -1116,32 +1212,269 @@ impl Pui {
             ui.label(theme::small(ui, "Connect to Pi to load the model catalog."));
             return;
         }
-        card(ui, |ui| {
-            for (index, model) in models.iter().enumerate() {
-                if index > 0 {
-                    separator(ui);
+        let colors = theme::palette(ui.ctx());
+        egui::Frame::new()
+            .fill(colors.surface)
+            .stroke(Stroke::new(1.0_f32, colors.border))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    crate::icons::inline(ui, Icon::Search, colors.dim);
+                    let clear_w = if self.settings_view.models_search.is_empty() {
+                        0.0
+                    } else {
+                        22.0
+                    };
+                    let edit_w = (ui.available_width() - clear_w).max(80.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_view.models_search)
+                            .id_salt("settings-models-search")
+                            .hint_text("Search models by name, ID, or provider…")
+                            .frame(false)
+                            .desired_width(edit_w),
+                    );
+                    if !self.settings_view.models_search.is_empty()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("×").size(13.0).color(colors.muted),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("Clear search")
+                            .clicked()
+                    {
+                        self.settings_view.models_search.clear();
+                    }
+                });
+            });
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let query = self.settings_view.models_search.trim().to_ascii_lowercase();
+        let mut by_provider: std::collections::BTreeMap<String, Vec<protocol::Model>> =
+            std::collections::BTreeMap::new();
+        for model in models {
+            if !query.is_empty() {
+                let display = crate::accounts::display_provider(&model.provider);
+                let hay = format!("{} {} {} {}", model.name, model.id, model.provider, display)
+                    .to_ascii_lowercase();
+                if !hay.contains(&query) {
+                    continue;
                 }
-                row(
-                    ui,
-                    &model.name,
-                    &format!("{} · {}", model.provider, model.id),
-                    |ui| {
-                        ui.label(theme::small(
-                            ui,
-                            format!(
-                                "{}k context · ${} / ${}",
-                                model.context_window / 1000,
-                                model.input_cost,
-                                model.output_cost
-                            ),
-                        ))
-                        .on_hover_text("Configured input / output price per million tokens");
-                    },
-                );
             }
+            by_provider
+                .entry(model.provider.clone())
+                .or_default()
+                .push(model);
+        }
+        if by_provider.is_empty() {
+            ui.add_space(12.0);
+            ui.label(theme::small(
+                ui,
+                format!(
+                    "No models match \"{}\".",
+                    self.settings_view.models_search.trim()
+                ),
+            ));
+            return;
+        }
+        for (provider, provider_models) in by_provider {
+            let display = crate::accounts::display_provider(&provider);
+            let heading = if display.eq_ignore_ascii_case(&provider) {
+                display.to_owned()
+            } else {
+                format!("{display} ({provider})")
+            };
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                crate::icons::provider_inline(ui, &provider);
+                ui.label(
+                    RichText::new(&heading)
+                        .size(13.5)
+                        .strong()
+                        .color(theme::palette(ui.ctx()).text),
+                );
+                ui.label(theme::small(
+                    ui,
+                    format!("· {} model(s)", provider_models.len()),
+                ));
+            });
+            ui.add_space(6.0);
+            card(ui, |ui| {
+                for (index, model) in provider_models.iter().enumerate() {
+                    if index > 0 {
+                        separator(ui);
+                    }
+                    let hidden_key = format!("{}/{}", model.provider, model.id);
+                    let was_visible = !self.prefs.hidden_models.contains(&hidden_key);
+                    let mut visible = was_visible;
+                    provider_row(
+                        ui,
+                        &model.provider,
+                        &model.name,
+                        &format!("{} · {}", display, model.id),
+                        |ui| {
+                            toggle(
+                                ui,
+                                &mut visible,
+                                &format!("Show {} in chat model picker", model.name),
+                            );
+                            if visible != was_visible {
+                                if visible {
+                                    self.prefs.hidden_models.remove(&hidden_key);
+                                } else {
+                                    self.prefs.hidden_models.insert(hidden_key.clone());
+                                }
+                            }
+                            self.model_context_editor(
+                                ui,
+                                &model.provider,
+                                &model.id,
+                                model.context_window,
+                            );
+                            ui.label(theme::small(
+                                ui,
+                                format!("${} / ${}", model.input_cost, model.output_cost),
+                            ))
+                            .on_hover_text("Configured input / output price per million tokens");
+                        },
+                    );
+                }
+            });
+        }
+    }
+
+    fn model_context_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        provider: &str,
+        model_id: &str,
+        current_window: u64,
+    ) {
+        let key = (provider.to_owned(), model_id.to_owned());
+        let saved_override = self
+            .settings_view
+            .providers
+            .model_context_overrides
+            .get(&key)
+            .copied();
+        let effective = saved_override.unwrap_or(current_window.max(4_096));
+        let mut draft = self
+            .settings_view
+            .providers
+            .context_override_drafts
+            .get(&key)
+            .copied()
+            .unwrap_or(effective);
+        let mut commit = None;
+        let mut reset = false;
+        let colors = theme::palette(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if saved_override.is_some()
+                && ui
+                    .add(egui::Button::new(theme::small(ui, "Reset")).frame(false))
+                    .on_hover_text("Remove context window override and use provider default")
+                    .clicked()
+            {
+                reset = true;
+            }
+            ui.scope(|ui| {
+                ui.visuals_mut().selection.bg_fill = colors.accent_bg;
+                ui.visuals_mut().selection.stroke = Stroke::new(1.0_f32, colors.accent);
+                let response = ui
+                    .add_sized(
+                        Vec2::new(78.0, theme::CONTROL_HEIGHT),
+                        egui::DragValue::new(&mut draft)
+                            .range(4_096..=10_000_000)
+                            .speed(4_096)
+                            .custom_formatter(|v, _| format_context_tokens(v as u64))
+                            .custom_parser(parse_context_tokens),
+                    )
+                    .on_hover_text(format!(
+                        "Max context window ({effective} tokens). Click to type (e.g. 200k, 1M) or drag."
+                    ));
+                if response.changed() {
+                    self.settings_view
+                        .providers
+                        .context_override_drafts
+                        .insert(key.clone(), draft);
+                }
+                if (response.drag_stopped() || response.lost_focus()) && draft != effective {
+                    commit = Some(draft);
+                }
+            });
         });
+        if let Some(tokens) = commit {
+            if let Err(err) = self
+                .settings_view
+                .providers
+                .set_model_context_window(provider, model_id, tokens)
+            {
+                self.settings_view.providers.status_error = Some(err);
+            } else {
+                for m in &mut self.state.models {
+                    if m.provider == provider && m.id == model_id {
+                        m.context_window = tokens;
+                    }
+                }
+                if self.state.model == model_id
+                    && (self.state.provider.is_empty() || self.state.provider == provider)
+                {
+                    self.state.context_window = tokens as f64;
+                }
+            }
+        } else if reset {
+            if let Err(err) = self
+                .settings_view
+                .providers
+                .clear_model_context_window(provider, model_id)
+            {
+                self.settings_view.providers.status_error = Some(err);
+            }
+        }
     }
 }
+fn format_context_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        let m = tokens as f64 / 1_000_000.0;
+        if (m - m.round()).abs() < 0.01 {
+            format!("{}M", m.round() as u64)
+        } else {
+            format!("{m:.1}M")
+        }
+    } else if tokens >= 1_000 {
+        let k = tokens as f64 / 1_000.0;
+        if (k - k.round()).abs() < 0.05 {
+            format!("{}k", k.round() as u64)
+        } else {
+            format!("{k:.1}k")
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn parse_context_tokens(input: &str) -> Option<f64> {
+    let s = input.trim().replace([',', '_'], "").to_ascii_lowercase();
+    let s = s.strip_suffix("tokens").unwrap_or(&s).trim();
+    if let Some(num) = s.strip_suffix('m') {
+        num.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1_000_000.0).round())
+    } else if let Some(num) = s.strip_suffix('k') {
+        num.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1_000.0).round())
+    } else {
+        s.parse::<f64>().ok().map(f64::round)
+    }
+}
+
 fn command() -> &'static str {
     if cfg!(target_os = "macos") {
         "⌘"

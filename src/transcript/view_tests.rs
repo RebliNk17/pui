@@ -36,11 +36,14 @@ fn draw(
                     assistant(
                         ui,
                         messages,
+                        0,
                         "fixture",
                         "high",
                         (running, false, false, view),
                         false,
                         &mut gallery,
+                        None,
+                        &std::sync::Arc::new(std::sync::Mutex::new(None)),
                     );
                 });
             },

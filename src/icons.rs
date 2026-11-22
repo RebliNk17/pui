@@ -1,7 +1,9 @@
 //! Small, resolution-independent line icons (no platform-specific glyph fonts).
+mod providers;
 #[cfg(test)]
 mod tests;
 use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+pub use providers::{draw_provider, has_provider_logo, provider_inline};
 
 #[derive(Clone, Copy)]
 pub enum Icon {
@@ -43,6 +45,7 @@ pub enum Icon {
     Expand,
     Collapse,
     Check,
+    Mic,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -376,6 +379,26 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((-7.0, 0.0), (-3.0, 5.0));
             line((3.0, -5.0), (7.0, 0.0));
             line((7.0, 0.0), (3.0, 5.0));
+        }
+        Icon::Mic => {
+            // Microphone capsule
+            p.rect_stroke(
+                Rect::from_min_max(pt(-2.5, -6.5), pt(2.5, 0.5)),
+                2.5 * scale,
+                s,
+                egui::StrokeKind::Middle,
+            );
+            // U-shaped cradle arc
+            let arc: Vec<Pos2> = (0..=10)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (i as f32 / 10.0);
+                    pt(-4.8 * a.cos(), -0.5 + 4.2 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, s));
+            // Stem and base
+            line((0.0, 3.7), (0.0, 6.5));
+            line((-2.8, 6.5), (2.8, 6.5));
         }
     }
 }

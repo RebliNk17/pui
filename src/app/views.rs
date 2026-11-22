@@ -217,6 +217,20 @@ impl Pui {
                             .map(|t| t.phase.label())
                             .unwrap_or("")
                             .to_owned();
+                        let connectors = load_mcp_connectors(&self.prefs.cwd, &self.state.diagnostics);
+                        let active_bg_count = self
+                            .state
+                            .messages
+                            .iter()
+                            .flat_map(|m| &m.tools)
+                            .filter(|t| !t.finished)
+                            .count()
+                            + self
+                                .agents
+                                .nodes
+                                .values()
+                                .filter(|n| n.id != self.agents.active && n.status == "Working")
+                                .count();
                         let summaries = [
                             status.to_owned(),
                             crate::context::usage_summary(&self.state),
@@ -228,13 +242,23 @@ impl Pui {
                             .to_string(),
                             if self.demo { "4" } else { "—" }.into(),
                             self.workspace.files.len().to_string(),
+                            connectors.len().to_string(),
+                            if active_bg_count > 0 {
+                                format!("{active_bg_count} running")
+                            } else {
+                                "Idle".into()
+                            },
                         ];
                         let mut layout = std::mem::take(&mut self.prefs.cards);
                         let original_hidden = layout.hidden.clone();
                         if task.is_some() {
-                            layout
-                                .hidden
-                                .extend([Card::Context, Card::Pulls, Card::Changes]);
+                            layout.hidden.extend([
+                                Card::Context,
+                                Card::Connectors,
+                                Card::Pulls,
+                                Card::Changes,
+                                Card::BackgroundTasks,
+                            ]);
                         }
                         let workflow_id = self.inspector_workflow().map(|t| t.id.clone());
                         if workflow_id.is_none() {
@@ -255,6 +279,8 @@ impl Pui {
                                     Card::Outputs => 2,
                                     Card::Pulls => 3,
                                     Card::Changes => 4,
+                                    Card::Connectors => 5,
+                                    Card::BackgroundTasks => 6,
                                 }]
                                 .clone()
                             },
@@ -358,7 +384,12 @@ impl Pui {
                                     }
                                 }
                                 Card::Context => {
-                                    crate::context::show(ui, &self.state, self.demo);
+                                    crate::context::show_with_cwd(
+                                        ui,
+                                        &self.state,
+                                        &self.prefs.cwd,
+                                        self.demo,
+                                    );
                                     if !self.demo
                                         && ui
                                             .add_enabled(
@@ -374,6 +405,9 @@ impl Pui {
                                         self.send(protocol::command("compact"));
                                     }
                                 }
+                                Card::Connectors => {
+                                    self.connectors_card(ui, &connectors);
+                                }
                                 Card::Outputs => {
                                     let outputs = if task.is_some() {
                                         &task_outputs
@@ -383,20 +417,47 @@ impl Pui {
                                     if outputs.is_empty() {
                                         ui.label(theme::small(ui, "No recorded file changes."));
                                     }
-                                    let mut selected = None;
+                                    let mut selected_diff = None;
+                                    let mut selected_preview = None;
                                     for (index, file) in outputs.iter().enumerate() {
-                                        if output_row(
+                                        let previewable = is_previewable_output(&file.path);
+                                        let resp = output_row(
                                             ui,
                                             &file.path,
                                             &file.added.to_string(),
                                             &file.removed.to_string(),
-                                        )
-                                        .clicked()
-                                        {
-                                            selected = Some(index);
+                                        );
+                                        if resp.clicked() {
+                                            if previewable && task.is_none() {
+                                                selected_preview = Some(file.path.clone());
+                                            } else {
+                                                selected_diff = Some(index);
+                                            }
+                                        }
+                                        if task.is_none() {
+                                            resp.context_menu(|ui| {
+                                                theme::menu_controls(ui);
+                                                if ui.button("Open preview").clicked() {
+                                                    selected_preview = Some(file.path.clone());
+                                                    ui.close();
+                                                }
+                                                if ui.button("View diff").clicked() {
+                                                    selected_diff = Some(index);
+                                                    ui.close();
+                                                }
+                                            });
                                         }
                                     }
-                                    if let Some(index) = selected {
+                                    if let Some(path) = selected_preview {
+                                        if let Err(err) =
+                                            self.files.open_target(ctx, &self.prefs.cwd, &path)
+                                        {
+                                            self.state.notice = Some(err);
+                                        } else {
+                                            self.inspector_panel = false;
+                                            self.files.hide_web();
+                                        }
+                                    } else if let Some(index) = selected_diff {
                                         if let Some(task) = &task {
                                             self.open_work_item_tab(task.id.clone(), tasks::work_item::Tab::Changes);
                                         } else {
@@ -410,10 +471,17 @@ impl Pui {
                                     self.pulls.show(ui);
                                 }
                                 Card::Changes => self.working_tree(ui),
+                                Card::BackgroundTasks => self.background_tasks_card(ui),
                             },
                         );
                         if task.is_some() {
-                            for card in [Card::Context, Card::Pulls, Card::Changes] {
+                            for card in [
+                                Card::Context,
+                                Card::Connectors,
+                                Card::Pulls,
+                                Card::Changes,
+                                Card::BackgroundTasks,
+                            ] {
                                 if !original_hidden.contains(&card) {
                                     layout.hidden.remove(&card);
                                 }
@@ -424,7 +492,12 @@ impl Pui {
                         }
                         self.prefs.cards = layout;
                         if action == Some(Card::Workflow) {
-                            if let Some(id) = workflow_id { self.open_task_from_board(id, None); }
+                            if let Some(id) = workflow_id {
+                                self.open_task_from_board(id, None);
+                            }
+                        } else if action == Some(Card::Connectors) {
+                            self.settings_view.select("Resources");
+                            self.settings_open = true;
                         }
                     });
             });
@@ -432,6 +505,61 @@ impl Pui {
 
     fn working_tree(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
+        let (total_added, total_removed) =
+            self.workspace
+                .files
+                .iter()
+                .fold((0usize, 0usize), |acc, f| {
+                    (
+                        acc.0 + f.added.parse::<usize>().unwrap_or(0),
+                        acc.1 + f.removed.parse::<usize>().unwrap_or(0),
+                    )
+                });
+        if self.workspace.is_git {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if total_added > 0 || total_removed > 0 {
+                    ui.label(
+                        RichText::new(format!("+{total_added}"))
+                            .size(11.0)
+                            .strong()
+                            .color(colors.green),
+                    );
+                    ui.label(
+                        RichText::new(format!("-{total_removed}"))
+                            .size(11.0)
+                            .strong()
+                            .color(colors.red),
+                    );
+                } else {
+                    ui.label(RichText::new("Clean").size(11.0).color(colors.dim));
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("Create PR")
+                        .on_hover_text("Open GitHub PR creation in browser (`gh pr create --web`)")
+                        .clicked()
+                    {
+                        let cwd = self.prefs.cwd.clone();
+                        std::thread::spawn(move || {
+                            let _ = std::process::Command::new("gh")
+                                .args(["pr", "create", "--web"])
+                                .current_dir(&cwd)
+                                .status();
+                        });
+                        self.state.notice = Some("Opening PR creation in browser…".into());
+                    }
+                    if ui
+                        .small_button("Commit")
+                        .on_hover_text("Open Changes panel to stage and commit")
+                        .clicked()
+                    {
+                        self.changes.set_expanded(true);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        }
         ui.label(
             RichText::new("Working tree vs HEAD, not recorded session outputs.")
                 .size(10.0)
@@ -458,6 +586,245 @@ impl Pui {
         if let Some(index) = selected {
             let file = self.workspace.files[index].clone();
             self.diff_rx = Some(changes::git_files::start(&self.ctx, &self.workspace, file));
+        }
+    }
+
+    fn connectors_card(&mut self, ui: &mut egui::Ui, connectors: &[McpConnector]) {
+        let colors = crate::theme::palette(ui.ctx());
+        if connectors.is_empty() {
+            ui.label(theme::small(ui, "No MCP connectors configured."));
+        } else {
+            let mut reconnect = false;
+            for conn in connectors {
+                ui.horizontal(|ui| {
+                    dot(
+                        ui,
+                        if conn.error.is_some() {
+                            colors.amber
+                        } else if self.connected {
+                            colors.green
+                        } else {
+                            colors.dim
+                        },
+                    );
+                    let label = ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
+                    if let Some(err) = &conn.error {
+                        label.on_hover_text(err);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let action_label = if conn.error.is_some() {
+                            "Reconnect"
+                        } else {
+                            "Reload"
+                        };
+                        if ui
+                            .add_enabled(
+                                !self.demo && self.connected,
+                                egui::Button::new(RichText::new(action_label).size(10.5).color(
+                                    if conn.error.is_some() {
+                                        colors.amber
+                                    } else {
+                                        colors.muted
+                                    },
+                                ))
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            reconnect = true;
+                        }
+                    });
+                });
+            }
+            if reconnect {
+                self.request_resource_reload();
+            }
+        }
+    }
+
+    fn background_tasks_card(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
+        let mut stop_current = false;
+        let mut stop_agent_id: Option<String> = None;
+        let mut open_agent_id: Option<String> = None;
+
+        let active_tools: Vec<(String, String)> = self
+            .state
+            .messages
+            .iter()
+            .flat_map(|m| &m.tools)
+            .filter(|t| !t.finished)
+            .map(|t| {
+                let title = if !t.command.is_empty() {
+                    t.command.clone()
+                } else if !t.path.is_empty() {
+                    format!("{} {}", t.name, t.path)
+                } else {
+                    t.name.clone()
+                };
+                (t.id.clone(), title)
+            })
+            .collect();
+
+        let running_agents: Vec<(String, String, Option<std::time::SystemTime>)> = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| n.id != self.agents.active && n.status == "Working")
+            .map(|n| (n.id.clone(), n.name.clone(), n.created))
+            .collect();
+
+        let finished_agents: Vec<(String, String, String)> = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| n.id != self.agents.active && n.status != "Working")
+            .map(|n| (n.id.clone(), n.name.clone(), n.status.clone()))
+            .collect();
+
+        let finished_tools: Vec<(String, Option<u64>, bool)> = self
+            .state
+            .messages
+            .iter()
+            .flat_map(|m| &m.tools)
+            .filter(|t| t.finished)
+            .rev()
+            .take(15)
+            .map(|t| {
+                let title = if !t.command.is_empty() {
+                    t.command.clone()
+                } else if !t.path.is_empty() {
+                    format!("{} {}", t.name, t.path)
+                } else {
+                    t.name.clone()
+                };
+                (title, t.duration_ms, t.failed)
+            })
+            .collect();
+
+        if active_tools.is_empty() && running_agents.is_empty() {
+            ui.label(theme::small(ui, "No active background tasks."));
+        } else {
+            for (_id, title) in &active_tools {
+                ui.horizontal(|ui| {
+                    icons::inline(ui, Icon::Terminal, colors.accent);
+                    ui.add(
+                        egui::Label::new(RichText::new(title).size(11.0).color(colors.text))
+                            .truncate(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
+                            stop_current = true;
+                        }
+                    });
+                });
+            }
+            for (id, name, created) in &running_agents {
+                ui.horizontal(|ui| {
+                    dot(ui, colors.accent);
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new(name).size(11.0).color(colors.text))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        open_agent_id = Some(id.clone());
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
+                            stop_agent_id = Some(id.clone());
+                        }
+                        if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
+                            ui.label(
+                                RichText::new(format_elapsed(elapsed))
+                                    .size(10.0)
+                                    .color(colors.muted),
+                            );
+                        }
+                    });
+                });
+            }
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+
+        let finished_count = finished_tools.len() + finished_agents.len();
+        if finished_count > 0 {
+            ui.add_space(4.0);
+            let id = ui.make_persistent_id("bg-tasks-finished");
+            let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+            let header = ui
+                .horizontal(|ui| {
+                    let (chev_rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    icons::chevron(ui, chev_rect, open, colors.dim);
+                    ui.label(
+                        RichText::new(format!("{finished_count} finished"))
+                            .size(11.0)
+                            .color(colors.muted),
+                    );
+                })
+                .response
+                .interact(Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if header.clicked() {
+                open = !open;
+                ui.ctx().data_mut(|d| d.insert_temp(id, open));
+            }
+            if open {
+                ui.indent("bg-finished-list", |ui| {
+                    for (id, name, status) in &finished_agents {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(name).size(10.5).color(colors.muted),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                open_agent_id = Some(id.clone());
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(status).size(10.0).color(colors.dim));
+                            });
+                        });
+                    }
+                    for (title, duration_ms, failed) in &finished_tools {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(title).size(10.5).color(if *failed {
+                                        colors.red
+                                    } else {
+                                        colors.muted
+                                    }),
+                                )
+                                .truncate(),
+                            );
+                            if let Some(ms) = duration_ms {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format_elapsed(Duration::from_millis(*ms)))
+                                            .size(10.0)
+                                            .color(colors.dim),
+                                    );
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        }
+
+        if stop_current {
+            self.stop();
+        }
+        if let Some(id) = stop_agent_id {
+            self.stop_agent_tree(&id);
+        }
+        if let Some(id) = open_agent_id {
+            self.view_agent(&id);
         }
     }
 
@@ -489,6 +856,14 @@ impl Pui {
                             });
                         });
                     });
+                let pane_rect = ui.max_rect();
+                if let Some(idx) = self
+                    .chat_find
+                    .sync(&self.state.messages, self.prefs.transcript_view)
+                {
+                    self.transcript.jump_to_message(idx);
+                }
+                self.transcript.find = self.chat_find.target();
                 self.transcript.task_output = matches!(
                     self.task_session(&self.state),
                     Some(crate::tasks::Role::Proposal | crate::tasks::Role::Verifier)
@@ -555,8 +930,78 @@ impl Pui {
                     );
                 }
                 self.attention_rendered(ui);
+                if self
+                    .transcript
+                    .find
+                    .as_ref()
+                    .is_some_and(|f| !f.scroll_to_active)
+                {
+                    self.chat_find.scroll_to_active = false;
+                }
+                self.show_chat_find_bar(ctx, pane_rect);
             });
         self.history_action();
+    }
+}
+
+struct McpConnector {
+    name: String,
+    error: Option<String>,
+}
+
+fn load_mcp_connectors(cwd: &std::path::Path, diagnostics: &[String]) -> Vec<McpConnector> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut candidates = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".pi/agent/mcp.json"));
+    }
+    if !cwd.as_os_str().is_empty() {
+        candidates.push(cwd.join(".pi/mcp.json"));
+        candidates.push(cwd.join(".mcp.json"));
+    }
+    for path in candidates {
+        if let Ok(raw) = std::fs::read_to_string(&path)
+            && let Ok(val) = serde_json::from_str::<Value>(&raw)
+            && let Some(servers) = val.get("mcpServers").and_then(Value::as_object)
+        {
+            for key in servers.keys() {
+                names.insert(key.clone());
+            }
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let lower = name.to_ascii_lowercase();
+            let error = diagnostics
+                .iter()
+                .find(|d| d.to_ascii_lowercase().contains(&lower))
+                .cloned();
+            McpConnector { name, error }
+        })
+        .collect()
+}
+
+fn is_previewable_output(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "md" | "markdown" | "csv"
+            )
+        })
+}
+
+fn format_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -567,11 +1012,12 @@ fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui
     if response.hovered() {
         ui.painter().rect_filled(rect, 4, colors.hover);
     }
+    let (file_icon, file_tint) = files::file_icon(std::path::Path::new(path), &colors);
     icons::draw(
         ui,
         egui::Rect::from_center_size(rect.left_center() + egui::vec2(8.0, 0.0), Vec2::splat(14.0)),
-        Icon::File,
-        colors.dim,
+        file_icon,
+        file_tint,
     );
     let name = std::path::Path::new(path)
         .file_name()

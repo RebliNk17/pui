@@ -1,5 +1,6 @@
 //! Selectable Markdown with tables, one consistent baseline and real link hit targets.
 mod capture;
+mod mermaid;
 mod reply;
 #[cfg(test)]
 mod reply_tests;
@@ -7,7 +8,169 @@ mod table;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, RichText, TextFormat, Ui, text::LayoutJob};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+
+#[derive(Clone)]
+pub struct FindHighlight {
+    pub query: String,
+    pub active_in_scope: Option<usize>,
+    pub seen: Arc<AtomicUsize>,
+    pub active_rect: Arc<Mutex<Option<egui::Rect>>>,
+}
+
+fn find_highlight_id() -> egui::Id {
+    egui::Id::new("pui-markdown-find-highlight")
+}
+
+pub fn set_find_highlight(ctx: &egui::Context, highlight: Option<FindHighlight>) {
+    ctx.data_mut(|d| {
+        if let Some(h) = highlight {
+            d.insert_temp(find_highlight_id(), h);
+        } else {
+            d.remove::<FindHighlight>(find_highlight_id());
+        }
+    });
+}
+
+pub fn find_case_insensitive_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if query.is_ascii() {
+        let qlen = query.len();
+        let mut i = 0;
+        while i + qlen <= text.len() {
+            if let Some(slice) = text.get(i..i + qlen)
+                && slice.eq_ignore_ascii_case(query)
+            {
+                out.push(i..i + qlen);
+                i += qlen;
+                continue;
+            }
+            if let Some(ch) = text[i..].chars().next() {
+                i += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return out;
+    }
+    let q_lower = query.to_lowercase();
+    let mut lowered = String::with_capacity(text.len());
+    let mut byte_map = Vec::with_capacity(text.len());
+    for (orig_idx, ch) in text.char_indices() {
+        for lc in ch.to_lowercase() {
+            let start = lowered.len();
+            lowered.push(lc);
+            for _ in start..lowered.len() {
+                byte_map.push(orig_idx);
+            }
+        }
+    }
+    byte_map.push(text.len());
+    let mut pos = 0;
+    while let Some(found) = lowered[pos..].find(&q_lower) {
+        let l_start = pos + found;
+        let l_end = l_start + q_lower.len();
+        out.push(byte_map[l_start]..byte_map[l_end]);
+        pos = l_end;
+    }
+    out
+}
+
+/// Apply active chat-find highlights to `job`, returning the byte offset of the active match if present.
+pub fn highlight_job(ui: &Ui, job: &mut LayoutJob) -> Option<usize> {
+    let state = ui
+        .ctx()
+        .data(|d| d.get_temp::<FindHighlight>(find_highlight_id()))?;
+    let ranges = find_case_insensitive_ranges(&job.text, &state.query);
+    if ranges.is_empty() {
+        return None;
+    }
+    let dark = ui.ctx().style().visuals.dark_mode;
+    let active_bg = Color32::from_rgb(234, 138, 30);
+    let active_fg = Color32::WHITE;
+    let other_bg = if dark {
+        Color32::from_rgba_unmultiplied(234, 179, 8, 95)
+    } else {
+        Color32::from_rgba_unmultiplied(250, 204, 21, 145)
+    };
+    let other_fg = if dark {
+        Color32::from_rgb(255, 240, 180)
+    } else {
+        Color32::BLACK
+    };
+    let mut active_byte = None;
+    let tagged: Vec<(std::ops::Range<usize>, bool)> = ranges
+        .into_iter()
+        .map(|r| {
+            let idx = state.seen.fetch_add(1, Ordering::Relaxed);
+            let is_active = state.active_in_scope == Some(idx);
+            if is_active {
+                active_byte = Some(r.start);
+            }
+            (r, is_active)
+        })
+        .collect();
+    let old_sections = std::mem::take(&mut job.sections);
+    for section in old_sections {
+        let s_start = section.byte_range.start;
+        let s_end = section.byte_range.end;
+        let mut cursor = s_start;
+        for (r, is_active) in &tagged {
+            if r.end <= cursor || r.start >= s_end {
+                continue;
+            }
+            let o_start = r.start.max(cursor);
+            let o_end = r.end.min(s_end);
+            if o_start > cursor {
+                let mut prefix = section.clone();
+                prefix.byte_range = cursor..o_start;
+                job.sections.push(prefix);
+            }
+            let mut matched = section.clone();
+            matched.byte_range = o_start..o_end;
+            matched.format.background = if *is_active { active_bg } else { other_bg };
+            matched.format.color = if *is_active { active_fg } else { other_fg };
+            job.sections.push(matched);
+            cursor = o_end;
+        }
+        if cursor < s_end {
+            let mut tail = section;
+            tail.byte_range = cursor..s_end;
+            job.sections.push(tail);
+        }
+    }
+    active_byte
+}
+
+pub fn record_find_match_rect(
+    ui: &Ui,
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    byte_start: usize,
+) {
+    let Some(state) = ui
+        .ctx()
+        .data(|d| d.get_temp::<FindHighlight>(find_highlight_id()))
+    else {
+        return;
+    };
+    let char_idx = galley
+        .job
+        .text
+        .get(..byte_start)
+        .map_or(0, |s| s.chars().count());
+    let local = galley.pos_from_cursor(egui::text::CCursor::new(char_idx));
+    let rect = local.translate(origin.to_vec2());
+    if let Ok(mut slot) = state.active_rect.lock() {
+        *slot = Some(rect);
+    }
+}
 use table::Table;
 #[derive(Default)]
 struct ParseMarkdown;
@@ -21,24 +184,170 @@ impl egui::cache::ComputerMut<&str, Arc<Vec<Event<'static>>>> for ParseMarkdown 
     }
 }
 type MarkdownCache = egui::cache::FrameCache<Arc<Vec<Event<'static>>>, ParseMarkdown>;
+#[derive(Clone)]
 struct Link {
     range: std::ops::Range<usize>,
     url: String,
 }
-fn local_file(value: &str) -> bool {
-    !value.chars().any(char::is_whitespace)
-        && (value.starts_with('/') || value.starts_with("./") || value.starts_with("~/"))
-        && std::path::Path::new(value).extension().is_some()
+
+fn scroll_heading_id() -> egui::Id {
+    egui::Id::new("pui-markdown-scroll-heading")
 }
+
+/// Request that the next Markdown file render scroll to the `index`-th heading (0-based).
+pub fn request_scroll_to_heading(ctx: &egui::Context, index: usize) {
+    ctx.data_mut(|d| d.insert_temp(scroll_heading_id(), index));
+}
+
+/// Extracts `(level, title)` for headings in a Markdown document (ignoring fenced code blocks).
+pub fn headings(source: &str) -> Vec<(u8, String)> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if (1..=4).contains(&hashes) {
+            let rest = &trimmed[hashes..];
+            if let Some(title) = rest.strip_prefix(' ') {
+                let title = title.trim().trim_end_matches('#').trim();
+                if !title.is_empty() {
+                    out.push((hashes as u8, title.to_owned()));
+                }
+            }
+        }
+    }
+    out
+}
+/// Splits a local file link into `(path, optional_1_based_line)`.
+/// Supports `path:42`, `path:42:10`, `path#L42`, `path#L42-L60`, and `path#42`.
+pub fn split_file_line(value: &str) -> (&str, Option<usize>) {
+    if let Some((base, frag)) = value.split_once('#') {
+        let trimmed = frag
+            .strip_prefix('L')
+            .or_else(|| frag.strip_prefix('l'))
+            .unwrap_or(frag);
+        let digits = trimmed.split('-').next().unwrap_or("").trim();
+        if let Ok(line) = digits.parse::<usize>()
+            && line > 0
+        {
+            return (base, Some(line));
+        }
+    }
+    if let Some((prefix, last)) = value.rsplit_once(':')
+        && let Ok(num) = last.parse::<usize>()
+        && num > 0
+    {
+        // Handle `path:line:col` as well as `path:line`.
+        if let Some((path, line_str)) = prefix.rsplit_once(':')
+            && let Ok(line) = line_str.parse::<usize>()
+            && line > 0
+        {
+            return (path, Some(line));
+        }
+        return (prefix, Some(num));
+    }
+    (value, None)
+}
+
+fn known_bare_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "md"
+            | "markdown"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "svg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "sh"
+            | "zsh"
+            | "bash"
+            | "txt"
+            | "csv"
+            | "sql"
+            | "xml"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "hpp"
+            | "go"
+            | "java"
+            | "kt"
+            | "swift"
+            | "rb"
+            | "php"
+            | "lock"
+    )
+}
+
+fn local_file(value: &str) -> bool {
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains("://")
+        || value.starts_with('#')
+    {
+        return false;
+    }
+    let (base, _) = split_file_line(value);
+    if base.is_empty() || base.contains(':') {
+        return false;
+    }
+    let Some(ext) = std::path::Path::new(base)
+        .extension()
+        .and_then(|e| e.to_str())
+    else {
+        return false;
+    };
+    if base.starts_with('/') || base.starts_with("./") || base.starts_with("~/") {
+        return !ext.is_empty()
+            && ext.len() <= 12
+            && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    if base.contains('/') {
+        return !base.starts_with("http")
+            && !ext.is_empty()
+            && ext.len() <= 12
+            && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    known_bare_extension(ext)
+}
+
 fn safe_url(url: &str) -> bool {
     url.starts_with("https://")
         || url.starts_with("http://")
         || url.starts_with("mailto:")
         || url.starts_with("file://")
         || local_file(url)
-        || (!url.contains(':')
-            && !url.starts_with('#')
-            && std::path::Path::new(url).extension().is_some())
+        || {
+            let (base, _) = split_file_line(url);
+            !base.contains(':')
+                && !base.starts_with('#')
+                && std::path::Path::new(base).extension().is_some()
+        }
 }
 
 pub fn show_file(ui: &mut Ui, source: &str, path: &std::path::Path) {
@@ -75,11 +384,20 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     }
     job.wrap.max_width = ui.available_width();
     job.align_baseline = true;
+    let active = highlight_job(ui, job);
     let galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
-    show_galley(ui, galley, links);
+    show_galley_with_find(ui, galley, links, active);
     links.clear();
 }
 fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
+    show_galley_with_find(ui, galley, links, None);
+}
+fn show_galley_with_find(
+    ui: &mut Ui,
+    galley: Arc<egui::Galley>,
+    links: &[Link],
+    active_byte: Option<usize>,
+) {
     let response = ui.add(egui::Label::new(galley.clone()).wrap().selectable(true));
     capture::offer(ui, &response, &galley.job.text);
     let origin = match galley.job.halign {
@@ -87,6 +405,9 @@ fn show_galley(ui: &mut Ui, galley: Arc<egui::Galley>, links: &[Link]) {
         egui::Align::Center => response.rect.center_top(),
         egui::Align::Max => response.rect.right_top(),
     };
+    if let Some(byte_start) = active_byte {
+        record_find_match_rect(ui, &galley, origin, byte_start);
+    }
     if let Some(pos) = response.hover_pos() {
         let cursor = galley.cursor_from_pos(pos - origin);
         let byte = galley
@@ -218,6 +539,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
     let mut in_item = false;
     let mut table: Option<Table> = None;
     let mut table_header = false;
+    let mut heading_index = 0usize;
     let mut event_index = 0;
     while event_index < events.len() {
         let event = events[event_index].clone();
@@ -294,6 +616,13 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
             Event::End(TagEnd::Emphasis) => italic = false,
             Event::Start(Tag::Heading { .. }) => {
                 flush(ui, &mut job, &mut links);
+                let target: Option<usize> = ui.ctx().data(|d| d.get_temp(scroll_heading_id()));
+                if target == Some(heading_index) {
+                    ui.scroll_to_cursor(Some(egui::Align::TOP));
+                    ui.ctx()
+                        .data_mut(|d| d.remove_temp::<usize>(scroll_heading_id()));
+                }
+                heading_index += 1;
                 heading = true;
             }
             Event::End(TagEnd::Heading(_)) => {
@@ -312,6 +641,13 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                 };
             }
             Event::End(TagEnd::CodeBlock) => {
+                let is_mermaid = language.eq_ignore_ascii_case("mermaid");
+                let mermaid_src_id = ui.make_persistent_id(("mermaid-src", event_index));
+                let mut show_mermaid_source = is_mermaid
+                    && ui
+                        .ctx()
+                        .data(|d| d.get_temp::<bool>(mermaid_src_id))
+                        .unwrap_or(false);
                 egui::Frame::new()
                     .fill(colors.code_bg)
                     .stroke(egui::Stroke::new(1.0, colors.border))
@@ -332,23 +668,46 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
                                     {
                                         ui.ctx().copy_text(code_text.clone());
                                     }
+                                    if is_mermaid {
+                                        let toggle_label = if show_mermaid_source {
+                                            "Diagram"
+                                        } else {
+                                            "Source"
+                                        };
+                                        if ui
+                                            .add(
+                                                egui::Button::new(theme::small(ui, toggle_label))
+                                                    .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            show_mermaid_source = !show_mermaid_source;
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(mermaid_src_id, show_mermaid_source);
+                                            });
+                                        }
+                                    }
                                 },
                             );
                         });
-                        egui::ScrollArea::horizontal()
-                            .id_salt(ui.next_auto_id())
-                            .show(ui, |ui| {
-                                let text = code_text.trim_end();
-                                let response = ui.add(
-                                    egui::Label::new(
-                                        RichText::new(text)
-                                            .font(FontId::monospace(12.0))
-                                            .color(colors.code_text),
-                                    )
-                                    .selectable(true),
-                                );
-                                capture::offer(ui, &response, text);
-                            });
+                        let rendered_diagram =
+                            is_mermaid && !show_mermaid_source && mermaid::show(ui, &code_text);
+                        if !rendered_diagram {
+                            egui::ScrollArea::horizontal()
+                                .id_salt(ui.next_auto_id())
+                                .show(ui, |ui| {
+                                    let text = code_text.trim_end();
+                                    let response = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(text)
+                                                .font(FontId::monospace(12.0))
+                                                .color(colors.code_text),
+                                        )
+                                        .selectable(true),
+                                    );
+                                    capture::offer(ui, &response, text);
+                                });
+                        }
                     });
                 code_text.clear();
                 code = false;
@@ -479,6 +838,7 @@ fn show_events(ui: &mut Ui, events: &[Event<'static>], reply: bool, mut item: Op
         }
     }
     flush(ui, &mut job, &mut links);
+    table::show_expanded_modal(ui.ctx());
 }
 
 fn alert(ui: &mut Ui, kind: pulldown_cmark::BlockQuoteKind, events: &[Event<'static>]) {
@@ -586,8 +946,13 @@ pub fn diff(ui: &mut Ui, source: &str) {
             },
         );
     }
+    let active = highlight_job(ui, &mut job);
     let background = ui.painter().add(egui::Shape::Noop);
-    let response = ui.add(egui::Label::new(job).selectable(true).extend());
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let response = ui.add(egui::Label::new(galley.clone()).selectable(true).extend());
+    if let Some(byte_start) = active {
+        record_find_match_rect(ui, &galley, response.rect.left_top(), byte_start);
+    }
     let width = response.rect.width().max(ui.available_width());
     let shapes = backgrounds
         .into_iter()
@@ -1130,5 +1495,27 @@ mod tests {
         }
         assert!(commands.iter().any(|c|matches!(c,egui::OutputCommand::OpenUrl(u) if u.url=="https://github.com/a/b/pull/59")));
         assert!(!safe_url("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn split_file_line_and_local_file_handle_relative_paths_and_line_anchors() {
+        assert_eq!(split_file_line("src/app.rs:120"), ("src/app.rs", Some(120)));
+        assert_eq!(
+            split_file_line("src/app.rs:120:15"),
+            ("src/app.rs", Some(120))
+        );
+        assert_eq!(
+            split_file_line("src/app.rs#L42-L60"),
+            ("src/app.rs", Some(42))
+        );
+        assert_eq!(split_file_line("ASSETS.md"), ("ASSETS.md", None));
+
+        assert!(local_file("src/app.rs:120"));
+        assert!(local_file("./README.md#L10"));
+        assert!(local_file("ASSETS.md"));
+        assert!(local_file("/tmp/demo.rs:42"));
+        assert!(safe_url("src/app.rs:120"));
+        assert!(!local_file("self.state"));
+        assert!(!local_file("https://example.com/a.rs"));
     }
 }

@@ -9,6 +9,8 @@ mod loader;
 mod open_tests;
 mod quick_paths;
 mod svg;
+mod syntax;
+pub(super) use syntax::file_icon;
 mod table_preferences;
 use super::*;
 use std::{
@@ -988,7 +990,7 @@ impl Browser {
         actions: &mut Vec<Action>,
     ) {
         let colors = theme::palette(ui.ctx());
-        let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width().max(120.0), 30.0));
+        let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width().max(120.0), 22.0));
         let response = ui.interact(
             rect,
             ui.make_persistent_id(("workspace-file", &self.root, &entry.path)),
@@ -1018,15 +1020,16 @@ impl Browser {
                 colors.dim,
             );
         }
+        let (icon, icon_color) = if entry.directory {
+            (Icon::Folder, colors.muted)
+        } else {
+            syntax::file_icon(&entry.path, &colors)
+        };
         icons::draw(
             ui,
-            egui::Rect::from_center_size(egui::pos2(x + 20.0, rect.center().y), Vec2::splat(16.0)),
-            if entry.directory {
-                Icon::Folder
-            } else {
-                Icon::File
-            },
-            colors.muted,
+            egui::Rect::from_center_size(egui::pos2(x + 20.0, rect.center().y), Vec2::splat(15.0)),
+            icon,
+            icon_color,
         );
         let name = if search {
             entry
@@ -1169,22 +1172,8 @@ impl Browser {
                     .to_ascii_lowercase();
                 let markdown = matches!(extension.as_str(), "md" | "markdown" | "mdown");
                 let html = matches!(extension.as_str(), "html" | "htm");
-                let table = matches!(extension.as_str(), "csv" | "tsv");
                 let svg = extension == "svg";
-                if markdown || svg {
-                    ui.horizontal(|ui| {
-                        let preview_response = ui.selectable_value(
-                            &mut tab.source,
-                            false,
-                            if table { "Table" } else { "Preview" },
-                        );
-                        let source_response = ui.selectable_value(&mut tab.source, true, "Source");
-                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
-                            preview.remember(0, &preview_response);
-                            preview.remember(1, &source_response);
-                        }
-                    });
-                }
+                let pane_rect = ui.max_rect();
                 if let Some(notice) = &tab.line_notice {
                     ui.label(theme::small(ui, notice));
                 }
@@ -1278,13 +1267,7 @@ impl Browser {
                                                 )
                                                 .extend(),
                                             );
-                                            let galley = ui.fonts(|fonts| {
-                                                fonts.layout_no_wrap(
-                                                    content.clone(),
-                                                    FontId::monospace(12.0),
-                                                    colors.text,
-                                                )
-                                            });
+                                            let galley = syntax::galley(ui, &tab.path, content);
                                             let response = ui.add(
                                                 egui::Label::new(galley.clone())
                                                     .extend()
@@ -1320,6 +1303,131 @@ impl Browser {
                                         .max_width(ui.available_width())
                                         .shrink_to_fit(),
                                 );
+                            });
+                    }
+                }
+                if markdown || svg {
+                    let md_headings = if markdown && !tab.source {
+                        if let Some(Ok(Content::Text(content))) = &tab.content {
+                            markdown::headings(content)
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    let has_outline = !md_headings.is_empty();
+                    let outline_open_id = ui.id().with(("md-outline-open", &tab.path));
+                    let mut outline_open = has_outline
+                        && ui
+                            .ctx()
+                            .data(|d| d.get_temp::<bool>(outline_open_id))
+                            .unwrap_or(false);
+
+                    let toggle_id = ui.id().with("preview-source-toggle");
+                    let width_offset = if has_outline { 60.0 } else { 32.0 };
+                    let pos = egui::pos2(pane_rect.right() - width_offset, pane_rect.top());
+                    egui::Area::new(toggle_id)
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(pos)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::new()
+                                .fill(colors.surface)
+                                .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                                .corner_radius(6)
+                                .inner_margin(2)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 2.0;
+                                        if has_outline {
+                                            let outline_btn = crate::icons::button(
+                                                ui,
+                                                crate::icons::Icon::Details,
+                                                "Toggle document outline",
+                                            );
+                                            if outline_btn.clicked() {
+                                                outline_open = !outline_open;
+                                                ui.ctx().data_mut(|d| {
+                                                    d.insert_temp(outline_open_id, outline_open);
+                                                });
+                                            }
+                                        }
+                                        let (icon, tip) = if tab.source {
+                                            (crate::icons::Icon::File, "Show preview")
+                                        } else {
+                                            (crate::icons::Icon::Code, "Show source")
+                                        };
+                                        let response = crate::icons::button(ui, icon, tip);
+                                        ui.ctx().data_mut(|data| {
+                                            data.insert_temp(
+                                                egui::Id::new("file-preview-source-toggle-rect"),
+                                                response.rect,
+                                            );
+                                        });
+                                        if let Some(Ok(Content::Svg(preview))) = &mut tab.content {
+                                            preview.remember(0, &response);
+                                        }
+                                        if response.clicked() {
+                                            tab.source = !tab.source;
+                                        }
+                                    });
+                                });
+                        });
+
+                    if outline_open {
+                        let outline_pos = egui::pos2(
+                            (pane_rect.right() - 248.0).max(pane_rect.left() + 8.0),
+                            pane_rect.top() + 34.0,
+                        );
+                        egui::Area::new(ui.id().with("md-outline-popover"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(outline_pos)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::new()
+                                    .fill(colors.sidebar)
+                                    .stroke(egui::Stroke::new(1.0_f32, colors.border))
+                                    .corner_radius(8)
+                                    .inner_margin(8)
+                                    .show(ui, |ui| {
+                                        ui.set_width(232.0);
+                                        ui.label(
+                                            RichText::new("Outline")
+                                                .size(11.0)
+                                                .strong()
+                                                .color(colors.muted),
+                                        );
+                                        ui.add_space(4.0);
+                                        egui::ScrollArea::vertical()
+                                            .max_height(
+                                                (pane_rect.height() - 64.0).clamp(120.0, 360.0),
+                                            )
+                                            .show(ui, |ui| {
+                                                for (idx, (level, title)) in
+                                                    md_headings.iter().enumerate()
+                                                {
+                                                    let indent = (*level as f32 - 1.0) * 10.0;
+                                                    ui.horizontal(|ui| {
+                                                        ui.add_space(indent);
+                                                        if ui
+                                                            .add(
+                                                                egui::Button::new(
+                                                                    RichText::new(title)
+                                                                        .size(11.5)
+                                                                        .color(colors.text),
+                                                                )
+                                                                .frame(false),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            markdown::request_scroll_to_heading(
+                                                                ui.ctx(),
+                                                                idx,
+                                                            );
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                    });
                             });
                     }
                 }
@@ -1403,34 +1511,60 @@ impl Pui {
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
         // Keep remote web links with the OS/default browser. Only local
         // development previews and files are captured by the docked viewer.
-        let mut targets = Vec::new();
+        let mut targets: Vec<(String, Option<usize>)> = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| {
                 if let egui::OutputCommand::OpenUrl(url) = command {
                     if cfg!(target_os = "macos") && super::webview::local_preview_url(&url.url) {
-                        targets.push(url.url.clone());
+                        targets.push((url.url.clone(), None));
                         return false;
                     }
-                    if let Ok(url) = url::Url::parse(&url.url)
-                        && url.scheme() == "file"
-                        && let Ok(path) = url.to_file_path()
+                    if let Ok(parsed) = url::Url::parse(&url.url)
+                        && parsed.scheme() == "file"
+                        && let Ok(path) = parsed.to_file_path()
                     {
-                        targets.push(path.display().to_string());
+                        let line = parsed.fragment().and_then(|frag| {
+                            let trimmed = frag
+                                .strip_prefix('L')
+                                .or_else(|| frag.strip_prefix('l'))
+                                .unwrap_or(frag);
+                            trimmed
+                                .split('-')
+                                .next()
+                                .and_then(|s| s.trim().parse::<usize>().ok())
+                                .filter(|&n| n > 0)
+                        });
+                        targets.push((path.display().to_string(), line));
                         return false;
                     }
-                    if !url.url.contains(':')
-                        && !url.url.starts_with('#')
-                        && std::path::Path::new(&url.url).extension().is_some()
+                    let (base, line) = crate::markdown::split_file_line(&url.url);
+                    if !base.contains(':')
+                        && !base.starts_with('#')
+                        && std::path::Path::new(base).extension().is_some()
                     {
-                        targets.push(url.url.clone());
+                        targets.push((base.to_owned(), line));
                         return false;
                     }
                 }
                 true
             })
         });
-        for target in targets {
-            if let Err(error) = self.files.open_target(ctx, &self.prefs.cwd, &target) {
+        for (target, line) in targets {
+            let result = if let Some(line_num) = line {
+                let candidate = Path::new(&target);
+                let resolved = if candidate.is_absolute() {
+                    candidate.to_path_buf()
+                } else {
+                    let stripped = target.strip_prefix("./").unwrap_or(&target);
+                    self.prefs.cwd.join(stripped)
+                };
+                self.files
+                    .open_workspace_source(ctx, &self.prefs.cwd, &resolved, Some(line_num))
+                    .or_else(|_| self.files.open_target(ctx, &self.prefs.cwd, &target))
+            } else {
+                self.files.open_target(ctx, &self.prefs.cwd, &target)
+            };
+            if let Err(error) = result {
                 self.state.notice = Some(error);
             } else {
                 self.inspector_panel = false;

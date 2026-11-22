@@ -1,7 +1,7 @@
 use std::hash::Hash;
 
 use crate::{
-    Context, Id, InnerResponse, NumExt as _, Rect, Response, Sense, Stroke, TextStyle,
+    Context, Id, InnerResponse, NumExt as _, Response, Sense, Stroke, TextStyle,
     TextWrapMode, Ui, UiBuilder, UiKind, UiStackInfo, Vec2, WidgetInfo, WidgetText, WidgetType,
     emath, epaint, pos2, remap, remap_clamp, vec2,
 };
@@ -350,23 +350,21 @@ impl<HeaderRet> HeaderResponse<'_, HeaderRet> {
 /// Paint the arrow icon that indicated if the region is open or not
 pub fn paint_default_icon(ui: &mut Ui, openness: f32, response: &Response) {
     let visuals = ui.style().interact(response);
-
-    let rect = response.rect;
-
-    // Draw a pointy triangle arrow:
-    let rect = Rect::from_center_size(rect.center(), vec2(rect.width(), rect.height()) * 0.75);
-    let rect = rect.expand(visuals.expansion);
-    let mut points = vec![rect.left_top(), rect.right_top(), rect.center_bottom()];
+    let c = response.rect.center();
+    let mut points = vec![
+        c + vec2(-3.0, -1.2),
+        c + vec2(0.0, 1.8),
+        c + vec2(3.0, -1.2),
+    ];
     use std::f32::consts::TAU;
     let rotation = emath::Rot2::from_angle(remap(openness, 0.0..=1.0, -TAU / 4.0..=0.0));
     for p in &mut points {
-        *p = rect.center() + rotation * (*p - rect.center());
+        *p = c + rotation * (*p - c);
     }
 
-    ui.painter().add(Shape::convex_polygon(
+    ui.painter().add(Shape::line(
         points,
-        visuals.fg_stroke.color,
-        Stroke::NONE,
+        Stroke::new(1.25_f32, visuals.fg_stroke.color),
     ));
 }
 

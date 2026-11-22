@@ -649,7 +649,7 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
                     );
                     let mut native = egui::Rect::NOTHING;
                     let mut pane = egui::Rect::NOTHING;
-                    let mut status_bottom = 0.0_f32;
+                    let mut status_bottom = f32::INFINITY;
                     for _ in 0..3 {
                         let output = ctx.run(
                             egui::RawInput {
@@ -680,8 +680,8 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
                         );
                         for shape in output.shapes {
                             if let egui::Shape::Text(text) = shape.shape {
-                                if text.galley.job.text.contains("Certificate checks") {
-                                    status_bottom = text.pos.y + text.galley.size().y;
+                                if text.galley.job.text.contains("Page returned HTTP") {
+                                    status_bottom = status_bottom.min(text.pos.y);
                                 }
                             }
                         }
@@ -699,7 +699,7 @@ fn maximum_custom_geometry_excludes_chat_status_console_at_narrow_zoom() {
                         "{width} {zoom} {rotate}: {native:?}"
                     );
                     assert!(pane.contains_rect(native), "{pane:?} / {native:?}");
-                    assert!(native.top() >= status_bottom);
+                    assert!(native.bottom() <= status_bottom);
                     assert!(native.bottom() < console.top());
                     assert!(native.left() >= 220.0);
                 }

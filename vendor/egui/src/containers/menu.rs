@@ -319,11 +319,11 @@ pub struct SubMenuButton<'a> {
 }
 
 impl<'a> SubMenuButton<'a> {
-    /// The default right arrow symbol: `"⏵"`
-    pub const RIGHT_ARROW: &'static str = "⏵";
+    /// Reserved right spacing for the vector submenu chevron painted in [`Self::ui`].
+    pub const RIGHT_ARROW: &'static str = "  ";
 
     pub fn new(atoms: impl IntoAtoms<'a>) -> Self {
-        Self::from_button(Button::new(atoms.into_atoms()).right_text("⏵"))
+        Self::from_button(Button::new(atoms.into_atoms()).right_text(Self::RIGHT_ARROW))
     }
 
     /// Create a new submenu button from a [`Button`].
@@ -363,6 +363,17 @@ impl<'a> SubMenuButton<'a> {
         }
         let response = self.button.ui(ui);
         ui.style_mut().visuals.widgets.inactive = inactive;
+
+        let c = response.rect.right_center() - crate::vec2(10.0, 0.0);
+        let chevron_color = ui.style().interact(&response).fg_stroke.color;
+        ui.painter().add(crate::Shape::line(
+            vec![
+                c + crate::vec2(-1.5, -3.5),
+                c + crate::vec2(2.0, 0.0),
+                c + crate::vec2(-1.5, 3.5),
+            ],
+            crate::Stroke::new(1.25_f32, chevron_color),
+        ));
 
         let popup_response = self.sub_menu.show(ui, &response, content);
 

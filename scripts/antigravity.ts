@@ -228,10 +228,22 @@ export function parseAvailableModels(data: any): any[] {
   );
 }
 
+/**
+ * Offline/startup phase: restore the catalog persisted by the last live refresh so the picker lists
+ * the account's real models (Gemini 4 Neon/Argon/Hydrogen, orchestrators, ...) before the network
+ * refresh finishes, or when it fails. The built-in list is only the first-run fallback.
+ */
+function storedModels(context: any): any[] {
+  const models = Array.isArray(context?.stored?.models) ? context.stored.models : [];
+  return models.filter((m: any) => m && typeof m.id === "string" && typeof m.name === "string");
+}
+
 export async function refreshAntigravityModels(context: any): Promise<any[]> {
   const credential = context?.credential;
+  const cached = storedModels(context);
+  const fallback = cached.length ? cached : ANTIGRAVITY_MODELS;
   if (!context?.allowNetwork || credential?.type !== "oauth" || !credential.access) {
-    return ANTIGRAVITY_MODELS;
+    return fallback;
   }
   const body = JSON.stringify(credential.projectId ? { project: credential.projectId } : {});
   for (const endpoint of ENDPOINT_FALLBACKS) {
@@ -244,12 +256,19 @@ export async function refreshAntigravityModels(context: any): Promise<any[]> {
       });
       if (!res.ok) continue;
       const models = parseAvailableModels(await res.json());
-      if (models.length) return models;
+      if (models.length) {
+        try {
+          await context.publish?.({ persist: { models, checkedAt: Date.now() } });
+        } catch {
+          // Persistence is an optimization; the live list is still returned.
+        }
+        return models;
+      }
     } catch {
       if (context.signal?.aborted) break;
     }
   }
-  return ANTIGRAVITY_MODELS;
+  return fallback;
 }
 
 export function stableProjectId(seed: string): string {

@@ -109,3 +109,22 @@ test("429 errors distinguish model capacity exhaustion from quota exhaustion", a
   assert.doesNotMatch(formatAntigravityError(429, capacity), /individual or per-model limit is used up/i);
   assert.match(formatAntigravityError(429, quota), /quota exhausted.*resets 2h53m/i);
 });
+
+test("Antigravity restores and persists the account's live catalog so Gemini 4 models survive startup and failed refreshes", async () => {
+  const { refreshAntigravityModels } = await adapter();
+  const signal = new AbortController().signal;
+  const stored = { models: [{ id: "gemini-4-neon", name: "Gemini 4 Neon (Antigravity)" }] };
+  assert.deepEqual(await refreshAntigravityModels({ allowNetwork: false, stored, signal }), stored.models);
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({ ok: false, status: 503 });
+    assert.deepEqual(await refreshAntigravityModels({ allowNetwork: true, stored, credential: { type: "oauth", access: "t" }, signal }), stored.models);
+    let persisted;
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ models: { "gemini-4-neon-high": { displayName: "Gemini 4 Neon (High)", supportsImages: true } } }) });
+    const models = await refreshAntigravityModels({ allowNetwork: true, credential: { type: "oauth", access: "t" }, signal, publish: async (p) => { persisted = p; } });
+    assert.equal(models[0].id, "gemini-4-neon");
+    assert.deepEqual(persisted.persist.models, models);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

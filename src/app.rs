@@ -5,6 +5,7 @@ mod attachments;
 mod attention;
 mod automation;
 mod changes;
+mod chat_find;
 mod completions;
 mod composer_history;
 mod composer_text;
@@ -12,6 +13,7 @@ mod confirmations;
 pub(crate) mod context_capture;
 mod deletion;
 mod diagnostics;
+mod dictation;
 mod diff_viewer;
 mod files;
 mod kanban;
@@ -102,6 +104,7 @@ struct Preferences {
     closed_threads: std::collections::BTreeSet<String>,
     last_session: Option<PathBuf>,
     model_catalogs: Vec<model_cache::Catalog>,
+    hidden_models: std::collections::BTreeSet<String>,
     restart_checkpoints: Vec<restart::Checkpoint>,
     usage_cache: Option<crate::usage::CachedUsage>,
 }
@@ -163,6 +166,7 @@ pub struct Pui {
     deliveries: Vec<run_status::Delivery>,
     interrupt: Option<run_status::Interrupt>,
     draft: String,
+    dictation: dictation::Dictation,
     context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     recall_width: f32,
@@ -198,11 +202,13 @@ pub struct Pui {
     rename_chat: Option<PathBuf>,
     rename_text: String,
     usage: crate::usage::Usage,
+    dismissed_usage_warning: Option<String>,
     sessions: Vec<Session>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
     workspace: Workspace,
     workspace_rx: Option<workspace::read_only::Request<Workspace>>,
+    workspace_retry: bool,
     ctx: egui::Context,
     transcript: Transcript,
     outputs: Vec<RecordedFile>,
@@ -222,6 +228,7 @@ pub struct Pui {
     pending_dialog: Option<String>,
     focus_composer: bool,
     focus_search: bool,
+    chat_find: chat_find::ChatFind,
     screenshot: Option<PathBuf>,
     frames: usize,
 }
@@ -308,6 +315,7 @@ impl Pui {
             deliveries: Vec::new(),
             interrupt: None,
             draft: String::new(),
+            dictation: dictation::Dictation::default(),
             context_chips: Default::default(),
             recall: Default::default(),
             recall_width: 700.0,
@@ -349,6 +357,7 @@ impl Pui {
                     .map(crate::usage::Usage::from_cached)
                     .unwrap_or_default()
             },
+            dismissed_usage_warning: None,
             sessions: Vec::new(),
             session_rx: None,
             session_watch: if options.demo || cfg!(test) {
@@ -358,6 +367,7 @@ impl Pui {
             },
             workspace: Workspace::default(),
             workspace_rx: None,
+            workspace_retry: false,
             ctx: cc.egui_ctx.clone(),
             transcript: Transcript::default(),
             outputs: Vec::new(),
@@ -377,6 +387,7 @@ impl Pui {
             pending_dialog: None,
             focus_composer: true,
             focus_search: false,
+            chat_find: chat_find::ChatFind::default(),
             screenshot: options.screenshot,
             frames: 0,
         };
@@ -774,6 +785,13 @@ impl Pui {
         if self.workspace_rx.is_some() || self.demo {
             return;
         }
+        if changes::git_files::workspace_worker_busy(&self.ctx) {
+            self.workspace_retry = true;
+            self.ctx
+                .request_repaint_after(std::time::Duration::from_millis(80));
+            return;
+        }
+        self.workspace_retry = false;
         self.workspace_rx = Some(changes::git_files::start_workspace(
             &self.ctx,
             self.prefs.cwd.clone(),
@@ -843,6 +861,7 @@ impl Pui {
         };
         self.seed_model_catalog();
         self.transcript.clear();
+        self.chat_find.clear_results();
         self.pulls = Default::default();
         if let Some(path) = session.clone() {
             self.state.session_file = Some(path.display().to_string());
@@ -992,6 +1011,7 @@ impl Pui {
             self.state.context_breakdown = None;
             self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
             self.transcript.clear();
+            self.chat_find.clear_results();
             let (tx, rx) = mpsc::channel();
             self.preview_rx = Some(rx);
             let preview_path = path.clone();
@@ -1350,10 +1370,27 @@ impl Pui {
                 }),
             });
         if let Some(result) = workspace {
-            self.workspace = result;
             self.workspace_rx = None;
-            self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
-            self.changes.invalidate();
+            if result.error.as_deref()
+                == Some("A Git workspace read is still finishing. Refresh to retry.")
+            {
+                self.workspace_retry = true;
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_millis(80));
+            } else {
+                self.workspace_retry = false;
+                self.workspace = result;
+                self.diff_rx = None; // a refreshed repository snapshot invalidates an in-flight open
+                self.changes.invalidate();
+            }
+        }
+        if self.workspace_retry && self.workspace_rx.is_none() && !self.demo {
+            if changes::git_files::workspace_worker_busy(&self.ctx) {
+                self.ctx
+                    .request_repaint_after(std::time::Duration::from_millis(80));
+            } else {
+                self.refresh_workspace();
+            }
         }
         self.cancel_git_open_for_file_navigation();
         let git_review_overlay = self.settings_open
@@ -1570,6 +1607,9 @@ impl Pui {
     }
 
     fn composer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(notice) = self.dictation.poll(&mut self.draft) {
+            self.state.notice = Some(notice);
+        }
         let colors = crate::theme::palette(ui.ctx());
         if let Some(error) = self.state.error.clone() {
             egui::Frame::new()
@@ -1608,6 +1648,7 @@ impl Pui {
         let settings_before = self.prefs.settings.clone();
         self.permission_confirmation(ui);
         self.propagate_settings(&settings_before);
+        self.usage_limit_banner(ui);
         let mut submit = false;
         let mut alternate = false;
         let mut completion_anchor = None;
@@ -1860,6 +1901,8 @@ impl Pui {
                                 });
                             }
                         }
+                        self.composer_context_ring(ui);
+                        self.composer_mic_button(ui, ctx);
                     });
                 });
             });
@@ -1880,12 +1923,252 @@ impl Pui {
             self.completion_popup(ctx, anchor, layer);
         }
         if submit && !self.model_picker_open && !self.effort_picker_open {
+            self.dictation.stop();
             if alternate {
                 self.submit_mode(ctx, self.prefs.settings.delivery.opposite());
             } else {
                 self.submit(ctx);
             }
         }
+    }
+
+    fn usage_limit_banner(&mut self, ui: &mut egui::Ui) {
+        if self.demo {
+            return;
+        }
+        let Some(warning) = self.usage.warning_banner(&self.state.provider) else {
+            return;
+        };
+        if self.dismissed_usage_warning.as_deref() == Some(warning.key.as_str()) {
+            return;
+        }
+        let colors = crate::theme::palette(ui.ctx());
+        let accent = if warning.critical {
+            colors.red
+        } else {
+            colors.amber
+        };
+        let mut switch_account = false;
+        let mut dismiss = false;
+        egui::Frame::new()
+            .fill(colors.sidebar)
+            .stroke(Stroke::new(1.0, accent.linear_multiply(0.55)))
+            .corner_radius(12)
+            .inner_margin(egui::Margin {
+                left: 12,
+                right: 8,
+                top: 8,
+                bottom: 8,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    icons::inline(ui, Icon::Clock, accent);
+                    ui.label(
+                        RichText::new(&warning.title)
+                            .size(11.5)
+                            .strong()
+                            .color(colors.text),
+                    );
+                    if !warning.detail.is_empty() {
+                        ui.label(
+                            RichText::new(&warning.detail)
+                                .size(11.0)
+                                .color(colors.muted),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close = icons::button(ui, Icon::Close, "Dismiss usage warning");
+                        if close.clicked() {
+                            dismiss = true;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Switch account")
+                                        .size(11.0)
+                                        .color(colors.text),
+                                )
+                                .fill(colors.surface)
+                                .stroke(Stroke::new(1.0, colors.border))
+                                .corner_radius(6),
+                            )
+                            .on_hover_text(format!(
+                                "Open Providers settings ({})",
+                                warning.provider_name
+                            ))
+                            .clicked()
+                        {
+                            switch_account = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(6.0);
+        if dismiss {
+            self.dismissed_usage_warning = Some(warning.key);
+        }
+        if switch_account {
+            self.settings_view.select("Providers");
+            self.settings_open = true;
+        }
+    }
+
+    fn composer_mic_button(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let colors = crate::theme::palette(ui.ctx());
+        let listening = self.dictation.active();
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if listening {
+            ui.painter()
+                .rect_filled(rect, 6, colors.red.linear_multiply(0.22));
+            ui.painter().rect_stroke(
+                rect,
+                6,
+                Stroke::new(1.0_f32, colors.red),
+                egui::StrokeKind::Inside,
+            );
+        } else if response.hovered() {
+            ui.painter().rect_filled(rect, 6, colors.hover);
+        }
+        icons::draw(
+            ui,
+            rect,
+            Icon::Mic,
+            if listening {
+                colors.red
+            } else if response.hovered() {
+                colors.text
+            } else {
+                colors.muted
+            },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                !self.demo,
+                if listening {
+                    "Stop voice dictation"
+                } else {
+                    "Start voice dictation"
+                },
+            )
+        });
+        let tip = if listening {
+            "Listening… click to stop dictation"
+        } else {
+            "Voice dictation (macOS Speech Recognition)"
+        };
+        if response.on_hover_text(tip).clicked() && !self.demo {
+            if let Err(err) = self.dictation.toggle(ctx, &self.draft) {
+                self.state.notice = Some(err);
+            } else {
+                self.focus_composer = true;
+            }
+        }
+    }
+
+    fn composer_context_ring(&mut self, ui: &mut egui::Ui) {
+        let fraction = if self.demo {
+            Some(0.45_f32)
+        } else {
+            crate::context::usage_fraction(&self.state)
+        };
+        let Some(fraction) = fraction else {
+            return;
+        };
+        let colors = crate::theme::palette(ui.ctx());
+        let compact_threshold =
+            (self.prefs.settings.compact_percent as f32 / 100.0).clamp(0.1, 0.99);
+        let ring_color = if fraction >= 0.90 {
+            colors.red
+        } else if fraction >= compact_threshold {
+            colors.amber
+        } else {
+            colors.accent
+        };
+
+        let size = Vec2::splat(24.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 6, colors.hover);
+        }
+
+        let center = rect.center();
+        let radius = 7.5_f32;
+        let stroke_w = 2.0_f32;
+        ui.painter()
+            .circle_stroke(center, radius, Stroke::new(stroke_w, colors.border));
+
+        if fraction > 0.005 {
+            let sweep = fraction.clamp(0.0, 1.0) * std::f32::consts::TAU;
+            let segments = ((sweep / std::f32::consts::TAU) * 28.0).ceil().max(4.0) as usize;
+            let start = -std::f32::consts::FRAC_PI_2;
+            let points: Vec<egui::Pos2> = (0..=segments)
+                .map(|i| {
+                    let t = i as f32 / segments as f32;
+                    let angle = start + sweep * t;
+                    egui::pos2(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    )
+                })
+                .collect();
+            ui.painter()
+                .add(egui::Shape::line(points, Stroke::new(stroke_w, ring_color)));
+        }
+
+        let pct = (fraction * 100.0).round() as u32;
+        let tooltip = if self.demo {
+            "Context: 45% (450k / 1.0m) · Click to inspect".into()
+        } else {
+            let used = self
+                .state
+                .context_tokens
+                .or_else(|| self.state.context_breakdown.as_ref().map(|p| p.total()));
+            match used {
+                Some(u) if self.state.context_window > 0.0 => format!(
+                    "Context: {pct}% ({} / {}) · Click to inspect · Right-click to compact",
+                    crate::context::number(u),
+                    crate::context::number(self.state.context_window)
+                ),
+                _ => format!("Context: {pct}% · Click to inspect"),
+            }
+        };
+
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("Context usage {pct}%"),
+            )
+        });
+        let response = response.on_hover_text(tooltip);
+        if response.clicked() {
+            self.prefs.hide_inspector = false;
+            self.prefs.cards.hidden.remove(&inspector::Card::Context);
+            self.prefs.cards.collapsed.remove(&inspector::Card::Context);
+        }
+        response.context_menu(|ui| {
+            theme::menu_controls(ui);
+            if ui.button("Inspect context").clicked() {
+                self.prefs.hide_inspector = false;
+                self.prefs.cards.hidden.remove(&inspector::Card::Context);
+                self.prefs.cards.collapsed.remove(&inspector::Card::Context);
+                ui.close();
+            }
+            if !self.demo
+                && ui
+                    .add_enabled(
+                        self.connected && self.state.ready(),
+                        egui::Button::new("Compact context"),
+                    )
+                    .clicked()
+            {
+                self.send(protocol::command("compact"));
+                ui.close();
+            }
+        });
     }
 
     fn cancel_git_open_for_file_navigation(&mut self) {

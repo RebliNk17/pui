@@ -6,7 +6,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const sdk = process.env.PUI_PI_SDK || `${process.env.HOME}/.pi/agent/install/releases/1.5.0/node_modules/@earendil-works/pi-coding-agent/dist/index.js`;
 const source = stripTypeScriptTypes(await readFile(new URL('../scripts/context.ts', import.meta.url), 'utf8'));
-const { installContext, estimateCategories } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { installContext, estimateCategories, estimateDetail, splitPrompt } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 function host(manager, tokens = 4200) {
   process.env.PUI_PI_SDK = sdk;
@@ -98,4 +98,26 @@ test('unsupported Pi safely clears categories without leaking exception text', a
   await h.events.get('session_start')({}, h.ctx);
   assert.deepEqual(h.statuses.at(-1), { version: 1, sessionFile: 'session', parts: null });
   process.env.PUI_PI_SDK = sdk;
+});
+
+test('carves skills, memory files, MCP instructions and agents out of the prompt without double counting', async () => {
+  const estimate = (m) => Math.ceil(String(m.content ?? '').length / 4) + (m.toolsAdded ?? []).length * 10;
+  const prompt = [
+    'base prompt text',
+    '<project_context>\n<project_instructions path="/a/AGENTS.md">aaaa</project_instructions>\n<project_instructions path="/b/CLAUDE.md">bbbbbbbb</project_instructions>\n</project_context>',
+    '<skills>\n<skill><name>deploy</name>ship it</skill>\n<skill><name>new</name>x</skill>\n</skills>',
+    '<mcp_servers>\nserver docs\n</mcp_servers>',
+  ].join('\n');
+  const split = splitPrompt(prompt, estimate);
+  assert.deepEqual(split.items.memory.map(([name]) => name), ['/a/AGENTS.md', '/b/CLAUDE.md']);
+  assert.deepEqual(split.items.skills.map(([name]) => name), ['deploy', 'new']);
+  assert.ok(split.skills > 0 && split.memory > 0 && split.mcp_instructions > 0 && split.agents === 0);
+  assert.equal(split.system + split.skills + split.memory + split.mcp_instructions + split.agents, estimate({ content: prompt }));
+  const tools = [{ name: 'read' }, { name: 'mcp__docs__search' }];
+  const detail = estimateDetail(prompt, tools, [...tools, { name: 'mcp__docs__big' }, { name: 'later' }], estimate);
+  assert.deepEqual(detail.mcp_tools.map(([name]) => name), ['mcp__docs__search']);
+  assert.equal(detail.mcp_tools_count, 1);
+  assert.equal(detail.deferred_mcp_count, 1);
+  assert.equal(detail.deferred_system_count, 1);
+  assert.equal(detail.deferred_mcp, 10);
 });

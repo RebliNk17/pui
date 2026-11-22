@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 mod answers;
 mod context;
-pub use context::ContextBreakdown;
+pub use context::{ContextBreakdown, ContextDetail, ContextItem};
 #[cfg(test)]
 mod retry_tests;
 mod stream;
