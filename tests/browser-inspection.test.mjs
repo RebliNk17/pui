@@ -12,11 +12,11 @@ function element(tag, text = '', parent = null) {
   }
   return node;
 }
-function run(nodes, selector = 'h1') {
+function run(nodes, selector = 'h1', pick = false) {
   let visited = 0;
   const sandbox = {
     document: { createTreeWalker() { return { nextNode() { return nodes[visited++] ?? null; } }; } },
-    NodeFilter: { SHOW_ELEMENT: 1 }, Node: { TEXT_NODE: 3 },
+    NodeFilter: { SHOW_ELEMENT: 1 }, Node: { TEXT_NODE: 3, ELEMENT_NODE: 1 },
     Element: { prototype: {
       matches(query) {
         if (query === selector) return this.selected;
@@ -27,8 +27,15 @@ function run(nodes, selector = 'h1') {
     CharacterData: { prototype: { substringData(start, length) { return this.text.substring(start, start + length); } } },
     getComputedStyle(node) { return { ...style, ...node.style }; }
   };
+  if (pick) {
+    sandbox.picked = nodes[0];
+    sandbox.picked.nodeType ??= 1;
+    sandbox.picked.ownerDocument ??= sandbox.document;
+    sandbox.picked.getRootNode ??= () => sandbox.document;
+    sandbox.picked.isConnected ??= true;
+  }
   const context = vm.createContext(sandbox);
-  const value = vm.runInContext(`(${source})(${JSON.stringify(selector)})`, context, { timeout: 1000 });
+  const value = vm.runInContext(`(${source})(${pick ? 'picked' : JSON.stringify(selector)})`, context, { timeout: 1000 });
   return { value: JSON.parse(JSON.stringify(value)), visited };
 }
 
@@ -65,6 +72,18 @@ test('password/form/editable controls and descendants cannot return text or valu
   const wrapper = element('div', 'safe');
   wrapper.firstChild.nextSibling = { nodeType: 1, text: 'password', nextSibling: null };
   assert.equal(run([wrapper]).value.text, 'safe');
+});
+
+test('picked nodes use the same bounded reader and refuse foreign documents/shadow roots/disconnects', () => {
+  assert.equal(run([element('h1', 'picked public')], 'unused', true).value.text, 'picked public');
+  assert.equal(run([element('input', 'private')], 'unused', true).value.error, 'sensitive');
+  for (const change of ['document', 'shadow', 'detached']) {
+    const node = element('span', 'private');
+    if (change === 'document') node.ownerDocument = {};
+    if (change === 'shadow') node.getRootNode = () => ({});
+    if (change === 'detached') node.isConnected = false;
+    assert.equal(run([node], 'unused', true).value.error, 'unavailable', change);
+  }
 });
 
 test('text child traversal is bounded and native read errors do not echo page exceptions', () => {

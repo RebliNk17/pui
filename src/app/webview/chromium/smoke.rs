@@ -1,5 +1,6 @@
 //! Opt-in debug-only diagnostics. No disk writes, screenshots or timers unless requested.
 use super::*;
+mod picker_probe;
 use serde::Serialize;
 use std::sync::{OnceLock, mpsc};
 
@@ -8,6 +9,7 @@ pub(super) struct Diagnostics {
     last: Option<Report>,
     captured: bool,
     observer: Option<Registration>,
+    probe: picker_probe::Probe,
 }
 #[derive(Clone, PartialEq, Serialize)]
 struct Bounds {
@@ -40,6 +42,7 @@ struct Report {
 enum Output {
     Report(Report),
     Image(Vec<u8>),
+    Inspection(serde_json::Value),
 }
 fn writer() -> Option<&'static mpsc::SyncSender<Output>> {
     static WRITER: OnceLock<Option<mpsc::SyncSender<Output>>> = OnceLock::new();
@@ -58,6 +61,12 @@ fn writer() -> Option<&'static mpsc::SyncSender<Output>> {
                             if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
                                 let _ = std::fs::write(&path, bytes);
                             }
+                        }
+                        Output::Inspection(value) => {
+                            let _ = std::fs::write(
+                                path.with_extension("inspection.json"),
+                                value.to_string(),
+                            );
                         }
                         Output::Image(bytes) => {
                             let _ = std::fs::write(path.with_extension("png"), bytes);
@@ -86,6 +95,7 @@ wrap_dev_tools_message_observer! {
     }
 }
 pub(super) fn observe(tab: &mut Tab) {
+    picker_probe::Probe::tick(tab);
     let Some(writer) = writer() else {
         return;
     };

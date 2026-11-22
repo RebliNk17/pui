@@ -486,6 +486,12 @@ impl BrowserView {
                 self.inspection = None;
                 #[cfg(target_os = "macos")]
                 self.engine.cancel_inspection(key);
+            } else if decision.cancel_pick {
+                #[cfg(target_os = "macos")]
+                self.engine.cancel_inspection(key);
+            } else if decision.pick {
+                #[cfg(target_os = "macos")]
+                self.engine.pick(key, state.inspection.epoch);
             } else if let Some(query) = decision.inspect {
                 #[cfg(target_os = "macos")]
                 self.engine.inspect(key, state.inspection.epoch, &query);
