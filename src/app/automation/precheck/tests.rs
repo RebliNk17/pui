@@ -29,7 +29,10 @@ fn explicit_real_test_retains_diagnostic_without_resume_delivery_or_schedule_cha
     assert_eq!(job.last_run, before.last_run);
     assert_eq!(job.deliveries, 0);
     assert!(job.pending.is_none());
-    assert!(job.evidence.is_some());
+    assert_eq!(
+        job.evidence.as_ref().unwrap().origin_label(),
+        "Test once · no follow-up delivery"
+    );
     assert!(app.automation.precheck.is_none());
     assert!(app.automation.running.is_empty());
 }
@@ -47,6 +50,7 @@ fn deleting_a_job_cancels_only_its_one_shot_test_and_pending_confirmation() {
         run: Running {
             cancel: cancel.clone(),
             rx,
+            provenance: None,
         },
     });
     app.automation.test_confirm = Some((id.clone(), String::new()));
@@ -58,6 +62,53 @@ fn deleting_a_job_cancels_only_its_one_shot_test_and_pending_confirmation() {
     assert!(cancel.load(Ordering::Acquire));
     assert!(app.automation.precheck.is_none());
     assert!(app.automation.test_confirm.is_none());
+}
+
+#[test]
+fn stale_test_result_never_rebinds_execution_provenance_to_an_edited_job() {
+    let ctx = egui::Context::default();
+    let mut app = super::super::tests::app(&ctx);
+    let id = super::super::tests::create(&mut app, "monitor");
+    app.change_job(&id, "pause").unwrap();
+    app.request_monitor_test(&id).unwrap();
+    let (_, original) = app.automation.test_confirm.take().unwrap();
+    let provenance = evidence::Provenance::capture(
+        &app.automation.jobs[0],
+        None,
+        evidence::Origin::TestOnce,
+        100,
+    );
+    let (tx, rx) = mpsc::channel();
+    tx.send(runner::Check {
+        success: true,
+        exit_code: Some(0),
+        output: "stale result".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    app.automation.precheck = Some(Pending {
+        job: id,
+        original,
+        run: Running {
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx,
+            provenance,
+        },
+    });
+    app.automation.jobs[0].message = "edited after test started".into();
+    let before = serde_json::to_value(&app.automation.jobs).unwrap();
+    app.poll_monitor_test();
+    assert_eq!(before, serde_json::to_value(&app.automation.jobs).unwrap());
+    assert!(
+        app.automation
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("not attached")
+    );
+    assert!(app.automation.precheck.is_none());
+    assert!(app.automation.running.is_empty());
+    assert!(app.automation.mail.is_empty());
 }
 
 #[test]

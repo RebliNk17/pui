@@ -272,7 +272,7 @@ fn inline_recorded_and_working_diff_use_actual_source_and_session_identity() {
         for _ in 0..3 {
             frame(&ctx, &mut app, vec![]);
         }
-        let output = frame(&ctx, &mut app, vec![]);
+        frame(&ctx, &mut app, vec![]);
         let find = |output: &egui::FullOutput, needle: &str| {
             output
                 .shapes

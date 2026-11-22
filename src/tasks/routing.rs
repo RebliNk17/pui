@@ -11,6 +11,7 @@ pub enum Policy {
     #[default]
     Dynamic,
     Pinned,
+    Selected,
 }
 
 /// Frozen native-consent routing context. Catalog changes require a new question.
@@ -34,7 +35,7 @@ impl Approval {
         let policy = match value.get("policy") {
             None => Policy::Dynamic,
             Some(v) => serde_json::from_value(v.clone())
-                .map_err(|_| "Workflow policy must be dynamic or pinned.")?,
+                .map_err(|_| "Workflow policy must be dynamic, pinned or selected.")?,
         };
         let spend_limit = match value.get("spend_limit") {
             None => None,
@@ -75,12 +76,15 @@ impl Approval {
             return Err("Workflow does not match the approved model context.".into());
         }
         task.dynamic_routing = self.policy == Policy::Dynamic;
+        task.catalog_selected = self.policy == Policy::Selected;
+        task.selected_catalog = task.catalog_selected.then(|| self.catalog.clone());
         task.spend_limit = self.spend_limit;
         Ok(())
     }
     pub fn description(&self) -> String {
         let policy = match self.policy {
             Policy::Dynamic => "Dynamic routing: same-provider Haiku assesses each stage; only known normal-price models may launch. No silent fallback.".to_string(),
+            Policy::Selected => format!("Selected catalog model: {} / {} ({}) for every model stage. No router or substitution. Catalog context and finite positive prices are required; model-family names do not gate this explicit choice.",self.provider,self.model,self.thinking),
             Policy::Pinned => format!("Pinned routing: every model stage uses {} / {} ({}) without a router or substitutions.", self.provider, self.model, self.thinking),
         };
         let spend = self.spend_limit.map(|v| format!("Reported usage stop threshold: ${v:.2}. Delayed/in-flight usage can overshoot; not a hard billing cap."))
@@ -119,6 +123,18 @@ pub fn validate_policy(
                 .into(),
         );
     }
+    if policy == Policy::Selected {
+        let current = matches[0];
+        if current.context_window < 8192
+            || [current.input_cost, current.output_cost]
+                .iter()
+                .any(|price| !price.is_finite() || *price <= 0.0)
+            || family(model).is_some_and(Family::exceptional)
+        {
+            return Err("Selected catalog model needs sufficient context and finite positive prices; exceptional tiers remain excluded.".into());
+        }
+        return Ok(());
+    }
     let pool = candidates(models, provider);
     let current = pool.iter().find(|m| m.model == model)
         .ok_or("The current model is unclassified, unpriced or has insufficient context; no safe workflow policy is available.")?;
@@ -142,6 +158,29 @@ pub fn validate_launch(
     selection: &Selection,
     routing: bool,
 ) -> Result<(), String> {
+    if task.catalog_selected {
+        if task.selected_catalog.as_ref() != Some(&catalog_identity(models, &task.provider)?) {
+            return Err(
+                "Selected model catalog changed since approval; no paid stage launched.".into(),
+            );
+        }
+        if routing
+            || task.dynamic_routing
+            || selection.exceptional
+            || selection.provider != task.provider
+            || selection.model != task.model
+            || selection.thinking != task.thinking
+        {
+            return Err("Selected catalog policy forbids routing or substitutions.".into());
+        }
+        return validate_policy(
+            Policy::Selected,
+            models,
+            &selection.provider,
+            &selection.model,
+            &selection.thinking,
+        );
+    }
     let pool = candidates(models, &task.provider);
     let selected = pool.iter().find(|m| m.provider == selection.provider && m.model == selection.model)
         .ok_or("Selected workflow model is unavailable or outside the known policy. Nothing was substituted.")?;
@@ -383,6 +422,51 @@ mod tests {
             difficulty,
             reason: "The stage is bounded and the model matches its verification demands.".into(),
             exceptional_reason: None,
+        }
+    }
+    #[test]
+    fn explicit_selected_catalog_policy_accepts_eligible_new_models_without_router_or_substitution()
+    {
+        let models = vec![model("new-provider-model", 1.0)];
+        let approval = Approval::from_request(
+            &serde_json::json!({"policy":"selected"}),
+            &models,
+            "gateway",
+            "new-provider-model",
+            "high",
+        )
+        .unwrap();
+        let mut task = Task::new(
+            "/fixture".into(),
+            "gateway".into(),
+            "new-provider-model".into(),
+            "high".into(),
+        );
+        approval.bind(&mut task).unwrap();
+        let mut selection = Selection {
+            provider: task.provider.clone(),
+            model: task.model.clone(),
+            thinking: task.thinking.clone(),
+            ..Default::default()
+        };
+        assert!(validate_launch(&task, &models, &selection, false).is_ok());
+        let mut changed = models.clone();
+        changed[0].output_cost += 1.0;
+        assert!(validate_launch(&task, &changed, &selection, false).is_err());
+        assert!(validate_launch(&task, &models, &selection, true).is_err());
+        selection.model = "other".into();
+        assert!(validate_launch(&task, &models, &selection, false).is_err());
+        for price in [0.0, -1.0, f64::NAN] {
+            assert!(
+                Approval::from_request(
+                    &serde_json::json!({"policy":"selected"}),
+                    &[model("new-provider-model", price)],
+                    "gateway",
+                    "new-provider-model",
+                    "high"
+                )
+                .is_err()
+            );
         }
     }
     #[test]

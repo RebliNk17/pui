@@ -203,6 +203,7 @@ fn setup_cannot_submit_without_durable_started_evidence_and_record_drift_rejects
     assert_eq!(id, task.id);
     reply
         .send(Ok(refresh::Snapshot {
+            warning: None,
             records: vec![task.clone()],
             owned: Default::default(),
         }))
@@ -281,6 +282,56 @@ fn setup_confirmation_cancel_and_disabled_states_are_bounded_in_both_themes() {
 }
 
 #[test]
+fn continuation_confirmation_is_cancel_safe_in_themes_narrow_zoom_and_disabled_states() {
+    for theme in [theme::Theme::Light, theme::Theme::Dark] {
+        for zoom in [1.0, 1.5] {
+            for disabled in [false, true] {
+                let mut app = app();
+                let task = task();
+                let commands = writable(&mut app, task.clone());
+                theme.apply(&app.ctx);
+                app.ctx.set_zoom_factor(zoom);
+                app.tasks.operations.review_scope = Some(app.operation_scope());
+                app.tasks.operations.decision=Some(Decision::Continue{expected:task,boundary:domain::continuation::Boundary::Checks,detail:"Never-started checks only. No replay, builder, installation or automatic repair.".into()});
+                if disabled {
+                    app.agents.active = "foreign".into();
+                }
+                let ctx = app.ctx.clone();
+                for _ in 0..3 {
+                    let _ = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(360.0, 700.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ctx| app.task_operation_confirmation(ctx),
+                    );
+                }
+                assert!(commands.try_recv().is_err());
+                assert!(app.tasks.continuation.pending.is_none());
+                let _ = ctx.run(
+                    egui::RawInput {
+                        events: vec![egui::Event::Key {
+                            key: egui::Key::Escape,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                        ..Default::default()
+                    },
+                    |ctx| app.task_operation_confirmation(ctx),
+                );
+                assert!(app.tasks.operations.decision.is_none());
+                assert!(commands.try_recv().is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn authoritative_detach_after_setup_failure_clears_cached_parent_without_saving_it_back() {
     let mut app = app();
     let mut original = task();
@@ -293,6 +344,7 @@ fn authoritative_detach_after_setup_failure_clears_cached_parent_without_saving_
     app.tasks.operations.reconciling = Some((original.id.clone(), receiver));
     reply
         .send(Ok(refresh::Snapshot {
+            warning: None,
             records: vec![detached],
             owned: Default::default(),
         }))

@@ -89,6 +89,12 @@ impl Pui {
         let command = command.clone();
         let timeout = *timeout_seconds;
         let cwd = job.creator.cwd.clone();
+        let provenance = evidence::Provenance::capture(
+            job,
+            self.automation.home.as_deref(),
+            evidence::Origin::TestOnce,
+            now(),
+        );
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let signal = cancel.clone();
@@ -106,7 +112,11 @@ impl Pui {
         self.automation.precheck = Some(Pending {
             job: id,
             original,
-            run: Running { cancel, rx },
+            run: Running {
+                cancel,
+                rx,
+                provenance,
+            },
         });
         Ok(())
     }
@@ -128,7 +138,7 @@ impl Pui {
             j.id == pending.job
                 && serde_json::to_string(j).ok().as_deref() == Some(&pending.original)
         }) {
-            job.record_check(&check, now());
+            job.record_captured_check(&check, now(), pending.run.provenance.clone());
             job.evidence.as_mut().unwrap().mark_test();
             let _ = self.automation.persist();
         } else {

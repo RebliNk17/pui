@@ -52,6 +52,12 @@ impl Pui {
         }
         let enabled = self.task_operation_guard(task).is_ok();
         ui.horizontal_wrapped(|ui| {
+            if let Ok(boundary)=task.continuation_boundary() {
+                if ui.add_enabled(enabled,egui::Button::new("Review continuation…")).clicked(){
+                    self.tasks.operations.review_scope=Some(self.operation_scope());
+                    self.tasks.operations.decision=Some(Decision::Continue{expected:task.clone(),boundary,detail:format!("Continue {} from {:?} for captured source {}. Only never-started checks or a fresh paid review run; no uncertain effect, builder, install or apply will replay. Exact tool permissions remain separate.",task.objective,boundary,task.latest().unwrap().fingerprint.as_deref().unwrap())});
+                }
+            }
             if task.implementation_pending
                 && ui
                     .add_enabled(enabled, egui::Button::new("Review initial implementation…"))

@@ -1,6 +1,6 @@
 use super::*;
 
-fn app() -> Pui {
+pub(super) fn app() -> Pui {
     let mut app = Pui::new(
         &eframe::CreationContext::_new_kittest(egui::Context::default()),
         Options {
@@ -12,7 +12,7 @@ fn app() -> Pui {
     app.sessions.clear();
     app
 }
-fn saved(path: &str, title: &str) -> Session {
+pub(super) fn saved(path: &str, title: &str) -> Session {
     Session {
         path: path.into(),
         cwd: "/fixture".into(),
@@ -22,7 +22,7 @@ fn saved(path: &str, title: &str) -> Session {
         modified: std::time::SystemTime::UNIX_EPOCH,
     }
 }
-fn state(path: &str, title: &str) -> State {
+pub(super) fn state(path: &str, title: &str) -> State {
     State {
         session_file: Some(path.into()),
         session_name: title.into(),
@@ -75,11 +75,13 @@ fn history_preview_and_metadata_reconcile_once_per_batch() {
     let before = count();
     events.send(rpc::Event::History(vec![])).unwrap();
     app.poll_rpc();
-    assert_eq!(app.state.session_name, "Discovered title");
+    assert_eq!(app.state.assigned_title(), Some("Discovered title"));
+    assert!(app.state.session_name.is_empty());
     assert_eq!(count(), before + 1);
 
-    app.state.session_name.clear();
-    app.sessions[0].title.clear();
+    app.state = state("/fixture/preview.jsonl", "");
+    app.state.title_request = Some("a".repeat(64));
+    app.sessions = vec![saved("/fixture/preview.jsonl", "")];
     let (tx, rx) = mpsc::channel();
     app.preview_rx = Some(rx);
     tx.send(Ok(crate::history::Preview {
@@ -92,8 +94,16 @@ fn history_preview_and_metadata_reconcile_once_per_batch() {
     }))
     .unwrap();
     app.poll_rpc();
-    assert_eq!(app.state.session_name, "Preview prompt title");
-    assert_eq!(count(), before + 2);
+    assert!(
+        app.state.assigned_title().is_none(),
+        "History preview cannot assign a title"
+    );
+    let data = json!({"version":1,"sessionFile":"/fixture/preview.jsonl","sessionId":"preview-id","title":"Preview prompt title","initialRequest":"a".repeat(64)});
+    app.state.session_id = Some("preview-id".into());
+    app.state.apply(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-initial-title","statusText":data.to_string()}));
+    app.update_session_title();
+    assert_eq!(app.state.assigned_title(), Some("Preview prompt title"));
+    assert_eq!(count(), before + 3);
 
     events
         .send(rpc::Event::Record(
@@ -106,10 +116,11 @@ fn history_preview_and_metadata_reconcile_once_per_batch() {
         ))
         .unwrap();
     app.poll_rpc();
-    assert_eq!(app.sessions[0].title, "Final name");
-    assert_eq!(count(), before + 3, "Coalesce metadata in one RPC batch");
+    assert_eq!(app.sessions[0].title, "Preview prompt title");
+    assert_eq!(app.state.session_name, "Final name");
+    assert_eq!(count(), before + 4, "Coalesce metadata in one RPC batch");
     app.poll_rpc();
-    assert_eq!(count(), before + 3);
+    assert_eq!(count(), before + 4);
 }
 
 #[test]
@@ -122,10 +133,14 @@ fn state_and_user_events_keep_title_fallbacks() {
             &json!({"type":"response","command":command,"success":true})
         ));
     }
+    app.state = state("/fixture/new.jsonl", "");
+    app.state.title_request = Some("a".repeat(64));
     events.send(rpc::Event::Record(json!({"type":"response","command":"get_state","success":true,"data":{"sessionFile":"/fixture/new.jsonl","sessionName":""}}))).unwrap();
+    let data = json!({"version":1,"sessionFile":"/fixture/new.jsonl","sessionId":null,"title":"First prompt","initialRequest":"a".repeat(64)});
+    events.send(rpc::Event::Record(json!({"type":"extension_ui_request","method":"setStatus","statusKey":"pui-initial-title","statusText":data.to_string()}))).unwrap();
     events.send(rpc::Event::Record(json!({"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"First prompt"}]}}))).unwrap();
     app.poll_rpc();
-    assert_eq!(app.state.session_name, "First prompt");
+    assert_eq!(app.state.assigned_title(), Some("First prompt"));
     assert!(title_event(
         &json!({"type":"message_end","message":{"role":"user"}})
     ));
@@ -135,6 +150,7 @@ fn state_and_user_events_keep_title_fallbacks() {
 
     for title in ["", "Untitled session", "New conversation", "Opening chat…"] {
         let mut state = state("/fixture/image.jsonl", title);
+        state.title_request = Some("a".repeat(64));
         state.messages.push(Message {
             role: "user".into(),
             images: vec![
@@ -145,8 +161,12 @@ fn state_and_user_events_keep_title_fallbacks() {
             ],
             ..Default::default()
         });
-        reconcile(&mut state, None);
-        assert_eq!(state.session_name, "Image attachment");
+        reconcile(&mut state, None, &mut sidebar::ChatPrefs::default());
+        assert!(
+            state.assigned_title().is_none(),
+            "Unconfirmed title setup is not assignment"
+        );
+        assert!(state.chat_title().is_none());
     }
 }
 

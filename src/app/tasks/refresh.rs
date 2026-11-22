@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 pub(super) struct Snapshot {
     pub records: Vec<Task>,
+    pub warning: Option<String>,
     pub owned: BTreeSet<String>,
 }
 pub(super) struct Watch {
@@ -44,6 +45,7 @@ pub(super) fn watch(home: PathBuf, ctx: &egui::Context) -> Watch {
 }
 impl Tasks {
     fn merge_history(&mut self, snapshot: Snapshot) {
+        self.history_warning = snapshot.warning;
         // Locally queued writes and live jobs win over any earlier disk snapshot.
         let protected = |id: &str| {
             snapshot.owned.contains(id)

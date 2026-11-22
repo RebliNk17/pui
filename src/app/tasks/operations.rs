@@ -10,6 +10,11 @@ mod tests;
 mod ui;
 
 pub(super) enum Decision {
+    Continue {
+        expected: Task,
+        boundary: domain::continuation::Boundary,
+        detail: String,
+    },
     Rerun(recovery::Request),
     Resume(recovery::Request),
     Setup {
@@ -39,7 +44,7 @@ struct Save {
 pub(super) struct State {
     pub(super) decision: Option<Decision>,
     reading: Option<(String, Receiver<Result<ReadResult, String>>)>,
-    review_scope: Option<(String, Option<String>, settings::PermissionMode)>,
+    pub(super) review_scope: Option<(String, Option<String>, settings::PermissionMode)>,
     applying: Option<(
         String,
         Receiver<Result<domain::apply::ApplyOutcome, String>>,
@@ -66,7 +71,7 @@ impl State {
     }
 }
 impl Pui {
-    fn operation_scope(&self) -> (String, Option<String>, settings::PermissionMode) {
+    pub(super) fn operation_scope(&self) -> (String, Option<String>, settings::PermissionMode) {
         (
             self.agents.active.clone(),
             self.state.session_file.clone(),
@@ -87,7 +92,7 @@ impl Pui {
             && self.tasks.live.is_none()
             && self.tasks.job.is_none()
     }
-    fn task_operation_guard(&self, expected: &Task) -> Result<(), String> {
+    pub(super) fn task_operation_guard(&self, expected: &Task) -> Result<(), String> {
         if self.demo || self.is_mirror() || self.readonly_worker() || self.deletion.in_progress() {
             return Err(
                 "A writable owning conversation is required; no workflow action started.".into(),
@@ -116,6 +121,7 @@ impl Pui {
             || self.task_recovery_active()
             || self.tasks.setup.is_some()
             || self.tasks.operations.busy()
+            || self.tasks.continuation.pending.is_some()
         {
             return Err("Wait for workflow work, storage and pending actions to finish.".into());
         }
@@ -137,7 +143,10 @@ impl Pui {
         Ok(())
     }
     pub(super) fn task_operations_busy(&self) -> bool {
-        self.tasks.operations.busy() || self.tasks.setup.is_some() || self.task_recovery_active()
+        self.tasks.operations.busy()
+            || self.tasks.setup.is_some()
+            || self.task_recovery_active()
+            || self.tasks.continuation.pending.is_some()
     }
     pub(in crate::app) fn task_operations_confirming(&self) -> bool {
         self.tasks.operations.confirming()
@@ -245,6 +254,12 @@ impl Pui {
             return;
         };
         let (title, detail, label, danger) = match &decision {
+            Decision::Continue { detail, .. } => (
+                "Continue from this completed boundary?",
+                detail.clone(),
+                "Continue workflow",
+                false,
+            ),
             Decision::Rerun(request) => (
                 "Rerun these checks?",
                 format!("{}\n{}", request.summary, request.detail),
@@ -294,6 +309,13 @@ impl Pui {
         };
         let blocked = match &decision {
             Decision::Rerun(_) | Decision::Resume(_) => None,
+            Decision::Continue { expected, .. } => {
+                if self.tasks.operations.review_scope.as_ref() != Some(&self.operation_scope()) {
+                    Some("Conversation or permission changed; review again.".into())
+                } else {
+                    self.task_operation_guard(expected).err()
+                }
+            }
             Decision::Setup { expected, .. } => {
                 if self.tasks.operations.review_scope.as_ref() != Some(&self.operation_scope()) {
                     Some("Conversation or permission context changed; cancel and review a fresh setup plan.".into())
@@ -322,6 +344,9 @@ impl Pui {
             Some(confirmations::Choice::Cancel) => {}
             Some(confirmations::Choice::Confirm) => {
                 let result = match decision {
+                    Decision::Continue {
+                        expected, boundary, ..
+                    } => self.task_confirm_continuation(expected, boundary),
                     Decision::Rerun(request) => self.task_confirm_check_rerun(request),
                     Decision::Resume(request) => self.task_confirm_initial_resume(request),
                     Decision::Setup {

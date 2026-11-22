@@ -1,4 +1,6 @@
 use super::*;
+#[path = "dispatch_tests.rs"]
+mod dispatch_tests;
 #[path = "reliability_tests.rs"]
 mod reliability_tests;
 #[path = "watch_scope_tests.rs"]
@@ -76,6 +78,7 @@ fn process(app: &mut Pui, role: Role) {
             accepted: false,
             settled: false,
             aborted: false,
+            operation: None,
         }),
         initializing: false,
         ended: false,

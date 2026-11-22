@@ -1,7 +1,9 @@
 //! One application-context budget for retained file-preview payloads, including
 //! completed worker results waiting in hidden/parked tabs. No polling or eviction.
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+
+static NEXT_DOCUMENT: AtomicU64 = AtomicU64::new(1);
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Default)]
@@ -11,6 +13,7 @@ struct Pool {
 pub(crate) struct Lease {
     pool: Arc<Pool>,
     bytes: AtomicUsize,
+    document: u64,
 }
 impl Lease {
     pub(crate) fn new(ctx: &egui::Context) -> Arc<Self> {
@@ -21,7 +24,12 @@ impl Lease {
         Arc::new(Self {
             pool,
             bytes: AtomicUsize::new(0),
+            document: NEXT_DOCUMENT.fetch_add(1, Ordering::Relaxed),
         })
+    }
+    // Each load owns a fresh lease, including refresh/reopen of the same path.
+    pub(super) fn document(&self) -> u64 {
+        self.document
     }
     // One worker owns writes to this lease. It can reserve image output before
     // decoding, then reconcile actual capacity without double charging.

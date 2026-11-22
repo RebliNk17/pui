@@ -40,9 +40,16 @@ impl Pui {
     ) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        self.tasks.job = Some(Job { task, rx });
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        self.tasks.job = Some(Job { task, rx, cancel });
         std::thread::spawn(move || {
-            let _ = tx.send(job());
+            let result = domain::workspace::with_operation(
+                worker_cancel,
+                std::time::Instant::now() + DEADLINE,
+                job,
+            );
+            let _ = tx.send(result);
             ctx.request_repaint();
         });
     }
@@ -195,8 +202,22 @@ impl Pui {
             return;
         };
         let note = report.note();
+        if let Some(receipt) = &task.profile {
+            let root = task.workspace.as_ref().unwrap_or(&task.source);
+            if domain::profile::load(root)
+                .ok()
+                .flatten()
+                .is_none_or(|current| current.digest != receipt.digest)
+            {
+                self.tasks.block(
+                    "Reviewed execution profile changed; approve a new plan before further work.",
+                );
+                return;
+            }
+        }
         if !report.blockers.is_empty() {
-            self.tasks.block(note);
+            self.tasks
+                .block_with_reason(note, domain::decision::Reason::MissingPrerequisite);
             return;
         }
         task.note = format!("{}\n{}", task.note, note).trim().to_owned();
@@ -273,7 +294,12 @@ impl Pui {
         if self.tasks.job.is_some() {
             return;
         }
-        self.tasks.retire();
+        if !matches!(
+            step,
+            FingerprintStep::FeedbackBefore | FingerprintStep::FeedbackAfter
+        ) {
+            self.tasks.retire();
+        }
         let Some(t) = self.tasks.live_task().or_else(|| self.tasks.current()) else {
             return;
         };
@@ -287,6 +313,17 @@ impl Pui {
         });
     }
     fn task_fingerprinted(&mut self, step: FingerprintStep, fingerprint: String) {
+        if step == FingerprintStep::Continue {
+            self.task_continue_fingerprinted(&fingerprint);
+            return;
+        }
+        if matches!(
+            step,
+            FingerprintStep::FeedbackBefore | FingerprintStep::FeedbackAfter
+        ) {
+            self.task_feedback_fingerprinted(step, fingerprint);
+            return;
+        }
         if matches!(
             step,
             FingerprintStep::RecoveryBeforeChecks
@@ -320,6 +357,7 @@ impl Pui {
             } else {
                 t.invalidate(note);
             }
+            self.tasks.continuation = Default::default();
             self.tasks.save();
             self.tasks.retire();
             self.tasks.live = None;
@@ -340,10 +378,21 @@ impl Pui {
             | FingerprintStep::RecoveryBeforeChecks
             | FingerprintStep::RecoveryAfterChecks
             | FingerprintStep::RecoveryAfterReview
-            | FingerprintStep::InitialResumeBeforeBuilder => unreachable!(),
+            | FingerprintStep::InitialResumeBeforeBuilder
+            | FingerprintStep::FeedbackBefore
+            | FingerprintStep::FeedbackAfter
+            | FingerprintStep::Continue => unreachable!(),
         }
     }
     pub(super) fn task_launch(&mut self, role: Role) {
+        if !self.task_continuation_guard() {
+            return;
+        }
+        if self.task_continuation_active() && !matches!(role, Role::Checks | Role::Verifier) {
+            self.tasks
+                .block("Continuation cannot launch implementation or proposal.");
+            return;
+        }
         if !self.task_recovery_runtime_guard() {
             return;
         }
@@ -361,6 +410,7 @@ impl Pui {
             return;
         }
         if self.tasks.live_task().is_some_and(|t| t.dynamic_routing)
+            && !self.task_continuation_active()
             && role != Role::Checks
             && self.task_recovery_execution().is_none()
         {
@@ -390,6 +440,15 @@ impl Pui {
         routing_for: Option<Role>,
         route_prompt: Option<String>,
     ) {
+        if !self.task_continuation_guard() {
+            return;
+        }
+        if self.task_continuation_active()
+            && (!matches!(role, Role::Checks | Role::Verifier) || routing_for.is_some())
+        {
+            self.tasks.block("Continuation cannot route or implement.");
+            return;
+        }
         if !self.task_recovery_runtime_guard() {
             return;
         }
@@ -425,7 +484,7 @@ impl Pui {
             Role::Verifier => "verifier",
         };
         let tools = if role == Role::Builder {
-            "read,grep,find,ls,edit,write,pui_ask_questions"
+            "read,grep,find,ls,edit,write,pui_ask_questions,pui_run_check"
         } else {
             "read,grep,find,ls"
         };
@@ -500,6 +559,7 @@ impl Pui {
                 accepted: false,
                 settled: false,
                 aborted: false,
+                operation: None,
             },
             Err(e) => {
                 self.tasks.block(e);
@@ -563,7 +623,7 @@ impl Pui {
             .map(|a| serde_json::to_string(a).unwrap())
             .unwrap_or_default();
         format!(
-            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: the separate check runner runs approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations.\nObjective:\n{}\nConstraints:\n{}\nReviewed implementation plan:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
+            "Implement only this bounded objective and its frozen acceptance contract. Read relevant code first. Use file tools to implement and add meaningful regression coverage. No shell, package installs, delegation, commits, merges, pushes or deployment: request pui_run_check with a frozen criterion ID for bounded focused feedback while implementing; the independent acceptance runner repeats all approved commands after you stop. Do not weaken existing tests or claim unexecuted tests passed. Stop with a concise files-changed summary and limitations.\nObjective:\n{}\nConstraints:\n{}\nReviewed implementation plan:\n{}\nFrozen contract:\n{}\nPrevious failed attempt evidence (if any):\n{}",
             t.objective,
             t.constraints,
             t.execution_plan
@@ -588,7 +648,20 @@ impl Pui {
             return;
         }
         let role = self.tasks.processes[index].role;
-        let command = if role == Role::Checks {
+        let command = if role == Role::Checks && self.tasks.feedback.builder.is_some() {
+            let task = self.tasks.live_task().unwrap();
+            let check = task
+                .approved
+                .as_ref()
+                .unwrap()
+                .criteria
+                .iter()
+                .find(|c| c.id == self.tasks.feedback.criterion)
+                .unwrap()
+                .clone();
+            self.tasks.feedback.run = Some(self.tasks.processes[index].run.clone());
+            json!({"type":"bash","command":check.command,"excludeFromContext":true})
+        } else if role == Role::Checks {
             let t = self.tasks.live_task().unwrap();
             let evidence = t.current_evidence().unwrap();
             let checks = &evidence.checks;
@@ -627,6 +700,133 @@ impl Pui {
                 .unwrap_or_else(|| self.task_prompt(role));
             json!({"type":"prompt","message":prompt})
         };
+        self.task_stage_dispatch(index, command);
+    }
+    pub(super) fn task_stage_dispatch(&mut self, index: usize, command: Value) {
+        if !self.task_continuation_guard() {
+            return;
+        }
+        if self.tasks.dispatch.is_some() {
+            return;
+        }
+        let Some(expected) = self.tasks.live_task().cloned() else {
+            return;
+        };
+        if expected.pause_requested {
+            self.tasks.block("Paused at an operation boundary. Completed evidence is retained; use an explicit scoped recovery action to continue. No next operation was dispatched.");
+            return;
+        }
+        let run = self.tasks.processes[index].run.clone();
+        let role = self.tasks.processes[index].role;
+        let method = protocol::string(&command, "type");
+        let operation = match self.tasks.live_mut().unwrap().stage_operation(
+            &run,
+            role,
+            method,
+            command.to_string().as_bytes(),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                self.tasks.block(error);
+                return;
+            }
+        };
+        let mut task = self.tasks.live_task().unwrap().clone();
+        task.updated = domain::now();
+        *self.tasks.live_mut().unwrap() = task.clone();
+        let record = serde_json::to_string(&task).unwrap();
+        let Some(store) = self.tasks.store.as_ref() else {
+            if cfg!(test) {
+                self.task_dispatch(index, command, operation);
+            } else {
+                self.tasks
+                    .block("Workflow storage unavailable; no effect was dispatched.");
+            }
+            return;
+        };
+        let (reply, rx) = mpsc::channel();
+        if store
+            .send(StoreCommand::SaveAcknowledged {
+                expected: Box::new(expected.clone()),
+                task: Box::new(task),
+                reply,
+            })
+            .is_err()
+        {
+            self.tasks
+                .block("Workflow dispatch intent could not be persisted; nothing was dispatched.");
+            return;
+        }
+        self.tasks.dispatch = Some(Dispatch {
+            run,
+            operation,
+            command,
+            record,
+            before: expected,
+            reply: rx,
+        });
+        self.ctx.request_repaint();
+    }
+    fn task_poll_dispatch(&mut self) {
+        let Some(dispatch) = self.tasks.dispatch.as_ref() else {
+            return;
+        };
+        let result=match dispatch.reply.try_recv() {
+            Ok(result)=>result,
+            Err(mpsc::TryRecvError::Empty)=>return,
+            Err(mpsc::TryRecvError::Disconnected)=>Err("Dispatch persistence acknowledgment lost; no effect was submitted. Inspect authoritative state before continuing.".into()),
+        };
+        let dispatch = self.tasks.dispatch.take().unwrap();
+        let valid = self
+            .tasks
+            .live_task()
+            .is_some_and(|t| serde_json::to_string(t).ok().as_ref() == Some(&dispatch.record));
+        if result.is_err()
+            || !valid
+            || self.tasks.storage_failed
+            || !self.task_recovery_runtime_guard()
+            || !self.task_continuation_guard()
+        {
+            // Reconcile via the authoritative writer. A failed/unknown CAS is
+            // never followed by an unguarded save of our speculative record.
+            let error = result.err().unwrap_or_else(|| {
+                "Workflow changed before acknowledged dispatch; nothing submitted.".into()
+            });
+            if let Some(task) = self.tasks.live_task().cloned() {
+                self.task_recovery_reconcile(dispatch.before, task, error, false);
+            }
+            return;
+        }
+        let Some(index) = self
+            .tasks
+            .processes
+            .iter()
+            .position(|p| p.run == dispatch.run && !p.ended)
+        else {
+            return;
+        };
+        if self.tasks.processes[index].role != Role::Checks
+            && !self.task_validate_model_launch(
+                self.tasks.processes[index].role,
+                &self
+                    .tasks
+                    .live_task()
+                    .unwrap()
+                    .runs
+                    .iter()
+                    .find(|r| r.id == dispatch.run)
+                    .unwrap()
+                    .selection
+                    .clone()
+                    .unwrap(),
+                self.tasks.processes[index].routing_for.is_some(),
+            )
+        {
+            return;
+        }
+        self.task_dispatch(index, dispatch.command, dispatch.operation);
+    }
+    fn task_dispatch(&mut self, index: usize, command: Value, operation: String) {
         let method = protocol::string(&command, "type").to_owned();
         match self.tasks.processes[index].client.enqueue(command) {
             Ok(id) => {
@@ -638,6 +838,7 @@ impl Pui {
                     accepted: false,
                     settled: false,
                     aborted: false,
+                    operation: Some(operation),
                 })
             }
             Err(e) => {
@@ -660,6 +861,10 @@ impl Pui {
         self.ctx.request_repaint_after(DEADLINE);
     }
     pub(super) fn task_poll_processes(&mut self) {
+        if !self.task_continuation_guard() {
+            return;
+        }
+        self.task_poll_dispatch();
         if self.tasks.live.is_none() {
             return;
         }
@@ -682,6 +887,12 @@ impl Pui {
         }
         if let Some(p) = self.tasks.processes.iter().find(|p| {
             !p.ended
+                && self
+                    .tasks
+                    .feedback
+                    .builder
+                    .as_ref()
+                    .is_none_or(|(run, _)| run != &p.run)
                 && p.pending
                     .as_ref()
                     .is_some_and(|p| p.started.elapsed() > DEADLINE)
@@ -709,6 +920,9 @@ impl Pui {
                 return;
             }
         };
+        if self.task_feedback_request(i, &record) {
+            return;
+        }
         if record["type"] == "extension_ui_request"
             && record["method"] == "input"
             && record["title"] == "Pui steering window"
@@ -809,6 +1023,63 @@ impl Pui {
         if matching && pending.as_ref().is_some_and(|p| p.command == "bash") {
             let data = &record["data"];
             let t = self.tasks.live_mut().unwrap();
+            if data["exitCode"].as_i64().is_some()
+                && data["cancelled"] != true
+                && let Some(operation) = pending.as_ref().and_then(|p| p.operation.as_deref())
+            {
+                if let Err(error) = t.complete_operation(operation, &run) {
+                    self.tasks.block(error);
+                    return;
+                }
+            }
+            self.tasks.processes[i].pending = None;
+            if self.tasks.feedback.run.as_deref() == Some(&run) {
+                let criterion = self.tasks.feedback.criterion.clone();
+                let fingerprint = self.tasks.feedback.fingerprint.clone();
+                let t = self.tasks.live_mut().unwrap();
+                let command = t
+                    .approved
+                    .as_ref()
+                    .unwrap()
+                    .criteria
+                    .iter()
+                    .find(|c| c.id == criterion)
+                    .unwrap()
+                    .command
+                    .clone();
+                let check = Check {
+                    criterion: criterion.clone(),
+                    command,
+                    exit_code: data["exitCode"].as_i64(),
+                    output: protocol::string(data, "output")
+                        .chars()
+                        .take(24000)
+                        .collect(),
+                    truncated: data["truncated"] == true
+                        || protocol::string(data, "output").chars().count() > 24000,
+                    cancelled: data["cancelled"] == true,
+                    duration_ms: pending.unwrap().started.elapsed().as_millis() as u64,
+                };
+                let unknown = check.cancelled || check.exit_code.is_none();
+                t.feedback.push(domain::feedback::Feedback {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    criterion,
+                    attempt: t.latest().unwrap().number,
+                    fingerprint,
+                    check,
+                });
+                self.tasks.processes[i].ended = true;
+                if unknown {
+                    self.tasks.block(
+                        "Focused check outcome uncertain; builder continuation was not resumed.",
+                    );
+                    return;
+                }
+                self.tasks.save();
+                self.task_fingerprint(FingerprintStep::FeedbackAfter);
+                return;
+            }
+            let t = self.tasks.live_mut().unwrap();
             let recovery = t.recoveries.last_mut().filter(|r| r.state.active());
             let checks = if let Some(execution) = recovery {
                 &mut execution.checks
@@ -846,9 +1117,14 @@ impl Pui {
             } else {
                 environment::failed_requirement(last)
             };
+            let category = if last.cancelled || last.exit_code.is_none() {
+                domain::decision::Reason::UnknownEffect
+            } else {
+                domain::decision::Reason::MissingPrerequisite
+            };
             self.tasks.save();
             if let Some(reason) = environment_blocker {
-                self.tasks.block(reason);
+                self.tasks.block_with_reason(reason, category);
                 return;
             }
             self.task_send_work(i);
@@ -901,6 +1177,21 @@ impl Pui {
                 .unwrap_or_default();
             let role = p.role;
             let routing_for = p.routing_for;
+            if let Some(operation) = p
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.operation.clone())
+            {
+                if let Err(error) = self
+                    .tasks
+                    .live_mut()
+                    .unwrap()
+                    .complete_operation(&operation, &run)
+                {
+                    self.tasks.block(error);
+                    return;
+                }
+            }
             self.tasks.processes[i].pending = None;
             self.tasks.processes[i].ended = true;
             if let Some(r) = self
@@ -1001,42 +1292,51 @@ impl Pui {
                 .block("Recovery cannot resume implementation or consume repair rounds.");
             return;
         }
+        use domain::decision::{Decision, Reason};
+        let continuation = self.task_continuation_active();
         let t = self.tasks.live_mut().unwrap();
-        let c = t.approved.as_ref().unwrap();
-        let a = t.latest().unwrap();
-        if a.passed(c) {
-            t.phase = Phase::Ready;
-            t.note="Executed checks and independent review passed for the displayed source fingerprint. This is bounded evidence, not proof of all behavior. Workflow complete; files were not committed, merged or deployed.".into();
-            self.tasks.save();
-            self.tasks.retire();
-            self.tasks.live = None;
-            return;
-        }
-        if a.review
-            .as_ref()
-            .is_some_and(|r| r.criteria.iter().any(|f| f.status == Verdict::Blocked))
-            || a.checks
-                .iter()
-                .any(|c| c.cancelled || c.exit_code.is_none())
-        {
-            self.tasks.block("Verification could not establish a criterion, or a check was cancelled. Inspect evidence; no automatic repair.");
-            return;
-        }
-        if a.number >= 2 {
-            t.phase = Phase::Failed;
-            t.note="Initial implementation and two repair rounds exhausted. Inspect findings; nothing was committed or merged.".into();
-            self.tasks.save();
-            self.tasks.retire();
-            self.tasks.live = None;
-            return;
-        }
-        let number = a.number + 1;
+        let decision = domain::decision::finish(
+            t.latest().unwrap(),
+            t.approved.as_ref().unwrap(),
+            continuation,
+        );
+        let number = match decision {
+            Decision::Verified => {
+                t.phase = Phase::Ready;
+                t.reason = Some(Reason::Verified);
+                t.note="Executed checks and independent review passed for the displayed source fingerprint. This is bounded evidence, not proof of all behavior. Workflow complete; files were not committed, merged or deployed.".into();
+                self.tasks.continuation = Default::default();
+                self.tasks.save();
+                self.tasks.retire();
+                self.tasks.live = None;
+                return;
+            }
+            Decision::Blocked(reason) => {
+                self.tasks.block_with_reason("Verification could not establish a criterion, or a check was cancelled. Inspect evidence; no automatic repair.", reason);
+                return;
+            }
+            Decision::Failed(reason) => {
+                t.phase = Phase::Failed;
+                t.reason = Some(reason);
+                t.note=if continuation {"Fresh continuation checks or review failed. No builder or automatic repair was authorized; inspect findings."} else {"Initial implementation and two repair rounds exhausted. Inspect findings; nothing was committed or merged."}.into();
+                self.tasks.continuation = Default::default();
+                self.tasks.save();
+                self.tasks.retire();
+                self.tasks.live = None;
+                return;
+            }
+            Decision::Repair(number) => number,
+        };
+        t.reason = None;
         t.phase = Phase::Checking;
         self.tasks.save();
         self.tasks.retire();
         self.task_environment(environment::Stage::Repair(number));
     }
     pub(super) fn task_answer(&mut self, run: &str, id: &str, mut response: Value) {
+        if !self.task_continuation_guard() {
+            return;
+        }
         if !self.task_recovery_runtime_guard() {
             return;
         }

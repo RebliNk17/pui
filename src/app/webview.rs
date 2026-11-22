@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 pub(super) mod chrome;
 mod console;
+mod inspection;
 mod viewport;
 use console::ConsoleLine;
 #[cfg(target_os = "macos")]
@@ -102,6 +103,7 @@ struct PageState {
     forward: bool,
     error: Option<String>,
     console: std::collections::VecDeque<ConsoleLine>,
+    inspection: inspection::State,
 }
 #[derive(Clone, Copy)]
 enum Action {
@@ -110,7 +112,6 @@ enum Action {
     Reload,
     Stop,
     DevTools,
-    Inspect,
 }
 
 #[derive(Default)]
@@ -121,13 +122,14 @@ pub(super) struct BrowserView {
     active: String,
     last_location: String,
     viewport_editor: Option<viewport::Editor>,
+    inspection: Option<inspection::Editor>,
     unavailable: bool,
 }
 impl BrowserView {
     pub(super) fn focused(&self) -> bool {
         // App-level Escape handling runs before browser UI: an open dimension
         // editor owns cancellation even when the native page has lost focus.
-        if self.viewport_editor.is_some() {
+        if self.viewport_editor.is_some() || self.inspection.is_some() {
             return true;
         }
         #[cfg(target_os = "macos")]
@@ -136,6 +138,8 @@ impl BrowserView {
         false
     }
     pub(super) fn hide(&mut self) {
+        // Dialog/approval surfaces temporarily hide native CEF each frame. Keep
+        // the native editor (and its keyboard ownership), but cancel its data.
         #[cfg(target_os = "macos")]
         self.engine.hide();
     }
@@ -146,9 +150,17 @@ impl BrowserView {
         self.active.clear();
         self.last_location.clear();
         self.viewport_editor = None;
+        self.inspection = None;
         self.unavailable = false;
     }
     pub(super) fn close(&mut self, key: &str) {
+        if self
+            .inspection
+            .as_ref()
+            .is_some_and(|editor| editor.key == key)
+        {
+            self.inspection = None;
+        }
         #[cfg(target_os = "macos")]
         self.engine.close(key);
         self.options.remove(key);
@@ -275,8 +287,25 @@ impl BrowserView {
     }
     pub(super) fn tools(&mut self, ui: &mut egui::Ui, key: &str) {
         self.active = key.into();
-        if chrome::icon_button(ui, Icon::Inspect, "Inspect an element", false).clicked() {
-            self.action(Action::Inspect);
+        let inspecting = self
+            .inspection
+            .as_ref()
+            .is_some_and(|editor| editor.key == key);
+        if chrome::icon_button(ui, Icon::Inspect, "Inspect an element", inspecting).clicked() {
+            #[cfg(target_os = "macos")]
+            self.engine.cancel_inspection(key);
+            #[cfg(target_os = "macos")]
+            if !inspecting {
+                self.engine.prepare_inspection(key);
+            }
+            self.inspection = if inspecting {
+                None
+            } else {
+                Some(inspection::Editor::new(
+                    key,
+                    self.state(key).inspection.epoch,
+                ))
+            };
         }
         if chrome::icon_button(ui, Icon::Code, "Open Chrome DevTools", false).clicked() {
             self.action(Action::DevTools);
@@ -418,6 +447,52 @@ impl BrowserView {
         key: &str,
         state: PageState,
     ) -> egui::Rect {
+        if self
+            .inspection
+            .as_ref()
+            .is_some_and(|editor| editor.key != key)
+        {
+            if let Some(editor) = self.inspection.take() {
+                #[cfg(target_os = "macos")]
+                self.engine.cancel_inspection(&editor.key);
+                #[cfg(not(target_os = "macos"))]
+                let _ = editor;
+            }
+        }
+        if let Some(editor) = self.inspection.as_mut() {
+            let colors = theme::palette(ui.ctx());
+            let decision = egui::Frame::new()
+                .fill(colors.surface)
+                .inner_margin(12)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("element-inspection", key))
+                        .max_height((ui.available_height() * 0.55).clamp(80.0, 320.0))
+                        .show(ui, |ui| {
+                            inspection::show(
+                                ui,
+                                editor,
+                                &state.inspection,
+                                cfg!(target_os = "macos")
+                                    && state.inspection.ready
+                                    && !self.unavailable
+                                    && !state.loading,
+                            )
+                        })
+                        .inner
+                })
+                .inner;
+            if decision.close {
+                self.inspection = None;
+                #[cfg(target_os = "macos")]
+                self.engine.cancel_inspection(key);
+            } else if let Some(query) = decision.inspect {
+                #[cfg(target_os = "macos")]
+                self.engine.inspect(key, state.inspection.epoch, &query);
+                #[cfg(not(target_os = "macos"))]
+                let _ = query;
+            }
+        }
         let options = self.options.entry(key.into()).or_default();
         let mut state = state;
         if let Some(lines) = &options.console_paused {

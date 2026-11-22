@@ -224,17 +224,59 @@ fn recovery_history_scan_overflow_blocks_instead_of_omitting_uncertain_transacti
     );
 }
 #[test]
-fn missing_parent_addition_is_blocked_upfront() {
+fn missing_parent_addition_applies_with_directory_receipts_and_conditional_rollback() {
+    let mut f = Fixture::new();
+    fs::create_dir_all(f.candidate().join("newdir/nested")).unwrap();
+    fs::write(f.candidate().join("newdir/nested/file.txt"), "new\n").unwrap();
+    f.review();
+    let index = f.index();
+    let plan = prepare(&f.task).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let result = apply(&f.home, &f.task, &plan).unwrap();
+    assert_eq!(result.status, TransactionStatus::Applied);
+    assert_eq!(
+        fs::read_to_string(f.original().join("newdir/nested/file.txt")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(f.index(), index);
+    let claim = crate::tasks::store::lock(&f.home, &f.task.id).unwrap();
+    let rolled = recover_owned(
+        &f.home,
+        &claim,
+        &f.task,
+        &result.transaction_id,
+        RecoveryAction::RollBack,
+    )
+    .unwrap();
+    assert_eq!(
+        rolled.status,
+        TransactionStatus::RolledBack,
+        "{}",
+        rolled.detail
+    );
+    assert!(!f.original().join("newdir").exists());
+    assert_eq!(f.index(), index);
+}
+#[test]
+fn new_directory_rollback_preserves_external_files() {
     let mut f = Fixture::new();
     fs::create_dir(f.candidate().join("newdir")).unwrap();
-    fs::write(f.candidate().join("newdir/file.txt"), "new\n").unwrap();
+    fs::write(f.candidate().join("newdir/file.txt"), "candidate\n").unwrap();
     f.review();
-    let plan = prepare(&f.task).unwrap();
-    assert!(
-        plan.blockers
-            .iter()
-            .any(|b| b.contains("existing real parent"))
+    let result = apply(&f.home, &f.task, &prepare(&f.task).unwrap()).unwrap();
+    fs::write(f.original().join("newdir/external.txt"), "user\n").unwrap();
+    let claim = crate::tasks::store::lock(&f.home, &f.task.id).unwrap();
+    let rolled = recover_owned(
+        &f.home,
+        &claim,
+        &f.task,
+        &result.transaction_id,
+        RecoveryAction::RollBack,
+    )
+    .unwrap();
+    assert_eq!(rolled.status, TransactionStatus::RecoveryRequired);
+    assert_eq!(
+        fs::read_to_string(f.original().join("newdir/external.txt")).unwrap(),
+        "user\n"
     );
-    assert!(apply(&f.home, &f.task, &plan).is_err());
-    assert!(!f.original().join("newdir").exists());
 }

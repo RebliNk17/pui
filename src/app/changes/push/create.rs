@@ -10,7 +10,11 @@ pub(super) struct Form {
     pub(super) pending: Option<workspace::read_only::Request<Result<(), String>>>,
 }
 impl Changes {
-    pub(in crate::app::changes) fn remote_create(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+    pub(in crate::app::changes) fn remote_create(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+    ) {
         if let Some(result) = self
             .push
             .create

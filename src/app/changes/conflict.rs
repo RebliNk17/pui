@@ -1,5 +1,6 @@
-//! Read-only three-way conflict inspection; never automatic marker deletion or resolution.
+//! Explicit conflict inspection, working-text edit and separately reviewed index resolution.
 use super::*;
+mod resolution;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -11,6 +12,12 @@ pub(super) struct Conflict {
     review: Option<workspace::conflict::Review>,
     notice: Option<String>,
     side: usize,
+    resolution: resolution::Resolution,
+}
+impl Conflict {
+    pub(super) fn begin_rows(&mut self) {
+        self.resolution.begin_rows();
+    }
 }
 impl Changes {
     pub(super) fn conflict_row(
@@ -18,6 +25,7 @@ impl Changes {
         ui: &mut egui::Ui,
         workspace: &Workspace,
         file: &workspace::FileChange,
+        loading: bool,
     ) {
         if !matches!(
             file.status.as_str(),
@@ -27,8 +35,12 @@ impl Changes {
         }
         let s = &mut self.conflict;
         let enabled = self.index_writable
+            && !loading
+            && workspace.is_git
+            && workspace.error.is_none()
             && s.pending.is_none()
             && s.review.is_none()
+            && !s.resolution.busy()
             && !egui::Popup::is_any_open(ui.ctx())
             && ui.memory(|m| m.top_modal_layer().is_none());
         if prompt_ui::button(
@@ -66,16 +78,46 @@ impl Changes {
                 s.notice = Some("Cannot inspect conflict.".into());
             }
         }
+        let resolution_enabled = self.index_writable
+            && !loading
+            && workspace.is_git
+            && workspace.error.is_none()
+            && s.pending.is_none()
+            && s.review.is_none()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && ui.memory(|m| m.top_modal_layer().is_none());
+        ui.push_id(
+            (
+                &self.identity,
+                &workspace.root,
+                &file.path,
+                "conflict-resolution",
+            ),
+            |ui| {
+                if s.resolution.row(
+                    ui,
+                    &workspace.root,
+                    &file.path,
+                    resolution_enabled,
+                    &mut s.notice,
+                ) {
+                    s.owner = Some(self.identity.clone());
+                }
+            },
+        );
         if let Some(notice) = &s.notice {
             ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
         }
     }
-    pub(super) fn conflict_inputs(&mut self, visible: bool) {
+    pub(super) fn conflict_inputs(&mut self, ctx: &egui::Context, visible: bool) {
         let s = &mut self.conflict;
         if !visible || !self.index_writable || s.owner.as_ref().is_some_and(|o| o != &self.identity)
         {
             *s = Default::default();
             return;
+        }
+        if s.resolution.inputs(ctx, &mut s.notice) {
+            self.refresh = true;
         }
         if let Some(result) = s.pending.as_ref().and_then(|r| match r.try_recv() {
             Ok(r) => Some(r),
@@ -93,6 +135,12 @@ impl Changes {
         }
     }
     pub(super) fn conflict_dialog(&mut self, ctx: &egui::Context) {
+        self.conflict.resolution.dialog(
+            ctx,
+            self.index_writable,
+            self.conflict.owner.as_ref() == Some(&self.identity),
+            &mut self.conflict.notice,
+        );
         let Some(review) = &self.conflict.review else {
             return;
         };
@@ -101,6 +149,7 @@ impl Changes {
             egui::Id::new("git-conflict-inspection"),
         );
         if !self.index_writable
+            || self.conflict.owner.as_ref() != Some(&self.identity)
             || egui::Popup::is_any_open(ctx)
             || ctx.memory(|m| m.top_modal_layer().is_some_and(|l| l != own))
             || prompt_ui::modal_owns_current_pass(ctx)

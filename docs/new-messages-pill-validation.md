@@ -20,3 +20,16 @@ Validated against committed baseline `91d5e7bc` plus only this feature in retain
 - Strict `cargo clippy --offline --locked --all-targets -- -D warnings` remains blocked by existing `too_many_arguments` in `src/app/changes.rs:1300` and unused `output` in `src/app/context_capture/diff/ui_tests.rs:275`. No feature-file lint diagnostic. Log: `/tmp/pui-new-messages-clippy.log`.
 
 No application profiling, packaging, installation, deployment or native manual acceptance claimed. The three-option interactive HTML design preview was shown before development; the user selected A.
+
+## Master push integration
+
+User subsequently requested a normal push. Fetched and automatically merged remote master `87313763` into local `12ec06fa` (also retaining browser-inline-question fix `e4517578`). Reviewed automatic merges in `src/app.rs` and `src/app/files.rs`; retained both the inline-question preview behavior and upstream rendered-file capture/title integration. No conflict resolution or production source repair was needed.
+
+Validated the combined source before the merge commit/push, with the existing cached toolchain/CEF, explicit SDKROOT, installed SDK and supported `PUI_TEST_THREADS=1 CARGO_BUILD_JOBS=2`:
+
+- Complete `scripts/test-rust.sh`: **2,106 passed, 0 failed, 2 existing ignored**, all 23 result groups. `/tmp/pui-new-messages-push-rust.log`.
+- Full `cargo fmt --all -- --check`, strict all-target Clippy and working/staged diff whitespace checks: **passed**. Upstream supplied the earlier unrelated lint/format fixes. `/tmp/pui-new-messages-push-clippy.log`.
+- Full JavaScript: **146 passed, 1 existing skipped, 0 failed**. `/tmp/pui-new-messages-push-js.log`.
+- Homebrew Python unittest discovery: **41 passed**, fixture ResourceWarnings only. `/tmp/pui-new-messages-push-python.log`. Printed release publications were mocked test output, not deployments.
+
+No failed-test retries, omitted runner groups, deadline/assertion changes, packaging, installation or deployment. Normal non-force push only; remote success must be checked separately.

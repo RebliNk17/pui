@@ -103,6 +103,7 @@ pub(super) fn capture(root: &Path, target: Option<&Path>) -> Result<String, Stri
     }
     let mut total = 0;
     for relative in paths {
+        check_operation()?;
         let entry = entry(root, &relative)?;
         if matches!(entry, Entry::Missing) {
             continue;
@@ -160,6 +161,7 @@ pub(super) fn capture(root: &Path, target: Option<&Path>) -> Result<String, Stri
         let mut reader = (&file).take(meta.len().saturating_add(1));
         let mut buffer = [0; 65536];
         loop {
+            check_operation()?;
             let n = reader.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;

@@ -23,6 +23,7 @@ pub(super) fn offer(ui: &Ui, response: &egui::Response, text: &str) {
         .iter()
         .find_map(|stack| stack.tags().get_downcast::<String>(TAG))
     {
+        crate::app::context_capture::offer_file_block(response, text);
         crate::app::context_capture::offer_rendered_selection(response, origin, text);
     }
 }

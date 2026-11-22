@@ -174,29 +174,42 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
     if branch.is_empty() {
         return Err("Commit requires a local branch, not detached HEAD.".into());
     }
-    for name in [
-        "MERGE_HEAD",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "rebase-merge",
-        "rebase-apply",
-    ] {
-        let path = PathBuf::from(line(run(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", name],
-            cancel,
-            deadline,
-        )?)?);
-        if path.exists() {
-            return Err("Finish the merge/rebase/cherry-pick/revert first.".into());
-        }
-    }
-    let index_path = PathBuf::from(line(run(
+    // Resolve the exact same six Git-owned paths in one invocation. Six
+    // sequential process launches consumed most of the unchanged 3s deadline
+    // on macOS even in tiny fixture repositories. Validate every returned row.
+    let paths = run(
         root,
-        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "MERGE_HEAD",
+            "--git-path",
+            "CHERRY_PICK_HEAD",
+            "--git-path",
+            "REVERT_HEAD",
+            "--git-path",
+            "rebase-merge",
+            "--git-path",
+            "rebase-apply",
+            "--git-path",
+            "index",
+        ],
         cancel,
         deadline,
-    )?)?);
+    )?;
+    let paths = String::from_utf8(paths).map_err(|_| "Invalid Git paths")?;
+    let paths = paths
+        .lines()
+        .map(|path| line(format!("{path}\n").into_bytes()).map(PathBuf::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.len() != 6 || paths.iter().any(|path| !path.is_absolute()) {
+        return Err("Invalid Git path inventory.".into());
+    }
+    if paths[..5].iter().any(|path| path.exists()) {
+        return Err("Finish the merge/rebase/cherry-pick/revert first.".into());
+    }
+    let index_path = paths[5].clone();
     let index = index_bytes(&index_path)?;
     if !run(
         root,

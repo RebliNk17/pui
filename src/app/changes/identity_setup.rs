@@ -32,124 +32,124 @@ impl Changes {
         egui::CollapsingHeader::new("Set repository commit identity…")
             .default_open(sheet_open)
             .show(ui, |ui| {
-            let enabled = self.index_writable
-                && s.loading.is_none()
-                && s.pending.is_none()
-                && s.applying.is_none()
-                && s.review.is_none()
-                && !egui::Popup::is_any_open(ui.ctx())
-                && modal_ok;
-            ui.add_enabled_ui(enabled, |ui| {
-                let load = prompt_ui::button(
-                    ui,
-                    "Load current local identity",
-                    prompt_ui::Button::Secondary,
-                    true,
-                );
-                s.controls.push(load.id);
-                if load.clicked() {
-                    let Some(permit) = branches::permit(ui.ctx()) else {
-                        s.notice = Some("Git busy; retry explicitly.".into());
-                        return;
-                    };
-                    let root = workspace.root.clone();
-                    let (tx, rx) = mpsc::channel();
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    s.owner = Some(self.identity.clone());
-                    s.loading = Some(workspace::read_only::Request::new(rx, cancel.clone()));
-                    let ctx = ui.ctx().clone();
-                    if std::thread::Builder::new()
-                        .name("pui-identity-load".into())
-                        .spawn(move || {
-                            let result =
-                                workspace::commit::identity_setup::load_local(&root, &cancel);
-                            drop(permit);
-                            if !cancel.load(Ordering::Acquire) {
-                                let _ = tx.send(result);
-                                ctx.request_repaint();
-                            }
-                        })
-                        .is_err()
-                    {
-                        s.loading = None;
-                        s.notice = Some("Cannot load local identity.".into());
-                    }
-                    return;
-                }
-                for (label, value) in [("Name", &mut s.name), ("Email", &mut s.email)] {
-                    ui.label(theme::small(ui, label));
-                    let input = ui.add(
-                        egui::TextEdit::singleline(value)
-                            .char_limit(512)
-                            .desired_width(ui.available_width()),
+                let enabled = self.index_writable
+                    && s.loading.is_none()
+                    && s.pending.is_none()
+                    && s.applying.is_none()
+                    && s.review.is_none()
+                    && !egui::Popup::is_any_open(ui.ctx())
+                    && modal_ok;
+                ui.add_enabled_ui(enabled, |ui| {
+                    let load = prompt_ui::button(
+                        ui,
+                        "Load current local identity",
+                        prompt_ui::Button::Secondary,
+                        true,
                     );
-                    s.controls.push(input.id);
-                }
-                let edit = ui.checkbox(
-                    &mut s.edit_local,
-                    "Edit existing direct-local identity (review old → new)",
-                );
-                s.controls.push(edit.id);
-                let toggle = ui.checkbox(
-                    &mut s.override_inherited,
-                    "Override inherited identity locally (never replace local values)",
-                );
-                s.controls.push(toggle.id);
-                let response = prompt_ui::button(
-                    ui,
-                    "Review local identity…",
-                    prompt_ui::Button::Secondary,
-                    workspace::commit::identity_setup::valid(&s.name, &s.email),
-                );
-                s.controls.push(response.id);
-                if response.clicked() {
-                    let Some(permit) = branches::permit(ui.ctx()) else {
-                        s.notice = Some("Git busy; retry explicitly.".into());
+                    s.controls.push(load.id);
+                    if load.clicked() {
+                        let Some(permit) = branches::permit(ui.ctx()) else {
+                            s.notice = Some("Git busy; retry explicitly.".into());
+                            return;
+                        };
+                        let root = workspace.root.clone();
+                        let (tx, rx) = mpsc::channel();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        s.owner = Some(self.identity.clone());
+                        s.loading = Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                        let ctx = ui.ctx().clone();
+                        if std::thread::Builder::new()
+                            .name("pui-identity-load".into())
+                            .spawn(move || {
+                                let result =
+                                    workspace::commit::identity_setup::load_local(&root, &cancel);
+                                drop(permit);
+                                if !cancel.load(Ordering::Acquire) {
+                                    let _ = tx.send(result);
+                                    ctx.request_repaint();
+                                }
+                            })
+                            .is_err()
+                        {
+                            s.loading = None;
+                            s.notice = Some("Cannot load local identity.".into());
+                        }
                         return;
-                    };
-                    let root = workspace.root.clone();
-                    let name = s.name.clone();
-                    let email = s.email.clone();
-                    let allow = s.override_inherited;
-                    let edit = s.edit_local;
-                    let (tx, rx) = mpsc::channel();
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    s.owner = Some(self.identity.clone());
-                    s.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
-                    let ctx = ui.ctx().clone();
-                    if std::thread::Builder::new()
-                        .name("pui-identity-review".into())
-                        .spawn(move || {
-                            let result = if edit {
-                                workspace::commit::identity_setup::inspect_mode(
-                                    &root, &name, &email, false, true, &cancel,
-                                )
-                            } else if allow {
-                                workspace::commit::identity_setup::inspect_override(
-                                    &root, &name, &email, true, &cancel,
-                                )
-                            } else {
-                                workspace::commit::identity_setup::inspect(
-                                    &root, &name, &email, &cancel,
-                                )
-                            };
-                            drop(permit);
-                            if !cancel.load(Ordering::Acquire) {
-                                let _ = tx.send(result);
-                                ctx.request_repaint();
-                            }
-                        })
-                        .is_err()
-                    {
-                        s.pending = None;
-                        s.notice = Some("Cannot inspect identity setup.".into());
                     }
+                    for (label, value) in [("Name", &mut s.name), ("Email", &mut s.email)] {
+                        ui.label(theme::small(ui, label));
+                        let input = ui.add(
+                            egui::TextEdit::singleline(value)
+                                .char_limit(512)
+                                .desired_width(ui.available_width()),
+                        );
+                        s.controls.push(input.id);
+                    }
+                    let edit = ui.checkbox(
+                        &mut s.edit_local,
+                        "Edit existing direct-local identity (review old → new)",
+                    );
+                    s.controls.push(edit.id);
+                    let toggle = ui.checkbox(
+                        &mut s.override_inherited,
+                        "Override inherited identity locally (never replace local values)",
+                    );
+                    s.controls.push(toggle.id);
+                    let response = prompt_ui::button(
+                        ui,
+                        "Review local identity…",
+                        prompt_ui::Button::Secondary,
+                        workspace::commit::identity_setup::valid(&s.name, &s.email),
+                    );
+                    s.controls.push(response.id);
+                    if response.clicked() {
+                        let Some(permit) = branches::permit(ui.ctx()) else {
+                            s.notice = Some("Git busy; retry explicitly.".into());
+                            return;
+                        };
+                        let root = workspace.root.clone();
+                        let name = s.name.clone();
+                        let email = s.email.clone();
+                        let allow = s.override_inherited;
+                        let edit = s.edit_local;
+                        let (tx, rx) = mpsc::channel();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        s.owner = Some(self.identity.clone());
+                        s.pending = Some(workspace::read_only::Request::new(rx, cancel.clone()));
+                        let ctx = ui.ctx().clone();
+                        if std::thread::Builder::new()
+                            .name("pui-identity-review".into())
+                            .spawn(move || {
+                                let result = if edit {
+                                    workspace::commit::identity_setup::inspect_mode(
+                                        &root, &name, &email, false, true, &cancel,
+                                    )
+                                } else if allow {
+                                    workspace::commit::identity_setup::inspect_override(
+                                        &root, &name, &email, true, &cancel,
+                                    )
+                                } else {
+                                    workspace::commit::identity_setup::inspect(
+                                        &root, &name, &email, &cancel,
+                                    )
+                                };
+                                drop(permit);
+                                if !cancel.load(Ordering::Acquire) {
+                                    let _ = tx.send(result);
+                                    ctx.request_repaint();
+                                }
+                            })
+                            .is_err()
+                        {
+                            s.pending = None;
+                            s.notice = Some("Cannot inspect identity setup.".into());
+                        }
+                    }
+                });
+                if let Some(notice) = &s.notice {
+                    ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
                 }
             });
-            if let Some(notice) = &s.notice {
-                ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
-            }
-        });
     }
     pub(super) fn identity_setup_inputs(&mut self, ctx: &egui::Context, visible: bool) {
         let s = &mut self.identity_setup;

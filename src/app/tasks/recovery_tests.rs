@@ -118,7 +118,7 @@ fn job(app: &mut Pui) {
     let job = app.tasks.job.take().expect("bounded read-only job");
     app.task_job_result(job.rx.recv_timeout(Duration::from_secs(10)).unwrap());
 }
-fn init(app: &mut Pui) -> Receiver<Value> {
+fn init(app: &mut Pui, commands: &Receiver<StoreCommand>) -> Receiver<Value> {
     let (client, _, sent) = rpc::Client::stub_with_records();
     app.tasks.processes.last_mut().unwrap().client = client;
     let index = app.tasks.processes.len() - 1;
@@ -129,6 +129,23 @@ fn init(app: &mut Pui) -> Receiver<Value> {
         .id
         .clone();
     app.task_event(index, rpc::Event::Record(json!({"type":"response","command":"get_state","id":id,"success":true,"data":{"model":{"id":"claude-haiku-5-5","provider":"fixture-provider"},"thinkingLevel":"high"}})));
+    assert!(
+        sent.try_recv().is_err(),
+        "no effect before durable dispatch acknowledgment"
+    );
+    loop {
+        if let StoreCommand::SaveAcknowledged { task, reply, .. } =
+            commands.recv_timeout(Duration::from_secs(3)).unwrap()
+        {
+            assert_eq!(
+                task.operations.last().unwrap().state,
+                domain::engine::State::Dispatching
+            );
+            reply.send(Ok(())).unwrap();
+            break;
+        }
+    }
+    app.task_poll_processes();
     sent
 }
 fn check(app: &mut Pui, data: Value) {
@@ -270,7 +287,7 @@ fn unchanged_ignored_setup_allows_explicit_rechecks_and_fresh_verifier_at_repair
     job(&mut app); // environment inspection
     assert_eq!(app.tasks.processes.len(), 1);
     assert_eq!(app.tasks.processes[0].role, Role::Checks);
-    let sent = init(&mut app);
+    let sent = init(&mut app, &commands);
     assert_eq!(
         sent.recv_timeout(Duration::from_secs(2)).unwrap()["command"],
         "printf recovered"
@@ -290,7 +307,7 @@ fn unchanged_ignored_setup_allows_explicit_rechecks_and_fresh_verifier_at_repair
             .messages
             .is_empty()
     );
-    let sent = init(&mut app);
+    let sent = init(&mut app, &commands);
     let prompt = sent.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(prompt["message"].as_str().unwrap().contains("recovered"));
     assert!(
@@ -340,7 +357,7 @@ fn uncertain_check_and_candidate_drift_never_replay_launch_verifier_or_repair() 
             assert_eq!(app.tasks.current().unwrap().phase, Phase::Stale);
         } else {
             job(&mut app);
-            let _sent = init(&mut app);
+            let _sent = init(&mut app, &commands);
             if point == 1 {
                 check(&mut app, json!({"output":"uncertain","cancelled":false}));
                 assert_eq!(app.tasks.current().unwrap().phase, Phase::Blocked);
@@ -534,7 +551,7 @@ fn latest_failed_recovery_supersedes_older_pass_and_postreview_drift_is_stale() 
         claim_and_ack(&mut app, &commands);
         job(&mut app);
         job(&mut app);
-        let _ = init(&mut app);
+        let _ = init(&mut app, &commands);
         check(
             &mut app,
             json!({"exitCode":0,"output":"done","cancelled":false}),
@@ -560,6 +577,12 @@ fn latest_failed_recovery_supersedes_older_pass_and_postreview_drift_is_stale() 
         );
         let task = app.tasks.current().unwrap();
         assert_eq!(task.phase, if drift { Phase::Stale } else { Phase::Failed });
+        if !drift {
+            assert_eq!(
+                task.reason,
+                Some(domain::decision::Reason::VerificationFailed)
+            );
+        }
         assert!(task.current_evidence().unwrap().invalidated);
         assert!(
             !task
@@ -634,7 +657,7 @@ fn recovery_pending_check_approval_cannot_send_answer_or_settings_after_authorit
             claim_and_ack(&mut app, &commands);
             job(&mut app);
             job(&mut app);
-            let sent = init(&mut app);
+            let sent = init(&mut app, &commands);
             assert_eq!(
                 sent.recv_timeout(Duration::from_secs(2)).unwrap()["command"],
                 "printf recovered"
@@ -819,6 +842,7 @@ fn disconnected_consent_ack_stays_nonactive_and_quarantined_until_readonly_recon
     };
     reply
         .send(Ok(refresh::Snapshot {
+            warning: None,
             records: vec![original.clone()],
             owned: Default::default(),
         }))
@@ -881,6 +905,7 @@ fn preparation_and_builder_ack_failure_are_nonactive_and_do_not_restart_paid_wor
         };
         reply
             .send(Ok(refresh::Snapshot {
+                warning: None,
                 records: vec![before.clone()],
                 owned: Default::default(),
             }))

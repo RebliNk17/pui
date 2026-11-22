@@ -481,7 +481,14 @@ impl Changes {
         ui.painter().rect_stroke(
             rect,
             6,
-            Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
+            Stroke::new(
+                1.0,
+                if response.has_focus() {
+                    colors.accent
+                } else {
+                    colors.border
+                },
+            ),
             egui::StrokeKind::Inside,
         );
         icons::draw(
