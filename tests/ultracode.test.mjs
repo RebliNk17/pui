@@ -25,9 +25,12 @@ async function host(readonly = false, taskRole = '') {
   let active=['read', 'bash', 'subagent', 'mcp__agents__spawn_agent'];
   const pi = {appendEntry:()=>{},getAllTools:()=>[{name:"codemode"}],getActiveTools:()=>active,setActiveTools:tools=>{active=tools;}, registerCommand: (n, v) => commands.set(n, v), registerTool: t => tools.set(t.name, t), on: (n, f) => { const prev=events.get(n); events.set(n, prev ? async (...args) => { const first=await prev(...args); if(n==='before_agent_start' && first?.systemPrompt) args[0]={...args[0],systemPrompt:first.systemPrompt}; return await f(...args) ?? first; } : f); }, sendMessage: (...args) => messages.push(args) };
   const ctx = { modelRegistry:{getAvailable:()=>[]}, ui: { setStatus: (...args) => statuses.push(args), input: async (...args) => { requests.push(args); return JSON.stringify({ agent_id: 'agent-2' }); } } };
-  const old = process.env.PUI_AGENT_ACCESS, oldRole = process.env.PUI_TASK_ROLE;
+  const old = process.env.PUI_AGENT_ACCESS, oldRole = process.env.PUI_TASK_ROLE, oldSettings = process.env.PUI_SETTINGS;
   process.env.PUI_AGENT_ACCESS = readonly ? 'read-only' : 'worktree'; process.env.PUI_TASK_ROLE = taskRole;
+  // Hermetic: a host Pui chat's own settings (mode, picker scope) must not leak in.
+  delete process.env.PUI_SETTINGS;
   try { extension(pi); } finally {
+    if (oldSettings === undefined) delete process.env.PUI_SETTINGS; else process.env.PUI_SETTINGS = oldSettings;
     if (old === undefined) delete process.env.PUI_AGENT_ACCESS; else process.env.PUI_AGENT_ACCESS = old;
     if (oldRole === undefined) delete process.env.PUI_TASK_ROLE; else process.env.PUI_TASK_ROLE = oldRole;
   }

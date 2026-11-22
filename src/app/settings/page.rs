@@ -47,7 +47,7 @@ impl Page {
             Self::Notifications => "Choose how agents let you know their work is finished.",
             Self::Shortcuts => "Shortcuts available across Pui.",
             Self::Permissions => "Choose what your agent can do without asking.",
-            Self::Models => "Models and thinking levels supplied by Pi.",
+            Self::Models => "Defaults for new chats and the models Pi provides.",
             Self::Providers => "Connected model providers, managed by Pi.",
             Self::Resources => "Manage skills, MCP servers, extensions and Pi packages.",
         }
@@ -116,8 +116,13 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
         ),
         (
             "Model context window",
-            "General",
+            "Models",
             "context window max tokens limit override model",
+        ),
+        (
+            "Default model for new chats",
+            "Models",
+            "default model thinking effort new chat pi settings",
         ),
         (
             "Auto compact at",
@@ -222,6 +227,9 @@ pub(in crate::app) struct View {
     /// The Auto classifier uses the composer's model list, with its own filters.
     classifier_open: bool,
     classifier_list: crate::app::model_picker::ListState,
+    default_open: bool,
+    default_list: crate::app::model_picker::ListState,
+    defaults_error: Option<String>,
 }
 
 impl View {
@@ -506,6 +514,149 @@ fn navigation(ui: &mut egui::Ui, page: Page, selected: bool) -> egui::Response {
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
+use crate::app::model_picker::{ListState, ModelList, Pick, model_list};
+
+pub(super) struct Dropdown<'a> {
+    /// Scopes widget IDs and the list's filters.
+    pub salt: &'a str,
+    pub title: &'a str,
+    pub models: &'a [protocol::Model],
+    /// `provider/id` of the selection; `None` selects Automatic (if offered).
+    pub selected: Option<&'a str>,
+    pub automatic: Option<(&'a str, &'a str)>,
+    pub empty: &'a str,
+}
+
+fn model_label(model: &protocol::Model) -> String {
+    format!(
+        "{} · {}",
+        if model.name.is_empty() { &model.id } else { &model.name },
+        crate::accounts::display_provider(&model.provider)
+    )
+}
+
+/// A Settings button that opens the composer's searchable, priced model list.
+pub(super) fn model_dropdown(
+    ui: &mut egui::Ui,
+    open: &mut bool,
+    list_state: &mut ListState,
+    dropdown: Dropdown<'_>,
+) -> Option<Pick> {
+    let colors = theme::palette(ui.ctx());
+    let label = match (dropdown.selected, dropdown.automatic) {
+        (None, Some((automatic, _))) => automatic.to_owned(),
+        (None, None) => "Choose a model".to_owned(),
+        (Some(key), _) => dropdown
+            .models
+            .iter()
+            .find(|m| format!("{}/{}", m.provider, m.id) == key)
+            .map(model_label)
+            .unwrap_or_else(|| key.to_owned()),
+    };
+    let width = 230.0_f32.min(ui.available_width());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, theme::CONTROL_HEIGHT), Sense::click());
+    ui.painter().rect(
+        rect,
+        7,
+        if *open || response.hovered() { colors.hover } else { colors.surface },
+        Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
+        egui::StrokeKind::Inside,
+    );
+    let mut job =
+        egui::text::LayoutJob::simple_singleline(label.clone(), FontId::proportional(12.0), colors.text);
+    job.wrap.max_width = (rect.width() - 34.0).max(0.0);
+    job.wrap.max_rows = 1;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        colors.text,
+    );
+    icons::chevron(
+        ui,
+        egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), Vec2::splat(10.0)),
+        false,
+        colors.dim,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            format!("{}: {label}", dropdown.title),
+        )
+    });
+    let response = response
+        .on_hover_text(label.as_str())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(egui::Id::new(format!("{}-rect", dropdown.salt)), response.rect)
+    });
+    if response.clicked() {
+        *open = !*open;
+        if *open {
+            list_state.query.clear();
+            list_state.focus = true;
+        }
+    }
+    if !*open {
+        return None;
+    }
+    if !list_state.provider.is_empty()
+        && !dropdown.models.iter().any(|m| m.provider == list_state.provider)
+    {
+        list_state.provider.clear();
+    }
+    let ctx = ui.ctx().clone();
+    let popup_width = 340.0_f32.min((ctx.screen_rect().width() - 16.0).max(120.0));
+    // The provider filter is a child popup; its click must not close this one.
+    let close_behavior = if egui::Popup::is_any_open(&ctx) {
+        egui::PopupCloseBehavior::IgnoreClicks
+    } else {
+        egui::PopupCloseBehavior::CloseOnClickOutside
+    };
+    let selected = dropdown.selected.and_then(|key| key.split_once('/'));
+    let mut still_open = true;
+    let mut pick = None;
+    egui::Popup::new(
+        egui::Id::new((dropdown.salt, "settings-model-dropdown")),
+        ctx.clone(),
+        response.rect,
+        ui.layer_id(),
+    )
+    .open_bool(&mut still_open)
+    .align(egui::emath::RectAlign::BOTTOM_END)
+    .align_alternatives(&[egui::emath::RectAlign::TOP_END])
+    .close_behavior(close_behavior)
+    .width(popup_width)
+    .frame(prompt_ui::popup(&ctx).inner_margin(6))
+    .gap(6.0)
+    .show(|ui| {
+        theme::menu_controls(ui);
+        ui.set_width(popup_width - 12.0);
+        let refs: Vec<&protocol::Model> = dropdown.models.iter().collect();
+        pick = model_list(
+            ui,
+            list_state,
+            ModelList {
+                salt: dropdown.salt,
+                models: &refs,
+                selected,
+                enabled: true,
+                automatic: dropdown
+                    .automatic
+                    .map(|(label, description)| (label, description, dropdown.selected.is_none())),
+            },
+            |_| {},
+            |_| 260.0,
+            dropdown.empty,
+        );
+    });
+    *open = pick.is_none() && still_open;
+    pick
+}
+
 impl Pui {
     pub(in crate::app) fn session_settings(&mut self, ctx: &egui::Context) {
         let colors = crate::theme::palette(ctx);
@@ -521,6 +672,7 @@ impl Pui {
                 || !self.settings_view.resources.escape())
             && !self.settings_view.providers.escape()
             && !std::mem::take(&mut self.settings_view.classifier_open)
+            && !std::mem::take(&mut self.settings_view.default_open)
         {
             self.settings_open = false;
             self.focus_composer = true;
@@ -697,38 +849,8 @@ impl Pui {
             ui,
             "Changes apply at the next context check. A summary already running is left alone.",
         ));
-        self.settings_view.providers.ensure_loaded(self.demo);
-        let active_model = self
-            .state
-            .models
-            .iter()
-            .find(|m| {
-                m.id == self.state.model
-                    && (self.state.provider.is_empty() || m.provider == self.state.provider)
-            })
-            .or_else(|| self.state.models.iter().find(|m| m.id == self.state.model))
-            .cloned();
         card(ui, |ui| {
             ui.scope(|ui| {
-                if let Some(model) = active_model {
-                    row(
-                        ui,
-                        "Model context window",
-                        &format!(
-                            "Maximum context limit for {} (saved in ~/.pi/agent/models.json).",
-                            model.name
-                        ),
-                        |ui| {
-                            self.model_context_editor(
-                                ui,
-                                &model.provider,
-                                &model.id,
-                                model.context_window,
-                            );
-                        },
-                    );
-                    separator(ui);
-                }
                 row(
                     ui,
                     "Auto compact at",
@@ -1086,51 +1208,30 @@ impl Pui {
             "Permission checks include nested codemode calls. They are not an OS sandbox.",
         );
         ui.label(theme::small(ui, "Choose each chat's agent mode from the composer. New chats start in the mode you selected last (Auto on first launch). Changes apply to subsequent tool calls; commands already executing are not interrupted."));
-        // Always shown: the mode itself is chosen per chat from the composer.
-        {
-            section(
+        // Independent of the selected chat: the app-level catalog and Pi's files.
+        section(
+            ui,
+            "Auto classifier",
+            "Used by chats in Auto mode. Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
+        );
+        card(ui, |ui| {
+            row(
                 ui,
-                "Auto classifier",
-                "Used by chats in Auto mode. Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
+                "Classifier model",
+                "Automatic uses the lowest input + output price across the models shown in the model picker. Sends the proposed call and recent requests to that provider. Applies to all chats, without changing their conversation models.",
+                |ui| self.classifier_picker(ui),
             );
-            card(ui, |ui| {
-                row(
-                    ui,
-                    "Classifier model",
-                    "Automatic uses the lowest input + output price across connected providers within Pi's model scope. Sends the proposed call and recent requests to that provider. Applies to all chats, without changing their conversation models.",
-                    |ui| self.classifier_picker(ui),
-                );
-                separator(ui);
-                row(
-                    ui,
-                    "Resolved model",
-                    "Uses configured prices, including zero-price entries. An unavailable override never silently falls back to another model.",
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(theme::small(
-                                ui,
-                                self.state.permission_classifier.as_deref().unwrap_or(
-                                    "Unavailable · calls needing classification are blocked",
-                                ),
-                            ))
-                            .wrap(),
-                        );
-                    },
-                );
-                separator(ui);
-                row(
-                    ui,
-                    "Classifier usage",
-                    "Separate from the conversation model cost; current connection only.",
-                    |ui| {
-                        ui.label(theme::small(
-                            ui,
-                            format!("${:.5}", self.state.permission_cost),
-                        ));
-                    },
-                );
-            });
-        }
+            separator(ui);
+            let resolved = self.resolved_classifier();
+            row(
+                ui,
+                "Resolved model",
+                "Uses configured prices, including zero-price entries. An unavailable override never silently falls back to another model.",
+                |ui| {
+                    ui.add(egui::Label::new(theme::small(ui, resolved)).wrap());
+                },
+            );
+        });
         section(ui, "Confirmations", "");
         card(ui, |ui| {
             row(
@@ -1161,205 +1262,179 @@ impl Pui {
             "Extensions can run their own code. Bypass skips Pui approvals, not OS permissions or read-only worker restrictions. These are tool-level controls, not a security sandbox.",
         );
     }
-    /// The composer's searchable model list with a leading Automatic entry.
+    /// Classifier choices from the app catalog (picker scope, Auto's
+    /// eligibility rules); before the first catalog load, the chat's report.
+    fn classifier_choices(&self) -> Vec<protocol::Model> {
+        if !self.catalog.loaded {
+            return self.state.permission_classifier_models.clone();
+        }
+        let providers = &self.settings_view.providers;
+        self.catalog
+            .classifier_models(|p| providers.is_provider_configured(p), &self.prefs.hidden_models)
+            .into_iter()
+            .map(|m| m.model.clone())
+            .collect()
+    }
+    fn resolved_classifier(&self) -> String {
+        const UNAVAILABLE: &str = "Unavailable · calls needing classification are blocked";
+        if !self.catalog.loaded {
+            return self
+                .state
+                .permission_classifier
+                .clone()
+                .unwrap_or_else(|| UNAVAILABLE.into());
+        }
+        let providers = &self.settings_view.providers;
+        let candidates = self
+            .catalog
+            .classifier_models(|p| providers.is_provider_configured(p), &self.prefs.hidden_models);
+        let found = match &self.prefs.settings.permission_classifier {
+            Some(key) => candidates.iter().find(|m| m.key() == *key),
+            None => candidates.iter().find(|m| m.priced),
+        };
+        found.map(|m| m.key()).unwrap_or_else(|| UNAVAILABLE.into())
+    }
     fn classifier_picker(&mut self, ui: &mut egui::Ui) {
-        use crate::app::model_picker::{ModelList, Pick, model_list};
         const AUTOMATIC: &str = "Automatic · cheapest available";
-        let colors = theme::palette(ui.ctx());
-        let models = &self.state.permission_classifier_models;
-        let label = match &self.prefs.settings.permission_classifier {
-            None => AUTOMATIC.to_owned(),
-            Some(key) => models
-                .iter()
-                .find(|m| format!("{}/{}", m.provider, m.id) == *key)
-                .map(|m| {
-                    format!(
-                        "{} · {}",
-                        if m.name.is_empty() { &m.id } else { &m.name },
-                        crate::accounts::display_provider(&m.provider)
-                    )
-                })
-                .unwrap_or_else(|| key.clone()),
-        };
-        let width = 230.0_f32.min(ui.available_width());
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(width, theme::CONTROL_HEIGHT), Sense::click());
-        let open = self.settings_view.classifier_open;
-        ui.painter().rect(
-            rect,
-            7,
-            if open || response.hovered() { colors.hover } else { colors.surface },
-            Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
-            egui::StrokeKind::Inside,
-        );
-        let mut job = egui::text::LayoutJob::simple_singleline(
-            label.clone(),
-            FontId::proportional(12.0),
-            colors.text,
-        );
-        job.wrap.max_width = (rect.width() - 34.0).max(0.0);
-        job.wrap.max_rows = 1;
-        let galley = ui.painter().layout_job(job);
-        ui.painter().galley(
-            egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            colors.text,
-        );
-        icons::chevron(
+        let models = self.classifier_choices();
+        let selected = self.prefs.settings.permission_classifier.clone();
+        let pick = model_dropdown(
             ui,
-            egui::Rect::from_center_size(
-                rect.right_center() - egui::vec2(14.0, 0.0),
-                Vec2::splat(10.0),
-            ),
-            false,
-            colors.dim,
+            &mut self.settings_view.classifier_open,
+            &mut self.settings_view.classifier_list,
+            Dropdown {
+                salt: "classifier",
+                title: "Classifier model",
+                models: &models,
+                selected: selected.as_deref(),
+                automatic: Some((
+                    AUTOMATIC,
+                    "Lowest-priced model in the picker; skips providers that fail.",
+                )),
+                empty: "No classifier models available. Connect a provider in Settings → Providers.",
+            },
         );
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
-                true,
-                format!("Classifier model: {label}"),
-            )
-        });
-        let response = response
-            .on_hover_text(label.as_str())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        #[cfg(test)]
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(egui::Id::new("auto-classifier-rect"), response.rect));
-        if response.clicked() {
-            self.settings_view.classifier_open = !open;
-            if !open {
-                self.settings_view.classifier_list.query.clear();
-                self.settings_view.classifier_list.focus = true;
-            }
-        }
-        if !self.settings_view.classifier_open {
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        let popup_width = 340.0_f32.min((ctx.screen_rect().width() - 16.0).max(120.0));
-        // The provider filter is a child popup; its click must not close this one.
-        let close_behavior = if egui::Popup::is_any_open(&ctx) {
-            egui::PopupCloseBehavior::IgnoreClicks
-        } else {
-            egui::PopupCloseBehavior::CloseOnClickOutside
-        };
-        let selected = self
-            .prefs
-            .settings
-            .permission_classifier
-            .as_deref()
-            .and_then(|key| key.split_once('/'))
-            .map(|(p, i)| (p.to_owned(), i.to_owned()));
-        let automatic_selected = self.prefs.settings.permission_classifier.is_none();
-        let list_state = &mut self.settings_view.classifier_list;
-        if !list_state.provider.is_empty()
-            && !models.iter().any(|m| m.provider == list_state.provider)
-        {
-            list_state.provider.clear();
-        }
-        let mut still_open = true;
-        let mut pick = None;
-        egui::Popup::new(
-            egui::Id::new("settings-classifier-picker"),
-            ctx.clone(),
-            response.rect,
-            ui.layer_id(),
-        )
-        .open_bool(&mut still_open)
-        .align(egui::emath::RectAlign::BOTTOM_END)
-        .align_alternatives(&[egui::emath::RectAlign::TOP_END])
-        .close_behavior(close_behavior)
-        .width(popup_width)
-        .frame(prompt_ui::popup(&ctx).inner_margin(6))
-        .gap(6.0)
-        .show(|ui| {
-            theme::menu_controls(ui);
-            ui.set_width(popup_width - 12.0);
-            let refs: Vec<&protocol::Model> = models.iter().collect();
-            pick = model_list(
-                ui,
-                list_state,
-                ModelList {
-                    salt: "classifier",
-                    models: &refs,
-                    selected: selected.as_ref().map(|(p, i)| (p.as_str(), i.as_str())),
-                    enabled: true,
-                    automatic: Some((
-                        AUTOMATIC,
-                        "Lowest-priced connected model; skips providers that fail.",
-                        automatic_selected,
-                    )),
-                },
-                |_| {},
-                |_| 260.0,
-                "No classifier models available. Connect a provider in Settings → Providers.",
-            );
-        });
         match pick {
-            Some(Pick::Automatic) => {
-                self.prefs.settings.permission_classifier = None;
-                self.settings_view.classifier_open = false;
-            }
+            Some(Pick::Automatic) => self.prefs.settings.permission_classifier = None,
             Some(Pick::Model { provider, id }) => {
-                self.prefs.settings.permission_classifier = Some(format!("{provider}/{id}"));
-                self.settings_view.classifier_open = false;
+                self.prefs.settings.permission_classifier = Some(format!("{provider}/{id}"))
             }
-            None => self.settings_view.classifier_open = still_open,
+            None => {}
+        }
+    }
+    /// Models from configured providers (hidden ones included, so they can be
+    /// shown again). App-level: never the selected chat's process.
+    fn configured_models(&self) -> Vec<protocol::Model> {
+        let providers = &self.settings_view.providers;
+        if self.catalog.loaded {
+            self.catalog
+                .models
+                .iter()
+                .filter(|m| providers.is_provider_configured(&m.model.provider))
+                .map(|m| m.model.clone())
+                .collect()
+        } else {
+            self.state
+                .models
+                .iter()
+                .filter(|m| providers.is_provider_configured(&m.provider))
+                .cloned()
+                .collect()
         }
     }
     fn settings_models(&mut self, ui: &mut egui::Ui) {
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let models = self.configured_models();
         section(
             ui,
-            "Current conversation",
-            "Model choices and supported thinking levels come from Pi.",
+            "Defaults for new chats",
+            "Saved in Pi's settings (~/.pi/agent/settings.json), shared with the Pi CLI. Each chat changes its own model from the composer; Pi remembers the last one you chose.",
         );
-        self.settings_view.providers.ensure_loaded(self.demo);
-        let models: Vec<protocol::Model> = self
-            .state
-            .models
+        let visible: Vec<protocol::Model> = models
             .iter()
             .filter(|m| {
-                self.settings_view
-                    .providers
-                    .is_provider_configured(&m.provider)
+                !self
+                    .prefs
+                    .hidden_models
+                    .contains(&format!("{}/{}", m.provider, m.id))
             })
             .cloned()
             .collect();
-        let blocked = self.model_change_blocked();
+        let defaults = self.catalog.defaults.clone();
+        let default_key = defaults
+            .provider
+            .as_ref()
+            .zip(defaults.model.as_ref())
+            .map(|(p, m)| format!("{p}/{m}"));
+        let mut write = None;
         card(ui, |ui| {
-            ui.add_enabled_ui(blocked.is_none(), |ui|{
-                row(ui,"Model","Changing the conversation model does not change Pi authentication.",|ui|{
-                    egui::ComboBox::from_id_salt("settings-model").selected_text(model_picker::selected_label(&self.state)).width(190.0).show_ui(ui,|ui|{
-                        for model in &models{if ui.selectable_label(model.id==self.state.model&&model.provider==self.state.provider,format!("{} · {}",model.name,model.provider)).clicked(){self.send_model_change(json!({"type":"set_model","provider":model.provider,"modelId":model.id}));}}
-                    });
-                });separator(ui);
-                row(ui,"Thinking effort","Only levels supported by the selected model are offered.",|ui|{
-                    let levels=self.state.levels.clone();
-                    ui.add_enabled_ui(!self.state.levels.is_empty(), |ui| {egui::ComboBox::from_id_salt("settings-effort").selected_text(thinking_label(&self.state.thinking)).width(120.0).show_ui(ui,|ui|{for level in levels{if ui.selectable_label(level==self.state.thinking,thinking_label(&level)).clicked(){self.send_model_change(json!({"type":"set_thinking_level","level":level}));}}});});
-                });
+            row(ui, "Default model", "The model a new chat starts with.", |ui| {
+                if let Some(Pick::Model { provider, id }) = model_dropdown(
+                    ui,
+                    &mut self.settings_view.default_open,
+                    &mut self.settings_view.default_list,
+                    Dropdown {
+                        salt: "default-model",
+                        title: "Default model",
+                        models: &visible,
+                        selected: default_key.as_deref(),
+                        automatic: None,
+                        empty: "No models available. Connect a provider in Settings → Providers.",
+                    },
+                ) {
+                    write = Some((Some((provider, id)), None));
+                }
             });
-        });
-        ui.add_space(8.0);
-        if let Some(reason) = blocked {
-            ui.label(theme::small(ui, reason));
-        }
-        if self.state.models_cached {
-            ui.label(theme::small(
+            separator(ui);
+            row(
                 ui,
-                if self.state.error.is_some() {
-                    "Cached models · live refresh unavailable"
-                } else {
-                    "Cached models · refreshing from Pi…"
+                "Default thinking effort",
+                "Applied when the model supports it; Pi uses the nearest supported level otherwise.",
+                |ui| {
+                    let current = defaults.thinking.clone().unwrap_or_default();
+                    egui::ComboBox::from_id_salt("settings-default-effort")
+                        .selected_text(if current.is_empty() {
+                            "Pi default".to_owned()
+                        } else {
+                            thinking_label(&current)
+                        })
+                        .width(140.0)
+                        .show_ui(ui, |ui| {
+                            for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+                                if ui
+                                    .selectable_label(current == level, thinking_label(level))
+                                    .clicked()
+                                {
+                                    write = Some((None, Some(level.to_owned())));
+                                }
+                            }
+                        });
                 },
-            ));
+            );
+        });
+        if let Some((model, thinking)) = write {
+            let result = catalog::write_defaults(
+                model.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
+                thinking.as_deref(),
+            );
+            match result {
+                Ok(()) => self.catalog.defaults = catalog::read_defaults(),
+                Err(error) => self.settings_view.defaults_error = Some(error),
+            }
         }
-        ui.label(theme::small(ui, "An in-flight provider response keeps its original model; Pi applies your selection to subsequent requests."));
+        if let Some(error) = &self.settings_view.defaults_error {
+            ui.add_space(6.0);
+            ui.label(RichText::new(error).size(11.0).color(theme::palette(ui.ctx()).red));
+        }
         section(ui, "Available models", "");
+        if let Some(error) = &self.catalog.error {
+            ui.label(theme::small(ui, format!("{error} Showing the last loaded list.")));
+        } else if self.catalog.loading() && !self.catalog.loaded {
+            ui.label(theme::small(ui, "Loading models from Pi…"));
+        }
         if models.is_empty() {
-            let message = if self.state.models.is_empty() {
-                "Connect to Pi to load the model catalog."
+            let message = if self.catalog.loading() {
+                "Loading models from Pi…"
             } else {
                 "No configured providers. Add a provider in Settings → Providers."
             };
@@ -1739,7 +1814,7 @@ mod tests {
                     .1;
                 assert!(automatic.right() <= width + 0.1);
                 let actual = ctx
-                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("classifier-rect")))
                     .unwrap();
                 click(&mut app, actual.center());
                 assert!(
@@ -1764,7 +1839,7 @@ mod tests {
                 let text = labels(frame(&mut app, vec![]));
                 let selected = text.iter().find(|(t, _)| t == "Flash · google").unwrap().1;
                 let actual = ctx
-                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("classifier-rect")))
                     .unwrap();
                 assert!(selected.intersects(actual));
                 click(&mut app, actual.center());
@@ -1790,7 +1865,7 @@ mod tests {
                 assert!(text.iter().any(|(t, _)| t.starts_with("Unavailable")));
                 let selected = text.iter().find(|(t, _)| t == "google/flash").unwrap().1;
                 let actual = ctx
-                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("auto-classifier-rect")))
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("classifier-rect")))
                     .unwrap();
                 assert!(selected.intersects(actual));
                 click(&mut app, actual.center());
@@ -1820,6 +1895,54 @@ mod tests {
                 assert!(app.state.dialogs.is_empty());
             }
         }
+    }
+    #[test]
+    fn settings_use_the_app_catalog_without_any_chat_connection() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        // A released/idle chat: no client, no chat catalog.
+        app.client = None;
+        app.connected = false;
+        app.state.models.clear();
+        app.state.permission_classifier_models.clear();
+        app.state.permission_classifier = None;
+        app.catalog.models = crate::app::catalog::fixture(&[
+            ("anthropic", "claude-opus-5-5", 5.0, 25.0),
+            ("Nvidia", "glm5", 0.5, 1.0),
+        ]);
+        app.catalog.loaded = true;
+        let render = |app: &mut Pui, page: fn(&mut Pui, &mut egui::Ui)| {
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| page(app, ui));
+            });
+            let mut text = Vec::new();
+            fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for shape in output.shapes {
+                walk(&shape.shape, &mut text);
+            }
+            text
+        };
+        let models = render(&mut app, |app, ui| app.settings_models(ui));
+        assert!(models.iter().any(|t| t == "glm5"), "{models:?}");
+        assert!(models.iter().any(|t| t == "Default model"));
+        assert!(!models.iter().any(|t| t.contains("Connect to Pi")));
+        let permissions = render(&mut app, |app, ui| app.settings_permissions(ui));
+        assert!(
+            permissions.iter().any(|t| t == "Nvidia/glm5"),
+            "cheapest priced visible model resolves without a chat: {permissions:?}"
+        );
     }
     #[test]
     fn resources_page_is_searchable_and_keeps_the_running_chat_intact() {

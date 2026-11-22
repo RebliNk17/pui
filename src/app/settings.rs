@@ -161,6 +161,10 @@ impl Settings {
         }
     }
 }
+/// Pi's JSON config files are written atomically, preserving other keys.
+pub(super) fn write_pi_json(path: &std::path::Path, value: &Value) -> Result<(), String> {
+    providers::write_json_atomic(path, value, false)
+}
 mod appearance;
 mod page;
 mod providers;

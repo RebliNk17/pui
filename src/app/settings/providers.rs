@@ -245,7 +245,7 @@ fn read_json_object(path: &Path) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn write_json_atomic(path: &Path, value: &Value, private_mode: bool) -> Result<(), String> {
+pub(super) fn write_json_atomic(path: &Path, value: &Value, private_mode: bool) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or("Invalid configuration directory path.")?;
@@ -953,10 +953,14 @@ impl ProvidersManager {
             return false;
         }
         self.config_checked = Some(now);
-        self.stamp_changed([auth_json_path(), models_json_path()])
+        self.stamp_changed([
+            auth_json_path(),
+            models_json_path(),
+            agent_dir().map(|dir| dir.join("settings.json")),
+        ])
     }
 
-    fn stamp_changed(&mut self, paths: [Option<PathBuf>; 2]) -> bool {
+    fn stamp_changed(&mut self, paths: [Option<PathBuf>; 3]) -> bool {
         let stamp: Vec<_> = paths
             .into_iter()
             .map(|path| {
@@ -3030,7 +3034,13 @@ mod config_watch_tests {
     fn provider_file_changes_are_detected_without_a_restart() {
         let dir = std::env::temp_dir().join(format!("pui-config-watch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = || [Some(dir.join("auth.json")), Some(dir.join("models.json"))];
+        let paths = || {
+            [
+                Some(dir.join("auth.json")),
+                Some(dir.join("models.json")),
+                Some(dir.join("settings.json")),
+            ]
+        };
         let mut manager = ProvidersManager::default();
         assert!(!manager.stamp_changed(paths()), "first check records a baseline");
         assert!(!manager.stamp_changed(paths()));

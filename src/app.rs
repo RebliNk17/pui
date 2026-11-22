@@ -4,6 +4,7 @@ mod approval_view;
 mod attachments;
 mod attention;
 mod automation;
+mod catalog;
 mod changes;
 mod chat_find;
 mod completions;
@@ -109,6 +110,10 @@ struct Preferences {
     hidden_models: std::collections::BTreeSet<String>,
     restart_checkpoints: Vec<restart::Checkpoint>,
     usage_cache: Option<crate::usage::CachedUsage>,
+    /// Models from providers registered by Pui's Pi extension (e.g.
+    /// Antigravity accounts), learned from Pi and kept app-wide so Settings
+    /// never depends on a running chat.
+    extension_models: Vec<protocol::Model>,
 }
 
 impl Preferences {
@@ -147,6 +152,8 @@ pub struct Pui {
     menu: menu::Menu,
     navigation: navigation::Navigation,
     updates: updates::Updates,
+    /// App-level model catalog and Pi defaults; never tied to a chat.
+    catalog: catalog::AppCatalog,
     completion_run: notifications::CompletionRun,
     attention: attention::Attention,
     attention_observed: attention::Observed,
@@ -291,6 +298,7 @@ impl Pui {
             menu: menu::Menu::new(&cc.egui_ctx),
             navigation: Default::default(),
             updates: Default::default(),
+            catalog: Default::default(),
             completion_run: Default::default(),
             attention: attention::Attention::restore(
                 cc.storage
@@ -1098,9 +1106,16 @@ impl Pui {
         self.updates.poll();
         self.settings_view.resources.poll();
         self.settings_view.providers.poll();
+        if self.catalog.poll(&self.ctx) {
+            self.catalog.with_extensions(&self.prefs.extension_models);
+        }
+        if !self.demo && !self.catalog.started {
+            self.catalog.request(&self.ctx);
+        }
         if self.settings_view.providers.reload_requested {
             self.settings_view.providers.reload_requested = false;
             self.refresh_providers_catalog();
+            self.catalog.request(&self.ctx);
         } else if !self.demo
             && self
                 .settings_view
@@ -1109,6 +1124,7 @@ impl Pui {
         {
             self.settings_view.providers.reload_from_disk();
             self.refresh_providers_catalog();
+            self.catalog.request(&self.ctx);
         }
         if !self.demo {
             // Low-frequency wake for the provider-file check; no model calls.
@@ -1287,6 +1303,13 @@ impl Pui {
                     {
                         if command == "get_available_models" && !self.demo && !cfg!(test) {
                             self.settings_view.providers.reload_from_disk();
+                        }
+                        if command == "get_available_models" && success {
+                            self.catalog.learn_extension_models(
+                                &self.state.models,
+                                &mut self.prefs.extension_models,
+                            );
+                            self.catalog.with_extensions(&self.prefs.extension_models);
                         }
                         self.remember_model_catalog(&command);
                     }

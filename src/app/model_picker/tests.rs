@@ -791,7 +791,13 @@ fn provider_changes_reload_models_in_busy_and_background_chats() {
     app.agents.parked.insert("agent-parked".into(), chat);
     app.refresh_providers_catalog();
     for requests in [&active, &parked] {
-        let sent: Vec<Value> = requests.try_iter().collect();
+        let mut sent = Vec::new();
+        while let Ok(record) = requests.recv_timeout(Duration::from_millis(500)) {
+            sent.push(record);
+            if sent.len() == 4 {
+                break;
+            }
+        }
         assert_eq!(sent[0]["message"], "/pui-reload-models", "{sent:?}");
         assert!(sent.iter().any(|r| r["type"] == "get_available_models"));
     }
