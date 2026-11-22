@@ -2337,15 +2337,7 @@ impl eframe::App for Pui {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);
         }
-        if !self.settings_open
-            && !self.kanban.open
-            && !self.automation.open
-            && !theater
-            && !confirming
-            && !self.section_view.confirming()
-            && !self.search_open
-            && self.state.dialogs.is_empty()
-        {
+        if self.web_preview_allowed(theater, confirming) {
             self.files.show_web(frame, ctx);
         } else {
             self.files.hide_web();

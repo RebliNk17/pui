@@ -1382,6 +1382,18 @@ impl Pui {
         }
     }
 
+    pub(super) fn web_preview_allowed(&self, theater: bool, confirming: bool) -> bool {
+        // Agent questions and permissions are inline, not workspace overlays.
+        // Actual floating surfaces are still checked by Browser::web_obscured.
+        !self.settings_open
+            && !self.kanban.open
+            && !self.automation.open
+            && !theater
+            && !confirming
+            && !self.section_view.confirming()
+            && !self.search_open
+    }
+
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
         // Keep remote web links with the OS/default browser. Only local
         // development previews and files are captured by the docked viewer.
@@ -1818,6 +1830,8 @@ mod auto_restore_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
 mod path_menu;
+#[cfg(test)]
+mod question_tests;
 #[cfg(test)]
 mod read_safety_tests;
 #[cfg(test)]
