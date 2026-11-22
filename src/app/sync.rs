@@ -1016,9 +1016,15 @@ impl Pui {
                 value.to_bits().hash(&mut hash);
             }
             let detail = &parts.detail;
-            for item in [&detail.mcp_tools, &detail.system_tools, &detail.skills, &detail.memory, &detail.agents]
-                .into_iter()
-                .flatten()
+            for item in [
+                &detail.mcp_tools,
+                &detail.system_tools,
+                &detail.skills,
+                &detail.memory,
+                &detail.agents,
+            ]
+            .into_iter()
+            .flatten()
             {
                 item.name.hash(&mut hash);
                 item.tokens.to_bits().hash(&mut hash);

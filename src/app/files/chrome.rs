@@ -66,7 +66,7 @@ impl Browser {
                                             ("file", &file.path),
                                             &title,
                                             &file.path.display().to_string(),
-                                            super::syntax::file_icon(&file.path, &colors).0,
+                                            super::syntax::file_icon(&file.path, colors).0,
                                             self.selected.as_ref() == Some(&file.path),
                                             width,
                                         );

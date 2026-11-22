@@ -99,8 +99,16 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
     let demo_cats = [
         ("Messages", 410000.0, colors.blue),
         ("MCP tools", 25700.0, colors.accent),
-        ("System tools", 18700.0, egui::Color32::from_rgb(47, 157, 143)),
-        ("System prompt", 10800.0, egui::Color32::from_rgb(214, 158, 46)),
+        (
+            "System tools",
+            18700.0,
+            egui::Color32::from_rgb(47, 157, 143),
+        ),
+        (
+            "System prompt",
+            10800.0,
+            egui::Color32::from_rgb(214, 158, 46),
+        ),
         ("Skills", 9900.0, grey(150)),
         ("MCP server instructions", 3300.0, grey(125)),
         ("Memory files", 455.0, grey(105)),
@@ -116,8 +124,16 @@ pub fn show_with_cwd(ui: &mut egui::Ui, state: &State, cwd: &std::path::Path, de
                 colors.blue,
             ),
             ("MCP tools", p.mcp_tools, colors.accent),
-            ("System tools", p.tools, egui::Color32::from_rgb(47, 157, 143)),
-            ("System prompt", p.system, egui::Color32::from_rgb(214, 158, 46)),
+            (
+                "System tools",
+                p.tools,
+                egui::Color32::from_rgb(47, 157, 143),
+            ),
+            (
+                "System prompt",
+                p.system,
+                egui::Color32::from_rgb(214, 158, 46),
+            ),
             ("Skills", p.skills, grey(150)),
             ("MCP server instructions", p.mcp_instructions, grey(125)),
             ("Memory files", p.memory, grey(105)),
@@ -361,7 +377,11 @@ fn demo_detail() -> crate::protocol::ContextDetail {
             .map(|(name, tokens)| item(&format!("mcp__launchdarkly__{name}"), *tokens))
             .collect(),
         mcp_tools_count: 748,
-        system_tools: vec![item("bash", 4100.0), item("edit", 2300.0), item("read", 900.0)],
+        system_tools: vec![
+            item("bash", 4100.0),
+            item("edit", 2300.0),
+            item("read", 900.0),
+        ],
         skills: vec![item("deploy", 1800.0), item("find-skills", 900.0)],
         memory: vec![
             item("~/.claude/CLAUDE.md", 14.0),
@@ -396,7 +416,11 @@ fn named_items(list: &[crate::protocol::ContextItem], pretty: bool) -> Vec<(Stri
     list.iter()
         .map(|i| {
             (
-                if pretty { pretty_tool(&i.name) } else { i.name.clone() },
+                if pretty {
+                    pretty_tool(&i.name)
+                } else {
+                    i.name.clone()
+                },
                 Some(i.tokens),
             )
         })

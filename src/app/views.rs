@@ -1012,7 +1012,7 @@ fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui
     if response.hovered() {
         ui.painter().rect_filled(rect, 4, colors.hover);
     }
-    let (file_icon, file_tint) = files::file_icon(std::path::Path::new(path), &colors);
+    let (file_icon, file_tint) = files::file_icon(std::path::Path::new(path), colors);
     icons::draw(
         ui,
         egui::Rect::from_center_size(rect.left_center() + egui::vec2(8.0, 0.0), Vec2::splat(14.0)),
