@@ -47,6 +47,9 @@ struct CaptureState {
     settled_at: Option<Instant>,
     frame: Option<ColorImage>,
     error: Option<String>,
+    /// Live visuals keep their viewport and only record the content height.
+    live: bool,
+    content_height: i32,
 }
 
 wrap_render_handler! {
@@ -280,8 +283,9 @@ wrap_dev_tools_message_observer! {
                     && let Some(h) = parsed["result"]["value"].as_f64()
                     && h.is_finite()
                 {
+                    state.content_height = h.ceil() as i32;
                     let target = (h.ceil() as i32).clamp(MIN_HEIGHT, MAX_HEIGHT);
-                    if (target - state.height).abs() > 2 {
+                    if !state.live && (target - state.height).abs() > 2 {
                         state.height = target;
                         state.frame = None;
                         resized = true;
@@ -383,20 +387,7 @@ impl OsrPool {
                 && active.browser.is_valid() == 1
                 && let Some(host) = active.browser.host()
             {
-                let expr = "(function(){const b=document.body,d=document.documentElement;const r=b?b.getBoundingClientRect():null;return Math.ceil(Math.max(b?b.scrollHeight:0,d?d.scrollHeight:0,r?r.height:0));})()";
-                let params_json = serde_json::json!({
-                    "expression": expr,
-                    "returnByValue": true
-                })
-                .to_string();
-                let cef_json = CefString::from(params_json.as_str());
-                let mut dict =
-                    cef::parse_json(Some(&cef_json), JsonParserOptions::RFC).and_then(|v| v.dictionary());
-                let sent = host.execute_dev_tools_method(
-                    msg_id,
-                    Some(&CefString::from("Runtime.evaluate")),
-                    dict.as_mut(),
-                );
+                let sent = if measure(&host, msg_id) { msg_id } else { -1 };
                 if sent != msg_id
                     && let Ok(mut state) = active.state.lock()
                 {
@@ -434,89 +425,62 @@ impl OsrPool {
         completed
     }
 
-    fn start(
-        &mut self,
-        ctx: &egui::Context,
-        request: CaptureRequest,
-    ) -> Result<ActiveCapture, (CaptureKey, String)> {
+    fn ensure_runtime(&mut self, ctx: &egui::Context) -> Result<(), String> {
         if self.runtime.is_none() {
             match crate::chromium::shared(ctx) {
                 Ok(runtime) => self.runtime = Some(runtime),
                 Err(error) => {
                     self.unavailable = Some(error.clone());
-                    return Err((request.key, error));
+                    return Err(error);
                 }
             }
         }
-        let initial = format!(
-            "data:text/html;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(request.html.as_bytes())
+        Ok(())
+    }
+
+    fn start(
+        &mut self,
+        ctx: &egui::Context,
+        request: CaptureRequest,
+    ) -> Result<ActiveCapture, (CaptureKey, String)> {
+        if let Err(error) = self.ensure_runtime(ctx) {
+            return Err((request.key, error));
+        }
+        let state = new_state(
+            request.width as i32,
+            request.initial_height as i32,
+            request.scale,
+            false,
         );
-        let state = Arc::new(Mutex::new(CaptureState {
-            width: (request.width as i32).clamp(160, 1200),
-            height: (request.initial_height as i32).clamp(MIN_HEIGHT, MAX_HEIGHT),
-            scale: request.scale.clamp(1.0, 3.0),
-            loaded: false,
-            measured: false,
-            measure_sent: false,
-            measure_msg_id: 0,
-            settled_at: None,
-            frame: None,
-            error: None,
-        }));
-        static NEXT_PUMP: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(100_000);
-        let pump_id = NEXT_PUMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut client = OsrClient::new(
-            OsrRender::new(state.clone(), ctx.clone()),
-            OsrLoad::new(state.clone(), ctx.clone()),
-            OsrLife::new(pump_id),
-            OsrRequest::new(initial.clone()),
-            OsrDownloads::new(),
-            OsrPermissions::new(),
-            OsrDialogs::new(),
-        );
-        let settings = BrowserSettings {
-            windowless_frame_rate: 30,
-            javascript_access_clipboard: State::DISABLED,
-            javascript_dom_paste: State::DISABLED,
-            javascript: State::DEFAULT,
-            ..Default::default()
-        };
-        let mut handler = crate::chromium::context_handler();
-        let Some(mut request_context) = cef::request_context_create_context(
-            Some(&crate::chromium::context_settings()),
-            Some(&mut handler),
-        ) else {
-            return Err((
-                request.key,
-                "Cannot create private browser context for inline visual.".into(),
-            ));
-        };
-        let info = WindowInfo::default().set_as_windowless(std::ptr::null_mut());
-        let Some(browser) = cef::browser_host_create_browser_sync(
-            Some(&info),
-            Some(&mut client),
-            Some(&CefString::from(initial.as_str())),
-            Some(&settings),
-            None,
-            Some(&mut request_context),
-        ) else {
-            return Err((
-                request.key,
-                "Chromium could not create offscreen inline visual.".into(),
-            ));
-        };
-        let observer = browser.host().and_then(|host| {
-            let mut obs = MeasureObserver::new(state.clone(), ctx.clone());
-            host.add_dev_tools_message_observer(Some(&mut obs))
-        });
+        let (browser, observer) = create_browser(ctx, &request.html, state.clone(), 30)
+            .map_err(|error| (request.key.clone(), error))?;
         Ok(ActiveCapture {
             key: request.key,
             browser,
             state,
             _observer: observer,
             started: Instant::now(),
+        })
+    }
+
+    /// A persistent, interactive offscreen page for one visual.
+    pub(super) fn start_live(
+        &mut self,
+        ctx: &egui::Context,
+        key: CaptureKey,
+        html: &str,
+        width: i32,
+        height: i32,
+        scale: f32,
+    ) -> Result<LiveVisual, String> {
+        self.ensure_runtime(ctx)?;
+        let state = new_state(width, height, scale, true);
+        let (browser, observer) = create_browser(ctx, html, state.clone(), 60)?;
+        Ok(LiveVisual {
+            key,
+            browser,
+            state,
+            _observer: observer,
         })
     }
 
@@ -531,5 +495,304 @@ impl OsrPool {
 impl Drop for OsrPool {
     fn drop(&mut self) {
         self.release_all();
+    }
+}
+
+fn new_state(width: i32, height: i32, scale: f32, live: bool) -> Arc<Mutex<CaptureState>> {
+    Arc::new(Mutex::new(CaptureState {
+        width: width.clamp(160, 1200),
+        height: height.clamp(MIN_HEIGHT, MAX_HEIGHT),
+        scale: scale.clamp(1.0, 3.0),
+        loaded: false,
+        measured: false,
+        measure_sent: false,
+        measure_msg_id: 0,
+        settled_at: None,
+        frame: None,
+        error: None,
+        live,
+        content_height: 0,
+    }))
+}
+
+fn measure(host: &BrowserHost, msg_id: i32) -> bool {
+    let expr = "(function(){const b=document.body,d=document.documentElement;const r=b?b.getBoundingClientRect():null;return Math.ceil(Math.max(b?b.scrollHeight:0,d?d.scrollHeight:0,r?r.height:0));})()";
+    let params_json = serde_json::json!({"expression": expr, "returnByValue": true}).to_string();
+    let cef_json = CefString::from(params_json.as_str());
+    let mut dict =
+        cef::parse_json(Some(&cef_json), JsonParserOptions::RFC).and_then(|v| v.dictionary());
+    host.execute_dev_tools_method(
+        msg_id,
+        Some(&CefString::from("Runtime.evaluate")),
+        dict.as_mut(),
+    ) == msg_id
+}
+
+fn create_browser(
+    ctx: &egui::Context,
+    html: &str,
+    state: Arc<Mutex<CaptureState>>,
+    frame_rate: i32,
+) -> Result<(Browser, Option<Registration>), String> {
+    let initial = format!(
+        "data:text/html;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(html.as_bytes())
+    );
+    static NEXT_PUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100_000);
+    let pump_id = NEXT_PUMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut client = OsrClient::new(
+        OsrRender::new(state.clone(), ctx.clone()),
+        OsrLoad::new(state.clone(), ctx.clone()),
+        OsrLife::new(pump_id),
+        OsrRequest::new(initial.clone()),
+        OsrDownloads::new(),
+        OsrPermissions::new(),
+        OsrDialogs::new(),
+    );
+    let settings = BrowserSettings {
+        windowless_frame_rate: frame_rate,
+        javascript_access_clipboard: State::DISABLED,
+        javascript_dom_paste: State::DISABLED,
+        javascript: State::DEFAULT,
+        ..Default::default()
+    };
+    let mut handler = crate::chromium::context_handler();
+    let Some(mut request_context) = cef::request_context_create_context(
+        Some(&crate::chromium::context_settings()),
+        Some(&mut handler),
+    ) else {
+        return Err("Cannot create private browser context for inline visual.".into());
+    };
+    let info = WindowInfo::default().set_as_windowless(std::ptr::null_mut());
+    let Some(browser) = cef::browser_host_create_browser_sync(
+        Some(&info),
+        Some(&mut client),
+        Some(&CefString::from(initial.as_str())),
+        Some(&settings),
+        None,
+        Some(&mut request_context),
+    ) else {
+        return Err("Chromium could not create offscreen inline visual.".into());
+    };
+    let observer = browser.host().and_then(|host| {
+        let mut obs = MeasureObserver::new(state.clone(), ctx.clone());
+        host.add_dev_tools_message_observer(Some(&mut obs))
+    });
+    Ok((browser, observer))
+}
+
+/// Mac virtual key codes and Windows key codes for keys a visual may need:
+/// (windows_key_code, native mac keycode, character).
+fn key_codes(key: egui::Key) -> Option<(i32, i32, u16)> {
+    use egui::Key::*;
+    Some(match key {
+        Backspace => (0x08, 0x33, 0x08),
+        Tab => (0x09, 0x30, 0x09),
+        Enter => (0x0D, 0x24, 0x0D),
+        Escape => (0x1B, 0x35, 0x1B),
+        Delete => (0x2E, 0x75, 0x7F),
+        ArrowLeft => (0x25, 0x7B, 0),
+        ArrowUp => (0x26, 0x7E, 0),
+        ArrowRight => (0x27, 0x7C, 0),
+        ArrowDown => (0x28, 0x7D, 0),
+        Home => (0x24, 0x73, 0),
+        End => (0x23, 0x77, 0),
+        PageUp => (0x21, 0x74, 0),
+        PageDown => (0x22, 0x79, 0),
+        A => (0x41, 0x00, 'a' as u16),
+        C => (0x43, 0x08, 'c' as u16),
+        V => (0x56, 0x09, 'v' as u16),
+        X => (0x58, 0x07, 'x' as u16),
+        Z => (0x5A, 0x06, 'z' as u16),
+        _ => return None,
+    })
+}
+
+/// cef_event_flags_t: SHIFT 2, CONTROL 4, ALT 8, LEFT button 16, COMMAND 128.
+pub(super) fn event_flags(m: egui::Modifiers, left_down: bool) -> u32 {
+    let mut flags = if left_down { 16 } else { 0 };
+    if m.shift {
+        flags |= 2;
+    }
+    if m.ctrl {
+        flags |= 4;
+    }
+    if m.alt {
+        flags |= 8;
+    }
+    if m.mac_cmd {
+        flags |= 128;
+    }
+    flags
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Edit {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+}
+
+/// A persistent, interactive offscreen visual. Dropping it closes the browser.
+pub(super) struct LiveVisual {
+    pub key: CaptureKey,
+    browser: Browser,
+    state: Arc<Mutex<CaptureState>>,
+    _observer: Option<Registration>,
+}
+
+impl LiveVisual {
+    fn host(&self) -> Option<BrowserHost> {
+        if self.browser.is_valid() == 1 {
+            self.browser.host()
+        } else {
+            None
+        }
+    }
+    /// Latest painted frame, if one arrived since the last call.
+    pub fn take_frame(&self) -> Option<ColorImage> {
+        self.state.lock().ok()?.frame.take()
+    }
+    pub fn error(&self) -> Option<String> {
+        self.state.lock().ok()?.error.clone()
+    }
+    /// The page is taller than its viewport, so the wheel scrolls the page.
+    pub fn scrollable(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|s| s.content_height > s.height + 1)
+    }
+    /// Measure content height once loaded (and after a resize).
+    pub fn poll(&self) {
+        let mut send = None;
+        if let Ok(mut state) = self.state.lock()
+            && state.loaded
+            && !state.measure_sent
+        {
+            state.measure_sent = true;
+            static NEXT_MSG: std::sync::atomic::AtomicI32 =
+                std::sync::atomic::AtomicI32::new(900_000);
+            let id = NEXT_MSG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            state.measure_msg_id = id;
+            send = Some(id);
+        }
+        if let (Some(id), Some(host)) = (send, self.host()) {
+            measure(&host, id);
+        }
+    }
+    pub fn resize(&self, width: i32, height: i32) {
+        let changed = self.state.lock().is_ok_and(|mut s| {
+            let (w, h) = (width.clamp(160, 1200), height.clamp(MIN_HEIGHT, MAX_HEIGHT));
+            let changed = s.width != w || s.height != h;
+            if changed {
+                s.width = w;
+                s.height = h;
+                s.measure_sent = false;
+                s.measured = false;
+            }
+            changed
+        });
+        if changed && let Some(host) = self.host() {
+            host.was_resized();
+        }
+    }
+    pub fn mouse_move(&self, x: i32, y: i32, flags: u32, leave: bool) {
+        if let Some(host) = self.host() {
+            host.send_mouse_move_event(Some(&MouseEvent { x, y, modifiers: flags }), leave as i32);
+        }
+    }
+    pub fn click(&self, x: i32, y: i32, button: egui::PointerButton, up: bool, count: i32, flags: u32) {
+        let button = match button {
+            egui::PointerButton::Secondary => MouseButtonType::RIGHT,
+            egui::PointerButton::Middle => MouseButtonType::MIDDLE,
+            _ => MouseButtonType::LEFT,
+        };
+        if let Some(host) = self.host() {
+            host.send_mouse_click_event(
+                Some(&MouseEvent { x, y, modifiers: flags }),
+                button,
+                up as i32,
+                count,
+            );
+        }
+    }
+    pub fn wheel(&self, x: i32, y: i32, dx: i32, dy: i32, flags: u32) {
+        if let Some(host) = self.host() {
+            host.send_mouse_wheel_event(Some(&MouseEvent { x, y, modifiers: flags }), dx, dy);
+        }
+    }
+    /// Clipboard and selection commands run in the page's frame (not page JS).
+    pub fn edit(&self, command: Edit) {
+        let Some(frame) = (self.browser.is_valid() == 1).then(|| self.browser.main_frame()).flatten() else {
+            return;
+        };
+        match command {
+            Edit::Copy => frame.copy(),
+            Edit::Cut => frame.cut(),
+            Edit::Paste => frame.paste(),
+            Edit::SelectAll => frame.select_all(),
+        }
+    }
+    pub fn focus(&self, focused: bool) {
+        if let Some(host) = self.host() {
+            host.set_focus(focused as i32);
+        }
+    }
+    pub fn text(&self, text: &str) {
+        let Some(host) = self.host() else { return };
+        for unit in text.encode_utf16() {
+            host.send_key_event(Some(&KeyEvent {
+                type_: KeyEventType::CHAR,
+                windows_key_code: unit as i32,
+                character: unit,
+                unmodified_character: unit,
+                ..Default::default()
+            }));
+        }
+    }
+    /// Editing/navigation keys and Cmd shortcuts. Returns false for keys left
+    /// to the text path (ordinary letters arrive as `text`).
+    pub fn key(&self, key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> bool {
+        let Some((windows, native, character)) = key_codes(key) else {
+            return false;
+        };
+        let letter = matches!(
+            key,
+            egui::Key::A | egui::Key::C | egui::Key::V | egui::Key::X | egui::Key::Z
+        );
+        if letter && !modifiers.mac_cmd {
+            return false;
+        }
+        let Some(host) = self.host() else { return false };
+        let event = KeyEvent {
+            type_: if pressed {
+                KeyEventType::RAWKEYDOWN
+            } else {
+                KeyEventType::KEYUP
+            },
+            modifiers: event_flags(modifiers, false),
+            windows_key_code: windows,
+            native_key_code: native,
+            character,
+            unmodified_character: character,
+            ..Default::default()
+        };
+        host.send_key_event(Some(&event));
+        if pressed && matches!(key, egui::Key::Enter | egui::Key::Tab | egui::Key::Backspace) {
+            host.send_key_event(Some(&KeyEvent {
+                type_: KeyEventType::CHAR,
+                ..event
+            }));
+        }
+        true
+    }
+}
+
+impl Drop for LiveVisual {
+    fn drop(&mut self) {
+        if let Some(host) = self.host() {
+            host.close_browser(1);
+        }
     }
 }

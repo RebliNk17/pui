@@ -112,6 +112,10 @@ pub fn prepare_visual_html(source: &str, dark: bool) -> String {
             "body{{padding:14px;overflow-x:auto;}}",
             "*,*::before,*::after{{box-sizing:border-box;}}",
             "svg{{max-width:100%;height:auto;display:block;}}",
+            "::-webkit-scrollbar{{width:10px;height:10px;}}",
+            "::-webkit-scrollbar-track{{background:transparent;}}",
+            "::-webkit-scrollbar-thumb{{background:{border};border-radius:5px;border:2px solid {bg};}}",
+            "::-webkit-scrollbar-thumb:hover{{background:{fg}55;}}",
             "</style>",
             "{source}"
         ),
@@ -177,6 +181,26 @@ pub struct VisualOutcome {
     pub expand: bool,
 }
 
+/// The one visual currently running as a live, interactive page.
+#[cfg(target_os = "macos")]
+struct LiveSession {
+    tool_id: String,
+    visual: cef_osr::LiveVisual,
+    texture: Option<TextureHandle>,
+    focused: bool,
+    hovered: bool,
+    left_down: bool,
+    last_shown: std::time::Instant,
+    last_active: std::time::Instant,
+    last_pos: (i32, i32),
+}
+
+/// Close a live page scrolled out of view, or idle (not hovered/focused) this long.
+#[cfg(target_os = "macos")]
+const LIVE_HIDDEN: std::time::Duration = std::time::Duration::from_millis(1500);
+#[cfg(target_os = "macos")]
+const LIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct InlineVisualHost {
     cache: HashMap<VisualKey, CachedVisual>,
     page_textures: HashMap<String, (u64, TextureHandle)>,
@@ -186,6 +210,8 @@ pub struct InlineVisualHost {
     svg_pending: usize,
     #[cfg(target_os = "macos")]
     osr: cef_osr::OsrPool,
+    #[cfg(target_os = "macos")]
+    live: Option<LiveSession>,
     tick: u64,
 }
 
@@ -201,6 +227,8 @@ impl Default for InlineVisualHost {
             svg_pending: 0,
             #[cfg(target_os = "macos")]
             osr: cef_osr::OsrPool::default(),
+            #[cfg(target_os = "macos")]
+            live: None,
             tick: 0,
         }
     }
@@ -209,6 +237,36 @@ impl Default for InlineVisualHost {
 impl InlineVisualHost {
     pub fn poll(&mut self, ctx: &egui::Context) -> bool {
         let mut changed = false;
+        #[cfg(target_os = "macos")]
+        {
+            let expired = self.live.as_ref().is_some_and(|live| {
+                live.last_shown.elapsed() > LIVE_HIDDEN
+                    || (!live.focused && !live.hovered && live.last_active.elapsed() > LIVE_IDLE)
+            });
+            if expired {
+                self.live = None; // Drop closes the offscreen browser.
+                changed = true;
+            }
+            if let Some(live) = &mut self.live {
+                live.visual.poll();
+                if let Some(image) = live.visual.take_frame() {
+                    match &mut live.texture {
+                        Some(texture) => texture.set(image, TextureOptions::LINEAR),
+                        None => {
+                            live.texture = Some(ctx.load_texture(
+                                format!("inline-visual-live-{}", live.tool_id),
+                                image,
+                                TextureOptions::LINEAR,
+                            ))
+                        }
+                    }
+                    changed = true;
+                }
+                if live.visual.error().is_some() {
+                    self.live = None;
+                }
+            }
+        }
         for done in self.svg_rx.try_iter() {
             self.svg_pending = self.svg_pending.saturating_sub(1);
             match done.result {
@@ -300,7 +358,10 @@ impl InlineVisualHost {
     pub fn release_textures(&mut self) {
         let snapshots = self.page_snapshots.clone();
         #[cfg(target_os = "macos")]
-        self.osr.release_all();
+        {
+            self.live = None;
+            self.osr.release_all();
+        }
         *self = Self::default();
         self.page_snapshots = snapshots;
     }
@@ -453,6 +514,182 @@ impl InlineVisualHost {
         key
     }
 
+    /// Run the hovered visual as a live page: forward pointer, wheel and (once
+    /// clicked) keyboard input, and return its latest frame for painting.
+    #[cfg(target_os = "macos")]
+    fn interact(
+        &mut self,
+        ui: &mut egui::Ui,
+        tool_id: &str,
+        visual: &InlineVisual,
+        key: &VisualKey,
+        dark: bool,
+        rect: egui::Rect,
+    ) -> Option<egui::TextureId> {
+        use egui::{Event, PointerButton};
+        let ctx = ui.ctx().clone();
+        let osr_key = cef_osr::CaptureKey {
+            content_hash: key.content_hash,
+            width: key.width,
+            dark,
+        };
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        let inside = pointer.is_some_and(|p| rect.contains(p))
+            && ui.is_rect_visible(rect)
+            && ui.ui_contains_pointer()
+            && !egui::Popup::is_any_open(&ctx);
+        let (width, height) = (rect.width().round() as i32, rect.height().round() as i32);
+        let current = self
+            .live
+            .as_ref()
+            .is_some_and(|live| live.tool_id == tool_id && live.visual.key == osr_key);
+        if inside && !current {
+            self.live = None;
+            let html = prepare_visual_html(&visual.html, dark);
+            let scale = ctx.pixels_per_point().clamp(1.0, 3.0);
+            if let Ok(visual) = self.osr.start_live(&ctx, osr_key, &html, width, height, scale) {
+                let now = std::time::Instant::now();
+                self.live = Some(LiveSession {
+                    tool_id: tool_id.to_owned(),
+                    visual,
+                    texture: None,
+                    focused: false,
+                    hovered: false,
+                    left_down: false,
+                    last_shown: now,
+                    last_active: now,
+                    last_pos: (0, 0),
+                });
+            }
+        }
+        let live = self.live.as_mut().filter(|live| live.tool_id == tool_id)?;
+        let now = std::time::Instant::now();
+        live.last_shown = now;
+        live.visual.resize(width, height);
+        let focus_id = ui.make_persistent_id(("inline-visual-focus", tool_id));
+        let local = |p: egui::Pos2| ((p.x - rect.min.x).round() as i32, (p.y - rect.min.y).round() as i32);
+        let modifiers = ctx.input(|i| i.modifiers);
+        let events = ctx.input(|i| i.events.clone());
+        for event in &events {
+            match event {
+                Event::PointerMoved(pos) if rect.contains(*pos) => {
+                    let (x, y) = local(*pos);
+                    live.last_pos = (x, y);
+                    live.hovered = true;
+                    live.last_active = now;
+                    live.visual.mouse_move(x, y, cef_osr::event_flags(modifiers, live.left_down), false);
+                }
+                Event::PointerButton { pos, button, pressed, modifiers } if rect.contains(*pos) => {
+                    let (x, y) = local(*pos);
+                    if *button == PointerButton::Primary {
+                        live.left_down = *pressed;
+                    }
+                    if *pressed && !live.focused {
+                        live.focused = true;
+                        live.visual.focus(true);
+                        ctx.memory_mut(|m| m.request_focus(focus_id));
+                    }
+                    let count = if ctx.input(|i| i.pointer.button_double_clicked(*button)) { 2 } else { 1 };
+                    live.last_active = now;
+                    live.visual.click(x, y, *button, !*pressed, count, cef_osr::event_flags(*modifiers, false));
+                }
+                Event::PointerButton { pressed: true, .. } if live.focused => {
+                    live.focused = false;
+                    live.visual.focus(false);
+                }
+                Event::PointerButton { pressed: false, button: PointerButton::Primary, .. } if live.left_down => {
+                    // Drag released outside: finish the page's selection/drag.
+                    live.left_down = false;
+                    let (x, y) = live.last_pos;
+                    live.visual.click(x, y, PointerButton::Primary, true, 1, 0);
+                }
+                _ => {}
+            }
+        }
+        if live.hovered && !inside {
+            live.hovered = false;
+            let (x, y) = live.last_pos;
+            live.visual.mouse_move(x, y, 0, true);
+        }
+        // Wheel scrolls the page only when it has more to show; otherwise the chat scrolls.
+        if inside && live.visual.scrollable() {
+            let delta = ctx.input(|i| i.smooth_scroll_delta);
+            if delta != Vec2::ZERO {
+                let (x, y) = live.last_pos;
+                live.visual.wheel(x, y, delta.x.round() as i32, delta.y.round() as i32, 0);
+                live.last_active = now;
+                ctx.input_mut(|i| {
+                    i.smooth_scroll_delta = Vec2::ZERO;
+                    i.raw_scroll_delta = Vec2::ZERO;
+                });
+            }
+        }
+        if live.focused && !ctx.memory(|m| m.has_focus(focus_id)) && ctx.memory(|m| m.focused().is_some()) {
+            // Another control (e.g. the composer) took keyboard focus.
+            live.focused = false;
+            live.visual.focus(false);
+        }
+        if live.focused {
+            ctx.memory_mut(|m| {
+                m.request_focus(focus_id);
+                m.set_focus_lock_filter(
+                    focus_id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                )
+            });
+            let typed = ctx.input_mut(|i| {
+                let taken: Vec<Event> = i
+                    .events
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut | Event::Key { .. }
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                i.events.retain(|e| {
+                    !matches!(
+                        e,
+                        Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut | Event::Key { .. }
+                    )
+                });
+                taken
+            });
+            for event in typed {
+                match event {
+                    Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                        live.focused = false;
+                        live.visual.focus(false);
+                        ctx.memory_mut(|m| m.surrender_focus(focus_id));
+                    }
+                    Event::Text(text) => live.visual.text(&text),
+                    Event::Paste(_) => live.visual.edit(cef_osr::Edit::Paste),
+                    Event::Copy => live.visual.edit(cef_osr::Edit::Copy),
+                    Event::Cut => live.visual.edit(cef_osr::Edit::Cut),
+                    Event::Key { key: egui::Key::A, pressed: true, modifiers, .. } if modifiers.mac_cmd => {
+                        live.visual.edit(cef_osr::Edit::SelectAll)
+                    }
+                    Event::Key { key, pressed, modifiers, .. } => {
+                        live.visual.key(key, pressed, modifiers);
+                    }
+                    _ => {}
+                }
+                live.last_active = now;
+            }
+        }
+        if inside {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+        }
+        live.texture.as_ref().map(TextureHandle::id)
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, tool_id: &str, visual: &InlineVisual) -> VisualOutcome {
         let colors = crate::theme::palette(ui.ctx());
         let dark = ui.ctx().style().visuals.dark_mode;
@@ -584,19 +821,16 @@ impl InlineVisualHost {
                                     (logical.x * scale).min(inner_width),
                                     (logical.y * scale).clamp(80.0, 820.0),
                                 );
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(display, Sense::click());
+                                let (rect, _resp) =
+                                    ui.allocate_exact_size(display, Sense::hover());
+                                #[cfg(target_os = "macos")]
+                                let painted = self.interact(ui, tool_id, visual, &key, dark, rect);
+                                #[cfg(not(target_os = "macos"))]
+                                let painted = None;
                                 if ui.is_rect_visible(rect) {
-                                    egui::Image::new((tex_id, display))
+                                    egui::Image::new((painted.unwrap_or(tex_id), display))
                                         .corner_radius(9)
                                         .paint_at(ui, rect);
-                                }
-                                if resp
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_text("Click to open interactive visual in Browser")
-                                    .clicked()
-                                {
-                                    expand = true;
                                 }
                             }
                             Some((None, Some(error))) => {
@@ -665,6 +899,9 @@ mod tests {
 
         let light = prepare_visual_html("<div>Hello</div>", false);
         assert!(light.contains("color-scheme:light"));
+        // Taller visuals show a visible scrollbar instead of being cut off silently.
+        assert!(dark.contains("::-webkit-scrollbar{width:10px"));
+        assert!(dark.contains("::-webkit-scrollbar-thumb{background:#323230"));
     }
 
     #[test]
