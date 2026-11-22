@@ -331,7 +331,9 @@ pub fn stack(
                         .min_scrolled_height(max_height)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            ui.set_width((width - 6.0).max(40.0));
+                            let inner_width = (width - 6.0).max(40.0);
+                            ui.set_width(inner_width);
+                            ui.set_max_width(inner_width);
                             contents(ui, card);
                         });
                 }

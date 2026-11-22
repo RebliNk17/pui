@@ -656,7 +656,12 @@ impl Pui {
             .filter(|t| !t.finished)
             .map(|t| {
                 let title = if !t.command.is_empty() {
-                    t.command.clone()
+                    t.command
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or(&t.command)
+                        .trim()
+                        .to_owned()
                 } else if !t.path.is_empty() {
                     format!("{} {}", t.name, t.path)
                 } else {
@@ -692,7 +697,12 @@ impl Pui {
             .take(15)
             .map(|t| {
                 let title = if !t.command.is_empty() {
-                    t.command.clone()
+                    t.command
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or(&t.command)
+                        .trim()
+                        .to_owned()
                 } else if !t.path.is_empty() {
                     format!("{} {}", t.name, t.path)
                 } else {
@@ -705,33 +715,42 @@ impl Pui {
         if active_tools.is_empty() && running_agents.is_empty() {
             ui.label(theme::small(ui, "No active background tasks."));
         } else {
+            let active_w = (ui.available_width() - 12.0).max(40.0);
             for (_id, title) in &active_tools {
-                ui.horizontal(|ui| {
-                    icons::inline(ui, Icon::Terminal, colors.accent);
-                    ui.add(
-                        egui::Label::new(RichText::new(title).size(11.0).color(colors.text))
-                            .truncate(),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(active_w, 20.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.set_max_width(active_w);
                         if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
                             stop_current = true;
                         }
-                    });
-                });
+                        ui.add_space(6.0);
+                        let left_w = ui.available_width().max(20.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(left_w, 20.0),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.set_max_width(left_w);
+                                icons::inline(ui, Icon::Terminal, colors.accent);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(title).size(11.0).color(colors.text),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(title);
+                            },
+                        );
+                    },
+                );
             }
             for (id, name, created) in &running_agents {
-                ui.horizontal(|ui| {
-                    dot(ui, colors.accent);
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(name).size(11.0).color(colors.text))
-                                .frame(false),
-                        )
-                        .clicked()
-                    {
-                        open_agent_id = Some(id.clone());
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(active_w, 20.0),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        ui.set_max_width(active_w);
                         if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
                             stop_agent_id = Some(id.clone());
                         }
@@ -742,8 +761,31 @@ impl Pui {
                                     .color(colors.muted),
                             );
                         }
-                    });
-                });
+                        ui.add_space(6.0);
+                        let left_w = ui.available_width().max(20.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(left_w, 20.0),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.set_max_width(left_w);
+                                dot(ui, colors.accent);
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(name).size(11.0).color(colors.text),
+                                        )
+                                        .truncate()
+                                        .frame(false),
+                                    )
+                                    .on_hover_text(name)
+                                    .clicked()
+                                {
+                                    open_agent_id = Some(id.clone());
+                                }
+                            },
+                        );
+                    },
+                );
             }
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
@@ -772,46 +814,78 @@ impl Pui {
             }
             if open {
                 ui.indent("bg-finished-list", |ui| {
+                    // Reserve right clearance so the ScrollArea scrollbar never overlaps duration/status labels.
+                    let row_w = (ui.available_width() - 12.0).max(40.0);
+                    ui.set_max_width(row_w);
                     for (id, name, status) in &finished_agents {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(name).size(10.5).color(colors.muted),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                open_agent_id = Some(id.clone());
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(row_w, 18.0),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                ui.set_max_width(row_w);
                                 ui.label(RichText::new(status).size(10.0).color(colors.dim));
-                            });
-                        });
+                                ui.add_space(8.0);
+                                let left_w = ui.available_width().max(20.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(left_w, 18.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.set_max_width(left_w);
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(name)
+                                                        .size(10.5)
+                                                        .color(colors.muted),
+                                                )
+                                                .truncate()
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(name)
+                                            .clicked()
+                                        {
+                                            open_agent_id = Some(id.clone());
+                                        }
+                                    },
+                                );
+                            },
+                        );
                     }
                     for (title, duration_ms, failed) in &finished_tools {
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(title).size(10.5).color(if *failed {
-                                        colors.red
-                                    } else {
-                                        colors.muted
-                                    }),
-                                )
-                                .truncate(),
-                            );
-                            if let Some(ms) = duration_ms {
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(row_w, 18.0),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                ui.set_max_width(row_w);
+                                if let Some(ms) = duration_ms {
                                     ui.label(
                                         RichText::new(format_elapsed(Duration::from_millis(*ms)))
                                             .size(10.0)
                                             .color(colors.dim),
                                     );
-                                });
-                            }
-                        });
+                                    ui.add_space(8.0);
+                                }
+                                let left_w = ui.available_width().max(20.0);
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(left_w, 18.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.set_max_width(left_w);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(title).size(10.5).color(if *failed {
+                                                    colors.red
+                                                } else {
+                                                    colors.muted
+                                                }),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(title);
+                                    },
+                                );
+                            },
+                        );
                     }
                 });
             }
@@ -1321,5 +1395,163 @@ mod tests {
         assert_eq!(app.transcript.viewport, height);
         assert_eq!(app.state.diagnostics.len(), 1);
         assert!(app.state.notice.is_none());
+    }
+
+    #[test]
+    fn expanding_finished_background_tasks_keeps_panel_width_and_aligns_durations() {
+        fn collect_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((
+                    t.galley.job.text.clone(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                )),
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect_texts(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.prefs.cards.collapsed.extend(Card::ALL);
+        app.prefs.cards.collapsed.remove(&Card::BackgroundTasks);
+        // Populate finished tools with short and very long commands + varying durations.
+        app.state.messages = vec![protocol::Message {
+            role: "assistant".into(),
+            tools: vec![
+                protocol::Tool {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    command: "git status -s".into(),
+                    finished: true,
+                    duration_ms: Some(120),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "t2".into(),
+                    name: "bash".into(),
+                    command: "git add scripts/visual.ts scripts/ultracode.ts scripts/permissions.ts scripts/bundle-macos.sh src/inline_visual.rs src/transcript.rs".into(),
+                    finished: true,
+                    duration_ms: Some(400),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "t3".into(),
+                    name: "bash".into(),
+                    command: "export PATH=\"$HOME/.cargo/bin:$PATH\"\ncargo test --offline --locked --bin pui".into(),
+                    finished: true,
+                    duration_ms: Some(217_000),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+
+        let run = |app: &mut Pui, events: Vec<egui::Event>| {
+            let mut remaining = egui::Rect::NOTHING;
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.inspector(ctx);
+                    remaining = ctx.available_rect();
+                },
+            );
+            (out, 1000.0 - remaining.width())
+        };
+
+        // Measure inspector panel width while "3 finished" is collapsed.
+        let _ = run(&mut app, vec![]);
+        let (collapsed_out, width_before) = run(&mut app, vec![]);
+        let mut texts = Vec::new();
+        for clipped in &collapsed_out.shapes {
+            collect_texts(&clipped.shape, &mut texts);
+        }
+        let toggle_pos = texts
+            .iter()
+            .find(|(t, _)| t == "3 finished")
+            .expect("finished disclosure visible")
+            .1
+            .center();
+
+        // Click "3 finished" to expand it.
+        let _ = run(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(toggle_pos),
+                egui::Event::PointerButton {
+                    pos: toggle_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let _ = run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: toggle_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let (expanded_out, width_after) = run(&mut app, vec![]);
+        assert!(
+            (width_after - width_before).abs() < 0.5,
+            "Inspector width changed when expanding finished tasks: before={width_before}, after={width_after}"
+        );
+
+        let mut expanded_texts = Vec::new();
+        for clipped in &expanded_out.shapes {
+            collect_texts(&clipped.shape, &mut expanded_texts);
+        }
+        let duration_rects: Vec<_> = expanded_texts
+            .iter()
+            .filter(|(t, _)| t == "0s" || t == "3m 37s")
+            .collect();
+        assert_eq!(duration_rects.len(), 3, "expected all 3 duration labels");
+        let expected_right = duration_rects[0].1.right();
+        for (label, rect) in &duration_rects {
+            assert!(
+                (rect.right() - expected_right).abs() < 1.0,
+                "Duration '{label}' right edge {} misaligned with {expected_right}",
+                rect.right()
+            );
+            assert!(
+                rect.right() <= 1000.0 - 20.0,
+                "Duration '{label}' right edge {} leaves no scrollbar clearance (panel width_before={width_before}, width_after={width_after}, rect={rect:?})",
+                rect.right()
+            );
+        }
+        // Verify long truncated command text stays strictly to the left of its duration label.
+        let long_cmd = expanded_texts
+            .iter()
+            .find(|(t, _)| t.starts_with("git add scripts/"))
+            .expect("truncated long command visible");
+        let same_row_dur = duration_rects
+            .iter()
+            .find(|(_, r)| (r.center().y - long_cmd.1.center().y).abs() < 4.0)
+            .expect("matching duration on long command row");
+        assert!(
+            long_cmd.1.right() + 4.0 <= same_row_dur.1.left(),
+            "Truncated command {:?} overlaps duration {:?}",
+            long_cmd.1,
+            same_row_dur.1
+        );
     }
 }
