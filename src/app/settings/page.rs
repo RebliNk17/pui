@@ -1177,7 +1177,18 @@ impl Pui {
             "Current conversation",
             "Model choices and supported thinking levels come from Pi.",
         );
-        let models = self.state.models.clone();
+        self.settings_view.providers.ensure_loaded(self.demo);
+        let models: Vec<protocol::Model> = self
+            .state
+            .models
+            .iter()
+            .filter(|m| {
+                self.settings_view
+                    .providers
+                    .is_provider_configured(&m.provider)
+            })
+            .cloned()
+            .collect();
         let blocked = self.model_change_blocked();
         card(ui, |ui| {
             ui.add_enabled_ui(blocked.is_none(), |ui|{
@@ -1209,7 +1220,12 @@ impl Pui {
         ui.label(theme::small(ui, "An in-flight provider response keeps its original model; Pi applies your selection to subsequent requests."));
         section(ui, "Available models", "");
         if models.is_empty() {
-            ui.label(theme::small(ui, "Connect to Pi to load the model catalog."));
+            let message = if self.state.models.is_empty() {
+                "Connect to Pi to load the model catalog."
+            } else {
+                "No configured providers. Add a provider in Settings → Providers."
+            };
+            ui.label(theme::small(ui, message));
             return;
         }
         let colors = theme::palette(ui.ctx());
