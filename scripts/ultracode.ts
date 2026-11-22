@@ -12,6 +12,7 @@ import { installVisual } from "./visual.ts";
 import { installWorkflows, WORKFLOW_GUIDANCE } from "./workflows.ts";
 import { installAntigravity } from "./antigravity.ts";
 import { installAccounts } from "./accounts.ts";
+import { installModelFallback } from "./model-fallback.ts";
 import { installShellEnv } from "./shellenv.ts";
 
 export const AGENT_GUIDANCE = `Pui manages subagents as independently clickable child chats beneath the conversation that launches them. When the user requests subagents, use pui_spawn_agent (optionally with cwd for another repository), pui_agents, pui_wait_agents, pui_message_agent and pui_stop_agent. These tools are available without enabling Ultracode; normal permission checks still apply.
@@ -44,6 +45,7 @@ export default function puiExtension(pi: any) {
   installContext(pi);
   installTitles(pi);
   installAntigravity(pi);
+  installModelFallback(pi);
   installShellEnv(pi);
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",

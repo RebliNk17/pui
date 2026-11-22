@@ -13,6 +13,11 @@ pub(super) struct CatalogModel {
     pub model: protocol::Model,
     pub max_tokens: u64,
     pub text: bool,
+    pub vision: bool,
+    pub reasoning: bool,
+    pub cache_read_cost: f64,
+    pub cache_write_cost: f64,
+    pub thinking_format: Option<String>,
     /// Both input and output prices are known (zero is a valid price).
     pub priced: bool,
     /// Learned from Pi for an extension-registered provider.
@@ -139,6 +144,11 @@ impl AppCatalog {
                     // Pi does not report these over RPC; extension providers are chat models.
                     max_tokens: 8192,
                     text: true,
+                    vision: false,
+                    reasoning: false,
+                    cache_read_cost: 0.0,
+                    cache_write_cost: 0.0,
+                    thinking_format: None,
                     priced: true,
                     extension: true,
                 }),
@@ -327,6 +337,16 @@ fn parse(stdout: &[u8]) -> Result<Vec<CatalogModel>, String> {
             text: m["input"]
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|k| k == "text")),
+            vision: m["input"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|k| k == "image")),
+            reasoning: m["reasoning"].as_bool().unwrap_or(false),
+            cache_read_cost: m["cost"]["cacheRead"].as_f64().unwrap_or_default(),
+            cache_write_cost: m["cost"]["cacheWrite"].as_f64().unwrap_or_default(),
+            thinking_format: m["thinkingFormat"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             priced: m["cost"]["input"].is_number() && m["cost"]["output"].is_number(),
             extension: false,
         })

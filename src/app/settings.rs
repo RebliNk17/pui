@@ -166,6 +166,7 @@ pub(super) fn write_pi_json(path: &std::path::Path, value: &Value) -> Result<(),
     providers::write_json_atomic(path, value, false)
 }
 mod appearance;
+mod model_editor;
 mod page;
 mod providers;
 mod resources;

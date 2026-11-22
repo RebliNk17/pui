@@ -212,8 +212,12 @@ pub(in crate::app) struct ProvidersManager {
     disk_loaded: bool,
     pub(in crate::app) custom_providers: Vec<CustomProviderSummary>,
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
-    pub(in crate::app) model_context_overrides: std::collections::BTreeMap<(String, String), u64>,
-    pub(in crate::app) context_override_drafts: std::collections::BTreeMap<(String, String), u64>,
+    pub(in crate::app) model_overrides:
+        std::collections::BTreeMap<(String, String), super::model_editor::ModelOverride>,
+    pub(in crate::app) model_thinking_levels:
+        std::collections::BTreeMap<(String, String), String>,
+    pub(in crate::app) model_fallbacks:
+        std::collections::BTreeMap<(String, String), String>,
     claude: ClaudeSubscriptionFlow,
     antigravity: AntigravitySubscriptionFlow,
     vertex: VertexModal,
@@ -235,6 +239,14 @@ fn models_json_path() -> Option<PathBuf> {
 
 fn auth_json_path() -> Option<PathBuf> {
     agent_dir().map(|dir| dir.join("auth.json"))
+}
+
+fn settings_json_path() -> Option<PathBuf> {
+    agent_dir().map(|dir| dir.join("settings.json"))
+}
+
+fn fallbacks_json_path() -> Option<PathBuf> {
+    agent_dir().map(|dir| dir.join(super::model_editor::FALLBACKS_FILE))
 }
 
 fn read_json_object(path: &Path) -> Value {
@@ -956,11 +968,12 @@ impl ProvidersManager {
         self.stamp_changed([
             auth_json_path(),
             models_json_path(),
-            agent_dir().map(|dir| dir.join("settings.json")),
+            settings_json_path(),
+            fallbacks_json_path(),
         ])
     }
 
-    fn stamp_changed(&mut self, paths: [Option<PathBuf>; 3]) -> bool {
+    fn stamp_changed(&mut self, paths: impl IntoIterator<Item = Option<PathBuf>>) -> bool {
         let stamp: Vec<_> = paths
             .into_iter()
             .map(|path| {
@@ -1014,7 +1027,9 @@ impl ProvidersManager {
         self.accounts.registry = None;
         self.custom_providers.clear();
         self.saved_auth.clear();
-        self.model_context_overrides.clear();
+        self.model_overrides.clear();
+        self.model_thinking_levels.clear();
+        self.model_fallbacks.clear();
         if let Some(auth_path) = auth_json_path() {
             let root = read_json_object(&auth_path);
             if let Some(obj) = root.as_object() {
@@ -1040,6 +1055,7 @@ impl ProvidersManager {
         }
         if let Some(models_path) = models_json_path() {
             let root = read_json_object(&models_path);
+            self.model_overrides = super::model_editor::read_model_overrides(&root);
             if let Some(providers) = root["providers"].as_object() {
                 for (id, config) in providers {
                     let base_url = config["baseUrl"].as_str().unwrap_or_default().to_owned();
@@ -1074,14 +1090,6 @@ impl ProvidersManager {
                             });
                         }
                     }
-                    if let Some(overrides) = config["modelOverrides"].as_object() {
-                        for (model_id, ov) in overrides {
-                            if let Some(cw) = ov["contextWindow"].as_u64().filter(|&v| v > 0) {
-                                self.model_context_overrides
-                                    .insert((id.clone(), model_id.clone()), cw);
-                            }
-                        }
-                    }
                     if !base_url.is_empty() || !models.is_empty() {
                         self.custom_providers.push(CustomProviderSummary {
                             id: id.clone(),
@@ -1095,91 +1103,148 @@ impl ProvidersManager {
                 }
             }
         }
+        if let Some(settings_path) = settings_json_path() {
+            let root = read_json_object(&settings_path);
+            self.model_thinking_levels = super::model_editor::read_model_thinking_levels(&root);
+        }
+        if let Some(fallbacks_path) = fallbacks_json_path() {
+            self.model_fallbacks = super::model_editor::read_model_fallbacks(&fallbacks_path);
+        }
     }
 
-    pub(in crate::app) fn set_model_context_window(
+    pub(in crate::app) fn has_model_customizations(&self, provider: &str, model_id: &str) -> bool {
+        let key = (provider.to_owned(), model_id.to_owned());
+        self.model_overrides.contains_key(&key)
+            || self.model_thinking_levels.contains_key(&key)
+            || self.model_fallbacks.contains_key(&key)
+    }
+
+    pub(in crate::app) fn apply_model_edits(
         &mut self,
-        provider: &str,
-        model_id: &str,
-        tokens: u64,
+        patch: &super::model_editor::ModelEditPatch,
     ) -> Result<(), String> {
-        let tokens = tokens.clamp(4_096, 10_000_000);
-        let path = models_json_path().ok_or("Cannot resolve ~/.pi/agent/models.json.")?;
-        let mut root = read_json_object(&path);
-        if !root["providers"].is_object() {
-            root["$schema"] = json!("https://pi.dev/schemas/models.schema.json");
-            root["providers"] = json!({});
+        use super::model_editor::{
+            FieldEdit, apply_override_patch_to_json, apply_thinking_level_to_settings,
+            serialize_model_fallbacks, validate_fallback_target,
+        };
+        if patch.targets.is_empty() {
+            return Ok(());
         }
-        let providers = root["providers"]
-            .as_object_mut()
-            .ok_or("Invalid providers object in models.json.")?;
-        let entry = providers
-            .entry(provider.to_owned())
-            .or_insert_with(|| json!({}));
-        if !entry.is_object() {
-            *entry = json!({});
+        if let FieldEdit::Set(target) = &patch.fallback {
+            let edited: std::collections::BTreeSet<String> = patch
+                .targets
+                .iter()
+                .map(|(p, id)| format!("{p}/{id}"))
+                .collect();
+            validate_fallback_target(&edited, target, &self.model_fallbacks)?;
         }
-        if !entry["modelOverrides"].is_object() {
-            entry["modelOverrides"] = json!({});
+
+        // 1. models.json overrides
+        let models_path = models_json_path().ok_or("Cannot resolve ~/.pi/agent/models.json.")?;
+        let mut models_root = read_json_object(&models_path);
+        let mut models_dirty = false;
+        for (provider, model_id) in &patch.targets {
+            if apply_override_patch_to_json(&mut models_root, provider, model_id, patch)? {
+                models_dirty = true;
+            }
         }
-        let overrides = entry["modelOverrides"]
-            .as_object_mut()
-            .ok_or("Invalid modelOverrides object in models.json.")?;
-        let model_ov = overrides
-            .entry(model_id.to_owned())
-            .or_insert_with(|| json!({}));
-        if !model_ov.is_object() {
-            *model_ov = json!({});
+        if models_dirty {
+            write_json_atomic(&models_path, &models_root, false)?;
         }
-        model_ov["contextWindow"] = json!(tokens);
-        write_json_atomic(&path, &root, false)?;
-        self.context_override_drafts
-            .remove(&(provider.to_owned(), model_id.to_owned()));
+
+        // 2. settings.json per-model thinking level
+        if !matches!(patch.thinking_level, FieldEdit::Keep) {
+            let settings_path =
+                settings_json_path().ok_or("Cannot resolve ~/.pi/agent/settings.json.")?;
+            let mut settings_root = read_json_object(&settings_path);
+            let mut settings_dirty = false;
+            for (provider, model_id) in &patch.targets {
+                if apply_thinking_level_to_settings(
+                    &mut settings_root,
+                    provider,
+                    model_id,
+                    &patch.thinking_level,
+                ) {
+                    settings_dirty = true;
+                }
+            }
+            if settings_dirty {
+                write_json_atomic(&settings_path, &settings_root, false)?;
+            }
+        }
+
+        // 3. pui-model-fallbacks.json
+        if !matches!(patch.fallback, FieldEdit::Keep) {
+            let fallbacks_path = fallbacks_json_path()
+                .ok_or("Cannot resolve ~/.pi/agent/pui-model-fallbacks.json.")?;
+            let mut map = super::model_editor::read_model_fallbacks(&fallbacks_path);
+            for (provider, model_id) in &patch.targets {
+                let key = (provider.clone(), model_id.clone());
+                match &patch.fallback {
+                    FieldEdit::Set(target) => {
+                        map.insert(key, target.clone());
+                    }
+                    FieldEdit::Clear => {
+                        map.remove(&key);
+                    }
+                    FieldEdit::Keep => {}
+                }
+            }
+            write_json_atomic(&fallbacks_path, &serialize_model_fallbacks(&map), false)?;
+        }
+
         self.reload_from_disk();
         self.status_error = None;
         self.reload_requested = true;
         Ok(())
     }
 
-    pub(in crate::app) fn clear_model_context_window(
+    pub(in crate::app) fn reset_model_edits(
         &mut self,
-        provider: &str,
-        model_id: &str,
+        targets: &[(String, String)],
     ) -> Result<(), String> {
-        let path = models_json_path().ok_or("Cannot resolve ~/.pi/agent/models.json.")?;
-        let mut root = read_json_object(&path);
-        if let Some(providers) = root["providers"].as_object_mut() {
-            let mut remove_provider = false;
-            if let Some(entry) = providers.get_mut(provider).and_then(|v| v.as_object_mut()) {
-                let mut remove_overrides = false;
-                if let Some(overrides) = entry
-                    .get_mut("modelOverrides")
-                    .and_then(|v| v.as_object_mut())
-                {
-                    let mut remove_model = false;
-                    if let Some(model_ov) =
-                        overrides.get_mut(model_id).and_then(|v| v.as_object_mut())
-                    {
-                        model_ov.remove("contextWindow");
-                        remove_model = model_ov.is_empty();
-                    }
-                    if remove_model {
-                        overrides.remove(model_id);
-                    }
-                    remove_overrides = overrides.is_empty();
-                }
-                if remove_overrides {
-                    entry.remove("modelOverrides");
-                }
-                remove_provider = entry.is_empty();
-            }
-            if remove_provider {
-                providers.remove(provider);
-            }
-            write_json_atomic(&path, &root, false)?;
+        use super::model_editor::{
+            FieldEdit, apply_thinking_level_to_settings, clear_override_in_json,
+            serialize_model_fallbacks,
+        };
+        if targets.is_empty() {
+            return Ok(());
         }
-        self.context_override_drafts
-            .remove(&(provider.to_owned(), model_id.to_owned()));
+        if let Some(models_path) = models_json_path() {
+            let mut models_root = read_json_object(&models_path);
+            let mut dirty = false;
+            for (provider, model_id) in targets {
+                dirty |= clear_override_in_json(&mut models_root, provider, model_id);
+            }
+            if dirty {
+                write_json_atomic(&models_path, &models_root, false)?;
+            }
+        }
+        if let Some(settings_path) = settings_json_path() {
+            let mut settings_root = read_json_object(&settings_path);
+            let mut dirty = false;
+            for (provider, model_id) in targets {
+                dirty |= apply_thinking_level_to_settings(
+                    &mut settings_root,
+                    provider,
+                    model_id,
+                    &FieldEdit::Clear,
+                );
+            }
+            if dirty {
+                write_json_atomic(&settings_path, &settings_root, false)?;
+            }
+        }
+        if let Some(fallbacks_path) = fallbacks_json_path() {
+            let mut map = super::model_editor::read_model_fallbacks(&fallbacks_path);
+            let mut dirty = false;
+            for key in targets {
+                dirty |= map.remove(key).is_some();
+            }
+            if dirty {
+                write_json_atomic(&fallbacks_path, &serialize_model_fallbacks(&map), false)?;
+            }
+        }
         self.reload_from_disk();
         self.status_error = None;
         self.reload_requested = true;

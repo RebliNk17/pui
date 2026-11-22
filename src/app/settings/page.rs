@@ -117,7 +117,7 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
         (
             "Model context window",
             "Models",
-            "context window max tokens limit override model",
+            "context window max tokens limit override vision reasoning fallback pricing edit model",
         ),
         (
             "Default model for new chats",
@@ -221,6 +221,9 @@ pub(in crate::app) struct View {
     page: Page,
     search: String,
     models_search: String,
+    models_select_mode: bool,
+    models_selected: std::collections::BTreeSet<(String, String)>,
+    pub(in crate::app) model_editor: Option<super::model_editor::ModelEditDraft>,
     scale: super::scale::Scale,
     pub(in crate::app) resources: resources::Resources,
     pub(in crate::app) providers: super::providers::ProvidersManager,
@@ -241,7 +244,9 @@ impl View {
         }
     }
     pub(in crate::app) fn navigation_blocked(&self) -> bool {
-        self.resources.navigation_blocked() || self.providers.any_modal_open()
+        self.resources.navigation_blocked()
+            || self.providers.any_modal_open()
+            || self.model_editor.is_some()
     }
     pub(in crate::app) fn select(&mut self, name: &str) {
         if let Some(view) = name.strip_prefix("Resources/") {
@@ -671,6 +676,7 @@ impl Pui {
             && (self.settings_view.page != Page::Resources
                 || !self.settings_view.resources.escape())
             && !self.settings_view.providers.escape()
+            && !self.escape_model_editor()
             && !std::mem::take(&mut self.settings_view.classifier_open)
             && !std::mem::take(&mut self.settings_view.default_open)
         {
@@ -801,6 +807,124 @@ impl Pui {
         }
         self.propagate_settings(&before);
         self.settings_view.providers.show_modals(ctx);
+        self.show_model_editor_dialog(ctx);
+    }
+
+    fn escape_model_editor(&mut self) -> bool {
+        let Some(draft) = self.settings_view.model_editor.as_mut() else {
+            return false;
+        };
+        if !draft.escape() {
+            self.settings_view.model_editor = None;
+        }
+        true
+    }
+
+    fn show_model_editor_dialog(&mut self, ctx: &egui::Context) {
+        if self.settings_view.model_editor.is_none() {
+            return;
+        }
+        let all_models = self.configured_models();
+        let existing_fallbacks = self.settings_view.providers.model_fallbacks.clone();
+        let outcome = {
+            let draft = self.settings_view.model_editor.as_mut().unwrap();
+            super::model_editor::show_model_editor(ctx, draft, &all_models, &existing_fallbacks)
+        };
+        match outcome {
+            super::model_editor::EditorOutcome::Open => {}
+            super::model_editor::EditorOutcome::Cancel => {
+                self.settings_view.model_editor = None;
+            }
+            super::model_editor::EditorOutcome::Save(patch) => {
+                match self.settings_view.providers.apply_model_edits(&patch) {
+                    Ok(()) => {
+                        self.apply_model_patch_in_memory(&patch);
+                        self.settings_view.model_editor = None;
+                    }
+                    Err(err) => {
+                        if let Some(draft) = self.settings_view.model_editor.as_mut() {
+                            draft.error = Some(err);
+                        }
+                    }
+                }
+            }
+            super::model_editor::EditorOutcome::Reset(targets) => {
+                match self.settings_view.providers.reset_model_edits(&targets) {
+                    Ok(()) => {
+                        self.settings_view.model_editor = None;
+                    }
+                    Err(err) => {
+                        if let Some(draft) = self.settings_view.model_editor.as_mut() {
+                            draft.error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_model_patch_in_memory(&mut self, patch: &super::model_editor::ModelEditPatch) {
+        use super::model_editor::FieldEdit;
+        for (provider, model_id) in &patch.targets {
+            for m in &mut self.state.models {
+                if m.provider == *provider && m.id == *model_id {
+                    if let FieldEdit::Set(name) = &patch.name {
+                        m.name = name.clone();
+                    }
+                    if let FieldEdit::Set(tokens) = patch.context_window {
+                        m.context_window = tokens;
+                    }
+                    if let FieldEdit::Set(v) = patch.input_cost {
+                        m.input_cost = v;
+                    }
+                    if let FieldEdit::Set(v) = patch.output_cost {
+                        m.output_cost = v;
+                    }
+                }
+            }
+            for entry in &mut self.catalog.models {
+                if entry.model.provider == *provider && entry.model.id == *model_id {
+                    if let FieldEdit::Set(name) = &patch.name {
+                        entry.model.name = name.clone();
+                    }
+                    if let FieldEdit::Set(v) = patch.vision {
+                        entry.vision = v;
+                    }
+                    if let FieldEdit::Set(v) = patch.reasoning {
+                        entry.reasoning = v;
+                    }
+                    if let FieldEdit::Set(tokens) = patch.context_window {
+                        entry.model.context_window = tokens;
+                    }
+                    if let FieldEdit::Set(tokens) = patch.max_tokens {
+                        entry.max_tokens = tokens;
+                    }
+                    if let FieldEdit::Set(v) = patch.input_cost {
+                        entry.model.input_cost = v;
+                    }
+                    if let FieldEdit::Set(v) = patch.output_cost {
+                        entry.model.output_cost = v;
+                    }
+                    if let FieldEdit::Set(v) = patch.cache_read_cost {
+                        entry.cache_read_cost = v;
+                    }
+                    if let FieldEdit::Set(v) = patch.cache_write_cost {
+                        entry.cache_write_cost = v;
+                    }
+                    match &patch.thinking_format {
+                        FieldEdit::Set(v) => entry.thinking_format = Some(v.clone()),
+                        FieldEdit::Clear => entry.thinking_format = None,
+                        FieldEdit::Keep => {}
+                    }
+                }
+            }
+            if let FieldEdit::Set(tokens) = patch.context_window
+                && self.state.model == *model_id
+                && (self.state.provider.is_empty() || self.state.provider == *provider)
+            {
+                self.state.context_window = tokens as f64;
+            }
+        }
     }
     fn settings_general(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
@@ -1443,48 +1567,156 @@ impl Pui {
             return;
         }
         let colors = theme::palette(ui.ctx());
-        egui::Frame::new()
-            .fill(colors.surface)
-            .stroke(Stroke::new(1.0_f32, colors.border))
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    crate::icons::inline(ui, Icon::Search, colors.dim);
-                    let clear_w = if self.settings_view.models_search.is_empty() {
-                        0.0
-                    } else {
-                        22.0
-                    };
-                    let edit_w = (ui.available_width() - clear_w).max(80.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.settings_view.models_search)
-                            .id_salt("settings-models-search")
-                            .hint_text("Search models by name, ID, or provider…")
-                            .frame(false)
-                            .desired_width(edit_w),
-                    );
-                    if !self.settings_view.models_search.is_empty()
-                        && ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("×").size(13.0).color(colors.muted),
+        let select_btn_w = 88.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let search_w = (ui.available_width() - select_btn_w - 8.0).max(120.0);
+            egui::Frame::new()
+                .fill(colors.surface)
+                .stroke(Stroke::new(1.0_f32, colors.border))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_width((search_w - 22.0).max(80.0));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        crate::icons::inline(ui, Icon::Search, colors.dim);
+                        let clear_w = if self.settings_view.models_search.is_empty() {
+                            0.0
+                        } else {
+                            22.0
+                        };
+                        let edit_w = (ui.available_width() - clear_w).max(60.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings_view.models_search)
+                                .id_salt("settings-models-search")
+                                .hint_text("Search models by name, ID, or provider…")
+                                .frame(false)
+                                .desired_width(edit_w),
+                        );
+                        if !self.settings_view.models_search.is_empty()
+                            && ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("×").size(13.0).color(colors.muted),
+                                    )
+                                    .frame(false),
                                 )
-                                .frame(false),
-                            )
-                            .on_hover_text("Clear search")
-                            .clicked()
-                    {
-                        self.settings_view.models_search.clear();
-                    }
+                                .on_hover_text("Clear search")
+                                .clicked()
+                        {
+                            self.settings_view.models_search.clear();
+                        }
+                    });
                 });
-            });
+            let select_label = if self.settings_view.models_select_mode {
+                "Done"
+            } else {
+                "Select"
+            };
+            if theme::choice(ui, self.settings_view.models_select_mode, select_label)
+                .on_hover_text("Select multiple models to edit or show/hide together")
+                .clicked()
+            {
+                self.settings_view.models_select_mode = !self.settings_view.models_select_mode;
+                if !self.settings_view.models_select_mode {
+                    self.settings_view.models_selected.clear();
+                }
+            }
+        });
+
+        let available_keys: std::collections::BTreeSet<(String, String)> = models
+            .iter()
+            .map(|m| (m.provider.clone(), m.id.clone()))
+            .collect();
+        self.settings_view
+            .models_selected
+            .retain(|k| available_keys.contains(k));
+
+        let mut open_single: Option<protocol::Model> = None;
+        let mut open_multi = false;
+
+        if self.settings_view.models_select_mode && !self.settings_view.models_selected.is_empty() {
+            let count = self.settings_view.models_selected.len();
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(colors.accent_bg)
+                .stroke(Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.5)))
+                .corner_radius(10)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{count} model{} selected",
+                                if count == 1 { "" } else { "s" }
+                            ))
+                            .size(12.5)
+                            .strong()
+                            .color(colors.text),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if prompt_ui::button(
+                                ui,
+                                "Clear",
+                                prompt_ui::Button::Secondary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.settings_view.models_selected.clear();
+                            }
+                            if prompt_ui::button(
+                                ui,
+                                "Hide",
+                                prompt_ui::Button::Secondary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                for (prov, id) in &self.settings_view.models_selected {
+                                    self.prefs.hidden_models.insert(format!("{prov}/{id}"));
+                                }
+                            }
+                            if prompt_ui::button(
+                                ui,
+                                "Show",
+                                prompt_ui::Button::Secondary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                for (prov, id) in &self.settings_view.models_selected {
+                                    self.prefs.hidden_models.remove(&format!("{prov}/{id}"));
+                                }
+                            }
+                            let edit_label = if count == 1 {
+                                "Edit model".to_owned()
+                            } else {
+                                format!("Edit {count} models")
+                            };
+                            if prompt_ui::button(
+                                ui,
+                                &edit_label,
+                                prompt_ui::Button::Primary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                open_multi = true;
+                            }
+                        });
+                    });
+                });
+        }
+
         self.settings_view.providers.ensure_loaded(self.demo);
         let query = self.settings_view.models_search.trim().to_ascii_lowercase();
         let mut by_provider: std::collections::BTreeMap<String, Vec<protocol::Model>> =
             std::collections::BTreeMap::new();
-        for model in models {
+        for model in &models {
             if !query.is_empty() {
                 let display = crate::accounts::display_provider(&model.provider);
                 let hay = format!("{} {} {} {}", model.name, model.id, model.provider, display)
@@ -1496,7 +1728,7 @@ impl Pui {
             by_provider
                 .entry(model.provider.clone())
                 .or_default()
-                .push(model);
+                .push(model.clone());
         }
         if by_provider.is_empty() {
             ui.add_space(12.0);
@@ -1530,6 +1762,39 @@ impl Pui {
                     ui,
                     format!("· {} model(s)", provider_models.len()),
                 ));
+                if self.settings_view.models_select_mode {
+                    let all_selected = provider_models.iter().all(|m| {
+                        self.settings_view
+                            .models_selected
+                            .contains(&(m.provider.clone(), m.id.clone()))
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let text = if all_selected {
+                            "Deselect all"
+                        } else {
+                            "Select all"
+                        };
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new(text).size(11.5).color(colors.accent),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            for m in &provider_models {
+                                let key = (m.provider.clone(), m.id.clone());
+                                if all_selected {
+                                    self.settings_view.models_selected.remove(&key);
+                                } else {
+                                    self.settings_view.models_selected.insert(key);
+                                }
+                            }
+                        }
+                    });
+                }
             });
             ui.add_space(6.0);
             card(ui, |ui| {
@@ -1537,172 +1802,328 @@ impl Pui {
                     if index > 0 {
                         separator(ui);
                     }
+                    let target = self.build_model_edit_target(model);
                     let hidden_key = format!("{}/{}", model.provider, model.id);
                     let was_visible = !self.prefs.hidden_models.contains(&hidden_key);
                     let mut visible = was_visible;
-                    provider_row(
+                    let sel_key = (model.provider.clone(), model.id.clone());
+                    let is_selected = self.settings_view.models_selected.contains(&sel_key);
+                    let mut selected = is_selected;
+                    let select_mode = self.settings_view.models_select_mode;
+                    let edit_clicked = model_settings_row(
                         ui,
-                        &model.provider,
-                        &model.name,
-                        &format!("{} · {}", display, model.id),
-                        |ui| {
-                            toggle(
-                                ui,
-                                &mut visible,
-                                &format!("Show {} in chat model picker", model.name),
-                            );
-                            if visible != was_visible {
-                                if visible {
-                                    self.prefs.hidden_models.remove(&hidden_key);
-                                } else {
-                                    self.prefs.hidden_models.insert(hidden_key.clone());
-                                }
-                            }
-                            self.model_context_editor(
-                                ui,
-                                &model.provider,
-                                &model.id,
-                                model.context_window,
-                            );
-                            ui.label(theme::small(
-                                ui,
-                                format!("${} / ${}", model.input_cost, model.output_cost),
-                            ))
-                            .on_hover_text("Configured input / output price per million tokens");
-                        },
+                        &target,
+                        &display,
+                        select_mode,
+                        &mut selected,
+                        &mut visible,
                     );
-                }
-            });
-        }
-    }
-
-    fn model_context_editor(
-        &mut self,
-        ui: &mut egui::Ui,
-        provider: &str,
-        model_id: &str,
-        current_window: u64,
-    ) {
-        let key = (provider.to_owned(), model_id.to_owned());
-        let saved_override = self
-            .settings_view
-            .providers
-            .model_context_overrides
-            .get(&key)
-            .copied();
-        let effective = saved_override.unwrap_or(current_window.max(4_096));
-        let mut draft = self
-            .settings_view
-            .providers
-            .context_override_drafts
-            .get(&key)
-            .copied()
-            .unwrap_or(effective);
-        let mut commit = None;
-        let mut reset = false;
-        let colors = theme::palette(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if saved_override.is_some()
-                && ui
-                    .add(egui::Button::new(theme::small(ui, "Reset")).frame(false))
-                    .on_hover_text("Remove context window override and use provider default")
-                    .clicked()
-            {
-                reset = true;
-            }
-            ui.scope(|ui| {
-                ui.visuals_mut().selection.bg_fill = colors.accent_bg;
-                ui.visuals_mut().selection.stroke = Stroke::new(1.0_f32, colors.accent);
-                let response = ui
-                    .add_sized(
-                        Vec2::new(78.0, theme::CONTROL_HEIGHT),
-                        egui::DragValue::new(&mut draft)
-                            .range(4_096..=10_000_000)
-                            .speed(4_096)
-                            .custom_formatter(|v, _| format_context_tokens(v as u64))
-                            .custom_parser(parse_context_tokens),
-                    )
-                    .on_hover_text(format!(
-                        "Max context window ({effective} tokens). Click to type (e.g. 200k, 1M) or drag."
-                    ));
-                if response.changed() {
-                    self.settings_view
-                        .providers
-                        .context_override_drafts
-                        .insert(key.clone(), draft);
-                }
-                if (response.drag_stopped() || response.lost_focus()) && draft != effective {
-                    commit = Some(draft);
-                }
-            });
-        });
-        if let Some(tokens) = commit {
-            if let Err(err) = self
-                .settings_view
-                .providers
-                .set_model_context_window(provider, model_id, tokens)
-            {
-                self.settings_view.providers.status_error = Some(err);
-            } else {
-                for m in &mut self.state.models {
-                    if m.provider == provider && m.id == model_id {
-                        m.context_window = tokens;
+                    if selected != is_selected {
+                        if selected {
+                            self.settings_view.models_selected.insert(sel_key);
+                        } else {
+                            self.settings_view.models_selected.remove(&sel_key);
+                        }
+                    }
+                    if visible != was_visible {
+                        if visible {
+                            self.prefs.hidden_models.remove(&hidden_key);
+                        } else {
+                            self.prefs.hidden_models.insert(hidden_key);
+                        }
+                    }
+                    if edit_clicked {
+                        open_single = Some(model.clone());
                     }
                 }
-                if self.state.model == model_id
-                    && (self.state.provider.is_empty() || self.state.provider == provider)
-                {
-                    self.state.context_window = tokens as f64;
-                }
-            }
-        } else if reset {
-            if let Err(err) = self
-                .settings_view
-                .providers
-                .clear_model_context_window(provider, model_id)
-            {
-                self.settings_view.providers.status_error = Some(err);
+            });
+        }
+
+        if let Some(model) = open_single {
+            let target = self.build_model_edit_target(&model);
+            self.settings_view.model_editor =
+                Some(super::model_editor::ModelEditDraft::single(target));
+        } else if open_multi {
+            let targets: Vec<_> = models
+                .iter()
+                .filter(|m| {
+                    self.settings_view
+                        .models_selected
+                        .contains(&(m.provider.clone(), m.id.clone()))
+                })
+                .map(|m| self.build_model_edit_target(m))
+                .collect();
+            if !targets.is_empty() {
+                self.settings_view.model_editor =
+                    Some(super::model_editor::ModelEditDraft::multi(targets));
             }
         }
     }
-}
-fn format_context_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let m = tokens as f64 / 1_000_000.0;
-        if (m - m.round()).abs() < 0.01 {
-            format!("{}M", m.round() as u64)
-        } else {
-            format!("{m:.1}M")
+
+    pub(super) fn build_model_edit_target(
+        &self,
+        model: &protocol::Model,
+    ) -> super::model_editor::ModelEditTarget {
+        let key = (model.provider.clone(), model.id.clone());
+        let catalog_entry = self
+            .catalog
+            .models
+            .iter()
+            .find(|c| c.model.provider == model.provider && c.model.id == model.id);
+        let custom_entry = self
+            .settings_view
+            .providers
+            .custom_providers
+            .iter()
+            .find(|p| p.id == model.provider)
+            .and_then(|p| p.models.iter().find(|m| m.id == model.id));
+        let ov = self.settings_view.providers.model_overrides.get(&key);
+
+        let name = ov
+            .and_then(|o| o.name.clone())
+            .unwrap_or_else(|| {
+                if model.name.is_empty() {
+                    model.id.clone()
+                } else {
+                    model.name.clone()
+                }
+            });
+        let vision = ov
+            .and_then(|o| o.vision)
+            .or_else(|| catalog_entry.map(|c| c.vision))
+            .or_else(|| custom_entry.map(|c| c.vision))
+            .unwrap_or(false);
+        let reasoning = ov
+            .and_then(|o| o.reasoning)
+            .or_else(|| catalog_entry.map(|c| c.reasoning))
+            .or_else(|| custom_entry.map(|c| c.reasoning))
+            .unwrap_or(false);
+        let context_window = ov
+            .and_then(|o| o.context_window)
+            .or_else(|| (model.context_window > 0).then_some(model.context_window))
+            .or_else(|| custom_entry.map(|c| c.context_window as u64))
+            .unwrap_or(128_000);
+        let max_tokens = ov
+            .and_then(|o| o.max_tokens)
+            .or_else(|| catalog_entry.map(|c| c.max_tokens).filter(|&v| v > 0))
+            .or_else(|| custom_entry.map(|c| c.max_tokens as u64).filter(|&v| v > 0))
+            .unwrap_or(16_384);
+        let input_cost = ov.and_then(|o| o.input_cost).unwrap_or(model.input_cost);
+        let output_cost = ov.and_then(|o| o.output_cost).unwrap_or(model.output_cost);
+        let cache_read_cost = ov
+            .and_then(|o| o.cache_read_cost)
+            .or_else(|| catalog_entry.map(|c| c.cache_read_cost))
+            .unwrap_or(0.0);
+        let cache_write_cost = ov
+            .and_then(|o| o.cache_write_cost)
+            .or_else(|| catalog_entry.map(|c| c.cache_write_cost))
+            .unwrap_or(0.0);
+        let thinking_format = ov
+            .and_then(|o| o.thinking_format.clone())
+            .or_else(|| catalog_entry.and_then(|c| c.thinking_format.clone()));
+        let thinking_level = self
+            .settings_view
+            .providers
+            .model_thinking_levels
+            .get(&key)
+            .cloned();
+        let fallback = self
+            .settings_view
+            .providers
+            .model_fallbacks
+            .get(&key)
+            .cloned();
+        let has_customizations = self
+            .settings_view
+            .providers
+            .has_model_customizations(&model.provider, &model.id);
+
+        super::model_editor::ModelEditTarget {
+            provider: model.provider.clone(),
+            id: model.id.clone(),
+            name,
+            vision,
+            reasoning,
+            context_window,
+            max_tokens,
+            input_cost,
+            output_cost,
+            cache_read_cost,
+            cache_write_cost,
+            thinking_format,
+            thinking_level,
+            fallback,
+            has_customizations,
         }
-    } else if tokens >= 1_000 {
-        let k = tokens as f64 / 1_000.0;
-        if (k - k.round()).abs() < 0.05 {
-            format!("{}k", k.round() as u64)
-        } else {
-            format!("{k:.1}k")
-        }
-    } else {
-        tokens.to_string()
     }
 }
 
-fn parse_context_tokens(input: &str) -> Option<f64> {
-    let s = input.trim().replace([',', '_'], "").to_ascii_lowercase();
-    let s = s.strip_suffix("tokens").unwrap_or(&s).trim();
-    if let Some(num) = s.strip_suffix('m') {
-        num.trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| (v * 1_000_000.0).round())
-    } else if let Some(num) = s.strip_suffix('k') {
-        num.trim()
-            .parse::<f64>()
-            .ok()
-            .map(|v| (v * 1_000.0).round())
+fn model_settings_row(
+    ui: &mut egui::Ui,
+    target: &super::model_editor::ModelEditTarget,
+    provider_display: &str,
+    select_mode: bool,
+    selected: &mut bool,
+    visible: &mut bool,
+) -> bool {
+    let colors = theme::palette(ui.ctx());
+    let mut edit_clicked = false;
+    let fill = if select_mode && *selected {
+        colors.accent_bg.gamma_multiply(0.35)
     } else {
-        s.parse::<f64>().ok().map(f64::round)
-    }
+        Color32::TRANSPARENT
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(18, 12))
+        .show(ui, |ui| {
+            let width = ui.available_width();
+            let controls = (width * 0.44).clamp(200.0, 290.0);
+            let origin = ui.cursor().min;
+            let check_w = if select_mode { 26.0 } else { 0.0 };
+            let icon_w = 24.0;
+            let left_offset = check_w + icon_w;
+            let label_width = (width - controls - left_offset - 12.0).max(80.0);
+
+            let mut labels = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt((&target.provider, &target.id, "model-row-label"))
+                    .max_rect(egui::Rect::from_min_size(
+                        origin + Vec2::new(left_offset, 0.0),
+                        Vec2::new(label_width, 30.0),
+                    ))
+                    .layout(Layout::top_down(Align::LEFT)),
+            );
+            labels.set_width(label_width);
+            labels.spacing_mut().item_spacing.y = 3.0;
+            labels.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
+                ui.label(
+                    RichText::new(&target.name)
+                        .size(13.0)
+                        .color(colors.text),
+                );
+                if target.has_customizations {
+                    row_pill(ui, "Customized", colors.accent_bg, colors.accent);
+                }
+            });
+            labels.add(
+                egui::Label::new(
+                    RichText::new(format!("{provider_display} · {}", target.id))
+                        .size(11.5)
+                        .color(colors.muted),
+                )
+                .wrap(),
+            );
+            if target.vision || target.reasoning || target.fallback.is_some() {
+                labels.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                    if target.vision {
+                        row_pill(ui, "Vision", colors.surface, colors.muted);
+                    }
+                    if target.reasoning {
+                        row_pill(ui, "Reasoning", colors.surface, colors.muted);
+                    }
+                    if let Some(fb) = &target.fallback {
+                        let short = fb.split('/').next_back().unwrap_or(fb);
+                        row_pill(
+                            ui,
+                            &format!("Fallback → {short}"),
+                            colors.amber.gamma_multiply(0.14),
+                            colors.amber,
+                        );
+                    }
+                });
+            }
+
+            let height = labels.min_rect().height().max(theme::CONTROL_HEIGHT);
+            if select_mode {
+                let mut check_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt((&target.provider, &target.id, "model-row-select"))
+                        .max_rect(egui::Rect::from_min_size(
+                            egui::pos2(origin.x, origin.y),
+                            Vec2::new(check_w, height),
+                        ))
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+                check_ui.checkbox(selected, "");
+            }
+            crate::icons::draw_provider(
+                ui,
+                egui::Rect::from_center_size(
+                    egui::pos2(origin.x + check_w + 8.0, origin.y + height * 0.5),
+                    Vec2::splat(16.0),
+                ),
+                &target.provider,
+            );
+
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt((&target.provider, &target.id, "model-row-controls"))
+                    .max_rect(egui::Rect::from_min_size(
+                        egui::pos2(origin.x + width - controls, origin.y),
+                        Vec2::new(controls, height),
+                    ))
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            right.set_width(controls);
+            right.set_height(height);
+            right.spacing_mut().item_spacing.x = 8.0;
+
+            toggle(
+                &mut right,
+                visible,
+                &format!("Show {} in chat model picker", target.name),
+            );
+            if right
+                .add(
+                    egui::Button::new(RichText::new("Edit").size(12.0).color(colors.text))
+                        .fill(colors.surface)
+                        .stroke(Stroke::new(1.0_f32, colors.border))
+                        .corner_radius(7)
+                        .min_size(Vec2::new(48.0, 26.0)),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("Edit context window, capabilities, fallback, and pricing")
+                .clicked()
+            {
+                edit_clicked = true;
+            }
+            let ctx_label = super::model_editor::format_tokens(target.context_window.max(4_096));
+            egui::Frame::new()
+                .fill(colors.bg)
+                .stroke(Stroke::new(1.0_f32, colors.border))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(7, 3))
+                .show(&mut right, |ui| {
+                    ui.label(RichText::new(&ctx_label).size(11.0).color(colors.muted))
+                        .on_hover_text(format!(
+                            "Context window ({} tokens). Click Edit to change.",
+                            target.context_window.max(4_096)
+                        ));
+                });
+            let price_in = super::model_editor::format_price(target.input_cost);
+            let price_out = super::model_editor::format_price(target.output_cost);
+            right
+                .label(theme::small(&right, format!("${price_in} / ${price_out}")))
+                .on_hover_text("Configured input / output price per million tokens");
+
+            ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+        });
+    edit_clicked
+}
+
+fn row_pill(ui: &mut egui::Ui, text: &str, fill: Color32, text_color: Color32) {
+    let colors = theme::palette(ui.ctx());
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, colors.border.gamma_multiply(0.6)))
+        .corner_radius(5)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(10.5).color(text_color));
+        });
 }
 
 fn command() -> &'static str {
@@ -2326,5 +2747,132 @@ mod tests {
         assert!(!app.settings_open);
         assert!(app.state.busy);
         assert_eq!(app.draft, "keep this draft");
+    }
+
+    #[test]
+    fn models_page_opens_single_and_multi_edit_dialogs_without_inline_context_input() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                ..Default::default()
+            },
+        );
+        app.settings_view.page = Page::Models;
+        app.settings_view
+            .providers
+            .set_configured_providers_for_test(&["anthropic"], &["Nvidia"]);
+        app.catalog.models = catalog::fixture(&[
+            ("Nvidia", "z-ai/glm-5.3-flash", 0.0, 0.0),
+            ("anthropic", "claude-sonnet-4-6", 3.0, 15.0),
+        ]);
+        app.catalog.models[0].model.context_window = 1_000_000;
+        app.catalog.models[0].vision = true;
+        app.catalog.models[0].reasoning = true;
+        app.catalog.loaded = true;
+
+        let mut window = eframe::Frame::_new_kittest();
+        let mut frame = |app: &mut Pui, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1280.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| eframe::App::update(app, ctx, &mut window),
+            )
+        };
+        let collect_labels = |output: &egui::FullOutput| {
+            let mut out = vec![];
+            for shape in &output.shapes {
+                texts(&shape.shape, &mut out);
+            }
+            out
+        };
+
+        let output = frame(&mut app, vec![]);
+        let labels = collect_labels(&output);
+        assert!(labels.iter().any(|(t, _)| t == "1M"), "context chip shown on row");
+        assert!(labels.iter().any(|(t, _)| t == "Vision"), "vision pill shown on row");
+        assert!(labels.iter().any(|(t, _)| t == "Reasoning"), "reasoning pill shown on row");
+        assert!(labels.iter().any(|(t, _)| t == "Edit"), "Edit button shown on row");
+        assert!(labels.iter().any(|(t, _)| t == "Select"), "Select toggle shown");
+
+        // Clicking Edit opens single-edit modal.
+        let edit_pos = labels.iter().find(|(t, _)| t == "Edit").unwrap().1.center();
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(edit_pos),
+                    egui::Event::PointerButton {
+                        pos: edit_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert!(app.settings_view.model_editor.is_some());
+        assert!(!app.settings_view.model_editor.as_ref().unwrap().is_multi());
+        assert!(app.settings_view.navigation_blocked());
+
+        // Escape closes the Edit Model dialog without closing Settings.
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.settings_view.model_editor.is_none());
+        assert!(app.settings_open);
+
+        // Multi-select mode -> Edit 2 models opens multi-edit dialog.
+        app.settings_view.models_select_mode = true;
+        app.settings_view
+            .models_selected
+            .insert(("Nvidia".into(), "z-ai/glm-5.3-flash".into()));
+        app.settings_view
+            .models_selected
+            .insert(("anthropic".into(), "claude-sonnet-4-6".into()));
+        let output = frame(&mut app, vec![]);
+        let labels = collect_labels(&output);
+        let bulk_pos = labels
+            .iter()
+            .find(|(t, _)| t == "Edit 2 models")
+            .expect("multi-edit action button")
+            .1
+            .center();
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(bulk_pos),
+                    egui::Event::PointerButton {
+                        pos: bulk_pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        let editor = app
+            .settings_view
+            .model_editor
+            .as_ref()
+            .expect("multi-edit dialog opened");
+        assert!(editor.is_multi());
+        assert_eq!(editor.targets.len(), 2);
     }
 }

@@ -1251,6 +1251,14 @@ impl Pui {
                         }
                         if status_key == "pui-models" {
                             self.send(protocol::command("get_available_models"));
+                            if let Ok(value) = serde_json::from_str::<Value>(protocol::string(
+                                &record,
+                                "statusText",
+                            )) && value["switched"].is_string()
+                            {
+                                self.send(protocol::command("get_state"));
+                                self.send(protocol::command("get_available_thinking_levels"));
+                            }
                             continue;
                         }
                     }

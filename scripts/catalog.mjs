@@ -15,8 +15,15 @@ try {
     provider: text(model.provider),
     contextWindow: number(model.contextWindow) ?? 0,
     maxTokens: number(model.maxTokens) ?? 0,
+    reasoning: Boolean(model.reasoning),
     input: Array.isArray(model.input) ? model.input.filter(kind => typeof kind === "string").slice(0, 8) : [],
-    cost: { input: number(model.cost?.input), output: number(model.cost?.output) },
+    cost: {
+      input: number(model.cost?.input),
+      output: number(model.cost?.output),
+      cacheRead: number(model.cost?.cacheRead),
+      cacheWrite: number(model.cost?.cacheWrite),
+    },
+    thinkingFormat: typeof model.compat?.thinkingFormat === "string" ? text(model.compat.thinkingFormat) : null,
   }));
   process.stdout.write(JSON.stringify({ models }));
 } catch {
