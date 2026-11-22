@@ -22,4 +22,13 @@ Based on `6b73fd37` (latest-master validation repairs). User requested retiring 
 
 Earlier full run: bulk **1,935 passed, 2 failed, 2 ignored** at unchanged Git push inspection deadlines; all remaining groups were run once afterward (**191 binary + 10 integration passed**) without retrying failures. Initial remaining-command generation had a quoting error before those 18 groups ran; the corrected temporary driver executed each once. Logs: `/tmp/pui-idle-full-rust.log`, `/tmp/pui-idle-remaining-rust.log`, `/tmp/pui-idle-full-rust-tail.log`. To address excess subprocess work, Push routing now takes one bounded NUL-framed query rather than four under the same deadline. Exact branch/remote matching and duplicate/empty routing refusals are tested. Focused Push then passed 17 tests but encountered a separate fixture-clone timeout; not hidden or automatically retried. The final complete green run followed the concrete routing repair, with production deadlines, safety assertions, runner scheduling and ignored tests unchanged.
 
-Used existing Rust/CEF/tool caches and an isolated cloned target `/tmp/pui-idle-timeout-build` to avoid concurrent-target interference. No profiling, provider requests, session/worktree deletion, installed-app replacement/restart, push or deployment. Remote tracking advanced during local work; concurrent upstream work was not automatically merged or overwritten. Packaging is recorded separately after success.
+Used existing Rust/CEF/tool caches and an isolated cloned target `/tmp/pui-idle-timeout-build` to avoid concurrent-target interference. No profiling, provider requests, session/worktree deletion, installed-app replacement/restart, push or deployment. Remote tracking advanced during local work; concurrent upstream work was not automatically merged or overwritten. Packaging is recorded below.
+
+## Release bundle
+
+- Source: `28dc27ec043e661c973108b0427fa9628ef241bb`; clean tree at packaging. Release arm64 bundle built with `scripts/bundle-macos.sh` at `dist/Pui.app`. `/tmp/pui-idle-release-bundle.log`.
+- Binary SHA-256: `169dcee5a0954fa084955f2ab035cb524bd9bffcd5c2a6b4d87525d308a73641`.
+- Ad-hoc signature: `codesign --verify --deep --strict dist/Pui.app` passed. Not Developer ID signed or notarized.
+- Fresh-HOME offline relocated runtime smoke passed: bundled Node 22.23.5, Pi 1.5.2, SDK/native/WASM/search tools, RPC adapter and resources. `/tmp/pui-idle-runtime-smoke.log`. No provider requests.
+- Previous local bundle retained at `dist/Pui.previous.ZOlKLJwk/Pui.app`. `/Applications/Pui.app` and its November 18 running process were not replaced, stopped or restarted.
+- At completion local `master` has the two task commits while `origin/master` advanced three commits during work. No automatic merge, push or claim of including those later upstream changes. A later documentation-only receipt commit does not change the packaged source.
