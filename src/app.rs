@@ -112,6 +112,19 @@ struct Preferences {
 }
 
 impl Preferences {
+    /// Bypass is confirmed per chat and is never a default for new chats or
+    /// workers. Existing chats that inherited it keep it explicitly.
+    fn normalize_default_permission(&mut self) {
+        if self.settings.permission != settings::PermissionMode::Bypass {
+            return;
+        }
+        for record in &mut self.agent_tree {
+            if record.permission.is_none() && record.access != "read-only" {
+                record.permission = Some(settings::PermissionMode::Bypass);
+            }
+        }
+        self.settings.permission = settings::PermissionMode::Auto;
+    }
     fn startup_session(&self, options: &Options) -> Option<PathBuf> {
         if options.demo {
             return None;
@@ -242,6 +255,7 @@ impl Pui {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        prefs.normalize_default_permission();
         diff_viewer::wrap_preference::init(&cc.egui_ctx, prefs.diff_wrap);
         prefs
             .color_styles
