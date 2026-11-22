@@ -155,10 +155,10 @@ export default function puiExtension(pi: any) {
     } finally { clearTimeout(timeout);pending.delete(id); signal?.removeEventListener("abort", cancel); }
   }
   pi.registerTool({
-    name: "pui_spawn_agent", label: "Delegate task", description: "Spawn an independent Pui worker as a live, clickable child chat. Available without Ultracode. Use the fewest useful workers. Optional cwd selects another local repository; defaults to the parent workspace. Returns its ID immediately, not its transcript. Worktree workers start from committed HEAD. Normal permissions apply.",
+    name: "pui_spawn_agent", label: "Delegate task", description: "Spawn an independent Pui worker as a live, clickable child chat. Available without Ultracode. Use the fewest useful workers. Optional cwd selects another local repository; defaults to the parent workspace. Returns its ID immediately, not its transcript. Worktree workers start from committed HEAD. Optional permission starts the worker in the same or a more restricted mode than this chat (plan < dontAsk < manual < acceptEdits < auto < bypassPermissions); omitted, it inherits this chat's mode. Requests above this chat's mode are rejected.",
     promptSnippet: "Launch a visible, independently addressable child agent",
     promptGuidelines: ["Use pui_spawn_agent for delegation, never detached agents through Bash/Python/CLI. If pui_spawn_agent fails or is unavailable, report the blocker rather than bypassing Pui's child-chat tracking."],
-    parameters: Type.Object({ name: Type.String({ maxLength: 80 }), task: Type.String({ maxLength: 24000 }), access: Type.Union([Type.Literal("read-only"), Type.Literal("worktree")]), cwd: Type.Optional(Type.String({ maxLength: 4096 })), depends_on: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }),
+    parameters: Type.Object({ name: Type.String({ maxLength: 80 }), task: Type.String({ maxLength: 24000 }), access: Type.Union([Type.Literal("read-only"), Type.Literal("worktree")]), cwd: Type.Optional(Type.String({ maxLength: 4096 })), depends_on: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), permission: Type.Optional(Type.Union(["plan", "dontAsk", "manual", "acceptEdits", "auto", "bypassPermissions"].map(m => Type.Literal(m)))) }),
     async execute(_id: string, args: any, signal: AbortSignal, _update: any, ctx: any) {
       if (readonly || taskRole) throw new Error("This worker cannot create subagents");
       return request("spawn", args, signal, ctx);

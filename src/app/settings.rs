@@ -39,6 +39,21 @@ impl PermissionMode {
         Self::DontAsk,
         Self::Bypass,
     ];
+    /// Permissiveness order used to bound delegated workers: a worker may run
+    /// in its parent's mode or any lower one, never a higher one.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Plan => 0,
+            Self::DontAsk => 1,
+            Self::Manual => 2,
+            Self::AcceptEdits => 3,
+            Self::Auto => 4,
+            Self::Bypass => 5,
+        }
+    }
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == key)
+    }
     pub fn short_label(self) -> &'static str {
         if self == Self::Bypass {
             "Bypass"

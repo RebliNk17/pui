@@ -1109,6 +1109,27 @@ impl Pui {
                     }
                     _ => return Err("Invalid worker cwd".into()),
                 };
+                let parent_mode = self.agent_settings(source).permission;
+                let permission = if access == "read-only" {
+                    settings::PermissionMode::Plan
+                } else {
+                    match request.get("permission") {
+                        None | Some(Value::Null) => parent_mode,
+                        Some(Value::String(key)) => {
+                            let mode = settings::PermissionMode::from_key(key)
+                                .ok_or("Invalid worker permission mode")?;
+                            if mode.rank() > parent_mode.rank() {
+                                return Err(format!(
+                                    "A worker cannot exceed this chat's permission mode ({}); request {} or a more restricted mode.",
+                                    parent_mode.key(),
+                                    parent_mode.key()
+                                ));
+                            }
+                            mode
+                        }
+                        Some(_) => return Err("Invalid worker permission mode".into()),
+                    }
+                };
                 self.agents.next += 1;
                 let id = format!("agent-{}", self.agents.next);
                 let mut node = Node {
@@ -1118,11 +1139,7 @@ impl Pui {
                     cwd: cwd.clone(),
                     path: None,
                     access: access.into(),
-                    permission: Some(if access == "read-only" {
-                        settings::PermissionMode::Plan
-                    } else {
-                        self.agent_settings(source).permission
-                    }),
+                    permission: Some(permission),
                     status: "Queued".into(),
                     last_activity: None,
                     created: Some(std::time::SystemTime::now()),
@@ -1160,7 +1177,7 @@ impl Pui {
                     .push(id.clone());
                 self.agents.parked.insert(id.clone(), chat);
                 Ok(
-                    json!({"agent_id":id,"state":"queued","access":access,"context":"fresh task brief only","note":"Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."}),
+                    json!({"agent_id":id,"state":"queued","access":access,"permission":permission.key(),"context":"fresh task brief only","note":"Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."}),
                 )
             }
             "list" => {
@@ -2047,6 +2064,44 @@ mod tests {
     }
     pub(super) fn spawn(app: &mut Pui, parent: &str) -> String {
         app.agent_control(parent,&json!({"action":"spawn","name":"Scoped reader","task":"Inspect just model selection and return file references","access":"read-only"})).unwrap()["agent_id"].as_str().unwrap().to_owned()
+    }
+    #[test]
+    fn workers_run_in_the_parents_mode_or_lower_never_higher() {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        let parent = app.agents.active.clone();
+        let dir = std::env::temp_dir().join(format!("pui-spawn-mode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut spawn_mode = |app: &mut Pui, permission: Option<&str>| {
+            let mut request = json!({"action":"spawn","name":"w","task":"t","access":"worktree","cwd":dir});
+            if let Some(mode) = permission {
+                request["permission"] = json!(mode);
+            }
+            app.agent_control(&parent, &request).map(|r| {
+                let id = r["agent_id"].as_str().unwrap().to_owned();
+                (r["permission"].as_str().unwrap().to_owned(), app.agent_settings(&id).permission.key())
+            })
+        };
+        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Bypass);
+        assert_eq!(spawn_mode(&mut app, None).unwrap().1, "bypassPermissions", "inherits by default");
+        for mode in ["auto", "acceptEdits", "manual", "dontAsk", "plan", "bypassPermissions"] {
+            assert_eq!(spawn_mode(&mut app, Some(mode)).unwrap(), (mode.to_owned(), mode), "{mode}");
+        }
+        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Auto);
+        assert_eq!(spawn_mode(&mut app, Some("manual")).unwrap().1, "manual");
+        let error = spawn_mode(&mut app, Some("bypassPermissions")).unwrap_err();
+        assert!(error.contains("cannot exceed"), "{error}");
+        assert!(spawn_mode(&mut app, Some("root")).is_err());
+        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Manual);
+        assert!(spawn_mode(&mut app, Some("auto")).is_err());
+        assert!(spawn_mode(&mut app, Some("acceptEdits")).is_err());
+        assert_eq!(spawn_mode(&mut app, Some("dontAsk")).unwrap().1, "dontAsk");
+        // Read-only workers are always Plan regardless of the request.
+        let reader = app
+            .agent_control(&parent, &json!({"action":"spawn","name":"r","task":"t","access":"read-only","permission":"manual"}))
+            .unwrap();
+        assert_eq!(reader["permission"], "plan");
+        app.shutdown_agents();
     }
     #[test]
     fn ordinary_chat_spawns_clickable_children_without_ultracode() {
