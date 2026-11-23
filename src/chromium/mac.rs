@@ -51,9 +51,45 @@ define_class! {
     unsafe impl CefAppProtocol for ChromiumApplication {}
 }
 
+/// Outcome of loading the bundled framework; written once on the main thread
+/// by `prepare_application`, before any other thread exists.
+static FRAMEWORK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+fn framework_paths() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let frameworks = executable
+        .parent()
+        .ok_or("Missing app directory")?
+        .join("../Frameworks");
+    Ok((
+        frameworks.join("Chromium Embedded Framework.framework"),
+        frameworks.join("Pui Browser Helper.app/Contents/MacOS/Pui Browser Helper"),
+    ))
+}
+
+fn load_framework() -> Result<(), String> {
+    let (framework, helper) = framework_paths()?;
+    if !framework.is_dir() || !helper.is_file() {
+        return Err("Chromium runtime is not bundled. Build with scripts/bundle-macos.sh, then run dist/Pui.app/Contents/MacOS/pui.".into());
+    }
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let library = cef::library_loader::LibraryLoader::new(&executable, false);
+    if !library.load() {
+        return Err("Could not load bundled Chromium framework.".into());
+    }
+    // Never unload: the framework installs process-wide malloc zones.
+    std::mem::forget(library);
+    Ok(())
+}
+
 pub fn prepare_application() {
     // Must run before winit, menu setup, or any call to sharedApplication.
     let mtm = MainThreadMarker::new().expect("Pui starts on the main thread");
+    // Load Chromium while the process is still single-threaded. Loading the
+    // framework installs its PartitionAlloc malloc zone; doing that lazily
+    // (on first browser/inline visual) races frees on AppKit's event thread
+    // and other workers, which then hit an allocator CHECK and crash.
+    FRAMEWORK.get_or_init(load_framework);
     let app: objc2::rc::Retained<NSApplication> =
         unsafe { msg_send![ChromiumApplication::class(), sharedApplication] };
     assert!(app.isKindOfClass(ChromiumApplication::class()));
@@ -84,22 +120,16 @@ wrap_app! {
 
 pub struct Runtime {
     timer: Arc<super::pump::native::Timer>,
-    library: std::mem::ManuallyDrop<cef::library_loader::LibraryLoader>,
 }
 impl Runtime {
     pub fn initialize(ctx: &eframe::egui::Context) -> Result<Self, String> {
+        FRAMEWORK
+            .get()
+            .ok_or("Chromium framework was not loaded at startup.")?
+            .clone()?;
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let macos = executable.parent().ok_or("Missing app directory")?;
-        let frameworks = macos.join("../Frameworks");
-        let framework = frameworks.join("Chromium Embedded Framework.framework");
-        let helper = frameworks.join("Pui Browser Helper.app/Contents/MacOS/Pui Browser Helper");
-        if !framework.is_dir() || !helper.is_file() {
-            return Err("Chromium runtime is not bundled. Build with scripts/bundle-macos.sh, then run dist/Pui.app/Contents/MacOS/pui.".into());
-        }
-        let library = cef::library_loader::LibraryLoader::new(&executable, false);
-        if !library.load() {
-            return Err("Could not load bundled Chromium framework.".into());
-        }
+        let (framework, helper) = framework_paths()?;
         let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
         let args = cef::args::Args::new();
         let storage = privacy::settings()?;
@@ -152,10 +182,7 @@ impl Runtime {
         }
         INITIALIZED.set(true);
         timer.schedule(std::time::Duration::ZERO);
-        Ok(Self {
-            timer,
-            library: std::mem::ManuallyDrop::new(library),
-        })
+        Ok(Self { timer })
     }
     pub fn browser(id: u64, open: bool) {
         PUMP.browser(std::time::Instant::now(), id, open);
@@ -188,7 +215,8 @@ impl Runtime {
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.timer.cancel();
-        TIMER.with(|shared| *shared.borrow_mut() = Default::default());
+        // `try_with`: never panic if thread-local storage is already gone.
+        let _ = TIMER.try_with(|shared| *shared.borrow_mut() = Default::default());
         PUMP.clear();
         // All BrowserViews close before runtime teardown. Pump close callbacks
         // before CEF shutdown; never unload a live Chromium framework.
@@ -199,13 +227,8 @@ impl Drop for Runtime {
         }
         if LIVE_BROWSERS.load(Ordering::Relaxed) == 0 {
             cef::shutdown();
-            INITIALIZED.set(false);
-            // SAFETY: shutdown completed; no callback can use the framework.
-            unsafe {
-                std::mem::ManuallyDrop::drop(&mut self.library);
-            }
+            let _ = INITIALIZED.try_with(|initialized| initialized.set(false));
         }
-        // A slow close retains the framework until process exit rather than
-        // unloading code still used by a renderer/callback.
+        // The framework stays loaded until process exit.
     }
 }
