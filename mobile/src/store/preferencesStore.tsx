@@ -22,6 +22,11 @@ export interface MobilePreferences {
   defaultOrdering: SessionOrdering;
   defaultEffort: string;
   transcriptView: TranscriptViewMode;
+  notificationsEnabled: boolean;
+  notifyFinished: boolean;
+  notifyApprovals: boolean;
+  notifyQuestions: boolean;
+  keepAliveInBackground: boolean;
 }
 
 const DEFAULT_PREFS: MobilePreferences = {
@@ -33,6 +38,11 @@ const DEFAULT_PREFS: MobilePreferences = {
   defaultOrdering: 'recent',
   defaultEffort: 'medium',
   transcriptView: 'normal',
+  notificationsEnabled: true,
+  notifyFinished: true,
+  notifyApprovals: true,
+  notifyQuestions: true,
+  keepAliveInBackground: true,
 };
 
 async function readPrefs(): Promise<MobilePreferences> {

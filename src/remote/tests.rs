@@ -420,3 +420,103 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&outside);
 }
+
+#[test]
+fn notifications_fire_on_finish_approval_and_questions_without_duplicates() {
+    let mut cfg = RemoteConfig {
+        enabled: true,
+        bind_mode: BindMode::Localhost,
+        port: 0,
+        host_name: "Test Mac".into(),
+        ..Default::default()
+    };
+    cfg.ensure_populated();
+    let mut server = RemoteServer::new(cfg, || {});
+    let path = "/tmp/notify-test.jsonl".to_owned();
+
+    let make_snap = |rev: u64, busy: bool, text: &str, dialogs: Vec<Value>| {
+        let mut details = BTreeMap::new();
+        details.insert(
+            path.clone(),
+            SessionDetail {
+                path: path.clone(),
+                title: "Build mobile app".into(),
+                busy,
+                messages: if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![crate::protocol::Message {
+                        role: "assistant".into(),
+                        text: text.into(),
+                        ..Default::default()
+                    }]
+                },
+                dialogs,
+                revision: rev,
+                ..Default::default()
+            },
+        );
+        RemoteSnapshot {
+            revision: rev,
+            host_name: "Test Mac".into(),
+            active_path: Some(path.clone()),
+            details,
+            ..Default::default()
+        }
+    };
+
+    // 1. Initial priming snapshot emits nothing even if a chat is already busy.
+    let n0 = server.collect_notifications(&make_snap(1, true, "", vec![]));
+    assert!(n0.is_empty());
+
+    // 2. Approval dialog appears -> emits one "approval" notification.
+    let approval = json!({
+        "id": "dlg-1",
+        "method": "confirm",
+        "title": "Allow bash?",
+        "message": "Run cargo test"
+    });
+    let n1 = server.collect_notifications(&make_snap(2, true, "", vec![approval.clone()]));
+    assert_eq!(n1.len(), 1);
+    assert_eq!(n1[0].kind, "approval");
+    assert_eq!(n1[0].body, "Allow bash?");
+
+    // Repeated snapshot with same dialog emits zero duplicates.
+    let n1_dup = server.collect_notifications(&make_snap(3, true, "", vec![approval]));
+    assert!(n1_dup.is_empty());
+
+    // 3. pui_ask_questions dialog appears -> emits "question" with first question text.
+    let q_payload = json!({
+        "schema": "pui.questions.v1",
+        "questions": [{ "id": "q1", "question": "Which push approach?" }]
+    })
+    .to_string();
+    let q_dlg = json!({
+        "id": "dlg-2",
+        "method": "pui_ask_questions",
+        "title": "Questions",
+        "message": q_payload
+    });
+    let n2 = server.collect_notifications(&make_snap(4, true, "", vec![q_dlg]));
+    assert_eq!(n2.len(), 1);
+    assert_eq!(n2[0].kind, "question");
+    assert_eq!(n2[0].body, "Which push approach?");
+
+    // 4. Busy transitions true -> false with reply -> emits "finished".
+    let n3 = server.collect_notifications(&make_snap(
+        5,
+        false,
+        "All done! Push notifications are wired up.",
+        vec![],
+    ));
+    assert_eq!(n3.len(), 1);
+    assert_eq!(n3[0].kind, "finished");
+    assert_eq!(n3[0].title, "Build mobile app");
+    assert!(n3[0].body.contains("All done!"));
+
+    // Subsequent idle snapshots emit nothing.
+    let n4 = server.collect_notifications(&make_snap(6, false, "All done!", vec![]));
+    assert!(n4.is_empty());
+
+    server.stop_listener();
+}

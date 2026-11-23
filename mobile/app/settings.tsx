@@ -1,11 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -31,6 +33,11 @@ import {
   getCurrentVersionCode,
 } from '../src/utils/appVersion';
 import {
+  getNotificationPermissionStatus,
+  requestNotificationPermission,
+  sendTestNotification,
+} from '../src/services/notifications';
+import {
   checkForMobileUpdate,
   GITHUB_REPO,
   type UpdateCheckResult,
@@ -51,6 +58,12 @@ export default function SettingsScreen() {
   const [favProvider, setFavProvider] = useState('All');
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [notifPerm, setNotifPerm] = useState<'granted' | 'denied' | 'undetermined'>('undetermined');
+  const [testSent, setTestSent] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getNotificationPermissionStatus().then(setNotifPerm);
+  }, []);
 
   const currentVersion = getCurrentAppVersion();
   const currentVersionCode = getCurrentVersionCode();
@@ -254,6 +267,123 @@ export default function SettingsScreen() {
               })}
             </View>
           </View>
+        </View>
+
+        <Text style={[styles.sectionLabel, { color: colors.dim }]}>NOTIFICATIONS</Text>
+        <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={[styles.rowTitle, { color: colors.text }]}>
+                Agent notifications
+              </Text>
+              <Text numberOfLines={2} style={[styles.rowSub, { color: colors.muted }]}>
+                {notifPerm === 'granted'
+                  ? 'Live alerts over Tailscale (permission granted)'
+                  : notifPerm === 'denied'
+                    ? 'Blocked in Android settings — tap Test to re-check or open system settings'
+                    : 'Tap toggle to allow Android notifications'}
+              </Text>
+            </View>
+            <Switch
+              value={prefs.notificationsEnabled}
+              onValueChange={async (val) => {
+                updatePrefs({ notificationsEnabled: val });
+                if (val) {
+                  const st = await requestNotificationPermission();
+                  setNotifPerm(st);
+                }
+              }}
+              trackColor={{ false: colors.surfaceElevated, true: colors.accent }}
+            />
+          </View>
+
+          {prefs.notificationsEnabled ? (
+            <>
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <View style={styles.row}>
+                <Text style={[styles.rowTitle, { color: colors.text, flex: 1 }]}>
+                  Agent finishes replying
+                </Text>
+                <Switch
+                  value={prefs.notifyFinished}
+                  onValueChange={(val) => updatePrefs({ notifyFinished: val })}
+                  trackColor={{ false: colors.surfaceElevated, true: colors.accent }}
+                />
+              </View>
+
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <View style={styles.row}>
+                <Text style={[styles.rowTitle, { color: colors.text, flex: 1 }]}>
+                  Tool approval needed
+                </Text>
+                <Switch
+                  value={prefs.notifyApprovals}
+                  onValueChange={(val) => updatePrefs({ notifyApprovals: val })}
+                  trackColor={{ false: colors.surfaceElevated, true: colors.accent }}
+                />
+              </View>
+
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <View style={styles.row}>
+                <Text style={[styles.rowTitle, { color: colors.text, flex: 1 }]}>
+                  Agent asks questions
+                </Text>
+                <Switch
+                  value={prefs.notifyQuestions}
+                  onValueChange={(val) => updatePrefs({ notifyQuestions: val })}
+                  trackColor={{ false: colors.surfaceElevated, true: colors.accent }}
+                />
+              </View>
+
+              {Platform.OS === 'android' ? (
+                <>
+                  <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+                  <View style={styles.row}>
+                    <View style={{ flex: 1 }}>
+                      <Text numberOfLines={1} style={[styles.rowTitle, { color: colors.text }]}>
+                        Keep alive in background
+                      </Text>
+                      <Text numberOfLines={2} style={[styles.rowSub, { color: colors.muted }]}>
+                        Shows a quiet Android status notification so alerts arrive even with screen off.
+                      </Text>
+                    </View>
+                    <Switch
+                      value={prefs.keepAliveInBackground}
+                      onValueChange={(val) => updatePrefs({ keepAliveInBackground: val })}
+                      trackColor={{ false: colors.surfaceElevated, true: colors.accent }}
+                    />
+                  </View>
+                </>
+              ) : null}
+
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <View style={styles.row}>
+                <Text style={[styles.rowSub, { color: colors.muted, flex: 1 }]}>
+                  {testSent ?? 'Verify sound & banner delivery on this device.'}
+                </Text>
+                <Pressable
+                  onPress={async () => {
+                    const ok = await sendTestNotification();
+                    const st = await getNotificationPermissionStatus();
+                    setNotifPerm(st);
+                    setTestSent(
+                      ok
+                        ? 'Test notification sent!'
+                        : 'Permission not granted — enable in Android App Settings.',
+                    );
+                  }}
+                  style={[
+                    styles.saveBtn,
+                    { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={{ color: colors.text, fontSize: 12.5, fontWeight: '600' }}>
+                    Send test
+                  </Text>
+                </Pressable>
+              </View>
+            </>
+          ) : null}
         </View>
 
         <Text style={[styles.sectionLabel, { color: colors.dim }]}>MODELS</Text>

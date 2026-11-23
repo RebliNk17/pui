@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
 import type {
@@ -10,12 +10,16 @@ import type {
   SessionSummary,
   WsServerEvent,
 } from '../protocol/types';
+import { startBackgroundKeepAlive, stopBackgroundKeepAlive } from '../services/keepAlive';
+import { presentAgentNotification } from '../services/notifications';
 import {
   CloudRelayTransport,
   DirectTransport,
   type ConnectionState,
   type PuiTransport,
 } from '../transport/transport';
+import { shouldPresentNotification } from '../utils/notifications';
+import { usePreferences } from './preferencesStore';
 
 const HOSTS_KEY = 'pui_saved_hosts_v1';
 const ACTIVE_HOST_KEY = 'pui_active_host_v1';
@@ -92,11 +96,16 @@ export interface PuiContextValue {
   retryConnection: () => void;
   refreshSessions: () => Promise<void>;
   loadSessionDetail: (path: string) => Promise<SessionDetail | null>;
+  setActiveChatPath: (path: string | null) => void;
 }
 
 const PuiContext = createContext<PuiContextValue | null>(null);
 
 export function PuiProvider({ children }: { children: React.ReactNode }) {
+  const { prefs } = usePreferences();
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+
   const [hosts, setHosts] = useState<SavedHost[]>([]);
   const hostsRef = useRef<SavedHost[]>([]);
   const [activeHostId, setActiveHostId] = useState<string | null>(null);
@@ -109,6 +118,21 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [detailsByPath, setDetailsByPath] = useState<Record<string, SessionDetail>>({});
   const [transport, setTransport] = useState<PuiTransport | null>(null);
+
+  const appStateRef = useRef<string>(AppState.currentState || 'active');
+  const activeChatPathRef = useRef<string | null>(null);
+  const seenNotificationIdsRef = useRef<Set<string>>(new Set());
+
+  const setActiveChatPath = useCallback((path: string | null) => {
+    activeChatPathRef.current = path;
+  }, []);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState) => {
+      appStateRef.current = nextState;
+    });
+    return () => sub.remove();
+  }, []);
 
   useEffect(() => {
     hostsRef.current = hosts;
@@ -166,8 +190,51 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
       setSessions(event.sessions);
     } else if (event.type === 'session_updated') {
       setDetailsByPath((prev) => ({ ...prev, [event.path]: event.detail }));
+    } else if (event.type === 'notification') {
+      const note = event.notification;
+      if (
+        shouldPresentNotification(
+          note,
+          prefsRef.current,
+          {
+            appState: appStateRef.current,
+            activeChatPath: activeChatPathRef.current,
+          },
+          seenNotificationIdsRef.current,
+        )
+      ) {
+        seenNotificationIdsRef.current.add(note.id);
+        if (seenNotificationIdsRef.current.size > 200) {
+          const first = seenNotificationIdsRef.current.values().next().value;
+          if (first) seenNotificationIdsRef.current.delete(first);
+        }
+        void presentAgentNotification(note).catch(() => {});
+      }
     }
   }, []);
+
+  // Keep Android background foreground-service in sync with active host & user preference.
+  useEffect(() => {
+    if (
+      activeHost &&
+      prefs.notificationsEnabled &&
+      prefs.keepAliveInBackground &&
+      connectionState === 'connected'
+    ) {
+      startBackgroundKeepAlive(hostInfo?.host_name || activeHost.name);
+    } else {
+      stopBackgroundKeepAlive();
+    }
+    return () => {
+      if (!activeHost) stopBackgroundKeepAlive();
+    };
+  }, [
+    activeHost,
+    hostInfo?.host_name,
+    prefs.notificationsEnabled,
+    prefs.keepAliveInBackground,
+    connectionState,
+  ]);
 
   // Connect transport whenever the active host changes.
   useEffect(() => {
@@ -338,6 +405,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     retryConnection,
     refreshSessions,
     loadSessionDetail,
+    setActiveChatPath,
   };
 
   return <PuiContext.Provider value={value}>{children}</PuiContext.Provider>;

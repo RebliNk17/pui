@@ -45,7 +45,13 @@ export default function ChatScreen() {
     transport,
     clientOrigin,
     loadSessionDetail,
+    setActiveChatPath,
   } = usePui();
+
+  useEffect(() => {
+    setActiveChatPath(sessionPath || null);
+    return () => setActiveChatPath(null);
+  }, [sessionPath, setActiveChatPath]);
 
   const detail = detailsByPath[sessionPath];
   const summary = sessions.find((s) => s.path === sessionPath);

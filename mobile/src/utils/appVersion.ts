@@ -2,7 +2,7 @@ import Constants from 'expo-constants';
 
 export function getCurrentAppVersion(): string {
   const v = Constants.expoConfig?.version;
-  return typeof v === 'string' && v.trim() ? v.trim() : '0.1.0';
+  return typeof v === 'string' && v.trim() ? v.trim() : '1.0.0';
 }
 
 export function getCurrentVersionCode(): number | null {

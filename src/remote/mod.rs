@@ -225,6 +225,17 @@ pub struct SessionDetail {
     pub revision: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationEvent {
+    pub id: String,
+    /// `"finished"`, `"approval"`, or `"question"`.
+    pub kind: String,
+    pub path: String,
+    pub title: String,
+    pub body: String,
+    pub timestamp: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RemoteSnapshot {
     pub revision: u64,
@@ -344,6 +355,9 @@ pub struct RemoteServer {
     listener_thread: Option<thread::JoinHandle<()>>,
     last_sessions_hash: u64,
     last_detail_revisions: BTreeMap<String, u64>,
+    last_busy_by_path: BTreeMap<String, bool>,
+    last_dialog_ids_by_path: BTreeMap<String, BTreeSet<String>>,
+    notifications_primed: bool,
 }
 
 impl Drop for RemoteServer {
@@ -379,6 +393,9 @@ impl RemoteServer {
             listener_thread: None,
             last_sessions_hash: 0,
             last_detail_revisions: BTreeMap::new(),
+            last_busy_by_path: BTreeMap::new(),
+            last_dialog_ids_by_path: BTreeMap::new(),
+            notifications_primed: false,
         };
         if server.config.enabled {
             server.start_listener();
@@ -478,6 +495,7 @@ impl RemoteServer {
                 changed_details.push((path.clone(), detail.clone()));
             }
         }
+        let notifications = self.collect_notifications(&snapshot);
         let revision = snapshot.revision;
         let sessions_clone = if sessions_changed {
             Some(snapshot.sessions.clone())
@@ -506,6 +524,80 @@ impl RemoteServer {
             });
             self.shared.broadcast(&payload.to_string(), Some(&path));
         }
+        for note in notifications {
+            let payload = json!({
+                "type": "notification",
+                "notification": note,
+            });
+            self.shared.broadcast(&payload.to_string(), None);
+        }
+    }
+
+    fn collect_notifications(&mut self, snapshot: &RemoteSnapshot) -> Vec<NotificationEvent> {
+        let mut events = Vec::new();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        for (path, detail) in &snapshot.details {
+            let prev_busy = self.last_busy_by_path.insert(path.clone(), detail.busy);
+            let current_dialog_ids: BTreeSet<String> = detail
+                .dialogs
+                .iter()
+                .filter_map(|d| d["id"].as_str().map(str::to_owned))
+                .collect();
+            let prev_dialogs = self
+                .last_dialog_ids_by_path
+                .insert(path.clone(), current_dialog_ids)
+                .unwrap_or_default();
+
+            if !self.notifications_primed {
+                continue;
+            }
+
+            let session_title = if detail.title.trim().is_empty() {
+                "Pui".to_owned()
+            } else {
+                detail.title.trim().to_owned()
+            };
+
+            // 1. New pending approvals or questions.
+            for dialog in &detail.dialogs {
+                let Some(dialog_id) = dialog["id"].as_str() else {
+                    continue;
+                };
+                if prev_dialogs.contains(dialog_id) {
+                    continue;
+                }
+                let (kind, body) = classify_dialog_notification(dialog);
+                events.push(NotificationEvent {
+                    id: format!("{kind}:{dialog_id}"),
+                    kind: kind.to_owned(),
+                    path: path.clone(),
+                    title: session_title.clone(),
+                    body,
+                    timestamp: now,
+                });
+            }
+
+            // 2. Agent finished replying (busy: true -> false) without a blocking dialog.
+            if prev_busy == Some(true) && !detail.busy && detail.dialogs.is_empty() {
+                let body = latest_reply_snippet(detail);
+                events.push(NotificationEvent {
+                    id: format!("finished:{path}:{now}"),
+                    kind: "finished".to_owned(),
+                    path: path.clone(),
+                    title: session_title,
+                    body,
+                    timestamp: now,
+                });
+            }
+        }
+
+        if !self.notifications_primed
+            && (!snapshot.details.is_empty() || !snapshot.sessions.is_empty())
+        {
+            self.notifications_primed = true;
+        }
+        events
     }
 
     fn resolve_bind_ip(&mut self) -> Result<IpAddr, String> {
@@ -1464,4 +1556,72 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
             );
         }
     }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let single_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = single_line.chars().count();
+    if count <= max_chars {
+        single_line
+    } else {
+        let mut out: String = single_line
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect();
+        out.push('…');
+        out
+    }
+}
+
+fn latest_reply_snippet(detail: &SessionDetail) -> String {
+    if let Some(err) = detail.error.as_deref().filter(|s| !s.trim().is_empty()) {
+        return truncate_chars(&format!("Error: {err}"), 140);
+    }
+    if let Some(msg) = detail
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && !m.text.trim().is_empty())
+    {
+        return truncate_chars(&msg.text, 140);
+    }
+    "Agent finished replying.".to_owned()
+}
+
+fn classify_dialog_notification(dialog: &Value) -> (&'static str, String) {
+    let method = dialog["method"].as_str().unwrap_or("");
+    let title = dialog["title"].as_str().unwrap_or("").trim();
+    let message = dialog["message"].as_str().unwrap_or("").trim();
+
+    let is_question = method == "pui_ask_questions"
+        || message.contains("\"pui.questions.v1\"")
+        || message.contains("pui.questions.v1");
+
+    if is_question {
+        if let Ok(parsed) = serde_json::from_str::<Value>(message) {
+            if let Some(q) = parsed["questions"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|item| item["question"].as_str())
+                .filter(|s| !s.trim().is_empty())
+            {
+                return ("question", truncate_chars(q, 140));
+            }
+        }
+        let fallback = if !title.is_empty() {
+            title
+        } else {
+            "Agent has a question for you."
+        };
+        return ("question", truncate_chars(fallback, 140));
+    }
+
+    let body = if !title.is_empty() {
+        title.to_owned()
+    } else if !message.is_empty() {
+        message.to_owned()
+    } else {
+        "Tool approval needed.".to_owned()
+    };
+    ("approval", truncate_chars(&body, 140))
 }

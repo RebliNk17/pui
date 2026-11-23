@@ -259,6 +259,15 @@ export interface GitChangesResponse {
   files: GitChangeItem[];
 }
 
+export interface NotificationEvent {
+  id: string;
+  kind: 'finished' | 'approval' | 'question' | string;
+  path: string;
+  title: string;
+  body: string;
+  timestamp: number;
+}
+
 export type WsServerEvent =
   | {
       type: 'hello';
@@ -277,6 +286,10 @@ export type WsServerEvent =
       revision: number;
       path: string;
       detail: SessionDetail;
+    }
+  | {
+      type: 'notification';
+      notification: NotificationEvent;
     }
   | {
       type: 'pong';

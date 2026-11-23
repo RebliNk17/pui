@@ -134,9 +134,8 @@ export async function checkForMobileUpdate(
       .map(parseGithubRelease)
       .filter((r): r is ReleaseInfo => r !== null);
 
-    // Prefer the latest release that ships an Android APK; fall back to latest tagged release.
-    const withApk = parsed.find((r) => Boolean(r.apkUrl));
-    const latest = withApk ?? parsed[0] ?? null;
+    // Only treat releases that actually ship an Android APK as installable mobile updates.
+    const latest = parsed.find((r) => Boolean(r.apkUrl)) ?? null;
     const updateAvailable = Boolean(latest && isNewerVersion(latest.version, currentVersion));
 
     return {
