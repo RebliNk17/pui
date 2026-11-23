@@ -2,9 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cleanUserDisplayText,
+  isMarkdownPath,
   isRtlText,
   parseInlineMarkdown,
   parseMarkdownBlocks,
+  resolveMarkdownAssetPath,
 } from '../src/utils/markdown.ts';
 
 describe('mobile Markdown parser and bidi direction helper', () => {
@@ -57,5 +59,30 @@ describe('mobile Markdown parser and bidi direction helper', () => {
     assert.equal(isRtlText('1. **Sessions Home** — Today'), false);
     assert.equal(isRtlText('הר געש עם לבה זורמת'), true);
     assert.equal(isRtlText('שלום Pui'), true);
+  });
+
+  it('parses markdown and html images and resolves relative markdown asset paths', () => {
+    const blocks = parseMarkdownBlocks(
+      '![Workspace](docs/images/workspace-dark.png)\n\n<p align="center">\n  <img src="docs/images/mobile-chat.png" width="250" alt="Mobile chat" />\n</p>',
+    );
+    const images = blocks.filter((b) => b.type === 'image');
+    assert.equal(images.length, 2);
+    assert.equal(images[0].src, 'docs/images/workspace-dark.png');
+    assert.equal(images[1].src, 'docs/images/mobile-chat.png');
+    assert.equal(images[1].alt, 'Mobile chat');
+
+    assert.equal(isMarkdownPath('README.md'), true);
+    assert.equal(isMarkdownPath('docs/guide.MDX'), true);
+    assert.equal(isMarkdownPath('src/main.rs'), false);
+
+    assert.equal(
+      resolveMarkdownAssetPath('/repo/docs/guide.md', '../assets/icon.png'),
+      '/repo/assets/icon.png',
+    );
+    assert.equal(
+      resolveMarkdownAssetPath('README.md', 'docs/images/mobile-chat.png'),
+      'docs/images/mobile-chat.png',
+    );
+    assert.equal(resolveMarkdownAssetPath('README.md', 'https://example.com/a.png'), null);
   });
 });

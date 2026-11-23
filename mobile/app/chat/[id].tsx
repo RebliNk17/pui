@@ -278,6 +278,22 @@ export default function ChatScreen() {
                   }
                 />
                 <CustomScrollbarOverlay {...metrics} inverted />
+                {metrics.offsetY > 140 ? (
+                  <Pressable
+                    onPress={() => listRef.current?.scrollToOffset({ offset: 0, animated: true })}
+                    accessibilityLabel="Scroll to bottom"
+                    style={({ pressed }) => [
+                      styles.scrollBottomFab,
+                      {
+                        backgroundColor: colors.surfaceElevated,
+                        borderColor: colors.border,
+                        opacity: pressed ? 0.8 : 1,
+                      },
+                    ]}
+                  >
+                    <Ionicons name="arrow-down" size={18} color={colors.text} />
+                  </Pressable>
+                ) : null}
               </View>
             )}
 
@@ -592,6 +608,22 @@ const styles = StyleSheet.create({
   listWrap: {
     flex: 1,
     position: 'relative',
+  },
+  scrollBottomFab: {
+    position: 'absolute',
+    right: 16,
+    bottom: 12,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 6,
   },
   loading: {
     flex: 1,

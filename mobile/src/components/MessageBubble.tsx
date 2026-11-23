@@ -252,12 +252,28 @@ export function MessageBubble({
   );
 }
 
-function MarkdownView({ text, colors }: { text: string; colors: Palette }) {
+export function MarkdownView({
+  text,
+  colors,
+  resolveImageUri,
+  onOpenImage,
+}: {
+  text: string;
+  colors: Palette;
+  resolveImageUri?: (src: string) => string | null;
+  onOpenImage?: (uri: string, title?: string) => void;
+}) {
   const blocks = useMemo(() => parseMarkdownBlocks(text), [text]);
   return (
     <View style={styles.mdRoot}>
       {blocks.map((block, idx) => (
-        <MarkdownBlockItem key={idx} block={block} colors={colors} />
+        <MarkdownBlockItem
+          key={idx}
+          block={block}
+          colors={colors}
+          resolveImageUri={resolveImageUri}
+          onOpenImage={onOpenImage}
+        />
       ))}
     </View>
   );
@@ -347,9 +363,45 @@ function InlineText({
   );
 }
 
-function MarkdownBlockItem({ block, colors }: { block: MarkdownBlock; colors: Palette }) {
+function MarkdownBlockItem({
+  block,
+  colors,
+  resolveImageUri,
+  onOpenImage,
+}: {
+  block: MarkdownBlock;
+  colors: Palette;
+  resolveImageUri?: (src: string) => string | null;
+  onOpenImage?: (uri: string, title?: string) => void;
+}) {
   if (block.type === 'hr') {
     return <View style={[styles.hr, { backgroundColor: colors.hairline }]} />;
+  }
+  if (block.type === 'image') {
+    const uri = resolveImageUri ? resolveImageUri(block.src) : null;
+    if (!uri) {
+      return (
+        <Text style={{ color: colors.dim, fontSize: 12, fontStyle: 'italic' }}>
+          [{block.alt || block.src}]
+        </Text>
+      );
+    }
+    return (
+      <Pressable
+        onPress={() => onOpenImage?.(uri, block.alt || block.src)}
+        style={[
+          styles.mdImageWrap,
+          { backgroundColor: colors.codeBg, borderColor: colors.border },
+        ]}
+      >
+        <Image source={{ uri }} style={styles.mdImage} resizeMode="contain" />
+        {block.alt ? (
+          <Text numberOfLines={1} style={[styles.mdImageCaption, { color: colors.dim }]}>
+            {block.alt}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
   }
   if (block.type === 'heading') {
     const size = block.level === 1 ? 19 : block.level === 2 ? 17 : 15.5;
@@ -780,5 +832,22 @@ const styles = StyleSheet.create({
     padding: 10,
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  mdImageWrap: {
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    padding: 6,
+    marginVertical: 4,
+  },
+  mdImage: {
+    width: '100%',
+    height: 220,
+    borderRadius: 6,
+  },
+  mdImageCaption: {
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 5,
   },
 });

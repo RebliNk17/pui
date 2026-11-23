@@ -16,8 +16,38 @@ export type MarkdownBlock =
   | { type: 'bullet'; items: string[] }
   | { type: 'ordered'; items: { num: string; text: string }[] }
   | { type: 'table'; headers: string[]; rows: string[][] }
+  | { type: 'image'; alt: string; src: string }
   | { type: 'hr' }
   | { type: 'paragraph'; text: string };
+
+export function isMarkdownPath(filePath: string): boolean {
+  const lower = filePath.trim().toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.mdx');
+}
+
+/**
+ * Resolves a Markdown image/link target relative to the current `.md` file path (inside `cwd`).
+ * Returns `null` for remote URLs (`http://`, `https://`, `data:`) so the caller can decide how to handle them.
+ */
+export function resolveMarkdownAssetPath(mdFilePath: string, src: string): string | null {
+  const trimmed = src.trim();
+  if (!trimmed || /^(https?:|data:|mailto:)/i.test(trimmed)) return null;
+  if (trimmed.startsWith('/')) return trimmed;
+  const cleanFile = mdFilePath.replace(/\\/g, '/');
+  const lastSlash = cleanFile.lastIndexOf('/');
+  const baseDir = lastSlash >= 0 ? cleanFile.slice(0, lastSlash) : '';
+  const parts = [...(baseDir ? baseDir.split('/') : []), ...trimmed.split('/')];
+  const out: string[] = [];
+  for (const part of parts) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+    } else {
+      out.push(part);
+    }
+  }
+  return (cleanFile.startsWith('/') ? '/' : '') + out.join('/');
+}
 
 /**
  * Strips Pi's internal image-coordinate annotations (e.g.
@@ -170,6 +200,38 @@ export function parseMarkdownBlocks(input: string): MarkdownBlock[] {
       continue;
     }
 
+    // Standalone Markdown image: ![alt](src)
+    const mdImg = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/.exec(trimmed);
+    if (mdImg) {
+      blocks.push({ type: 'image', alt: mdImg[1].trim(), src: mdImg[2].trim() });
+      i += 1;
+      continue;
+    }
+
+    // HTML wrapper tags or inline <img ... src="..." /> lines (e.g. README galleries)
+    if (/^<\/?p\b[^>]*>$/i.test(trimmed) || /^(&nbsp;\s*)+$/i.test(trimmed)) {
+      i += 1;
+      continue;
+    }
+    if (/<img\b[^>]*\bsrc=/i.test(trimmed)) {
+      const imgRegex = /<img\b([^>]*)\/?>/gi;
+      let matchedAny = false;
+      let m: RegExpExecArray | null;
+      while ((m = imgRegex.exec(trimmed)) !== null) {
+        const attrs = m[1];
+        const srcM = /\bsrc=["']([^"']+)["']/i.exec(attrs);
+        const altM = /\balt=["']([^"']*)["']/i.exec(attrs);
+        if (srcM) {
+          blocks.push({ type: 'image', alt: altM ? altM[1] : '', src: srcM[1] });
+          matchedAny = true;
+        }
+      }
+      if (matchedAny) {
+        i += 1;
+        continue;
+      }
+    }
+
     // Horizontal rule
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
       blocks.push({ type: 'hr' });
@@ -252,7 +314,10 @@ export function parseMarkdownBlocks(input: string): MarkdownBlock[] {
         /^(#{1,6})\s+/.test(cur) ||
         /^[-*+]\s+/.test(cur) ||
         /^\d+\.\s+/.test(cur) ||
-        /^(-{3,}|\*{3,}|_{3,})$/.test(cur)
+        /^(-{3,}|\*{3,}|_{3,})$/.test(cur) ||
+        /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/.test(cur) ||
+        /^<\/?p\b[^>]*>$/i.test(cur) ||
+        /<img\b[^>]*\bsrc=/i.test(cur)
       ) {
         break;
       }

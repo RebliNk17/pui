@@ -13,7 +13,10 @@ import { Ionicons } from '@expo/vector-icons';
 import type { FileContentResponse, TreeEntry } from '../protocol/types';
 import type { PuiTransport } from '../transport/transport';
 import { usePalette } from '../theme/colors';
+import { isMarkdownPath, resolveMarkdownAssetPath } from '../utils/markdown';
+import { CustomScrollbarOverlay, useCustomScrollbar } from './CustomScrollbar';
 import { HtmlArtifactCard } from './HtmlArtifactCard';
+import { MarkdownView } from './MessageBubble';
 
 interface Props {
   cwd: string;
@@ -29,6 +32,8 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileContentResponse | null>(null);
+  const [mdMode, setMdMode] = useState<'preview' | 'source'>('preview');
+  const { bindings, metrics } = useCustomScrollbar();
 
   const loadDir = useCallback(
     async (nextDir: string) => {
@@ -56,6 +61,7 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
       try {
         const content = await transport.getFileContent(cwd, filePath);
         setSelectedFile(content);
+        setMdMode('preview');
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : 'Failed to read file');
       } finally {
@@ -77,6 +83,19 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
 
   if (selectedFile) {
     const rawUrl = transport ? transport.getRawFileUrl(cwd, selectedFile.path) : '';
+    const isMarkdown = !selectedFile.is_binary && isMarkdownPath(selectedFile.path);
+    const displayPath =
+      cwd && selectedFile.path.startsWith(`${cwd}/`)
+        ? selectedFile.path.slice(cwd.length + 1)
+        : selectedFile.path;
+
+    const resolveMdImage = (src: string): string | null => {
+      if (!transport) return null;
+      if (/^https?:\/\//i.test(src.trim())) return src.trim();
+      const resolved = resolveMarkdownAssetPath(selectedFile.path, src);
+      return resolved ? transport.getRawFileUrl(cwd, resolved) : null;
+    };
+
     return (
       <View style={styles.flex}>
         <View style={[styles.bar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
@@ -85,39 +104,85 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
             <Text style={{ color: colors.accent, fontSize: 13, fontWeight: '600' }}>Files</Text>
           </Pressable>
           <Text numberOfLines={1} style={[styles.pathLabel, { color: colors.text }]}>
-            {selectedFile.path}
+            {displayPath}
           </Text>
-        </View>
-        <ScrollView style={styles.flex} contentContainerStyle={{ padding: 12 }}>
-          {selectedFile.is_image && rawUrl ? (
-            <Pressable onPress={() => onOpenImage(rawUrl, selectedFile.path)}>
-              <Image
-                source={{ uri: rawUrl }}
-                style={styles.previewImage}
-                resizeMode="contain"
-              />
-              <Text style={{ color: colors.dim, fontSize: 11.5, textAlign: 'center', marginTop: 6 }}>
-                Tap image to view fullscreen
-              </Text>
-            </Pressable>
-          ) : selectedFile.is_html && selectedFile.content ? (
-            <HtmlArtifactCard
-              title={selectedFile.path}
-              html={selectedFile.content}
-              initialHeight={380}
-            />
-          ) : selectedFile.is_binary ? (
-            <Text style={{ color: colors.muted, fontSize: 13 }}>
-              Binary file ({selectedFile.mime}, {formatBytes(selectedFile.size)}).
-            </Text>
-          ) : (
-            <View style={[styles.codeBox, { backgroundColor: colors.codeBg, borderColor: colors.border }]}>
-              <Text selectable style={[styles.code, { color: colors.text }]}>
-                {selectedFile.content ?? ''}
-              </Text>
+          {isMarkdown ? (
+            <View
+              style={[
+                styles.modeToggle,
+                { backgroundColor: colors.bg, borderColor: colors.border },
+              ]}
+            >
+              {(['preview', 'source'] as const).map((mode) => {
+                const active = mdMode === mode;
+                return (
+                  <Pressable
+                    key={mode}
+                    onPress={() => setMdMode(mode)}
+                    style={[
+                      styles.modeBtn,
+                      active && { backgroundColor: colors.accentBg },
+                    ]}
+                  >
+                    <Text
+                      style={{
+                        color: active ? colors.accent : colors.muted,
+                        fontSize: 11,
+                        fontWeight: '600',
+                      }}
+                    >
+                      {mode === 'preview' ? 'Preview' : 'Source'}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
-          )}
-        </ScrollView>
+          ) : null}
+        </View>
+        <View style={styles.scrollWrap}>
+          <ScrollView
+            {...bindings}
+            style={styles.flex}
+            contentContainerStyle={{ padding: isMarkdown && mdMode === 'preview' ? 16 : 12 }}
+          >
+            {selectedFile.is_image && rawUrl ? (
+              <Pressable onPress={() => onOpenImage(rawUrl, displayPath)}>
+                <Image
+                  source={{ uri: rawUrl }}
+                  style={styles.previewImage}
+                  resizeMode="contain"
+                />
+                <Text style={{ color: colors.dim, fontSize: 11.5, textAlign: 'center', marginTop: 6 }}>
+                  Tap image to view fullscreen
+                </Text>
+              </Pressable>
+            ) : selectedFile.is_html && selectedFile.content ? (
+              <HtmlArtifactCard
+                title={displayPath}
+                html={selectedFile.content}
+                initialHeight={380}
+              />
+            ) : selectedFile.is_binary ? (
+              <Text style={{ color: colors.muted, fontSize: 13 }}>
+                Binary file ({selectedFile.mime}, {formatBytes(selectedFile.size)}).
+              </Text>
+            ) : isMarkdown && mdMode === 'preview' ? (
+              <MarkdownView
+                text={selectedFile.content ?? ''}
+                colors={colors}
+                resolveImageUri={resolveMdImage}
+                onOpenImage={onOpenImage}
+              />
+            ) : (
+              <View style={[styles.codeBox, { backgroundColor: colors.codeBg, borderColor: colors.border }]}>
+                <Text selectable style={[styles.code, { color: colors.text }]}>
+                  {selectedFile.content ?? ''}
+                </Text>
+              </View>
+            )}
+          </ScrollView>
+          <CustomScrollbarOverlay {...metrics} />
+        </View>
       </View>
     );
   }
@@ -207,6 +272,20 @@ function formatBytes(n: number): string {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  scrollWrap: { flex: 1, position: 'relative' },
+  modeToggle: {
+    flexDirection: 'row',
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 2,
+    gap: 2,
+    flexShrink: 0,
+  },
+  modeBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
   bar: {
     flexDirection: 'row',
     alignItems: 'center',
