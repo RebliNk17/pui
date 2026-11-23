@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,6 +17,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Ionicons } from '@expo/vector-icons';
 import { usePui } from '../src/store/connectionStore';
 import { usePalette } from '../src/theme/colors';
+import { testHostConnection } from '../src/transport/transport';
 import { normalizeManualHost, parsePairingUri } from '../src/utils/pairing';
 
 export default function ConnectScreen() {
@@ -24,6 +27,10 @@ export default function ConnectScreen() {
 
   const [permission, requestPermission] = useCameraPermissions();
   const [scanning, setScanning] = useState(false);
+  const scanLockRef = useRef(false);
+  const [connecting, setConnecting] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [pairLinkInput, setPairLinkInput] = useState('');
   const [nameInput, setNameInput] = useState('');
   const [hostInput, setHostInput] = useState('');
   const [portInput, setPortInput] = useState('4817');
@@ -32,6 +39,13 @@ export default function ConnectScreen() {
   const [deviceInput, setDeviceInput] = useState(deviceName);
 
   const openScanner = async () => {
+    if (Platform.OS === 'web') {
+      Alert.alert(
+        'Camera scanner unavailable on web',
+        'Use "Paste pairing link" or enter your Tailscale IP and token below.',
+      );
+      return;
+    }
     if (!permission?.granted) {
       const res = await requestPermission();
       if (!res.granted) {
@@ -39,44 +53,90 @@ export default function ConnectScreen() {
         return;
       }
     }
+    scanLockRef.current = false;
     setScanning(true);
   };
 
+  const verifyAndConnect = async (candidate: {
+    name: string;
+    host: string;
+    port: number;
+    token: string;
+    tls: boolean;
+  }) => {
+    setConnecting(true);
+    setStatusError(null);
+    try {
+      const check = await testHostConnection(candidate);
+      if (!check.ok) {
+        setStatusError(check.error ?? 'Could not connect to Pui host.');
+        // Populate manual fields so the user can inspect/edit immediately.
+        setNameInput(candidate.name);
+        setHostInput(candidate.host);
+        setPortInput(String(candidate.port));
+        setTokenInput(candidate.token);
+        setTls(candidate.tls);
+        return;
+      }
+      await saveHost({
+        name: check.info?.host_name || candidate.name,
+        host: candidate.host,
+        port: candidate.port,
+        token: candidate.token,
+        tls: candidate.tls,
+        transport: 'direct',
+      });
+      router.back();
+    } catch (err: unknown) {
+      setStatusError(err instanceof Error ? err.message : 'Failed to save host.');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   const handleBarcode = async (data: string) => {
+    if (scanLockRef.current) return;
     const parsed = parsePairingUri(data);
-    if (!parsed) return;
+    if (!parsed) {
+      scanLockRef.current = true;
+      setScanning(false);
+      setStatusError('That QR code is not a Pui pairing code (expected pui://pair?...).');
+      return;
+    }
+    scanLockRef.current = true;
     setScanning(false);
-    await saveHost({
-      name: parsed.name,
-      host: parsed.host,
-      port: parsed.port,
-      token: parsed.token,
-      tls: parsed.tls,
-      transport: 'direct',
-    });
-    router.back();
+    await verifyAndConnect(parsed);
+  };
+
+  const handlePairingLinkConnect = async () => {
+    const parsed = parsePairingUri(pairLinkInput);
+    if (!parsed) {
+      setStatusError(
+        'Invalid pairing link. Copy it from Pui Desktop → Settings → Remote & Mobile → Copy pairing link.',
+      );
+      return;
+    }
+    await verifyAndConnect(parsed);
   };
 
   const handleManualSave = async () => {
     const fallbackPort = Number.parseInt(portInput, 10) || 4817;
     const normalized = normalizeManualHost(hostInput, fallbackPort);
     if (!normalized) {
-      Alert.alert('Invalid host', 'Enter your Mac Tailscale IP (e.g. 100.x.y.z) or hostname.');
+      setStatusError('Enter your Mac Tailscale IP (e.g. 100.108.253.122) or hostname.');
       return;
     }
     if (!tokenInput.trim()) {
-      Alert.alert('Token required', 'Paste the bearer token from Pui Settings → Remote & Mobile.');
+      setStatusError('Paste the bearer token from Pui Settings → Remote & Mobile.');
       return;
     }
-    await saveHost({
+    await verifyAndConnect({
       name: nameInput.trim() || normalized.host,
       host: normalized.host,
       port: normalized.port,
       tls: tls || normalized.tls,
       token: tokenInput.trim(),
-      transport: 'direct',
     });
-    router.back();
   };
 
   return (
@@ -85,12 +145,56 @@ export default function ConnectScreen() {
       contentContainerStyle={styles.container}
     >
       <Pressable
+        disabled={connecting}
         onPress={() => void openScanner()}
         style={[styles.qrBtn, { backgroundColor: colors.accent }]}
       >
-        <Ionicons name="qr-code-outline" size={20} color="#fff" />
-        <Text style={styles.qrBtnText}>Scan QR code from Pui Desktop</Text>
+        {connecting ? (
+          <ActivityIndicator color="#fff" size="small" />
+        ) : (
+          <Ionicons name="qr-code-outline" size={20} color="#fff" />
+        )}
+        <Text style={styles.qrBtnText}>
+          {connecting ? 'Testing connection…' : 'Scan QR code from Pui Desktop'}
+        </Text>
       </Pressable>
+
+      {statusError ? (
+        <View style={[styles.errorBanner, { backgroundColor: colors.redBg, borderColor: colors.red }]}>
+          <Ionicons name="alert-circle-outline" size={18} color={colors.red} />
+          <Text style={{ color: colors.red, fontSize: 12.5, lineHeight: 18, flex: 1 }}>
+            {statusError}
+          </Text>
+        </View>
+      ) : null}
+
+      <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+        <Text style={[styles.sectionTitle, { color: colors.text }]}>Paste pairing link</Text>
+        <Text style={[styles.hint, { color: colors.muted }]}>
+          Click &ldquo;Copy pairing link&rdquo; in Pui Desktop and paste it here to connect in one tap.
+        </Text>
+        <View style={styles.deviceRow}>
+          <TextInput
+            value={pairLinkInput}
+            onChangeText={setPairLinkInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="pui://pair?v=1&host=100.x.y.z&..."
+            placeholderTextColor={colors.dim}
+            style={[
+              styles.input,
+              { flex: 1, backgroundColor: colors.codeBg, color: colors.text, borderColor: colors.border },
+            ]}
+          />
+          <Pressable
+            disabled={connecting || !pairLinkInput.trim()}
+            onPress={() => void handlePairingLinkConnect()}
+            style={[styles.smallBtn, { backgroundColor: colors.accent, borderColor: colors.accent }]}
+          >
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 12.5 }}>Pair</Text>
+          </Pressable>
+        </View>
+      </View>
 
       <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
         <Text style={[styles.sectionTitle, { color: colors.text }]}>This device</Text>
@@ -137,7 +241,7 @@ export default function ConnectScreen() {
           onChangeText={setHostInput}
           autoCapitalize="none"
           autoCorrect={false}
-          placeholder="Tailscale IP or hostname (e.g. 100.88.12.3)"
+          placeholder="Tailscale IP or hostname (e.g. 100.108.253.122)"
           placeholderTextColor={colors.dim}
           style={[
             styles.input,
@@ -175,10 +279,13 @@ export default function ConnectScreen() {
           ]}
         />
         <Pressable
+          disabled={connecting}
           onPress={() => void handleManualSave()}
           style={[styles.saveBtn, { backgroundColor: colors.accent }]}
         >
-          <Text style={styles.qrBtnText}>Connect host</Text>
+          <Text style={styles.qrBtnText}>
+            {connecting ? 'Testing connection…' : 'Test & connect host'}
+          </Text>
         </Pressable>
       </View>
 
@@ -245,6 +352,14 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14.5,
     fontWeight: '700',
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
   },
   card: {
     borderWidth: 1,

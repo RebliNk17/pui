@@ -16,8 +16,73 @@ import { buildBaseHttpUrl, buildWsUrl } from '../utils/pairing';
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 export interface TransportCallbacks {
-  onStateChange: (state: ConnectionState, error?: string) => void;
+  onStateChange: (state: ConnectionState, error?: string | null) => void;
   onEvent: (event: WsServerEvent) => void;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  error?: string;
+  info?: HostInfo;
+}
+
+/**
+ * Preflight check against a Pui host:
+ * 1) Probes `/v1/health` to verify Tailscale/LAN network reachability.
+ * 2) Probes `/v1/info` with the bearer token to verify authentication.
+ */
+export async function testHostConnection(
+  host: Pick<SavedHost, 'host' | 'port' | 'tls' | 'token'>,
+  timeoutMs = 7000,
+): Promise<ConnectionTestResult> {
+  const base = buildBaseHttpUrl(host);
+  const fetchWithTimeout = async (url: string, init?: RequestInit) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  try {
+    const health = await fetchWithTimeout(`${base}/v1/health`);
+    if (!health.ok) {
+      return { ok: false, error: `Host responded HTTP ${health.status} on /v1/health.` };
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const aborted = msg.toLowerCase().includes('abort');
+    return {
+      ok: false,
+      error: aborted
+        ? `Timed out reaching ${base}. Check that Tailscale is connected on both your phone and Mac, and Remote Access is enabled in Pui.`
+        : `Cannot reach ${base} (${msg}). Make sure Tailscale is ON on your phone and Mac.`,
+    };
+  }
+
+  try {
+    const res = await fetchWithTimeout(`${base}/v1/info`, {
+      headers: { Authorization: `Bearer ${host.token}` },
+    });
+    if (res.status === 401) {
+      return {
+        ok: false,
+        error: 'Reached Pui host, but the bearer token was rejected (401). Re-scan the QR code or copy the latest token.',
+      };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `Host returned HTTP ${res.status} on /v1/info.` };
+    }
+    const info = (await res.json()) as HostInfo;
+    return { ok: true, info };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to authenticate with Pui host.',
+    };
+  }
 }
 
 /**
@@ -28,6 +93,7 @@ export interface TransportCallbacks {
 export interface PuiTransport {
   connect(deviceName: string, platform: 'android' | 'ios'): void;
   disconnect(): void;
+  reconnectNow(): void;
   subscribeSession(path: string | null): void;
   getInfo(): Promise<HostInfo>;
   listSessions(): Promise<{ revision: number; active_path: string | null; sessions: SessionSummary[] }>;
@@ -79,6 +145,7 @@ export class DirectTransport implements PuiTransport {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private closedManually = false;
   private attempt = 0;
+  private lastError: string | null = null;
   private subscribedPath: string | null = null;
   private clientMeta: { device: string; platform: 'android' | 'ios' } = {
     device: 'Phone',
@@ -93,6 +160,26 @@ export class DirectTransport implements PuiTransport {
   connect(deviceName: string, platform: 'android' | 'ios'): void {
     this.clientMeta = { device: deviceName, platform };
     this.closedManually = false;
+    this.attempt = 0;
+    this.openSocket();
+  }
+
+  reconnectNow(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    this.closedManually = false;
+    this.attempt = 0;
+    this.lastError = null;
     this.openSocket();
   }
 
@@ -114,7 +201,7 @@ export class DirectTransport implements PuiTransport {
       }
       this.ws = null;
     }
-    this.callbacks.onStateChange('disconnected');
+    this.callbacks.onStateChange('disconnected', null);
   }
 
   subscribeSession(path: string | null): void {
@@ -126,14 +213,15 @@ export class DirectTransport implements PuiTransport {
 
   private openSocket(): void {
     if (this.closedManually) return;
-    this.callbacks.onStateChange('connecting');
+    this.callbacks.onStateChange('connecting', this.lastError);
     const url = buildWsUrl(this.host);
     const socket = new WebSocket(url);
     this.ws = socket;
 
     socket.onopen = () => {
       this.attempt = 0;
-      this.callbacks.onStateChange('connected');
+      this.lastError = null;
+      this.callbacks.onStateChange('connected', null);
       socket.send(
         JSON.stringify({
           type: 'client_hello',
@@ -162,20 +250,30 @@ export class DirectTransport implements PuiTransport {
       }
     };
 
-    socket.onerror = () => {
-      this.callbacks.onStateChange('error', 'Could not reach Pui host. Check Tailscale and token.');
+    socket.onerror = (event: unknown) => {
+      const detail =
+        typeof event === 'object' && event !== null && 'message' in event
+          ? String((event as { message?: unknown }).message ?? '')
+          : '';
+      this.lastError = detail
+        ? `WebSocket error (${this.host.host}:${this.host.port}): ${detail}`
+        : `Could not reach ${this.host.host}:${this.host.port}. Check Tailscale & token.`;
+      this.callbacks.onStateChange('error', this.lastError);
     };
 
-    socket.onclose = () => {
+    socket.onclose = (event: { code?: number; reason?: string }) => {
       if (this.pingTimer) {
         clearInterval(this.pingTimer);
         this.pingTimer = null;
       }
       if (this.closedManually) {
-        this.callbacks.onStateChange('disconnected');
+        this.callbacks.onStateChange('disconnected', null);
         return;
       }
-      this.callbacks.onStateChange('disconnected');
+      const closeInfo =
+        this.lastError ??
+        `Disconnected from ${this.host.host}:${this.host.port} (code ${event.code ?? 'closed'}). Retrying…`;
+      this.callbacks.onStateChange('error', closeInfo);
       const delay = Math.min(1000 * 2 ** this.attempt, 15_000);
       this.attempt += 1;
       this.reconnectTimer = setTimeout(() => this.openSocket(), delay);
@@ -188,7 +286,7 @@ export class DirectTransport implements PuiTransport {
       ...init,
       headers: {
         Authorization: `Bearer ${this.host.token}`,
-        'Content-Type': 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
         ...(init?.headers ?? {}),
       },
     });

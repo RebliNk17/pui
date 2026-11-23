@@ -491,12 +491,11 @@ impl Pui {
         let before = self.prefs.remote.clone();
         self.prefs.remote.ensure_populated();
 
-        settings::page_section(ui, "Mobile companion", "");
         settings::page_card(ui, |ui| {
             settings::page_row(
                 ui,
                 "Enable remote access",
-                "Allow the Pui mobile app (Android now, iOS next) to connect to this computer over Tailscale.",
+                "Allow Pui Mobile on Android (and iOS) to connect securely to this computer over Tailscale.",
                 |ui| {
                     settings::toggle_switch(
                         ui,
@@ -505,100 +504,45 @@ impl Pui {
                     );
                 },
             );
-            settings::page_separator(ui);
-            settings::page_row(
-                ui,
-                "Network binding",
-                self.prefs.remote.bind_mode.description(),
-                |ui| {
-                    egui::ComboBox::from_id_salt("remote-bind-mode")
-                        .selected_text(self.prefs.remote.bind_mode.label())
-                        .width(230.0_f32.min(ui.available_width()))
-                        .show_ui(ui, |ui| {
-                            for mode in BindMode::ALL {
-                                ui.selectable_value(
-                                    &mut self.prefs.remote.bind_mode,
-                                    mode,
-                                    mode.label(),
-                                );
-                            }
-                        });
-                },
-            );
-            settings::page_separator(ui);
-            settings::page_row(
-                ui,
-                "Port",
-                "TCP port used for the WebSocket and REST API (default 4817).",
-                |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut self.prefs.remote.port)
-                            .range(1024..=65535)
-                            .speed(1),
-                    );
-                },
-            );
-            settings::page_separator(ui);
-            settings::page_row(
-                ui,
-                "Host name",
-                "Shown in the mobile app so you can tell multiple computers apart.",
-                |ui| {
-                    ui.add_sized(
-                        [210.0_f32.min(ui.available_width()), theme::CONTROL_HEIGHT],
-                        theme::text_field(&mut self.prefs.remote.host_name, "My Mac"),
-                    );
-                },
-            );
-            settings::page_separator(ui);
-            settings::page_row(
-                ui,
-                "Custom public hostname (optional)",
-                "Override the QR host (for example a Tailscale MagicDNS name like mac.tail1234.ts.net).",
-                |ui| {
-                    ui.add_sized(
-                        [210.0_f32.min(ui.available_width()), theme::CONTROL_HEIGHT],
-                        theme::text_field(
-                            &mut self.prefs.remote.public_host,
-                            "Auto (Tailscale IP)",
-                        ),
-                    );
-                },
-            );
-            settings::page_separator(ui);
-            settings::page_row(
-                ui,
-                "Use TLS (wss://) in QR",
-                "Turn on when exposing Pui through `tailscale serve` or an HTTPS reverse proxy.",
-                |ui| {
-                    settings::toggle_switch(
-                        ui,
-                        &mut self.prefs.remote.use_tls_in_qr,
-                        "Use TLS in QR",
-                    );
-                },
-            );
+            if !self.prefs.remote.enabled {
+                settings::page_separator(ui);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Remote server is off. Turn it on to generate a Tailscale pairing QR code.",
+                        )
+                        .size(12.0)
+                        .color(colors.muted),
+                    )
+                    .wrap(),
+                );
+            }
         });
 
         if self.prefs.remote != before && !self.demo {
             self.remote.apply_config(self.prefs.remote.clone());
         }
 
-        settings::page_section(ui, "Status & pairing", "");
+        // Status, pairing QR code, and advanced host settings are shown only when enabled.
+        if !self.prefs.remote.enabled {
+            return;
+        }
+
+        settings::page_section(ui, "Pair your phone", "");
         settings::page_card(ui, |ui| {
             let status_text = if self.demo {
-                "Preview mode — remote server is paused in demo.".to_owned()
+                "Preview mode · Remote server paused".to_owned()
             } else if let Some(addr) = self.remote.bound_addr {
                 let count = self.remote.connected_devices().len();
                 if count == 0 {
-                    format!("Listening on {addr} · Waiting for phone")
+                    format!("Listening · {addr}")
                 } else {
-                    format!("Listening on {addr} · {count} connected")
+                    format!("Listening · {addr} · {count} connected")
                 }
             } else if let Some(err) = &self.remote.last_error {
                 err.clone()
             } else {
-                "Off — enable remote access above to pair your phone.".to_owned()
+                "Starting remote listener…".to_owned()
             };
             let status_color = if self.remote.is_running() {
                 colors.green
@@ -607,125 +551,302 @@ impl Pui {
             } else {
                 colors.muted
             };
-            ui.horizontal_wrapped(|ui| {
-                icons::inline(ui, Icon::Phone, status_color);
-                ui.add(
-                    egui::Label::new(RichText::new(status_text).size(12.5).color(status_color))
-                        .wrap(),
-                );
-            });
-            ui.add_space(6.0);
-            let ts_label = self
-                .remote
-                .tailscale_ip
-                .as_deref()
-                .map(|ip| format!("Detected Tailscale IP: {ip}"))
-                .unwrap_or_else(|| "Tailscale IP: not detected".to_owned());
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(ts_label).size(11.5).color(colors.muted)).wrap(),
-                );
-                if ui.button("Refresh IP").clicked() && !self.demo {
-                    self.remote.refresh_tailscale_ip();
-                    if self.prefs.remote.enabled && !self.remote.is_running() {
-                        self.remote.start_listener();
-                    }
-                }
-            });
+            let uri = self.remote.pairing_uri();
+            let ws = self.remote.ws_url();
+            let matrix = uri.as_deref().and_then(qr::encode);
+            let copied_id = ui.id().with("remote-copied-label");
+            let copied_notice: Option<String> = ui.ctx().data(|d| d.get_temp::<String>(copied_id));
 
-            if let Some(uri) = self.remote.pairing_uri() {
-                settings::page_separator(ui);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new("Scan with Pui Mobile to pair over Tailscale")
-                            .size(12.5)
-                            .strong()
-                            .color(colors.text),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(8.0);
-                if let Some(matrix) = qr::encode(&uri) {
-                    paint_qr(ui, &matrix, 168.0_f32.min(ui.available_width()));
-                    ui.add_space(8.0);
-                }
-                if let Some(ws) = self.remote.ws_url() {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("Endpoint: {ws}"))
-                                .font(FontId::monospace(11.0))
-                                .color(colors.muted),
-                        )
-                        .wrap()
-                        .selectable(true),
-                    );
-                    ui.add_space(6.0);
-                }
+            let wide = ui.available_width() >= 480.0;
+            let render_details = |ui: &mut egui::Ui, app: &mut Pui| {
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Copy pairing link").clicked() {
-                        ui.ctx().copy_text(uri.clone());
-                    }
-                    if ui.button("Copy token").clicked() {
-                        ui.ctx().copy_text(self.prefs.remote.token.clone());
-                    }
-                    if ui.button("Regenerate token").clicked() {
-                        self.prefs.remote.regenerate_token();
-                        if !self.demo {
-                            self.remote.apply_config(self.prefs.remote.clone());
+                    egui::Frame::new()
+                        .fill(status_color.gamma_multiply(0.14))
+                        .stroke(Stroke::new(1.0_f32, status_color.gamma_multiply(0.38)))
+                        .corner_radius(99)
+                        .inner_margin(egui::Margin::symmetric(9, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 5.0;
+                                icons::inline(ui, Icon::Phone, status_color);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&status_text)
+                                            .size(11.5)
+                                            .strong()
+                                            .color(status_color),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                    if ui.button("Refresh IP").clicked() && !app.demo {
+                        app.remote.refresh_tailscale_ip();
+                        if app.prefs.remote.enabled && !app.remote.is_running() {
+                            app.remote.start_listener();
                         }
                     }
                 });
-            }
-
-            let devices = self.remote.connected_devices();
-            if !devices.is_empty() {
-                settings::page_separator(ui);
+                ui.add_space(6.0);
                 ui.add(
                     egui::Label::new(
-                        RichText::new("Connected devices")
-                            .size(12.0)
+                        RichText::new("Scan with Pui Mobile")
+                            .size(14.0)
                             .strong()
                             .color(colors.text),
                     )
                     .wrap(),
                 );
-                ui.add_space(4.0);
-                for dev in devices {
-                    ui.horizontal_wrapped(|ui| {
-                        let icon = if dev.platform == OriginPlatform::Web {
-                            Icon::Globe
-                        } else {
-                            Icon::Phone
-                        };
-                        icons::inline(ui, icon, colors.accent);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{} · {} ({})",
-                                    dev.device,
-                                    dev.platform.label(),
-                                    dev.remote_addr
-                                ))
-                                .size(11.5)
-                                .color(colors.muted),
-                            )
-                            .wrap(),
-                        );
-                    });
+                ui.add_space(2.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Open Pui on your phone → Pair with Pui Desktop → scan this code over Tailscale.",
+                        )
+                        .size(12.0)
+                        .color(colors.muted),
+                    )
+                    .wrap(),
+                );
+                if let Some(ws) = &ws {
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .fill(colors.bg)
+                        .stroke(Stroke::new(1.0_f32, colors.border))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(8, 5))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(ws)
+                                        .font(FontId::monospace(11.0))
+                                        .color(colors.muted),
+                                )
+                                .wrap()
+                                .selectable(true),
+                            );
+                        });
                 }
+                if let Some(uri) = &uri {
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Copy pairing link").clicked() {
+                            ui.ctx().copy_text(uri.clone());
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(copied_id, "Pairing link copied".to_owned())
+                            });
+                        }
+                        if ui.button("Copy token").clicked() {
+                            ui.ctx().copy_text(app.prefs.remote.token.clone());
+                            ui.ctx()
+                                .data_mut(|d| d.insert_temp(copied_id, "Token copied".to_owned()));
+                        }
+                        if ui.button("Regenerate").clicked() {
+                            app.prefs.remote.regenerate_token();
+                            if !app.demo {
+                                app.remote.apply_config(app.prefs.remote.clone());
+                            }
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(copied_id, "New token generated".to_owned())
+                            });
+                        }
+                    });
+                    if let Some(notice) = &copied_notice {
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::Label::new(RichText::new(notice).size(11.0).color(colors.accent))
+                                .wrap(),
+                        );
+                    }
+                }
+            };
+
+            if wide && let Some(mat) = &matrix {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 18.0;
+                    paint_qr(ui, mat, 156.0);
+                    ui.vertical(|ui| {
+                        render_details(ui, self);
+                    });
+                });
+            } else {
+                if let Some(mat) = &matrix {
+                    paint_qr(ui, mat, 168.0_f32.min(ui.available_width()));
+                    ui.add_space(10.0);
+                }
+                render_details(ui, self);
+            }
+
+            let devices = self.remote.connected_devices();
+            settings::page_separator(ui);
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("Connected devices")
+                            .size(11.5)
+                            .color(colors.muted),
+                    )
+                    .wrap(),
+                );
+                if devices.is_empty() {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("None yet · waiting for Pui Mobile")
+                                .size(11.5)
+                                .color(colors.dim),
+                        )
+                        .wrap(),
+                    );
+                } else {
+                    for dev in devices {
+                        egui::Frame::new()
+                            .fill(colors.surface)
+                            .stroke(Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(99)
+                            .inner_margin(egui::Margin::symmetric(9, 3))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 5.0;
+                                    let icon = if dev.platform == OriginPlatform::Web {
+                                        Icon::Globe
+                                    } else {
+                                        Icon::Phone
+                                    };
+                                    icons::inline(ui, icon, colors.accent);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                dev.device,
+                                                dev.platform.label()
+                                            ))
+                                            .size(11.5)
+                                            .color(colors.text),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                            });
+                    }
+                }
+            });
+        });
+
+        let adv_id = ui.id().with("remote-advanced-open");
+        let mut adv_open = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(adv_id))
+            .unwrap_or(false);
+        let before_adv = self.prefs.remote.clone();
+        settings::page_section(ui, "Advanced", "");
+        settings::page_card(ui, |ui| {
+            let summary = format!(
+                "{} · Port {} · {}",
+                self.prefs.remote.bind_mode.label(),
+                self.prefs.remote.port,
+                self.prefs.remote.host_name
+            );
+            settings::page_row(ui, "Network & host settings", &summary, |ui| {
+                if ui
+                    .button(if adv_open { "Hide" } else { "Configure" })
+                    .clicked()
+                {
+                    adv_open = !adv_open;
+                    ui.ctx().data_mut(|d| d.insert_temp(adv_id, adv_open));
+                }
+            });
+
+            if adv_open {
+                settings::page_separator(ui);
+                settings::page_row(
+                    ui,
+                    "Network binding",
+                    self.prefs.remote.bind_mode.description(),
+                    |ui| {
+                        egui::ComboBox::from_id_salt("remote-bind-mode")
+                            .selected_text(self.prefs.remote.bind_mode.label())
+                            .width(230.0_f32.min(ui.available_width()))
+                            .show_ui(ui, |ui| {
+                                for mode in BindMode::ALL {
+                                    ui.selectable_value(
+                                        &mut self.prefs.remote.bind_mode,
+                                        mode,
+                                        mode.label(),
+                                    );
+                                }
+                            });
+                    },
+                );
+                settings::page_separator(ui);
+                settings::page_row(
+                    ui,
+                    "Port",
+                    "TCP port used for the WebSocket and REST API (default 4817).",
+                    |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut self.prefs.remote.port)
+                                .range(1024..=65535)
+                                .speed(1),
+                        );
+                    },
+                );
+                settings::page_separator(ui);
+                settings::page_row(
+                    ui,
+                    "Host name",
+                    "Shown in the mobile app so you can tell multiple computers apart.",
+                    |ui| {
+                        ui.add_sized(
+                            [210.0_f32.min(ui.available_width()), theme::CONTROL_HEIGHT],
+                            theme::text_field(&mut self.prefs.remote.host_name, "My Mac"),
+                        );
+                    },
+                );
+                settings::page_separator(ui);
+                settings::page_row(
+                    ui,
+                    "Custom public hostname (optional)",
+                    "Override the QR host (for example a Tailscale MagicDNS name like mac.tail1234.ts.net).",
+                    |ui| {
+                        ui.add_sized(
+                            [210.0_f32.min(ui.available_width()), theme::CONTROL_HEIGHT],
+                            theme::text_field(
+                                &mut self.prefs.remote.public_host,
+                                "Auto (Tailscale IP)",
+                            ),
+                        );
+                    },
+                );
+                settings::page_separator(ui);
+                settings::page_row(
+                    ui,
+                    "Use TLS (wss://) in QR",
+                    "Turn on when exposing Pui through `tailscale serve` or an HTTPS reverse proxy.",
+                    |ui| {
+                        settings::toggle_switch(
+                            ui,
+                            &mut self.prefs.remote.use_tls_in_qr,
+                            "Use TLS in QR",
+                        );
+                    },
+                );
             }
         });
+        if self.prefs.remote != before_adv && !self.demo {
+            self.remote.apply_config(self.prefs.remote.clone());
+        }
     }
 }
 
 fn paint_qr(ui: &mut egui::Ui, matrix: &qr::QrMatrix, target_size: f32) {
-    let quiet = 2usize;
+    // ISO/IEC 18004 mandates a 4-module quiet zone so phone cameras scan reliably on dark UIs.
+    let quiet = 4usize;
     let total = matrix.size + quiet * 2;
     let cell = (target_size / total as f32).floor().max(2.0);
     let side = cell * total as f32;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 6, Color32::WHITE);
+    painter.rect_filled(rect, 8, Color32::WHITE);
     for y in 0..matrix.size {
         for x in 0..matrix.size {
             if matrix.get(x, y) {
@@ -793,5 +914,76 @@ mod tests {
 
         app.shutdown_agents();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_settings_hides_status_and_qr_until_enabled() {
+        fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| collect_texts(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                ..Default::default()
+            },
+        );
+        app.prefs.remote.enabled = false;
+        let off = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(960.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.settings_remote(ui));
+            },
+        );
+        let mut off_labels = Vec::new();
+        off.shapes
+            .iter()
+            .for_each(|s| collect_texts(&s.shape, &mut off_labels));
+        assert!(off_labels.iter().any(|t| t == "Enable remote access"));
+        assert!(
+            !off_labels
+                .iter()
+                .any(|t| t.contains("Scan with Pui Mobile"))
+        );
+        assert!(!off_labels.iter().any(|t| t.contains("Copy pairing link")));
+        assert!(
+            !off_labels
+                .iter()
+                .any(|t| t.contains("Network & host settings"))
+        );
+
+        app.prefs.remote.enabled = true;
+        app.remote.tailscale_ip = Some("100.108.253.122".into());
+        let on = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(960.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.settings_remote(ui));
+            },
+        );
+        let mut on_labels = Vec::new();
+        on.shapes
+            .iter()
+            .for_each(|s| collect_texts(&s.shape, &mut on_labels));
+        assert!(on_labels.iter().any(|t| t == "Scan with Pui Mobile"));
+        assert!(on_labels.iter().any(|t| t == "Copy pairing link"));
+        assert!(on_labels.iter().any(|t| t == "Network & host settings"));
     }
 }

@@ -81,6 +81,48 @@ fn qr_encoder_produces_valid_matrix_for_pairing_uri() {
     assert!(!matrix.get(1, 1));
     // Dark module at (8, size - 8).
     assert!(matrix.get(8, matrix.size - 8));
+
+    #[cfg(target_os = "macos")]
+    {
+        let quiet = 4usize;
+        let scale = 6u32;
+        let dim = ((matrix.size + quiet * 2) as u32) * scale;
+        let mut img = image::GrayImage::from_pixel(dim, dim, image::Luma([255u8]));
+        for y in 0..matrix.size {
+            for x in 0..matrix.size {
+                if matrix.get(x, y) {
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            img.put_pixel(
+                                ((x + quiet) as u32) * scale + dx,
+                                ((y + quiet) as u32) * scale + dy,
+                                image::Luma([0u8]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let png_path =
+            std::env::temp_dir().join(format!("pui-qr-verify-{}.png", uuid::Uuid::new_v4()));
+        img.save(&png_path).unwrap();
+        let output = std::process::Command::new("swift")
+            .args([
+                "-e",
+                &format!(
+                    r#"import Foundation; import CoreImage; let url = URL(fileURLWithPath: "{}"); let ci = CIImage(contentsOf: url)!; let det = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])!; let feats = det.features(in: ci) as? [CIQRCodeFeature] ?? []; print(feats.first?.messageString ?? "DECODE_FAILED")"#,
+                    png_path.display()
+                ),
+            ])
+            .output()
+            .expect("run swift qr decoder");
+        let _ = std::fs::remove_file(&png_path);
+        let decoded = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert_eq!(
+            decoded, uri,
+            "CoreImage must decode the generated QR code identically"
+        );
+    }
 }
 
 #[test]

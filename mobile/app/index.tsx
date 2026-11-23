@@ -30,6 +30,7 @@ export default function SessionsScreen() {
     transport,
     clientOrigin,
     deviceName,
+    retryConnection,
     refreshSessions,
   } = usePui();
 
@@ -117,7 +118,18 @@ export default function SessionsScreen() {
 
       {connectionError ? (
         <View style={[styles.banner, { backgroundColor: colors.redBg }]}>
-          <Text style={{ color: colors.red, fontSize: 12 }}>{connectionError}</Text>
+          <Text style={{ color: colors.red, fontSize: 12, flex: 1 }}>{connectionError}</Text>
+          <Pressable
+            onPress={retryConnection}
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 4,
+              borderRadius: 6,
+              backgroundColor: colors.surface,
+            }}
+          >
+            <Text style={{ color: colors.text, fontSize: 11.5, fontWeight: '700' }}>Retry</Text>
+          </Pressable>
         </View>
       ) : null}
 
@@ -306,6 +318,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     paddingHorizontal: 14,
     paddingVertical: 8,
   },
