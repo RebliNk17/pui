@@ -669,7 +669,8 @@ impl Updates {
                     if let Some(Ok(release)) = &self.result {
                         if release.newer && !release.body.trim().is_empty() {
                             ui.add_space(8.0);
-                            ui.add(egui::Label::new(theme::small(ui, release.body.trim())).wrap());
+                            // Release notes are the changelog section: render its Markdown.
+                            crate::markdown::show(ui, release.body.trim());
                         }
                     }
                 });
@@ -989,6 +990,46 @@ mod tests {
             )
         );
         assert!(updates.rx.is_none());
+    }
+
+    #[test]
+    fn release_notes_render_markdown_not_raw_markers() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut updates = Updates {
+            open: true,
+            ..Default::default()
+        };
+        updates.result = Some(Ok(Release {
+            version: "0.2.0".into(),
+            url: "https://github.com/example/pui/releases/tag/v0.2.0".into(),
+            body: "### Added\n\n- **Bold** feature with `code`\n".into(),
+            zip_url: None,
+            sums_url: None,
+            newer: true,
+        }));
+        let mut text = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run(Default::default(), |ctx| {
+                updates.show(ctx);
+            });
+            text.clear();
+            fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            for shape in output.shapes {
+                walk(&shape.shape, &mut text);
+            }
+        }
+        let all = text.join("\n");
+        assert!(all.contains("Added"), "{all}");
+        assert!(all.contains("Bold"), "{all}");
+        assert!(!all.contains("###"), "heading markers rendered: {all}");
+        assert!(!all.contains("**"), "emphasis markers rendered: {all}");
     }
 
     #[test]
