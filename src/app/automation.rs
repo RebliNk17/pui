@@ -134,6 +134,8 @@ pub(super) struct Automation {
     reconnect_at: BTreeMap<String, std::time::Instant>,
     pub error: Option<String>,
     failed: bool,
+    /// The store could not be read; memory holds no unsaved jobs, so a reload is safe.
+    load_failed: bool,
     delete: Option<String>,
     deleting: Option<String>,
     reschedule: Option<reschedule::Editor>,
@@ -230,6 +232,7 @@ impl Automation {
             Err(error) => {
                 self.error = Some(error);
                 self.failed = true;
+                self.load_failed = true;
                 return;
             }
         }
@@ -249,6 +252,17 @@ impl Automation {
             }
             let _ = self.persist();
         }
+    }
+    /// Retry a failed load (e.g. after repairing jobs.json). Write failures are
+    /// never retried here: memory may be newer than disk.
+    pub(super) fn reload(&mut self) {
+        if !self.load_failed {
+            return;
+        }
+        self.failed = false;
+        self.load_failed = false;
+        self.error = None;
+        self.refresh();
     }
     fn persist(&mut self) -> Result<(), String> {
         if self.failed {

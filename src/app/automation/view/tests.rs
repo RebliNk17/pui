@@ -386,3 +386,74 @@ fn status_counts_filters_and_next_activity_distinguish_pending_and_completed() {
     assert_eq!(job_status(job, false, colors).0, "Completed");
     assert!(JobFilter::History.includes(job));
 }
+
+#[test]
+fn empty_page_explains_scheduling_without_empty_filters() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.automation.jobs.clear();
+    let text = frame(&mut app, &ctx, Vec2::new(1000.0, 900.0), vec![]);
+    assert!(text.iter().any(|(s, _)| s == "No scheduled tasks yet."));
+    assert!(text.iter().any(|(s, _)| s == "New recurring prompt…"));
+    assert!(!text.iter().any(|(s, _)| s.starts_with("All tasks")));
+    assert!(!text.iter().any(|(s, _)| s.contains("0 active")));
+    // Help is expanded when there is nothing else to show.
+    assert!(
+        text.iter()
+            .any(|(s, _)| s.contains("Delivered events/prompts"))
+    );
+}
+
+#[test]
+fn load_failure_offers_reload_that_recovers_after_repair() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        let ctx = egui::Context::default();
+        let mut app = app(&ctx);
+        mode.apply(&ctx);
+        app.demo = false;
+        let jobs = std::mem::take(&mut app.automation.jobs);
+        let home = std::env::temp_dir().join(format!("pui-reload-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("jobs.json"), b"not json").unwrap();
+        app.automation.home = Some(home.clone());
+        app.automation.refresh();
+        assert!(app.automation.failed && app.automation.load_failed);
+        let size = Vec2::new(420.0, 900.0);
+        let text = frame(&mut app, &ctx, size, vec![]);
+        assert!(
+            text.iter()
+                .any(|(s, _)| s == "Couldn’t load scheduled tasks")
+        );
+        assert!(text.iter().any(|(s, _)| s == "Scheduled tasks unavailable"));
+        assert!(!text.iter().any(|(s, _)| s == "No scheduled tasks yet."));
+        // Reloading a still-broken store keeps failing closed.
+        click(&mut app, &ctx, size, position(&text, "Reload"));
+        assert!(app.automation.failed && app.automation.jobs.is_empty());
+        store::save(&home, &jobs).unwrap();
+        let text = frame(&mut app, &ctx, size, vec![]);
+        click(&mut app, &ctx, size, position(&text, "Reload"));
+        assert!(!app.automation.failed && app.automation.error.is_none());
+        assert_eq!(app.automation.jobs.len(), 4);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[test]
+fn write_failures_are_not_reloadable_and_action_errors_dismiss() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.demo = false;
+    app.automation.failed = true;
+    app.automation.error = Some("disk full".into());
+    let size = Vec2::new(1000.0, 900.0);
+    let text = frame(&mut app, &ctx, size, vec![]);
+    assert!(text.iter().any(|(s, _)| s == "Scheduling stopped"));
+    assert!(!text.iter().any(|(s, _)| s == "Reload"));
+    app.automation.reload();
+    assert!(app.automation.failed);
+    app.automation.failed = false;
+    app.automation.error = Some("Unknown job".into());
+    let text = frame(&mut app, &ctx, size, vec![]);
+    click(&mut app, &ctx, size, position(&text, "Dismiss"));
+    assert!(app.automation.error.is_none());
+}
