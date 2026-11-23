@@ -5,6 +5,20 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-23
+
+### Added
+
+- Inline sign-in and API key recovery prompt above the composer when a provider rejects an OAuth subscription token or API key. Prompts let you re-login or re-submit your API key directly in the chat and automatically reload models once updated.
+
+### Changed
+
+- Refactored the Scheduled tasks page with a cleaner header layout, an empty-state card, and notice banners with a **Reload** action when the task store could not be read.
+
+### Fixed
+
+- Reconnecting an Anthropic account saved as an API key now opens the API key dialog instead of starting subscription OAuth.
+
 ## [0.2.1] - 2026-11-23
 
 ### Fixed
