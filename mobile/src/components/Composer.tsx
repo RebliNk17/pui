@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  FlatList,
   Image,
   Modal,
   Pressable,
@@ -25,6 +24,8 @@ import {
   filterFileMentions,
   filterSlashCommands,
 } from '../utils/completions';
+import { isRtlText } from '../utils/markdown';
+import { formatLevelLabel, ModelEffortSheet } from './ModelEffortSheet';
 
 interface DraftImage {
   uri: string;
@@ -38,7 +39,10 @@ interface Props {
   busy: boolean;
   permissionMode: string;
   permissionModes: PermissionModeOption[];
-  currentModel: string;
+  currentModelId: string;
+  currentModelLabel: string;
+  currentThinking: string;
+  thinkingLevels: string[];
   models: ModelItem[];
   slashCommands: SlashCommandItem[];
   onFetchFileMentions: (cwd: string, query: string) => Promise<FileMentionItem[]>;
@@ -50,6 +54,7 @@ interface Props {
   onAbort: () => Promise<void>;
   onChangePermission: (key: string) => Promise<void>;
   onChangeModel: (provider: string, modelId: string) => Promise<void>;
+  onChangeThinking: (level: string) => Promise<void>;
   onLocalCommand?: (name: string) => void;
 }
 
@@ -58,7 +63,10 @@ export function Composer({
   busy,
   permissionMode,
   permissionModes,
-  currentModel,
+  currentModelId,
+  currentModelLabel,
+  currentThinking,
+  thinkingLevels,
   models,
   slashCommands,
   onFetchFileMentions,
@@ -66,6 +74,7 @@ export function Composer({
   onAbort,
   onChangePermission,
   onChangeModel,
+  onChangeThinking,
   onLocalCommand,
 }: Props) {
   const colors = usePalette();
@@ -77,6 +86,7 @@ export function Composer({
   const [sending, setSending] = useState(false);
   const [showPermPicker, setShowPermPicker] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
 
   const token = useMemo(
     () => detectCompletionToken(text, selection.start),
@@ -124,23 +134,30 @@ export function Composer({
     setDismissedAt(null);
   };
 
-  const attachImage = async () => {
+  /** Multi-select image upload (up to 10 photos at once). */
+  const attachImages = async () => {
+    setShowAttachMenu(false);
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      selectionLimit: 10,
       base64: true,
       quality: 0.85,
     });
-    if (res.canceled || !res.assets?.[0]?.base64) return;
-    const asset = res.assets[0];
-    setImages((prev) => [
-      ...prev,
-      {
+    if (res.canceled || !res.assets?.length) return;
+    const picked: DraftImage[] = [];
+    for (const asset of res.assets) {
+      if (!asset.base64) continue;
+      picked.push({
         uri: asset.uri,
-        data_base64: asset.base64!,
+        data_base64: asset.base64,
         mime: asset.mimeType ?? 'image/jpeg',
         name: asset.fileName ?? undefined,
-      },
-    ]);
+      });
+    }
+    if (picked.length > 0) {
+      setImages((prev) => [...prev, ...picked].slice(0, 12));
+    }
   };
 
   const handleSend = async (mode: 'steer' | 'queue' = 'steer') => {
@@ -173,17 +190,25 @@ export function Composer({
 
   const permLabel =
     permissionModes.find((m) => m.key === permissionMode)?.label ?? permissionMode ?? 'Auto';
+  const effortShort = currentThinking ? formatLevelLabel(currentThinking) : '';
+  const modelPillLabel = currentModelLabel
+    ? effortShort
+      ? `${effortShort} · ${currentModelLabel}`
+      : currentModelLabel
+    : 'Model';
+  const canSend = Boolean(text.trim() || images.length > 0);
+  const inputRtl = isRtlText(text);
 
   return (
-    <View style={[styles.wrap, { backgroundColor: colors.surface, borderTopColor: colors.border }]}>
+    <View style={[styles.outer, { backgroundColor: colors.bg }]}>
       {completionVisible && token ? (
         <View
           style={[
             styles.popup,
-            { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+            { backgroundColor: colors.surface, borderColor: colors.border },
           ]}
         >
-          <View style={[styles.popupHeader, { borderBottomColor: colors.border }]}>
+          <View style={[styles.popupHeader, { borderBottomColor: colors.hairline }]}>
             <Text style={[styles.popupTitle, { color: colors.muted }]}>
               {token.kind === 'command' ? 'Slash commands (/)' : 'Workspace files (@)'}
             </Text>
@@ -200,7 +225,7 @@ export function Composer({
                   <Pressable
                     key={cmd.name}
                     onPress={() => pickCompletion(cmd.name)}
-                    style={[styles.popupRow, { borderBottomColor: colors.border }]}
+                    style={[styles.popupRow, { borderBottomColor: colors.hairline }]}
                   >
                     <Text style={[styles.cmdName, { color: colors.accent }]}>/{cmd.name}</Text>
                     <Text numberOfLines={1} style={[styles.cmdDesc, { color: colors.muted }]}>
@@ -218,7 +243,7 @@ export function Composer({
                 <Pressable
                   key={file.path}
                   onPress={() => pickCompletion(file.path)}
-                  style={[styles.popupRow, { borderBottomColor: colors.border }]}
+                  style={[styles.popupRow, { borderBottomColor: colors.hairline }]}
                 >
                   <Ionicons name="document-outline" size={13} color={colors.accent} />
                   <Text numberOfLines={1} style={[styles.filePath, { color: colors.text }]}>
@@ -231,68 +256,33 @@ export function Composer({
         </View>
       ) : null}
 
-      {images.length > 0 ? (
-        <ScrollView horizontal style={styles.draftImages} contentContainerStyle={{ gap: 8 }}>
-          {images.map((img, idx) => (
-            <View key={idx} style={styles.draftThumbWrap}>
-              <Image source={{ uri: img.uri }} style={styles.draftThumb} />
-              <Pressable
-                onPress={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
-                style={styles.removeThumb}
-              >
-                <Ionicons name="close-circle" size={18} color="#fff" />
-              </Pressable>
-            </View>
-          ))}
-        </ScrollView>
-      ) : null}
+      <View
+        style={[
+          styles.card,
+          { backgroundColor: colors.surface, borderColor: colors.border },
+        ]}
+      >
+        {images.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.draftImages}
+            contentContainerStyle={{ gap: 8 }}
+          >
+            {images.map((img, idx) => (
+              <View key={idx} style={styles.draftThumbWrap}>
+                <Image source={{ uri: img.uri }} style={styles.draftThumb} />
+                <Pressable
+                  onPress={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
+                  style={styles.removeThumb}
+                >
+                  <Ionicons name="close-circle" size={18} color="#fff" />
+                </Pressable>
+              </View>
+            ))}
+          </ScrollView>
+        ) : null}
 
-      <View style={styles.pillRow}>
-        <Pressable
-          onPress={() => setShowPermPicker(true)}
-          style={[styles.chip, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}
-        >
-          <Ionicons name="shield-outline" size={12} color={colors.accent} />
-          <Text style={[styles.chipText, { color: colors.text }]}>{permLabel}</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setShowModelPicker(true)}
-          style={[styles.chip, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}
-        >
-          <Ionicons name="hardware-chip-outline" size={12} color={colors.muted} />
-          <Text numberOfLines={1} style={[styles.chipText, { color: colors.text, maxWidth: 160 }]}>
-            {currentModel || 'Model'}
-          </Text>
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            const next = text.startsWith('/') ? text : `/${text}`;
-            setText(next);
-            setSelection({ start: 1, end: 1 });
-          }}
-          style={[styles.chip, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}
-        >
-          <Text style={[styles.chipText, { color: colors.accent }]}>/</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => {
-            const insertAt = selection.start;
-            const prefix = insertAt > 0 && !/\s/.test(text[insertAt - 1]) ? ' @' : '@';
-            const next = `${text.slice(0, insertAt)}${prefix}${text.slice(insertAt)}`;
-            const cur = insertAt + prefix.length;
-            setText(next);
-            setSelection({ start: cur, end: cur });
-          }}
-          style={[styles.chip, { backgroundColor: colors.surfaceElevated, borderColor: colors.border }]}
-        >
-          <Text style={[styles.chipText, { color: colors.accent }]}>@</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.inputRow}>
-        <Pressable onPress={attachImage} style={styles.iconBtn}>
-          <Ionicons name="image-outline" size={22} color={colors.muted} />
-        </Pressable>
         <TextInput
           value={text}
           onChangeText={(next) => {
@@ -305,36 +295,153 @@ export function Composer({
           multiline
           style={[
             styles.input,
-            { backgroundColor: colors.codeBg, color: colors.text, borderColor: colors.border },
-          ]}
-        />
-        {busy ? (
-          <Pressable
-            onPress={() => void onAbort()}
-            style={[styles.sendBtn, { backgroundColor: colors.red }]}
-          >
-            <Ionicons name="stop" size={18} color="#fff" />
-          </Pressable>
-        ) : null}
-        <Pressable
-          disabled={sending || (!text.trim() && images.length === 0)}
-          onPress={() => void handleSend('steer')}
-          style={[
-            styles.sendBtn,
             {
-              backgroundColor:
-                text.trim() || images.length > 0 ? colors.accent : colors.surfaceElevated,
+              color: colors.text,
+              textAlign: inputRtl ? 'right' : 'left',
+              writingDirection: inputRtl ? 'rtl' : 'ltr',
             },
           ]}
-        >
-          <Ionicons
-            name="arrow-up"
-            size={18}
-            color={text.trim() || images.length > 0 ? '#fff' : colors.dim}
-          />
-        </Pressable>
+        />
+
+        <View style={styles.actionBar}>
+          <View style={styles.leftActions}>
+            <Pressable
+              onPress={() => setShowAttachMenu(true)}
+              style={[
+                styles.circleAction,
+                { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+              ]}
+            >
+              <Ionicons name="add" size={18} color={colors.text} />
+            </Pressable>
+
+            <Pressable
+              onPress={() => setShowModelPicker(true)}
+              style={[
+                styles.pill,
+                { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[styles.pillText, { color: colors.text, maxWidth: 150 }]}
+              >
+                {modelPillLabel}
+              </Text>
+              <Ionicons name="chevron-down" size={12} color={colors.dim} />
+            </Pressable>
+
+            <Pressable
+              onPress={() => setShowPermPicker(true)}
+              style={[
+                styles.pill,
+                { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+              ]}
+            >
+              <Text style={[styles.pillText, { color: colors.muted }]}>{permLabel}</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.rightActions}>
+            {busy ? (
+              <Pressable
+                onPress={() => void onAbort()}
+                style={[styles.sendCircle, { backgroundColor: colors.red }]}
+              >
+                <Ionicons name="stop" size={16} color="#fff" />
+              </Pressable>
+            ) : null}
+            <Pressable
+              disabled={sending || !canSend}
+              onPress={() => void handleSend('steer')}
+              style={[
+                styles.sendCircle,
+                {
+                  backgroundColor: canSend ? colors.accent : colors.surfaceElevated,
+                },
+              ]}
+            >
+              <Ionicons
+                name="arrow-up"
+                size={18}
+                color={canSend ? '#fff' : colors.dim}
+              />
+            </Pressable>
+          </View>
+        </View>
       </View>
 
+      {/* Attach / Quick insert sheet (+ button) */}
+      <Modal
+        visible={showAttachMenu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAttachMenu(false)}
+      >
+        <Pressable style={styles.modalBg} onPress={() => setShowAttachMenu(false)}>
+          <View
+            style={[
+              styles.sheet,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            <Text style={[styles.sheetTitle, { color: colors.text }]}>Add to message</Text>
+            <Pressable
+              onPress={() => void attachImages()}
+              style={[styles.sheetRow, { borderBottomColor: colors.hairline }]}
+            >
+              <View style={styles.sheetRowLeft}>
+                <Ionicons name="images-outline" size={19} color={colors.accent} />
+                <View>
+                  <Text style={{ color: colors.text, fontSize: 14.5, fontWeight: '600' }}>
+                    Upload photos (multi-select)
+                  </Text>
+                  <Text style={{ color: colors.muted, fontSize: 11.5 }}>
+                    Pick up to 10 screenshots or images at once
+                  </Text>
+                </View>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setShowAttachMenu(false);
+                const next = text.startsWith('/') ? text : `/${text}`;
+                setText(next);
+                setSelection({ start: 1, end: 1 });
+              }}
+              style={[styles.sheetRow, { borderBottomColor: colors.hairline }]}
+            >
+              <View style={styles.sheetRowLeft}>
+                <Ionicons name="terminal-outline" size={19} color={colors.accent} />
+                <Text style={{ color: colors.text, fontSize: 14.5, fontWeight: '600' }}>
+                  Insert slash command (/)
+                </Text>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setShowAttachMenu(false);
+                const insertAt = selection.start;
+                const prefix = insertAt > 0 && !/\s/.test(text[insertAt - 1]) ? ' @' : '@';
+                const next = `${text.slice(0, insertAt)}${prefix}${text.slice(insertAt)}`;
+                const cur = insertAt + prefix.length;
+                setText(next);
+                setSelection({ start: cur, end: cur });
+              }}
+              style={styles.sheetRow}
+            >
+              <View style={styles.sheetRowLeft}>
+                <Ionicons name="at-outline" size={19} color={colors.accent} />
+                <Text style={{ color: colors.text, fontSize: 14.5, fontWeight: '600' }}>
+                  Mention workspace file (@)
+                </Text>
+              </View>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Permission picker */}
       <Modal
         visible={showPermPicker}
         transparent
@@ -342,7 +449,12 @@ export function Composer({
         onRequestClose={() => setShowPermPicker(false)}
       >
         <Pressable style={styles.modalBg} onPress={() => setShowPermPicker(false)}>
-          <View style={[styles.sheet, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View
+            style={[
+              styles.sheet,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
             <Text style={[styles.sheetTitle, { color: colors.text }]}>Permission mode</Text>
             {permissionModes.map((mode) => (
               <Pressable
@@ -356,14 +468,15 @@ export function Composer({
                   {
                     backgroundColor:
                       mode.key === permissionMode ? colors.accentBg : 'transparent',
+                    borderRadius: 10,
                   },
                 ]}
               >
-                <Text style={{ color: colors.text, fontSize: 14, fontWeight: '600' }}>
+                <Text style={{ color: colors.text, fontSize: 14.5, fontWeight: '600' }}>
                   {mode.label}
                 </Text>
                 {mode.key === permissionMode ? (
-                  <Ionicons name="checkmark" size={16} color={colors.accent} />
+                  <Ionicons name="checkmark" size={17} color={colors.accent} />
                 ) : null}
               </Pressable>
             ))}
@@ -371,69 +484,92 @@ export function Composer({
         </Pressable>
       </Modal>
 
-      <Modal
+      {/* Multi-provider Model & Effort picker */}
+      <ModelEffortSheet
         visible={showModelPicker}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowModelPicker(false)}
-      >
-        <Pressable style={styles.modalBg} onPress={() => setShowModelPicker(false)}>
-          <View
-            style={[
-              styles.sheet,
-              { backgroundColor: colors.surface, borderColor: colors.border, maxHeight: '70%' },
-            ]}
-          >
-            <Text style={[styles.sheetTitle, { color: colors.text }]}>Choose model</Text>
-            <FlatList
-              data={models}
-              keyExtractor={(m) => `${m.provider}/${m.id}`}
-              renderItem={({ item }) => (
-                <Pressable
-                  onPress={() => {
-                    setShowModelPicker(false);
-                    void onChangeModel(item.provider, item.id);
-                  }}
-                  style={[
-                    styles.sheetRow,
-                    {
-                      backgroundColor:
-                        item.id === currentModel ? colors.accentBg : 'transparent',
-                    },
-                  ]}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: colors.text, fontSize: 13.5, fontWeight: '600' }}>
-                      {item.name || item.id}
-                    </Text>
-                    <Text style={{ color: colors.dim, fontSize: 11 }}>{item.provider}</Text>
-                  </View>
-                  {item.id === currentModel ? (
-                    <Ionicons name="checkmark" size={16} color={colors.accent} />
-                  ) : null}
-                </Pressable>
-              )}
-              ListEmptyComponent={
-                <Text style={{ color: colors.dim, padding: 12 }}>No models reported yet.</Text>
-              }
-            />
-          </View>
-        </Pressable>
-      </Modal>
+        models={models}
+        currentModelId={currentModelId}
+        currentThinking={currentThinking}
+        thinkingLevels={thinkingLevels}
+        onClose={() => setShowModelPicker(false)}
+        onSelectModel={onChangeModel}
+        onSelectThinking={onChangeThinking}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: {
-    borderTopWidth: 1,
+  outer: {
     paddingHorizontal: 10,
     paddingTop: 6,
     paddingBottom: 10,
+    direction: 'ltr',
+  },
+  card: {
+    borderWidth: 1,
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 9,
+    gap: 8,
+  },
+  input: {
+    minHeight: 36,
+    maxHeight: 120,
+    fontSize: 15,
+    lineHeight: 21,
+    paddingVertical: 2,
+  },
+  actionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  leftActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+    flexWrap: 'wrap',
+  },
+  rightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  circleAction: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  pillText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  sendCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   popup: {
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 14,
     marginBottom: 8,
     overflow: 'hidden',
   },
@@ -441,8 +577,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   popupTitle: {
@@ -451,14 +587,14 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   popupList: {
-    maxHeight: 190,
+    maxHeight: 200,
   },
   popupRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   cmdName: {
@@ -476,84 +612,39 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   emptyPopup: {
-    padding: 10,
+    padding: 12,
     fontSize: 12,
   },
   draftImages: {
-    marginBottom: 8,
+    marginBottom: 2,
   },
   draftThumbWrap: {
     position: 'relative',
   },
   draftThumb: {
-    width: 56,
-    height: 56,
-    borderRadius: 8,
+    width: 58,
+    height: 58,
+    borderRadius: 10,
   },
   removeThumb: {
     position: 'absolute',
     top: -4,
     right: -4,
   },
-  pillRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  chipText: {
-    fontSize: 11.5,
-    fontWeight: '600',
-  },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 6,
-  },
-  iconBtn: {
-    padding: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  input: {
-    flex: 1,
-    minHeight: 40,
-    maxHeight: 120,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 11,
-    paddingVertical: 9,
-    fontSize: 14,
-  },
-  sendBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
   modalBg: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(0,0,0,0.58)',
     justifyContent: 'flex-end',
     padding: 12,
   },
   sheet: {
     borderWidth: 1,
-    borderRadius: 14,
-    padding: 12,
+    borderRadius: 18,
+    padding: 14,
+    direction: 'ltr',
   },
   sheetTitle: {
-    fontSize: 15,
+    fontSize: 15.5,
     fontWeight: '700',
     marginBottom: 8,
   },
@@ -562,7 +653,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 10,
-    paddingVertical: 10,
-    borderRadius: 8,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'transparent',
+  },
+  sheetRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
   },
 });

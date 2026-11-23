@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import {
-  FlatList,
+  Modal,
   Pressable,
   RefreshControl,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -11,16 +12,25 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { CustomScrollbarOverlay, useCustomScrollbar } from '../src/components/CustomScrollbar';
 import { NewSessionModal } from '../src/components/NewSessionModal';
-import { OriginBadge } from '../src/components/OriginBadge';
 import type { SessionSummary } from '../src/protocol/types';
 import { usePui } from '../src/store/connectionStore';
+import { usePreferences } from '../src/store/preferencesStore';
 import { usePalette } from '../src/theme/colors';
-
-type Filter = 'all' | 'phone' | 'running' | 'attention';
+import { isRtlText } from '../src/utils/markdown';
+import {
+  filterSessions,
+  formatRelativeAge,
+  groupSessions,
+  type SessionFilter,
+  type SessionGrouping,
+  type SessionOrdering,
+} from '../src/utils/sessions';
 
 export default function SessionsScreen() {
   const colors = usePalette();
+  const { prefs, updatePrefs } = usePreferences();
   const {
     activeHost,
     connectionState,
@@ -35,26 +45,20 @@ export default function SessionsScreen() {
   } = usePui();
 
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [filter, setFilter] = useState<SessionFilter>('all');
+  const [sortModalOpen, setSortModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const { bindings, metrics } = useCustomScrollbar();
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return sessions.filter((s) => {
-      if (filter === 'phone' && s.origin.platform !== 'android' && s.origin.platform !== 'ios') {
-        return false;
-      }
-      if (filter === 'running' && !s.busy) return false;
-      if (filter === 'attention' && !s.has_pending_dialog && !s.unread) return false;
-      if (!q) return true;
-      return (
-        s.title.toLowerCase().includes(q) ||
-        s.project_name.toLowerCase().includes(q) ||
-        (s.origin.device ?? '').toLowerCase().includes(q)
-      );
-    });
-  }, [sessions, query, filter]);
+  const grouping = prefs.defaultGrouping;
+  const ordering = prefs.defaultOrdering;
+
+  const sections = useMemo(() => {
+    const filtered = filterSessions(sessions, filter, query);
+    return groupSessions(filtered, grouping, ordering);
+  }, [sessions, filter, query, grouping, ordering]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -66,6 +70,7 @@ export default function SessionsScreen() {
   };
 
   const openSession = (session: SessionSummary) => {
+    // Loads the session in background on host without switching Desktop's active chat.
     void transport?.openSession(session.path).catch(() => {});
     router.push({
       pathname: '/chat/[id]',
@@ -89,44 +94,118 @@ export default function SessionsScreen() {
     { key: 'bypassPermissions', label: 'Bypass' },
   ];
 
+  const renderSessionRow = ({ item }: { item: SessionSummary }) => {
+    const isPhone = item.origin.platform === 'android' || item.origin.platform === 'ios';
+    const dotColor = item.has_pending_dialog
+      ? colors.amber
+      : item.busy
+        ? colors.accent
+        : colors.dim;
+    const age = formatRelativeAge(item.modified_ms);
+    const titleRtl = isRtlText(item.title);
+
+    return (
+      <Pressable
+        onPress={() => openSession(item)}
+        style={({ pressed }) => [
+          styles.sessionRow,
+          (pressed || item.has_pending_dialog) && {
+            backgroundColor: colors.surface,
+          },
+        ]}
+      >
+        <View style={[styles.rowDot, { backgroundColor: dotColor }]} />
+        <View style={styles.rowMiddle}>
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.rowTitle,
+              {
+                color: colors.text,
+                textAlign: titleRtl ? 'right' : 'left',
+              },
+            ]}
+          >
+            {item.title}
+          </Text>
+          <View style={styles.rowSubLine}>
+            <Text numberOfLines={1} style={[styles.rowMeta, { color: colors.muted }]}>
+              {item.project_name}
+              {item.busy ? ' · Working…' : item.has_pending_dialog ? ' · Needs approval' : ''}
+            </Text>
+            {isPhone ? (
+              <View style={[styles.originPill, { backgroundColor: colors.accentBg }]}>
+                <Ionicons name="phone-portrait-outline" size={10} color={colors.accent} />
+                <Text numberOfLines={1} style={[styles.originPillText, { color: colors.accent }]}>
+                  {item.origin.device || (item.origin.platform === 'ios' ? 'iOS' : 'Android')}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+        <Text numberOfLines={1} style={[styles.rowAge, { color: colors.dim }]}>
+          {age}
+        </Text>
+      </Pressable>
+    );
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.bg }]}>
-      <View style={[styles.header, { borderBottomColor: colors.border }]}>
-        <Pressable onPress={() => router.push('/connect')} style={styles.hostButton}>
+      {/* Top header: Host chip on left, crisp Search + Settings gear on right */}
+      <View style={[styles.header, { borderBottomColor: colors.hairline }]}>
+        <Pressable
+          onPress={() => router.push('/connect')}
+          style={[
+            styles.hostChip,
+            { backgroundColor: colors.surface, borderColor: colors.border },
+          ]}
+        >
           <View style={[styles.dot, { backgroundColor: statusDot }]} />
-          <View style={{ flex: 1 }}>
-            <Text numberOfLines={1} style={[styles.hostTitle, { color: colors.text }]}>
-              {activeHost ? activeHost.name : 'Connect to Pui'}
-            </Text>
-            <Text numberOfLines={1} style={[styles.hostSub, { color: colors.muted }]}>
-              {activeHost
-                ? `${activeHost.host}:${activeHost.port} · ${connectionState}`
-                : 'Pair via QR code or Tailscale IP'}
-            </Text>
-          </View>
-          <Ionicons name="swap-horizontal-outline" size={18} color={colors.muted} />
+          <Text numberOfLines={1} style={[styles.hostTitle, { color: colors.text }]}>
+            {activeHost ? activeHost.name : 'Connect to Pui'}
+          </Text>
+          <Ionicons name="chevron-down" size={14} color={colors.dim} />
         </Pressable>
-        {activeHost ? (
+
+        <View style={styles.headerActions}>
+          {activeHost ? (
+            <Pressable
+              onPress={() => {
+                setSearchOpen((v) => {
+                  if (v) setQuery('');
+                  return !v;
+                });
+              }}
+              style={[
+                styles.headerIconBtn,
+                searchOpen && { backgroundColor: colors.accentBg },
+              ]}
+            >
+              <Ionicons
+                name={searchOpen ? 'close-outline' : 'search-outline'}
+                size={21}
+                color={searchOpen ? colors.accent : colors.muted}
+              />
+            </Pressable>
+          ) : null}
           <Pressable
-            onPress={() => setNewOpen(true)}
-            style={[styles.newBtn, { backgroundColor: colors.accent }]}
+            onPress={() => router.push('/settings')}
+            style={styles.headerIconBtn}
           >
-            <Ionicons name="add" size={20} color="#fff" />
+            <Ionicons name="settings-outline" size={21} color={colors.muted} />
           </Pressable>
-        ) : null}
+        </View>
       </View>
 
       {connectionError ? (
         <View style={[styles.banner, { backgroundColor: colors.redBg }]}>
-          <Text style={{ color: colors.red, fontSize: 12, flex: 1 }}>{connectionError}</Text>
+          <Text style={{ color: colors.red, fontSize: 12, flex: 1, textAlign: 'left' }}>
+            {connectionError}
+          </Text>
           <Pressable
             onPress={retryConnection}
-            style={{
-              paddingHorizontal: 10,
-              paddingVertical: 4,
-              borderRadius: 6,
-              backgroundColor: colors.surface,
-            }}
+            style={[styles.retryBtn, { backgroundColor: colors.surface }]}
           >
             <Text style={{ color: colors.text, fontSize: 11.5, fontWeight: '700' }}>Retry</Text>
           </Pressable>
@@ -138,8 +217,8 @@ export default function SessionsScreen() {
           <Text style={[styles.logo, { color: colors.accent }]}>π</Text>
           <Text style={[styles.emptyTitle, { color: colors.text }]}>Connect your phone to Pui</Text>
           <Text style={[styles.emptySub, { color: colors.muted }]}>
-            Open Pui Desktop → Settings → Remote & Mobile, turn on remote access, and scan the
-            Tailscale pairing QR code.
+            Open Pui Desktop → Settings → Remote &amp; Mobile, enable remote access, and scan the
+            Tailscale QR code.
           </Text>
           <Pressable
             onPress={() => router.push('/connect')}
@@ -151,25 +230,42 @@ export default function SessionsScreen() {
         </View>
       ) : (
         <>
-          <View style={styles.controls}>
-            <TextInput
-              value={query}
-              onChangeText={setQuery}
-              placeholder="Search sessions, projects, devices…"
-              placeholderTextColor={colors.dim}
-              style={[
-                styles.search,
-                { backgroundColor: colors.surface, color: colors.text, borderColor: colors.border },
-              ]}
-            />
-            <View style={styles.filters}>
+          {searchOpen ? (
+            <View style={styles.searchWrap}>
+              <View
+                style={[
+                  styles.searchBox,
+                  { backgroundColor: colors.surface, borderColor: colors.border },
+                ]}
+              >
+                <Ionicons name="search-outline" size={16} color={colors.dim} />
+                <TextInput
+                  autoFocus
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder="Search sessions, projects, devices…"
+                  placeholderTextColor={colors.dim}
+                  style={[styles.searchInput, { color: colors.text }]}
+                />
+                {query ? (
+                  <Pressable onPress={() => setQuery('')}>
+                    <Ionicons name="close-circle" size={16} color={colors.dim} />
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+          ) : null}
+
+          {/* SESSIONS bar with filter chips & Group/Sort button */}
+          <View style={styles.sectionToolbar}>
+            <View style={styles.filterGroup}>
               {(
                 [
                   ['all', 'All'],
-                  ['phone', 'From phone'],
-                  ['running', 'Running'],
-                  ['attention', 'Needs you'],
-                ] as [Filter, string][]
+                  ['phone', 'Phone'],
+                  ['running', 'Live'],
+                  ['attention', 'Alerts'],
+                ] as [SessionFilter, string][]
               ).map(([key, label]) => {
                 const active = filter === key;
                 return (
@@ -177,14 +273,15 @@ export default function SessionsScreen() {
                     key={key}
                     onPress={() => setFilter(key)}
                     style={[
-                      styles.filterPill,
+                      styles.filterChip,
                       {
-                        backgroundColor: active ? colors.accentBg : colors.surface,
-                        borderColor: active ? colors.accent : colors.border,
+                        backgroundColor: active ? colors.accentBg : 'transparent',
+                        borderColor: active ? colors.accent : 'transparent',
                       },
                     ]}
                   >
                     <Text
+                      numberOfLines={1}
                       style={{
                         color: active ? colors.accent : colors.muted,
                         fontSize: 12,
@@ -197,67 +294,135 @@ export default function SessionsScreen() {
                 );
               })}
             </View>
+
+            <Pressable
+              onPress={() => setSortModalOpen(true)}
+              style={[
+                styles.sortBtn,
+                { backgroundColor: colors.surface, borderColor: colors.border },
+              ]}
+            >
+              <Ionicons name="swap-vertical-outline" size={14} color={colors.muted} />
+              <Text numberOfLines={1} style={{ color: colors.muted, fontSize: 11.5, fontWeight: '600' }}>
+                {grouping === 'date' ? 'Date' : grouping === 'project' ? 'Project' : 'Flat'}
+              </Text>
+            </Pressable>
           </View>
 
-          <FlatList
-            data={filtered}
-            keyExtractor={(item) => item.path}
-            refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={() => void onRefresh()} />
-            }
-            contentContainerStyle={{ paddingBottom: 30 }}
-            renderItem={({ item }) => (
-              <Pressable
-                onPress={() => openSession(item)}
-                style={[
-                  styles.sessionCard,
-                  { backgroundColor: colors.surface, borderColor: colors.border },
-                ]}
-              >
-                <View style={styles.sessionTop}>
-                  <View
-                    style={[
-                      styles.statusCircle,
-                      {
-                        backgroundColor: item.has_pending_dialog
-                          ? colors.amber
-                          : item.busy
-                            ? colors.accent
-                            : colors.green,
-                      },
-                    ]}
-                  />
-                  <Text numberOfLines={1} style={[styles.sessionTitle, { color: colors.text }]}>
-                    {item.title}
+          <View style={styles.listContainer}>
+            <SectionList
+              {...bindings}
+              sections={sections}
+              keyExtractor={(item) => item.path}
+              stickySectionHeadersEnabled={false}
+              refreshControl={
+                <RefreshControl refreshing={refreshing} onRefresh={() => void onRefresh()} />
+              }
+              contentContainerStyle={{ paddingBottom: 88, paddingTop: 2 }}
+              renderSectionHeader={({ section }) =>
+                section.title ? (
+                  <View style={styles.dateHeader}>
+                    <Text numberOfLines={1} style={[styles.dateHeaderText, { color: colors.dim }]}>
+                      {section.title}
+                    </Text>
+                    <View style={[styles.dateHeaderLine, { backgroundColor: colors.hairline }]} />
+                  </View>
+                ) : null
+              }
+              renderItem={renderSessionRow}
+              ListEmptyComponent={
+                <View style={styles.emptyWrap}>
+                  <Text style={[styles.emptyTitle, { color: colors.muted }]}>No sessions found</Text>
+                  <Text style={[styles.emptySub, { color: colors.dim }]}>
+                    Tap + New session below to start a chat from your phone.
                   </Text>
-                  {item.has_pending_dialog ? (
-                    <View style={[styles.alertBadge, { backgroundColor: colors.amberBg }]}>
-                      <Text style={{ color: colors.amber, fontSize: 10.5, fontWeight: '700' }}>
-                        Approval
-                      </Text>
-                    </View>
-                  ) : null}
                 </View>
+              }
+            />
+            <CustomScrollbarOverlay {...metrics} />
+          </View>
 
-                <View style={styles.sessionMeta}>
-                  <OriginBadge origin={item.origin} />
-                  <Text numberOfLines={1} style={[styles.projectText, { color: colors.dim }]}>
-                    {item.project_name} · {item.status}
-                  </Text>
-                </View>
-              </Pressable>
-            )}
-            ListEmptyComponent={
-              <View style={styles.emptyWrap}>
-                <Text style={[styles.emptyTitle, { color: colors.muted }]}>No sessions found</Text>
-                <Text style={[styles.emptySub, { color: colors.dim }]}>
-                  Tap + in the top right to start a new session from your phone.
-                </Text>
-              </View>
-            }
-          />
+          {/* Clean floating + New session pill */}
+          <View pointerEvents="box-none" style={styles.fabContainer}>
+            <Pressable
+              onPress={() => setNewOpen(true)}
+              style={[styles.newPill, { backgroundColor: colors.accent }]}
+            >
+              <Ionicons name="add" size={19} color="#fff" />
+              <Text style={styles.newPillText}>New session</Text>
+            </Pressable>
+          </View>
         </>
       )}
+
+      {/* Grouping & Ordering bottom sheet (automatically persisted!) */}
+      <Modal
+        visible={sortModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSortModalOpen(false)}
+      >
+        <Pressable style={styles.modalBg} onPress={() => setSortModalOpen(false)}>
+          <Pressable
+            onPress={(e) => e.stopPropagation()}
+            style={[
+              styles.sheet,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            <Text style={[styles.sheetTitle, { color: colors.text }]}>Group sessions by</Text>
+            {(
+              [
+                ['date', 'Date (Today, Yesterday, Last week)'],
+                ['project', 'Project folder'],
+                ['none', 'Flat list (no grouping)'],
+              ] as [SessionGrouping, string][]
+            ).map(([key, label]) => (
+              <Pressable
+                key={key}
+                onPress={() => updatePrefs({ defaultGrouping: key })}
+                style={[
+                  styles.sheetRow,
+                  grouping === key && { backgroundColor: colors.accentBg },
+                ]}
+              >
+                <Text numberOfLines={1} style={{ color: colors.text, fontSize: 14, flex: 1 }}>
+                  {label}
+                </Text>
+                {grouping === key ? (
+                  <Ionicons name="checkmark" size={17} color={colors.accent} />
+                ) : null}
+              </Pressable>
+            ))}
+
+            <Text style={[styles.sheetTitle, { color: colors.text, marginTop: 14 }]}>Order by</Text>
+            {(
+              [
+                ['recent', 'Recent activity'],
+                ['running_first', 'Running & approvals first'],
+                ['created', 'Created date'],
+                ['title', 'Title (A–Z)'],
+              ] as [SessionOrdering, string][]
+            ).map(([key, label]) => (
+              <Pressable
+                key={key}
+                onPress={() => updatePrefs({ defaultOrdering: key })}
+                style={[
+                  styles.sheetRow,
+                  ordering === key && { backgroundColor: colors.accentBg },
+                ]}
+              >
+                <Text numberOfLines={1} style={{ color: colors.text, fontSize: 14, flex: 1 }}>
+                  {label}
+                </Text>
+                {ordering === key ? (
+                  <Ionicons name="checkmark" size={17} color={colors.accent} />
+                ) : null}
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <NewSessionModal
         visible={newOpen}
@@ -283,39 +448,50 @@ export default function SessionsScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
+  safe: {
+    flex: 1,
+    direction: 'ltr',
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  hostButton: {
-    flex: 1,
+  hostChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    maxWidth: '68%',
   },
   dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    flexShrink: 0,
   },
   hostTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
+    flexShrink: 1,
   },
-  hostSub: {
-    fontSize: 11.5,
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  newBtn: {
+  headerIconBtn: {
     width: 36,
     height: 36,
     borderRadius: 10,
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   banner: {
     flexDirection: 'row',
@@ -324,65 +500,181 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
   },
-  controls: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+  retryBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  searchWrap: {
+    paddingHorizontal: 14,
+    paddingTop: 10,
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 11,
+    paddingHorizontal: 11,
+    height: 40,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 13.5,
+    textAlign: 'left',
+  },
+  sectionToolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 6,
     gap: 8,
   },
-  search: {
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    fontSize: 13.5,
-  },
-  filters: {
+  filterGroup: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 1,
   },
-  filterPill: {
-    paddingHorizontal: 10,
+  filterChip: {
+    paddingHorizontal: 9,
     paddingVertical: 5,
     borderRadius: 999,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  sessionCard: {
-    marginHorizontal: 12,
-    marginVertical: 4,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: 1,
-    gap: 8,
-  },
-  sessionTop: {
+  sortBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexShrink: 0,
   },
-  statusCircle: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  sessionTitle: {
+  listContainer: {
     flex: 1,
-    fontSize: 14.5,
+    position: 'relative',
+  },
+  dateHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 6,
+  },
+  dateHeaderText: {
+    fontSize: 11.5,
     fontWeight: '600',
   },
-  alertBadge: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 999,
+  dateHeaderLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
   },
-  sessionMeta: {
+  sessionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 11,
+    marginHorizontal: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 11,
+    borderRadius: 10,
   },
-  projectText: {
+  rowDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    flexShrink: 0,
+  },
+  rowMiddle: {
     flex: 1,
+    minWidth: 0,
+    gap: 3,
+  },
+  rowTitle: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  rowSubLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  rowMeta: {
     fontSize: 11.5,
+    flexShrink: 1,
+  },
+  originPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  originPillText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  rowAge: {
+    fontSize: 11.5,
+    flexShrink: 0,
+  },
+  fabContainer: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 18,
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+  },
+  newPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 999,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  newPillText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  modalBg: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    justifyContent: 'flex-end',
+    padding: 12,
+  },
+  sheet: {
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 14,
+    direction: 'ltr',
+  },
+  sheetTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 6,
+    marginLeft: 4,
+  },
+  sheetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 10,
+    paddingVertical: 11,
+    borderRadius: 10,
   },
   emptyWrap: {
     flex: 1,

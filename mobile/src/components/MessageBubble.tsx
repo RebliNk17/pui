@@ -1,39 +1,88 @@
-import React, { useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import type { MessageRecord, ToolRecord } from '../protocol/types';
-import { usePalette } from '../theme/colors';
+import { usePalette, type Palette } from '../theme/colors';
+import {
+  isRtlText,
+  parseInlineMarkdown,
+  parseMarkdownBlocks,
+  type MarkdownBlock,
+} from '../utils/markdown';
 import { HtmlArtifactCard } from './HtmlArtifactCard';
 
 interface Props {
   message: MessageRecord;
+  verbose?: boolean;
   onOpenImage: (uri: string, title?: string) => void;
   onOpenFileTarget: (target: string) => void;
 }
 
-export function MessageBubble({ message, onOpenImage, onOpenFileTarget }: Props) {
+export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFileTarget }: Props) {
   const colors = usePalette();
   const isUser = message.role === 'user';
-  const [showThinking, setShowThinking] = useState(false);
-  const [showTools, setShowTools] = useState(false);
+  const [thinkingOverride, setThinkingOverride] = useState<boolean | null>(null);
+  const [toolsOverride, setToolsOverride] = useState<boolean | null>(null);
+  const showThinking = thinkingOverride ?? verbose;
+  const showTools = toolsOverride ?? verbose;
 
   const visualTools = message.tools.filter((t) => Boolean(t.visual));
   const openTools = message.tools.filter((t) => Boolean(t.open_target));
   const activityTools = message.tools.filter((t) => !t.visual);
 
+  if (isUser) {
+    const rtl = isRtlText(message.text);
+    return (
+      <View style={styles.userRow}>
+        <View
+          style={[
+            styles.userBubble,
+            { backgroundColor: colors.userBubble, borderColor: colors.border },
+          ]}
+        >
+          {message.text ? (
+            <Text
+              selectable
+              style={[
+                styles.userText,
+                {
+                  color: colors.text,
+                  textAlign: rtl ? 'right' : 'left',
+                  writingDirection: rtl ? 'rtl' : 'ltr',
+                },
+              ]}
+            >
+              {message.text.trim()}
+            </Text>
+          ) : null}
+          {message.images.length > 0 ? (
+            <View style={styles.imageGrid}>
+              {message.images.map((img, idx) => {
+                const uri = `data:${img.mime || 'image/png'};base64,${img.data}`;
+                const label = img.file?.name ?? `Image ${idx + 1}`;
+                return (
+                  <Pressable key={idx} onPress={() => onOpenImage(uri, label)}>
+                    <Image
+                      source={{ uri }}
+                      style={[styles.thumb, { borderColor: colors.border }]}
+                      resizeMode="cover"
+                    />
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
+      </View>
+    );
+  }
+
   return (
-    <View style={[styles.row, isUser ? styles.rowUser : styles.rowAssistant]}>
-      <View
-        style={[
-          styles.bubble,
-          isUser
-            ? { backgroundColor: colors.accentBg, borderColor: colors.accent }
-            : { backgroundColor: colors.surface, borderColor: colors.border },
-        ]}
-      >
+    <View style={styles.assistantRow}>
+      {message.model || message.cost > 0 ? (
         <View style={styles.metaRow}>
-          <Text style={[styles.roleLabel, { color: isUser ? colors.accent : colors.muted }]}>
-            {isUser ? 'You' : message.model || 'Pi'}
+          <Text style={[styles.roleLabel, { color: colors.dim }]}>
+            {message.model || 'Pi'}
           </Text>
           {message.cost > 0 ? (
             <Text style={[styles.metaRight, { color: colors.dim }]}>
@@ -41,130 +90,354 @@ export function MessageBubble({ message, onOpenImage, onOpenFileTarget }: Props)
             </Text>
           ) : null}
         </View>
+      ) : null}
 
-        {message.thinking ? (
+      {message.thinking ? (
+        <Pressable
+          onPress={() => setThinkingOverride(!showThinking)}
+          style={[
+            styles.collapsePill,
+            { backgroundColor: colors.surface, borderColor: colors.border },
+          ]}
+        >
+          <Ionicons
+            name={showThinking ? 'chevron-down' : 'chevron-forward'}
+            size={12}
+            color={colors.muted}
+          />
+          <Text style={[styles.collapseText, { color: colors.muted }]}>
+            Reasoning ({message.thinking.length} chars)
+          </Text>
+        </Pressable>
+      ) : null}
+      {showThinking && message.thinking ? (
+        <Text
+          selectable
+          style={[
+            styles.thinkingText,
+            {
+              color: colors.muted,
+              borderLeftColor: colors.border,
+              textAlign: isRtlText(message.thinking) ? 'right' : 'left',
+            },
+          ]}
+        >
+          {message.thinking}
+        </Text>
+      ) : null}
+
+      {activityTools.length > 0 ? (
+        <View style={styles.toolsWrap}>
           <Pressable
-            onPress={() => setShowThinking((v) => !v)}
-            style={[styles.collapsePill, { backgroundColor: colors.surfaceElevated }]}
+            onPress={() => setToolsOverride(!showTools)}
+            style={[
+              styles.collapsePill,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
           >
             <Ionicons
-              name={showThinking ? 'chevron-down' : 'chevron-forward'}
+              name={showTools ? 'chevron-down' : 'chevron-forward'}
               size={12}
               color={colors.muted}
             />
             <Text style={[styles.collapseText, { color: colors.muted }]}>
-              Reasoning ({message.thinking.length} chars)
+              {summarizeTools(activityTools)}
             </Text>
           </Pressable>
-        ) : null}
-        {showThinking && message.thinking ? (
-          <Text selectable style={[styles.thinkingText, { color: colors.muted }]}>
-            {message.thinking}
+          {showTools ? (
+            <View style={styles.toolList}>
+              {activityTools.map((tool, idx) => (
+                <ToolItem
+                  key={tool.id || `${tool.name}-${idx}`}
+                  tool={tool}
+                  defaultOpen={verbose}
+                  onOpenImage={onOpenImage}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      {message.text ? <MarkdownView text={message.text} colors={colors} /> : null}
+
+      {message.images.length > 0 ? (
+        <View style={styles.imageGrid}>
+          {message.images.map((img, idx) => {
+            const uri = `data:${img.mime || 'image/png'};base64,${img.data}`;
+            const label = img.file?.name ?? `Image ${idx + 1}`;
+            return (
+              <Pressable key={idx} onPress={() => onOpenImage(uri, label)}>
+                <Image
+                  source={{ uri }}
+                  style={[styles.thumb, { borderColor: colors.border }]}
+                  resizeMode="cover"
+                />
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+
+      {visualTools.map((tool, idx) =>
+        tool.visual ? (
+          <HtmlArtifactCard
+            key={tool.id || `visual-${idx}`}
+            title={tool.visual.title}
+            html={tool.visual.html}
+            initialHeight={tool.visual.height}
+          />
+        ) : null,
+      )}
+
+      {openTools.map((tool, idx) =>
+        tool.open_target ? (
+          <Pressable
+            key={tool.id || `open-${idx}`}
+            onPress={() => onOpenFileTarget(tool.open_target!)}
+            style={[
+              styles.artifactChip,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            <Ionicons name="document-text-outline" size={15} color={colors.accent} />
+            <Text numberOfLines={1} style={[styles.artifactChipText, { color: colors.text }]}>
+              {tool.open_target}
+            </Text>
+            <Ionicons name="chevron-forward" size={14} color={colors.dim} />
+          </Pressable>
+        ) : null,
+      )}
+
+      {message.error ? (
+        <View style={[styles.errorBox, { backgroundColor: colors.redBg, borderColor: colors.red }]}>
+          <Text style={{ color: colors.red, fontSize: 12.5, textAlign: 'left' }}>
+            {message.error}
           </Text>
-        ) : null}
-
-        {activityTools.length > 0 ? (
-          <View style={styles.toolsWrap}>
-            <Pressable
-              onPress={() => setShowTools((v) => !v)}
-              style={[styles.collapsePill, { backgroundColor: colors.surfaceElevated }]}
-            >
-              <Ionicons
-                name={showTools ? 'chevron-down' : 'chevron-forward'}
-                size={12}
-                color={colors.muted}
-              />
-              <Text style={[styles.collapseText, { color: colors.muted }]}>
-                {summarizeTools(activityTools)}
-              </Text>
-            </Pressable>
-            {showTools ? (
-              <View style={styles.toolList}>
-                {activityTools.map((tool) => (
-                  <ToolItem
-                    key={tool.id || `${tool.name}-${tool.path}-${tool.command}`}
-                    tool={tool}
-                    onOpenImage={onOpenImage}
-                  />
-                ))}
-              </View>
-            ) : null}
-          </View>
-        ) : null}
-
-        {message.text ? <FormattedText text={message.text} /> : null}
-
-        {message.images.length > 0 ? (
-          <View style={styles.imageGrid}>
-            {message.images.map((img, idx) => {
-              const uri = `data:${img.mime || 'image/png'};base64,${img.data}`;
-              const label = img.file?.name ?? `Image ${idx + 1}`;
-              return (
-                <Pressable key={idx} onPress={() => onOpenImage(uri, label)}>
-                  <Image
-                    source={{ uri }}
-                    style={[styles.thumb, { borderColor: colors.border }]}
-                    resizeMode="cover"
-                  />
-                </Pressable>
-              );
-            })}
-          </View>
-        ) : null}
-
-        {visualTools.map((tool, idx) =>
-          tool.visual ? (
-            <HtmlArtifactCard
-              key={tool.id || `visual-${idx}`}
-              title={tool.visual.title}
-              html={tool.visual.html}
-              initialHeight={tool.visual.height}
-            />
-          ) : null,
-        )}
-
-        {openTools.map((tool, idx) =>
-          tool.open_target ? (
-            <Pressable
-              key={tool.id || `open-${idx}`}
-              onPress={() => onOpenFileTarget(tool.open_target!)}
-              style={[
-                styles.artifactChip,
-                { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
-              ]}
-            >
-              <Ionicons name="document-text-outline" size={14} color={colors.accent} />
-              <Text numberOfLines={1} style={[styles.artifactChipText, { color: colors.text }]}>
-                Open artifact: {tool.open_target}
-              </Text>
-              <Ionicons name="chevron-forward" size={14} color={colors.dim} />
-            </Pressable>
-          ) : null,
-        )}
-
-        {message.error ? (
-          <View style={[styles.errorBox, { backgroundColor: colors.redBg }]}>
-            <Text style={{ color: colors.red, fontSize: 12 }}>{message.error}</Text>
-          </View>
-        ) : null}
-      </View>
+        </View>
+      ) : null}
     </View>
   );
 }
 
+function MarkdownView({ text, colors }: { text: string; colors: Palette }) {
+  const blocks = useMemo(() => parseMarkdownBlocks(text), [text]);
+  return (
+    <View style={styles.mdRoot}>
+      {blocks.map((block, idx) => (
+        <MarkdownBlockItem key={idx} block={block} colors={colors} />
+      ))}
+    </View>
+  );
+}
+
+function InlineText({
+  text,
+  colors,
+  baseSize = 14.5,
+  bold = false,
+}: {
+  text: string;
+  colors: Palette;
+  baseSize?: number;
+  bold?: boolean;
+}) {
+  const segments = useMemo(() => parseInlineMarkdown(text), [text]);
+  const rtl = isRtlText(text);
+  return (
+    <Text
+      selectable
+      style={{
+        color: colors.text,
+        fontSize: baseSize,
+        lineHeight: Math.round(baseSize * 1.48),
+        fontWeight: bold ? '700' : '400',
+        textAlign: rtl ? 'right' : 'left',
+        writingDirection: rtl ? 'rtl' : 'ltr',
+      }}
+    >
+      {segments.map((seg, i) => {
+        if (seg.type === 'bold') {
+          return (
+            <Text key={i} style={{ fontWeight: '700', color: colors.text }}>
+              {seg.text}
+            </Text>
+          );
+        }
+        if (seg.type === 'italic') {
+          return (
+            <Text key={i} style={{ fontStyle: 'italic' }}>
+              {seg.text}
+            </Text>
+          );
+        }
+        if (seg.type === 'strike') {
+          return (
+            <Text key={i} style={{ textDecorationLine: 'line-through', color: colors.muted }}>
+              {seg.text}
+            </Text>
+          );
+        }
+        if (seg.type === 'code') {
+          return (
+            <Text
+              key={i}
+              style={{
+                fontFamily: 'monospace',
+                fontSize: Math.max(12, baseSize - 1.5),
+                backgroundColor: colors.inlineCodeBg,
+                color: colors.inlineCodeText,
+              }}
+            >
+              {` ${seg.text} `}
+            </Text>
+          );
+        }
+        if (seg.type === 'link') {
+          return (
+            <Text
+              key={i}
+              onPress={() => {
+                if (/^https?:\/\//i.test(seg.url)) {
+                  void Linking.openURL(seg.url).catch(() => {});
+                }
+              }}
+              style={{ color: colors.accent, textDecorationLine: 'underline' }}
+            >
+              {seg.label}
+            </Text>
+          );
+        }
+        return <Text key={i}>{seg.text}</Text>;
+      })}
+    </Text>
+  );
+}
+
+function MarkdownBlockItem({ block, colors }: { block: MarkdownBlock; colors: Palette }) {
+  if (block.type === 'hr') {
+    return <View style={[styles.hr, { backgroundColor: colors.hairline }]} />;
+  }
+  if (block.type === 'heading') {
+    const size = block.level === 1 ? 19 : block.level === 2 ? 17 : 15.5;
+    return (
+      <View style={styles.headingWrap}>
+        <InlineText text={block.text} colors={colors} baseSize={size} bold />
+      </View>
+    );
+  }
+  if (block.type === 'code') {
+    return (
+      <View
+        style={[
+          styles.codeBlock,
+          { backgroundColor: colors.codeBg, borderColor: colors.border },
+        ]}
+      >
+        {block.lang ? (
+          <Text style={[styles.codeLang, { color: colors.dim }]}>{block.lang}</Text>
+        ) : null}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <Text selectable style={[styles.codeText, { color: colors.text }]}>
+            {block.code}
+          </Text>
+        </ScrollView>
+      </View>
+    );
+  }
+  if (block.type === 'blockquote') {
+    return (
+      <View
+        style={[
+          styles.blockquote,
+          { borderLeftColor: colors.accent, backgroundColor: colors.surface },
+        ]}
+      >
+        <InlineText text={block.text} colors={colors} baseSize={13.5} />
+      </View>
+    );
+  }
+  if (block.type === 'bullet') {
+    return (
+      <View style={styles.listWrap}>
+        {block.items.map((item, idx) => (
+          <View key={idx} style={styles.listRow}>
+            <Text style={[styles.bulletGlyph, { color: colors.muted }]}>•</Text>
+            <View style={{ flex: 1 }}>
+              <InlineText text={item} colors={colors} />
+            </View>
+          </View>
+        ))}
+      </View>
+    );
+  }
+  if (block.type === 'ordered') {
+    return (
+      <View style={styles.listWrap}>
+        {block.items.map((item, idx) => (
+          <View key={idx} style={styles.listRow}>
+            <Text style={[styles.numGlyph, { color: colors.muted }]}>{item.num}.</Text>
+            <View style={{ flex: 1 }}>
+              <InlineText text={item.text} colors={colors} />
+            </View>
+          </View>
+        ))}
+      </View>
+    );
+  }
+  if (block.type === 'table') {
+    return (
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={[styles.tableWrap, { borderColor: colors.border, backgroundColor: colors.surface }]}
+      >
+        <View>
+          <View style={[styles.tableRow, { backgroundColor: colors.surfaceElevated }]}>
+            {block.headers.map((h, i) => (
+              <View key={i} style={[styles.tableCell, { borderColor: colors.hairline }]}>
+                <InlineText text={h} colors={colors} baseSize={12.5} bold />
+              </View>
+            ))}
+          </View>
+          {block.rows.map((row, rIdx) => (
+            <View
+              key={rIdx}
+              style={[
+                styles.tableRow,
+                { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.hairline },
+              ]}
+            >
+              {row.map((cell, cIdx) => (
+                <View key={cIdx} style={[styles.tableCell, { borderColor: colors.hairline }]}>
+                  <InlineText text={cell} colors={colors} baseSize={12.5} />
+                </View>
+              ))}
+            </View>
+          ))}
+        </View>
+      </ScrollView>
+    );
+  }
+  return <InlineText text={block.text} colors={colors} />;
+}
+
 function ToolItem({
   tool,
+  defaultOpen = false,
   onOpenImage,
 }: {
   tool: ToolRecord;
+  defaultOpen?: boolean;
   onOpenImage: (uri: string, title?: string) => void;
 }) {
   const colors = usePalette();
-  const [open, setOpen] = useState(false);
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  const open = openOverride ?? defaultOpen;
   const subtitle = tool.path || tool.command || tool.args;
   return (
     <View style={[styles.toolCard, { backgroundColor: colors.codeBg, borderColor: colors.border }]}>
-      <Pressable onPress={() => setOpen((v) => !v)} style={styles.toolHeader}>
+      <Pressable onPress={() => setOpenOverride(!open)} style={styles.toolHeader}>
         <Text
           style={[
             styles.toolName,
@@ -207,45 +480,6 @@ function ToolItem({
   );
 }
 
-/**
- * Lightweight Markdown-aware renderer separating fenced code blocks from prose.
- */
-function FormattedText({ text }: { text: string }) {
-  const colors = usePalette();
-  const parts = text.split(/(```[\s\S]*?```)/g);
-  return (
-    <View style={{ gap: 6 }}>
-      {parts.map((part, idx) => {
-        if (!part) return null;
-        if (part.startsWith('```') && part.endsWith('```')) {
-          const inner = part.slice(3, -3);
-          const firstNl = inner.indexOf('\n');
-          const lang = firstNl > 0 ? inner.slice(0, firstNl).trim() : '';
-          const code = firstNl > 0 ? inner.slice(firstNl + 1) : inner;
-          return (
-            <View
-              key={idx}
-              style={[styles.codeBlock, { backgroundColor: colors.codeBg, borderColor: colors.border }]}
-            >
-              {lang ? (
-                <Text style={[styles.codeLang, { color: colors.dim }]}>{lang}</Text>
-              ) : null}
-              <Text selectable style={[styles.codeText, { color: colors.text }]}>
-                {code.trimEnd()}
-              </Text>
-            </View>
-          );
-        }
-        return (
-          <Text key={idx} selectable style={[styles.prose, { color: colors.text }]}>
-            {part.trim()}
-          </Text>
-        );
-      })}
-    </View>
-  );
-}
-
 function summarizeTools(tools: ToolRecord[]): string {
   const counts = new Map<string, number>();
   for (const t of tools) {
@@ -257,85 +491,142 @@ function summarizeTools(tools: ToolRecord[]): string {
 }
 
 const styles = StyleSheet.create({
-  row: {
-    paddingHorizontal: 12,
-    marginVertical: 5,
-  },
-  rowUser: {
+  userRow: {
+    paddingHorizontal: 14,
+    marginVertical: 6,
     alignItems: 'flex-end',
+    direction: 'ltr',
   },
-  rowAssistant: {
-    alignItems: 'stretch',
+  userBubble: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    maxWidth: '88%',
   },
-  bubble: {
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 11,
-    maxWidth: '100%',
+  userText: {
+    fontSize: 14.5,
+    lineHeight: 21,
+  },
+  assistantRow: {
+    paddingHorizontal: 16,
+    marginVertical: 8,
+    direction: 'ltr',
   },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 4,
+    marginBottom: 6,
   },
   roleLabel: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   metaRight: {
     fontSize: 10.5,
   },
-  prose: {
-    fontSize: 14,
-    lineHeight: 20,
+  mdRoot: {
+    gap: 8,
+  },
+  headingWrap: {
+    marginTop: 6,
+    marginBottom: 2,
+  },
+  hr: {
+    height: 1,
+    marginVertical: 6,
+  },
+  blockquote: {
+    borderLeftWidth: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 6,
+  },
+  listWrap: {
+    gap: 5,
+  },
+  listRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  bulletGlyph: {
+    fontSize: 15,
+    lineHeight: 21,
+    width: 12,
+    textAlign: 'center',
+  },
+  numGlyph: {
+    fontSize: 13.5,
+    lineHeight: 21,
+    minWidth: 20,
+    fontWeight: '600',
+  },
+  tableWrap: {
+    borderWidth: 1,
+    borderRadius: 10,
+  },
+  tableRow: {
+    flexDirection: 'row',
+  },
+  tableCell: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    minWidth: 105,
+    maxWidth: 220,
+    borderRightWidth: StyleSheet.hairlineWidth,
   },
   codeBlock: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    padding: 8,
+    borderRadius: 10,
+    padding: 10,
   },
   codeLang: {
     fontSize: 10,
-    fontWeight: '600',
-    marginBottom: 4,
+    fontWeight: '700',
+    marginBottom: 5,
     textTransform: 'uppercase',
   },
   codeText: {
     fontFamily: 'monospace',
     fontSize: 12,
-    lineHeight: 17,
+    lineHeight: 18,
+    textAlign: 'left',
   },
   collapsePill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 7,
-    marginBottom: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginBottom: 8,
     alignSelf: 'flex-start',
   },
   collapseText: {
-    fontSize: 11.5,
+    fontSize: 12,
     fontWeight: '600',
   },
   thinkingText: {
-    fontSize: 12,
-    lineHeight: 17,
+    fontSize: 12.5,
+    lineHeight: 18,
     fontStyle: 'italic',
-    marginBottom: 8,
+    marginBottom: 10,
+    borderLeftWidth: 2,
+    paddingLeft: 10,
   },
   toolsWrap: {
     marginBottom: 4,
   },
   toolList: {
     gap: 5,
-    marginBottom: 6,
+    marginBottom: 8,
   },
   toolCard: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
-    padding: 7,
+    borderRadius: 9,
+    padding: 8,
   },
   toolHeader: {
     flexDirection: 'row',
@@ -351,6 +642,7 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 11,
     flex: 1,
+    textAlign: 'left',
   },
   diffCounts: {
     fontFamily: 'monospace',
@@ -359,8 +651,9 @@ const styles = StyleSheet.create({
   toolBody: {
     fontFamily: 'monospace',
     fontSize: 11,
-    lineHeight: 15,
+    lineHeight: 16,
     marginTop: 6,
+    textAlign: 'left',
   },
   imageGrid: {
     flexDirection: 'row',
@@ -371,26 +664,28 @@ const styles = StyleSheet.create({
   thumb: {
     width: 112,
     height: 112,
-    borderRadius: 8,
+    borderRadius: 10,
     borderWidth: 1,
   },
   artifactChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 8,
+    gap: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 10,
     borderWidth: 1,
     marginTop: 8,
   },
   artifactChipText: {
     fontSize: 12.5,
     flex: 1,
+    textAlign: 'left',
   },
   errorBox: {
     marginTop: 8,
-    padding: 8,
-    borderRadius: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });

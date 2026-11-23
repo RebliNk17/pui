@@ -62,10 +62,17 @@ impl Pui {
             .nodes
             .iter()
             .filter_map(|(id, node)| {
-                self.pending_origins
-                    .contains_key(id)
-                    .then(|| node.path.clone().map(|p| (id.clone(), p)))
-                    .flatten()
+                self.pending_origins.contains_key(id).then(|| {
+                    node.path
+                        .clone()
+                        .or_else(|| {
+                            self.agents
+                                .parked
+                                .get(id)
+                                .and_then(|c| c.state.session_file.as_ref().map(PathBuf::from))
+                        })
+                        .map(|p| (id.clone(), p))
+                })?
             })
             .collect();
         for (id, path) in pairs {
@@ -89,6 +96,83 @@ impl Pui {
         }
     }
 
+    /// Ensures a saved session is loaded as a live Pi agent in `self.agents.parked` (or already active)
+    /// WITHOUT switching Desktop's visible chat, draft, or cwd.
+    fn ensure_background_live_chat(&mut self, path: &std::path::Path) -> bool {
+        if self
+            .state
+            .session_file
+            .as_deref()
+            .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), path))
+        {
+            return true;
+        }
+        if let Some(id) = self.agent_for_path(path) {
+            if self.agents.parked.contains_key(&id) {
+                if self.agents.idle.dormant.contains(&id) {
+                    let wake_id = id.clone();
+                    let _ = self.with_live_chat(path, |app| {
+                        let _ = app.wake_idle_agent(&wake_id);
+                    });
+                }
+                return true;
+            }
+        }
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|s| sidebar_tree::same_path(&s.path, path))
+            .cloned()
+        else {
+            return false;
+        };
+
+        // Snapshot Desktop's current visible chat and spawn the mobile-selected session parked in background.
+        let original_active = self.ensure_agent();
+        let original_cwd = self.prefs.cwd.clone();
+        let original_bg = self.agents.background;
+        let visible = self.take_chat();
+
+        self.agents.active.clear();
+        self.prefs.cwd = session.cwd.clone();
+        self.new_chat = false;
+        self.state = State::default();
+        self.state.session_file = Some(path.display().to_string());
+        self.state.session_name = session.title.clone();
+        let new_id = self.ensure_agent();
+        if let Some(node) = self.agents.nodes.get_mut(&new_id) {
+            node.path = Some(path.to_path_buf());
+            node.name = session.title;
+        }
+        self.agents.background = true;
+        let ctx = self.ctx.clone();
+        self.connect(&ctx, Some(path.to_path_buf()));
+        let parked_chat = self.take_chat();
+        self.agents.parked.insert(new_id, parked_chat);
+
+        self.put_chat(visible);
+        self.agents.active = original_active;
+        self.prefs.cwd = original_cwd;
+        self.agents.background = original_bg;
+        true
+    }
+
+    /// Runs `action` against `target_path` (if provided) inside a background swap so Desktop's
+    /// active chat is never disturbed. Falls back to active chat only when `target_path` is None.
+    fn run_on_remote_target(
+        &mut self,
+        target_path: Option<&std::path::Path>,
+        action: impl FnOnce(&mut Self),
+    ) {
+        if let Some(path) = target_path {
+            if self.ensure_background_live_chat(path) {
+                let _ = self.with_live_chat(path, action);
+            }
+        } else {
+            action(self);
+        }
+    }
+
     fn handle_remote_command(&mut self, cmd: RemoteCommand) {
         match cmd {
             RemoteCommand::CreateSession {
@@ -97,28 +181,55 @@ impl Pui {
                 prompt,
                 origin,
             } => {
+                let target_cwd = if cwd.is_dir() {
+                    sync::identity(&cwd)
+                } else {
+                    self.prefs.cwd.clone()
+                };
                 let perm = permission_mode
                     .as_deref()
                     .and_then(settings::PermissionMode::from_key);
-                if cwd.is_dir() {
-                    self.start_chat_with_permission(cwd, perm);
-                } else {
-                    self.start_chat_with_permission(self.prefs.cwd.clone(), perm);
+
+                // Create the new phone session parked in background so Desktop stays on its current chat!
+                let original_active = self.ensure_agent();
+                let original_cwd = self.prefs.cwd.clone();
+                let original_bg = self.agents.background;
+                let visible = self.take_chat();
+
+                self.agents.active.clear();
+                self.prefs.cwd = target_cwd;
+                self.new_chat = true;
+                self.state = State::default();
+                let new_id = self.ensure_agent();
+                if let Some(node) = self.agents.nodes.get_mut(&new_id) {
+                    node.permission = perm;
+                    node.name = "New conversation".into();
                 }
-                let active_id = self.agents.active.clone();
+                self.agents.background = true;
+                let ctx = self.ctx.clone();
+                self.connect(&ctx, None);
                 if let Some(path_str) = self.state.session_file.clone() {
                     self.record_session_origin(std::path::Path::new(&path_str), origin);
                 } else {
-                    self.pending_origins.insert(active_id, origin);
+                    self.pending_origins.insert(new_id.clone(), origin);
                 }
                 if let Some(text) = prompt {
                     self.draft = text;
-                    let ctx = self.ctx.clone();
                     self.submit_mode(&ctx, self.prefs.settings.delivery);
                 }
+                let parked_chat = self.take_chat();
+                self.agents.parked.insert(new_id, parked_chat);
+
+                // Restore Desktop's visible chat immediately.
+                self.put_chat(visible);
+                self.agents.active = original_active;
+                self.prefs.cwd = original_cwd;
+                self.agents.background = original_bg;
+                self.refresh_sessions();
             }
             RemoteCommand::OpenSession { path } => {
-                self.focus_session_path(&path);
+                // Load the session in background for mobile without switching Desktop's active chat!
+                let _ = self.ensure_background_live_chat(&path);
             }
             RemoteCommand::SendMessage {
                 path,
@@ -127,58 +238,55 @@ impl Pui {
                 images,
                 origin,
             } => {
-                if let Some(target_path) = path {
-                    self.focus_session_path(&target_path);
-                }
-                if let Some(origin) = origin {
-                    if let Some(path_str) = self.state.session_file.clone() {
-                        let p = std::path::Path::new(&path_str);
-                        if !self.prefs.chats.get(p).is_some_and(|m| m.origin.is_some())
-                            && self.state.messages.is_empty()
-                        {
-                            self.record_session_origin(p, origin);
-                        }
-                    }
-                }
-                let delivery = match mode.as_deref() {
-                    Some("queue") => settings::DeliveryMode::Queue,
-                    Some("steer") => settings::DeliveryMode::Steer,
-                    _ => self.prefs.settings.delivery,
-                };
-                if !images.is_empty() {
-                    let mut decoded = Vec::new();
-                    for img in images {
-                        if let Ok(bytes) =
-                            base64::engine::general_purpose::STANDARD.decode(img.data_base64.trim())
-                        {
-                            if let Ok(att) = crate::media::Attachment::from_bytes(&bytes) {
-                                decoded.push(att);
+                self.run_on_remote_target(path.as_deref(), |app| {
+                    if let Some(origin) = origin {
+                        if let Some(path_str) = app.state.session_file.clone() {
+                            let p = std::path::Path::new(&path_str);
+                            if !app.prefs.chats.get(p).is_some_and(|m| m.origin.is_some())
+                                && app.state.messages.is_empty()
+                            {
+                                app.record_session_origin(p, origin);
                             }
                         }
                     }
-                    if !decoded.is_empty() {
-                        self.draft_images.set_images(decoded);
+                    let delivery = match mode.as_deref() {
+                        Some("queue") => settings::DeliveryMode::Queue,
+                        Some("steer") => settings::DeliveryMode::Steer,
+                        _ => app.prefs.settings.delivery,
+                    };
+                    if !images.is_empty() {
+                        let mut decoded = Vec::new();
+                        for img in images {
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD
+                                .decode(img.data_base64.trim())
+                            {
+                                if let Ok(att) = crate::media::Attachment::from_bytes(&bytes) {
+                                    decoded.push(att);
+                                }
+                            }
+                        }
+                        if !decoded.is_empty() {
+                            app.draft_images.set_images(decoded);
+                        }
                     }
-                }
-                self.draft = text;
-                let ctx = self.ctx.clone();
-                self.submit_mode(&ctx, delivery);
+                    app.draft = text;
+                    let ctx = app.ctx.clone();
+                    app.submit_mode(&ctx, delivery);
+                });
             }
             RemoteCommand::Abort { path } => {
-                if let Some(target_path) = path {
-                    self.focus_session_path(&target_path);
-                }
-                self.stop();
+                self.run_on_remote_target(path.as_deref(), |app| {
+                    app.stop();
+                });
             }
             RemoteCommand::AnswerDialog {
                 path,
                 dialog_id,
                 response,
             } => {
-                if let Some(target_path) = path {
-                    self.focus_session_path(&target_path);
-                }
-                self.answer_dialog(&dialog_id, response);
+                self.run_on_remote_target(path.as_deref(), |app| {
+                    app.answer_dialog(&dialog_id, response);
+                });
             }
             RemoteCommand::UpdateSettings {
                 path,
@@ -187,54 +295,36 @@ impl Pui {
                 provider,
                 thinking,
             } => {
-                if let Some(target_path) = path {
-                    self.focus_session_path(&target_path);
-                }
-                if let Some(key) = permission_mode.as_deref() {
-                    if let Some(mode) = settings::PermissionMode::from_key(key) {
-                        self.prefs.settings.permission = mode;
-                        let payload = self.prefs.settings.payload();
-                        self.send(json!({ "type": "set_settings", "settings": payload }));
+                self.run_on_remote_target(path.as_deref(), |app| {
+                    if let Some(key) = permission_mode.as_deref() {
+                        if let Some(mode) = settings::PermissionMode::from_key(key) {
+                            let active_id = app.agents.active.clone();
+                            if let Some(node) = app.agents.nodes.get_mut(&active_id) {
+                                node.permission = Some(mode);
+                            }
+                            let mut s = app.prefs.settings.clone();
+                            s.permission = mode;
+                            app.send(json!({ "type": "set_settings", "settings": s.payload() }));
+                        }
                     }
-                }
-                if let Some(model_id) = model {
-                    let prov = provider.unwrap_or_else(|| self.state.provider.clone());
-                    if !prov.is_empty() {
-                        self.send(json!({
-                            "type": "set_model",
-                            "provider": prov,
-                            "modelId": model_id,
+                    if let Some(model_id) = model {
+                        let prov = provider.unwrap_or_else(|| app.state.provider.clone());
+                        if !prov.is_empty() {
+                            app.send(json!({
+                                "type": "set_model",
+                                "provider": prov,
+                                "modelId": model_id,
+                            }));
+                        }
+                    }
+                    if let Some(level) = thinking {
+                        app.send(json!({
+                            "type": "set_thinking_level",
+                            "level": level,
                         }));
                     }
-                }
-                if let Some(level) = thinking {
-                    self.send(json!({
-                        "type": "set_thinking_level",
-                        "level": level,
-                    }));
-                }
+                });
             }
-        }
-    }
-
-    fn focus_session_path(&mut self, path: &std::path::Path) {
-        if self
-            .state
-            .session_file
-            .as_deref()
-            .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), path))
-        {
-            return;
-        }
-        if let Some(session) = self
-            .sessions
-            .iter()
-            .find(|s| sidebar_tree::same_path(&s.path, path))
-            .cloned()
-        {
-            self.open_chat(session);
-        } else if let Some(id) = self.agent_for_path(path) {
-            self.view_agent(&id);
         }
     }
 
@@ -1029,6 +1119,11 @@ mod tests {
             },
         );
         app.demo = false;
+        let desktop_file = "/desktop/active-chat.jsonl".to_owned();
+        app.state.session_file = Some(desktop_file.clone());
+        app.draft = "Desktop draft stays intact".into();
+        let desktop_agent = app.ensure_agent();
+
         let dir = std::env::temp_dir().join(format!("pui-origin-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let session_file = dir.join("chat.jsonl");
@@ -1050,13 +1145,60 @@ mod tests {
             prompt: None,
             origin: origin.clone(),
         });
-        assert_eq!(app.pending_origins.get(&app.agents.active), Some(&origin));
+        // Desktop's visible active session and draft MUST NOT have switched!
+        assert_eq!(app.agents.active, desktop_agent);
+        assert_eq!(
+            app.state.session_file.as_deref(),
+            Some(desktop_file.as_str())
+        );
+        assert_eq!(app.draft, "Desktop draft stays intact");
 
-        // Simulate Pi assigning the concrete session file path.
-        app.state.session_file = Some(session_file.to_string_lossy().into_owned());
+        // The newly created phone session lives parked in background with its pending origin.
+        let (phone_id, pending_origin) = app
+            .pending_origins
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .expect("pending origin for background phone session");
+        assert_ne!(phone_id, desktop_agent);
+        assert_eq!(pending_origin, origin);
+
+        // Simulate Pi assigning the concrete session file path on the parked phone chat.
+        app.agents
+            .parked
+            .get_mut(&phone_id)
+            .unwrap()
+            .state
+            .session_file = Some(session_file.to_string_lossy().into_owned());
         app.flush_pending_origins();
         assert!(app.pending_origins.is_empty());
         assert_eq!(app.session_origin_for(&session_file), origin);
+
+        // Opening another saved session from phone also keeps Desktop untouched.
+        let saved_other = dir.join("other-saved.jsonl");
+        std::fs::write(
+            &saved_other,
+            format!("{{\"type\":\"session\",\"cwd\":\"{}\"}}\n", dir.display()),
+        )
+        .unwrap();
+        app.sessions.push(Session {
+            path: saved_other.clone(),
+            cwd: dir.clone(),
+            project: dir.clone(),
+            title: "Other saved chat".into(),
+            created: None,
+            modified: std::time::SystemTime::now(),
+        });
+        app.handle_remote_command(RemoteCommand::OpenSession {
+            path: saved_other.clone(),
+        });
+        assert_eq!(app.agents.active, desktop_agent);
+        assert_eq!(
+            app.state.session_file.as_deref(),
+            Some(desktop_file.as_str())
+        );
+        assert_eq!(app.draft, "Desktop draft stays intact");
+        assert!(app.agent_for_path(&saved_other).is_some());
 
         // Durable custom entry was appended to the JSONL file as well.
         let disk = std::fs::read_to_string(&session_file).unwrap();

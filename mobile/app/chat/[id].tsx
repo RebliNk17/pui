@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -15,19 +16,23 @@ import { Ionicons } from '@expo/vector-icons';
 import { ArtifactsView } from '../../src/components/ArtifactsView';
 import { ChangesView } from '../../src/components/ChangesView';
 import { Composer } from '../../src/components/Composer';
+import { ContextRing } from '../../src/components/ContextRing';
+import { CustomScrollbarOverlay, useCustomScrollbar } from '../../src/components/CustomScrollbar';
 import { DialogCard } from '../../src/components/DialogCard';
 import { FileTreeView } from '../../src/components/FileTreeView';
 import { ImageModal } from '../../src/components/ImageModal';
 import { MessageBubble } from '../../src/components/MessageBubble';
-import { OriginBadge } from '../../src/components/OriginBadge';
+import { UsageSheet } from '../../src/components/UsageSheet';
 import type { SlashCommandItem } from '../../src/protocol/types';
 import { usePui } from '../../src/store/connectionStore';
+import { usePreferences } from '../../src/store/preferencesStore';
 import { usePalette } from '../../src/theme/colors';
 
 type Tab = 'chat' | 'artifacts' | 'files' | 'changes';
 
 export default function ChatScreen() {
   const colors = usePalette();
+  const { prefs, updatePrefs } = usePreferences();
   const params = useLocalSearchParams<{ id: string }>();
   const sessionPath = decodeURIComponent(params.id ?? '');
 
@@ -46,7 +51,27 @@ export default function ChatScreen() {
   const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [androidKeyboardHeight, setAndroidKeyboardHeight] = useState(0);
   const listRef = useRef<FlatList>(null);
+  const { bindings, metrics } = useCustomScrollbar();
+
+  // Explicit Android keyboard height listener so the floating composer ALWAYS rises cleanly
+  // above the software keyboard even under Android 15+/Expo edge-to-edge mode.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setAndroidKeyboardHeight(e.endCoordinates?.height ?? 0);
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      setAndroidKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (!sessionPath || !transport) return;
@@ -71,9 +96,14 @@ export default function ChatScreen() {
 
   const cwd = detail?.cwd || summary?.cwd || '';
   const title = detail?.title || summary?.title || 'Conversation';
-  const origin = detail?.origin ?? summary?.origin;
+  const projectLabel = summary?.project_name || cwd.split('/').filter(Boolean).pop() || '';
   const artifacts = detail?.artifacts ?? [];
   const dialogs = detail?.dialogs ?? [];
+  const contextProgress =
+    detail && detail.context_window > 0 && detail.context_tokens != null
+      ? detail.context_tokens / detail.context_window
+      : 0;
+  const verbose = prefs.transcriptView === 'verbose';
   const permissionModes = hostInfo?.permission_modes ?? [
     { key: 'auto', label: 'Auto' },
     { key: 'manual', label: 'Manual' },
@@ -90,52 +120,82 @@ export default function ChatScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.bg }]}>
-      <View style={[styles.topBar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
-        <Pressable onPress={() => router.back()} style={styles.backBtn}>
-          <Ionicons name="chevron-back" size={22} color={colors.text} />
+      {/* Sleek LTR top bar */}
+      <View
+        style={[
+          styles.topBar,
+          { backgroundColor: colors.bg, borderBottomColor: colors.hairline },
+        ]}
+      >
+        <Pressable onPress={() => router.back()} style={styles.iconBtn}>
+          <Ionicons name="arrow-back" size={21} color={colors.text} />
         </Pressable>
-        <View style={{ flex: 1 }}>
+
+        <View style={styles.titleCenter}>
           <Text numberOfLines={1} style={[styles.title, { color: colors.text }]}>
             {title}
           </Text>
-          <View style={styles.subRow}>
-            <OriginBadge origin={origin} compact />
-            <Text numberOfLines={1} style={[styles.subText, { color: colors.muted }]}>
-              {detail?.busy ? 'Working…' : detail?.status || summary?.status || 'Ready'}
-            </Text>
-          </View>
+          <Text numberOfLines={1} style={[styles.subText, { color: colors.muted }]}>
+            {projectLabel}
+            {detail?.busy ? ' · Working…' : ''}
+          </Text>
         </View>
-        <Pressable
-          onPress={() => void loadSessionDetail(sessionPath).catch(() => {})}
-          style={styles.backBtn}
-        >
-          <Ionicons name="refresh" size={18} color={colors.muted} />
-        </Pressable>
+
+        <View style={styles.topRight}>
+          <Pressable
+            onPress={() => setUsageOpen(true)}
+            style={styles.iconBtn}
+            accessibilityLabel="Context and usage"
+          >
+            <ContextRing progress={contextProgress} size={22} />
+          </Pressable>
+          <Pressable
+            onPress={() =>
+              updatePrefs({
+                transcriptView: verbose ? 'normal' : 'verbose',
+              })
+            }
+            style={styles.iconBtn}
+            accessibilityLabel="Toggle verbose transcript"
+          >
+            <Ionicons
+              name={verbose ? 'eye' : 'eye-outline'}
+              size={19}
+              color={verbose ? colors.accent : colors.muted}
+            />
+          </Pressable>
+        </View>
       </View>
 
-      <View style={[styles.tabBar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
+      {/* Compact pill switcher */}
+      <View style={[styles.tabBar, { borderBottomColor: colors.hairline }]}>
         {(
           [
-            ['chat', 'Chat', 'chatbubble-outline'],
-            ['artifacts', `Artifacts${artifacts.length ? ` (${artifacts.length})` : ''}`, 'layers-outline'],
-            ['files', 'Files', 'folder-outline'],
-            ['changes', 'Changes', 'git-compare-outline'],
-          ] as [Tab, string, keyof typeof Ionicons.glyphMap][]
-        ).map(([key, label, icon]) => {
+            ['chat', 'Chat'],
+            ['artifacts', artifacts.length ? `Artifacts (${artifacts.length})` : 'Artifacts'],
+            ['files', 'Files'],
+            ['changes', 'Changes'],
+          ] as [Tab, string][]
+        ).map(([key, label]) => {
           const active = tab === key;
           return (
             <Pressable
               key={key}
               onPress={() => setTab(key)}
               style={[
-                styles.tabBtn,
-                active && { borderBottomColor: colors.accent, borderBottomWidth: 2 },
+                styles.tabPill,
+                {
+                  backgroundColor: active ? colors.surfaceElevated : 'transparent',
+                  borderColor: active ? colors.border : 'transparent',
+                },
               ]}
             >
-              <Ionicons name={icon} size={14} color={active ? colors.accent : colors.muted} />
               <Text
                 numberOfLines={1}
-                style={[styles.tabLabel, { color: active ? colors.accent : colors.muted }]}
+                style={[
+                  styles.tabLabel,
+                  { color: active ? colors.text : colors.muted },
+                ]}
               >
                 {label}
               </Text>
@@ -145,7 +205,7 @@ export default function ChatScreen() {
       </View>
 
       <KeyboardAvoidingView
-        style={{ flex: 1 }}
+        style={{ flex: 1, paddingBottom: Platform.OS === 'android' ? androidKeyboardHeight : 0 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         {tab === 'chat' ? (
@@ -158,44 +218,61 @@ export default function ChatScreen() {
                 </Text>
               </View>
             ) : (
-              <FlatList
-                ref={listRef}
-                data={detail.messages}
-                keyExtractor={(item, idx) => `${item.role}-${item.timestamp}-${idx}`}
-                contentContainerStyle={{ paddingVertical: 8 }}
-                onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
-                renderItem={({ item }) => (
-                  <MessageBubble
-                    message={item}
-                    onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
-                    onOpenFileTarget={openFileInTree}
-                  />
-                )}
-                ListFooterComponent={
-                  <>
-                    {detail.pending_messages.map((pm) => (
-                      <View
-                        key={pm.id}
-                        style={[
-                          styles.pendingBox,
-                          { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
-                        ]}
-                      >
-                        <Text style={{ color: colors.text, fontSize: 13 }}>{pm.text}</Text>
-                        <Text style={{ color: colors.amber, fontSize: 11, marginTop: 3 }}>
-                          {pm.status}
-                        </Text>
-                      </View>
-                    ))}
-                    {detail.busy ? (
-                      <View style={styles.workingRow}>
-                        <ActivityIndicator size="small" color={colors.accent} />
-                        <Text style={{ color: colors.muted, fontSize: 12 }}>Pi is working…</Text>
-                      </View>
-                    ) : null}
-                  </>
-                }
-              />
+              <View style={styles.listWrap}>
+                <FlatList
+                  ref={listRef}
+                  {...bindings}
+                  data={detail.messages}
+                  keyExtractor={(item, idx) => `${item.role}-${item.timestamp}-${idx}`}
+                  contentContainerStyle={{ paddingVertical: 10 }}
+                  onContentSizeChange={(w, h) => {
+                    bindings.onContentSizeChange(w, h);
+                    listRef.current?.scrollToEnd({ animated: false });
+                  }}
+                  renderItem={({ item }) => (
+                    <MessageBubble
+                      message={item}
+                      verbose={verbose}
+                      onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                      onOpenFileTarget={openFileInTree}
+                    />
+                  )}
+                  ListFooterComponent={
+                    <>
+                      {detail.pending_messages.map((pm) => (
+                        <View
+                          key={pm.id}
+                          style={[
+                            styles.pendingBox,
+                            { backgroundColor: colors.surface, borderColor: colors.border },
+                          ]}
+                        >
+                          <Text style={{ color: colors.text, fontSize: 13.5, textAlign: 'left' }}>
+                            {pm.text}
+                          </Text>
+                          <Text
+                            style={{
+                              color: colors.amber,
+                              fontSize: 11,
+                              marginTop: 4,
+                              textAlign: 'left',
+                            }}
+                          >
+                            {pm.status}
+                          </Text>
+                        </View>
+                      ))}
+                      {detail.busy ? (
+                        <View style={styles.workingRow}>
+                          <ActivityIndicator size="small" color={colors.accent} />
+                          <Text style={{ color: colors.muted, fontSize: 12 }}>Pi is working…</Text>
+                        </View>
+                      ) : null}
+                    </>
+                  }
+                />
+                <CustomScrollbarOverlay {...metrics} />
+              </View>
             )}
 
             {dialogs.length > 0 && transport ? (
@@ -216,7 +293,10 @@ export default function ChatScreen() {
               busy={Boolean(detail?.busy)}
               permissionMode={detail?.permission_mode ?? 'auto'}
               permissionModes={permissionModes}
-              currentModel={detail?.model_name || detail?.model || ''}
+              currentModelId={detail?.model ?? ''}
+              currentModelLabel={detail?.model_name || detail?.model || ''}
+              currentThinking={detail?.thinking || prefs.defaultEffort}
+              thinkingLevels={detail?.levels ?? []}
               models={detail?.models ?? []}
               slashCommands={slashCommands.length > 0 ? slashCommands : (detail?.commands ?? [])}
               onFetchFileMentions={fetchMentions}
@@ -246,6 +326,12 @@ export default function ChatScreen() {
                   model,
                 });
               }}
+              onChangeThinking={async (thinking) => {
+                await transport?.updateSessionSettings({
+                  path: sessionPath,
+                  thinking,
+                });
+              }}
               onLocalCommand={(name) => {
                 if (name === 'files') setTab('files');
               }}
@@ -271,6 +357,13 @@ export default function ChatScreen() {
         )}
       </KeyboardAvoidingView>
 
+      <UsageSheet
+        visible={usageOpen}
+        detail={detail}
+        onClose={() => setUsageOpen(false)}
+        onRefresh={() => void loadSessionDetail(sessionPath).catch(() => {})}
+      />
+
       <ImageModal
         uri={previewImage?.uri ?? null}
         title={previewImage?.title}
@@ -281,47 +374,62 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1 },
+  safe: {
+    flex: 1,
+    direction: 'ltr',
+  },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
     paddingHorizontal: 8,
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  backBtn: {
-    padding: 6,
+  iconBtn: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  titleCenter: {
+    flex: 1,
+    alignItems: 'center',
+    minWidth: 0,
   },
   title: {
     fontSize: 15,
     fontWeight: '700',
   },
-  subRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 2,
-  },
   subText: {
     fontSize: 11.5,
-    flex: 1,
+    marginTop: 1,
+  },
+  topRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   tabBar: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  tabBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    paddingVertical: 10,
+  tabPill: {
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   tabLabel: {
     fontSize: 12,
     fontWeight: '600',
+  },
+  listWrap: {
+    flex: 1,
+    position: 'relative',
   },
   loading: {
     flex: 1,
@@ -329,10 +437,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   pendingBox: {
-    marginHorizontal: 12,
+    marginHorizontal: 14,
     marginVertical: 4,
-    padding: 10,
-    borderRadius: 10,
+    padding: 11,
+    borderRadius: 12,
     borderWidth: 1,
   },
   workingRow: {
