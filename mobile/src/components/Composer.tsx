@@ -16,6 +16,7 @@ import type {
   ModelItem,
   PermissionModeOption,
   SlashCommandItem,
+  WaitingMessageItem,
 } from '../protocol/types';
 import { usePalette } from '../theme/colors';
 import {
@@ -45,6 +46,8 @@ interface Props {
   thinkingLevels: string[];
   models: ModelItem[];
   slashCommands: SlashCommandItem[];
+  waitingMessages?: WaitingMessageItem[];
+  onRemoveQueued?: (index: number) => Promise<void>;
   onFetchFileMentions: (cwd: string, query: string) => Promise<FileMentionItem[]>;
   onSend: (
     text: string,
@@ -56,6 +59,7 @@ interface Props {
   onChangeModel: (provider: string, modelId: string) => Promise<void>;
   onChangeThinking: (level: string) => Promise<void>;
   onLocalCommand?: (name: string) => void;
+  onPreviewImage?: (uri: string, title?: string) => void;
 }
 
 export function Composer({
@@ -69,6 +73,8 @@ export function Composer({
   thinkingLevels,
   models,
   slashCommands,
+  waitingMessages = [],
+  onRemoveQueued,
   onFetchFileMentions,
   onSend,
   onAbort,
@@ -76,6 +82,7 @@ export function Composer({
   onChangeModel,
   onChangeThinking,
   onLocalCommand,
+  onPreviewImage,
 }: Props) {
   const colors = usePalette();
   const [text, setText] = useState('');
@@ -87,6 +94,7 @@ export function Composer({
   const [showPermPicker, setShowPermPicker] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<'steer' | 'queue'>('queue');
 
   const token = useMemo(
     () => detectCompletionToken(text, selection.start),
@@ -256,12 +264,78 @@ export function Composer({
         </View>
       ) : null}
 
+      {waitingMessages.length > 0 ? (
+        <View
+          style={[
+            styles.queueBox,
+            { backgroundColor: colors.surface, borderColor: colors.border },
+          ]}
+        >
+          <Text style={[styles.queueHeader, { color: colors.muted }]}>
+            Queued ({waitingMessages.length})
+          </Text>
+          {waitingMessages.map((item) => (
+            <View
+              key={`${item.index}-${item.text.slice(0, 12)}`}
+              style={[styles.queueRow, { borderTopColor: colors.hairline }]}
+            >
+              <View style={[styles.queueTag, { backgroundColor: colors.accentBg }]}>
+                <Text style={{ color: colors.accent, fontSize: 10, fontWeight: '700' }}>
+                  {item.mode === 'steer' ? 'Steer' : 'Queue'}
+                </Text>
+              </View>
+              <Text numberOfLines={1} style={[styles.queueText, { color: colors.text }]}>
+                {item.text || `${item.image_count} image(s)`}
+              </Text>
+              {onRemoveQueued ? (
+                <Pressable onPress={() => void onRemoveQueued(item.index)} hitSlop={8}>
+                  <Ionicons name="close" size={16} color={colors.dim} />
+                </Pressable>
+              ) : null}
+            </View>
+          ))}
+        </View>
+      ) : null}
+
       <View
         style={[
           styles.card,
           { backgroundColor: colors.surface, borderColor: colors.border },
         ]}
       >
+        {busy ? (
+          <View style={[styles.deliveryBar, { borderBottomColor: colors.hairline }]}>
+            <Text style={{ color: colors.muted, fontSize: 11.5 }}>While working:</Text>
+            <View style={styles.deliveryPills}>
+              {(['queue', 'steer'] as const).map((m) => {
+                const active = deliveryMode === m;
+                return (
+                  <Pressable
+                    key={m}
+                    onPress={() => setDeliveryMode(m)}
+                    style={[
+                      styles.deliveryChip,
+                      {
+                        backgroundColor: active ? colors.accentBg : 'transparent',
+                        borderColor: active ? colors.accent : colors.border,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{
+                        color: active ? colors.accent : colors.muted,
+                        fontSize: 11,
+                        fontWeight: '600',
+                      }}
+                    >
+                      {m === 'queue' ? 'Queue' : 'Steer'}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        ) : null}
         {images.length > 0 ? (
           <ScrollView
             horizontal
@@ -271,10 +345,13 @@ export function Composer({
           >
             {images.map((img, idx) => (
               <View key={idx} style={styles.draftThumbWrap}>
-                <Image source={{ uri: img.uri }} style={styles.draftThumb} />
+                <Pressable onPress={() => onPreviewImage?.(img.uri, img.name ?? `Photo ${idx + 1}`)}>
+                  <Image source={{ uri: img.uri }} style={styles.draftThumb} />
+                </Pressable>
                 <Pressable
                   onPress={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
                   style={styles.removeThumb}
+                  hitSlop={6}
                 >
                   <Ionicons name="close-circle" size={18} color="#fff" />
                 </Pressable>
@@ -319,13 +396,11 @@ export function Composer({
               onPress={() => setShowModelPicker(true)}
               style={[
                 styles.pill,
+                styles.modelPill,
                 { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
               ]}
             >
-              <Text
-                numberOfLines={1}
-                style={[styles.pillText, { color: colors.text, maxWidth: 150 }]}
-              >
+              <Text numberOfLines={1} style={[styles.pillText, { color: colors.text, flexShrink: 1 }]}>
                 {modelPillLabel}
               </Text>
               <Ionicons name="chevron-down" size={12} color={colors.dim} />
@@ -335,10 +410,13 @@ export function Composer({
               onPress={() => setShowPermPicker(true)}
               style={[
                 styles.pill,
+                styles.permPill,
                 { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
               ]}
             >
-              <Text style={[styles.pillText, { color: colors.muted }]}>{permLabel}</Text>
+              <Text numberOfLines={1} style={[styles.pillText, { color: colors.muted }]}>
+                {permLabel}
+              </Text>
             </Pressable>
           </View>
 
@@ -353,7 +431,7 @@ export function Composer({
             ) : null}
             <Pressable
               disabled={sending || !canSend}
-              onPress={() => void handleSend('steer')}
+              onPress={() => void handleSend(busy ? deliveryMode : 'steer')}
               style={[
                 styles.sendCircle,
                 {
@@ -362,7 +440,7 @@ export function Composer({
               ]}
             >
               <Ionicons
-                name="arrow-up"
+                name={busy && deliveryMode === 'queue' ? 'time-outline' : 'arrow-up'}
                 size={18}
                 color={canSend ? '#fff' : colors.dim}
               />
@@ -506,6 +584,55 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     direction: 'ltr',
   },
+  queueBox: {
+    borderWidth: 1,
+    borderRadius: 14,
+    marginBottom: 7,
+    overflow: 'hidden',
+  },
+  queueHeader: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  queueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  queueTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  queueText: {
+    flex: 1,
+    fontSize: 12.5,
+    textAlign: 'left',
+  },
+  deliveryBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingBottom: 7,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  deliveryPills: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  deliveryChip: {
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   card: {
     borderWidth: 1,
     borderRadius: 22,
@@ -525,19 +652,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
+    gap: 6,
   },
   leftActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     flex: 1,
-    flexWrap: 'wrap',
+    minWidth: 0,
+    flexWrap: 'nowrap',
   },
   rightActions: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    flexShrink: 0,
   },
   circleAction: {
     width: 32,
@@ -546,6 +675,7 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   pill: {
     flexDirection: 'row',
@@ -555,6 +685,13 @@ const styles = StyleSheet.create({
     height: 32,
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
+  },
+  modelPill: {
+    flexShrink: 1,
+    minWidth: 64,
+  },
+  permPill: {
+    flexShrink: 0,
   },
   pillText: {
     fontSize: 12,

@@ -185,6 +185,14 @@ pub struct SlashCommandItem {
     pub source: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WaitingItem {
+    pub index: usize,
+    pub text: String,
+    pub mode: String,
+    pub image_count: usize,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub path: String,
@@ -208,6 +216,8 @@ pub struct SessionDetail {
     pub origin: SessionOrigin,
     pub messages: Vec<Message>,
     pub pending_messages: Vec<PendingMessage>,
+    #[serde(default)]
+    pub waiting_messages: Vec<WaitingItem>,
     pub dialogs: Vec<Value>,
     pub commands: Vec<SlashCommand>,
     pub models: Vec<Model>,
@@ -270,6 +280,10 @@ pub enum RemoteCommand {
         model: Option<String>,
         provider: Option<String>,
         thinking: Option<String>,
+    },
+    RemoveQueued {
+        path: Option<PathBuf>,
+        index: usize,
     },
 }
 
@@ -1158,6 +1172,35 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 provider: body["provider"].as_str().map(str::to_owned),
                 thinking: body["thinking"].as_str().map(str::to_owned),
             });
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
+        }
+        ("POST", "/v1/sessions/queue/remove") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(index) = body["index"].as_u64().map(|n| n as usize) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing queue index." }),
+                );
+                return;
+            };
+            let path = body["path"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
+            let _ = shared
+                .cmd_tx
+                .send(RemoteCommand::RemoveQueued { path, index });
             (shared.wake)();
             let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
         }

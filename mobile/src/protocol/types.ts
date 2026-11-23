@@ -112,6 +112,13 @@ export interface PendingMessageRecord {
   status: string;
 }
 
+export interface WaitingMessageItem {
+  index: number;
+  text: string;
+  mode: 'steer' | 'queue' | string;
+  image_count: number;
+}
+
 export interface SlashCommandItem {
   name: string;
   description: string;
@@ -161,6 +168,7 @@ export interface SessionDetail {
   origin: SessionOrigin;
   messages: MessageRecord[];
   pending_messages: PendingMessageRecord[];
+  waiting_messages?: WaitingMessageItem[];
   dialogs: Record<string, unknown>[];
   commands: SlashCommandItem[];
   models: ModelItem[];

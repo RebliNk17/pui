@@ -229,14 +229,19 @@ export default function ChatScreen() {
                     bindings.onContentSizeChange(w, h);
                     listRef.current?.scrollToEnd({ animated: false });
                   }}
-                  renderItem={({ item }) => (
-                    <MessageBubble
-                      message={item}
-                      verbose={verbose}
-                      onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
-                      onOpenFileTarget={openFileInTree}
-                    />
-                  )}
+                  renderItem={({ item, index }) => {
+                    const prev = index > 0 ? detail.messages[index - 1] : null;
+                    const showHeader = !prev || prev.role !== 'assistant' || prev.model !== item.model;
+                    return (
+                      <MessageBubble
+                        message={item}
+                        verbose={verbose}
+                        showHeader={showHeader}
+                        onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                        onOpenFileTarget={openFileInTree}
+                      />
+                    );
+                  }}
                   ListFooterComponent={
                     <>
                       {detail.pending_messages.map((pm) => (
@@ -299,6 +304,10 @@ export default function ChatScreen() {
               thinkingLevels={detail?.levels ?? []}
               models={detail?.models ?? []}
               slashCommands={slashCommands.length > 0 ? slashCommands : (detail?.commands ?? [])}
+              waitingMessages={detail?.waiting_messages ?? []}
+              onRemoveQueued={async (index) => {
+                await transport?.removeQueuedMessage(sessionPath, index);
+              }}
               onFetchFileMentions={fetchMentions}
               onSend={async (text, images, mode) => {
                 if (!transport) return;
@@ -335,6 +344,7 @@ export default function ChatScreen() {
               onLocalCommand={(name) => {
                 if (name === 'files') setTab('files');
               }}
+              onPreviewImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
             />
           </>
         ) : tab === 'artifacts' ? (

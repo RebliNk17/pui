@@ -19,6 +19,21 @@ export type MarkdownBlock =
   | { type: 'paragraph'; text: string };
 
 /**
+ * Strips Pi's internal image-coordinate annotations (e.g.
+ * `[Image: original 1080x2520, displayed at 857x2000. Multiply coordinates by 1.26 to map to original image.]`)
+ * so user bubbles show only what the user actually wrote (matching Pui Desktop's `user_display_text`).
+ */
+export function cleanUserDisplayText(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => !/^\[Image:\s*original\s+\d+x\d+.*\]$/i.test(line.trim()))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * Detects whether a paragraph's first strong directional character is RTL (Hebrew / Arabic).
  * Keeps English paragraphs cleanly left-aligned even on Hebrew/Arabic Android phones,
  * while letting actual Hebrew/Arabic text read right-to-left naturally.
@@ -52,7 +67,7 @@ export function isRtlText(text: string): boolean {
 export function parseInlineMarkdown(input: string): InlineSegment[] {
   const out: InlineSegment[] = [];
   const regex =
-    /(`[^`]+`|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+?\*)/g;
+    /(\*\*`[^`]+`\*\*|`[^`]+`|\*\*[^*\n]+?\*\*|__[^_\n]+?__|~~[^~\n]+?~~|\[[^\]\n]+\]\([^)\s]+\)|\*[^*\n]+?\*)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -61,7 +76,9 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
       out.push({ type: 'text', text: input.slice(lastIndex, match.index) });
     }
     const token = match[0];
-    if (token.startsWith('`') && token.endsWith('`')) {
+    if (token.startsWith('**`') && token.endsWith('`**')) {
+      out.push({ type: 'code', text: token.slice(3, -3) });
+    } else if (token.startsWith('`') && token.endsWith('`')) {
       out.push({ type: 'code', text: token.slice(1, -1) });
     } else if (
       (token.startsWith('**') && token.endsWith('**')) ||

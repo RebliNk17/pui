@@ -3,7 +3,7 @@
 use super::*;
 use crate::remote::{
     BindMode, OriginPlatform, RemoteCommand, RemoteSnapshot, SessionDetail, SessionOrigin,
-    SessionSummary, extract_artifacts, qr,
+    SessionSummary, WaitingItem, extract_artifacts, qr,
 };
 use base64::Engine as _;
 use std::{
@@ -325,12 +325,47 @@ impl Pui {
                     }
                 });
             }
+            RemoteCommand::RemoveQueued { path, index } => {
+                let target = path.or_else(|| self.state.session_file.as_ref().map(PathBuf::from));
+                if let Some(target_path) = target {
+                    if let Some(queue) = self.waiting.get_mut(&target_path) {
+                        if index < queue.len() {
+                            queue.remove(index);
+                        }
+                        if queue.is_empty() {
+                            self.waiting.remove(&target_path);
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    fn waiting_items_for(&self, path: &std::path::Path) -> Vec<WaitingItem> {
+        self.waiting
+            .get(path)
+            .map(|list| {
+                list.iter()
+                    .enumerate()
+                    .map(|(index, msg)| WaitingItem {
+                        index,
+                        text: msg.text.clone(),
+                        mode: msg.mode.label().to_ascii_lowercase(),
+                        image_count: msg.images.len(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn publish_remote_snapshot(&mut self) {
         self.remote_snapshot_tick = self.remote_snapshot_tick.wrapping_add(1);
         let active_path = self.state.session_file.clone();
+        let active_waiting_len = active_path
+            .as_deref()
+            .and_then(|p| self.waiting.get(std::path::Path::new(p)))
+            .map(Vec::len)
+            .unwrap_or(0) as u64;
         let active_detail_rev = self
             .state
             .transcript_revision
@@ -338,7 +373,8 @@ impl Pui {
             .wrapping_add(self.state.outputs_revision)
             .wrapping_add(u64::from(self.state.busy) << 56)
             .wrapping_add((self.state.dialogs.len() as u64) << 48)
-            .wrapping_add((self.state.pending_messages.len() as u64) << 40);
+            .wrapping_add((self.state.pending_messages.len() as u64) << 40)
+            .wrapping_add(active_waiting_len << 32);
 
         let mut details = BTreeMap::new();
         let mut allowed_artifacts = BTreeSet::new();
@@ -388,6 +424,7 @@ impl Pui {
                 origin,
                 messages: self.state.messages.clone(),
                 pending_messages: self.state.pending_messages.clone(),
+                waiting_messages: self.waiting_items_for(&path),
                 dialogs: self.state.dialogs.iter().cloned().collect(),
                 commands: self.state.commands.clone(),
                 models: self.state.models.clone(),
@@ -461,6 +498,7 @@ impl Pui {
                     origin,
                     messages: chat.state.messages.clone(),
                     pending_messages: chat.state.pending_messages.clone(),
+                    waiting_messages: self.waiting_items_for(&path),
                     dialogs: chat.state.dialogs.iter().cloned().collect(),
                     commands: chat.state.commands.clone(),
                     models: chat.state.models.clone(),

@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import type { MessageRecord, ToolRecord } from '../protocol/types';
 import { usePalette, type Palette } from '../theme/colors';
 import {
+  cleanUserDisplayText,
   isRtlText,
   parseInlineMarkdown,
   parseMarkdownBlocks,
@@ -14,11 +15,18 @@ import { HtmlArtifactCard } from './HtmlArtifactCard';
 interface Props {
   message: MessageRecord;
   verbose?: boolean;
+  showHeader?: boolean;
   onOpenImage: (uri: string, title?: string) => void;
   onOpenFileTarget: (target: string) => void;
 }
 
-export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFileTarget }: Props) {
+export function MessageBubble({
+  message,
+  verbose = false,
+  showHeader = true,
+  onOpenImage,
+  onOpenFileTarget,
+}: Props) {
   const colors = usePalette();
   const isUser = message.role === 'user';
   const [thinkingOverride, setThinkingOverride] = useState<boolean | null>(null);
@@ -31,7 +39,9 @@ export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFil
   const activityTools = message.tools.filter((t) => !t.visual);
 
   if (isUser) {
-    const rtl = isRtlText(message.text);
+    const displayText = cleanUserDisplayText(message.text);
+    const rtl = isRtlText(displayText);
+    const singleImage = message.images.length === 1;
     return (
       <View style={styles.userRow}>
         <View
@@ -40,7 +50,7 @@ export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFil
             { backgroundColor: colors.userBubble, borderColor: colors.border },
           ]}
         >
-          {message.text ? (
+          {displayText ? (
             <Text
               selectable
               style={[
@@ -52,20 +62,27 @@ export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFil
                 },
               ]}
             >
-              {message.text.trim()}
+              {displayText}
             </Text>
           ) : null}
           {message.images.length > 0 ? (
-            <View style={styles.imageGrid}>
+            <View style={[styles.imageGrid, !displayText && { marginTop: 0 }]}>
               {message.images.map((img, idx) => {
                 const uri = `data:${img.mime || 'image/png'};base64,${img.data}`;
                 const label = img.file?.name ?? `Image ${idx + 1}`;
                 return (
-                  <Pressable key={idx} onPress={() => onOpenImage(uri, label)}>
+                  <Pressable
+                    key={idx}
+                    onPress={() => onOpenImage(uri, label)}
+                    style={[
+                      singleImage ? styles.singleThumbWrap : styles.multiThumbWrap,
+                      { backgroundColor: colors.codeBg, borderColor: colors.border },
+                    ]}
+                  >
                     <Image
                       source={{ uri }}
-                      style={[styles.thumb, { borderColor: colors.border }]}
-                      resizeMode="cover"
+                      style={styles.thumbFill}
+                      resizeMode="contain"
                     />
                   </Pressable>
                 );
@@ -77,9 +94,16 @@ export function MessageBubble({ message, verbose = false, onOpenImage, onOpenFil
     );
   }
 
+  const isToolOnly =
+    !message.text.trim() &&
+    !message.error &&
+    message.images.length === 0 &&
+    visualTools.length === 0 &&
+    openTools.length === 0;
+
   return (
-    <View style={styles.assistantRow}>
-      {message.model || message.cost > 0 ? (
+    <View style={[styles.assistantRow, isToolOnly && styles.assistantRowCompact]}>
+      {showHeader && !isToolOnly && (message.model || message.cost > 0) ? (
         <View style={styles.metaRow}>
           <Text style={[styles.roleLabel, { color: colors.dim }]}>
             {message.model || 'Pi'}
@@ -510,8 +534,11 @@ const styles = StyleSheet.create({
   },
   assistantRow: {
     paddingHorizontal: 16,
-    marginVertical: 8,
+    marginVertical: 7,
     direction: 'ltr',
+  },
+  assistantRowCompact: {
+    marginVertical: 2,
   },
   metaRow: {
     flexDirection: 'row',
@@ -658,12 +685,30 @@ const styles = StyleSheet.create({
   imageGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 8,
     marginTop: 8,
   },
+  singleThumbWrap: {
+    width: 210,
+    height: 210,
+    borderRadius: 12,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  multiThumbWrap: {
+    width: 124,
+    height: 156,
+    borderRadius: 10,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  thumbFill: {
+    width: '100%',
+    height: '100%',
+  },
   thumb: {
-    width: 112,
-    height: 112,
+    width: 124,
+    height: 156,
     borderRadius: 10,
     borderWidth: 1,
   },

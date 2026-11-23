@@ -1,6 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isRtlText, parseInlineMarkdown, parseMarkdownBlocks } from '../src/utils/markdown.ts';
+import {
+  cleanUserDisplayText,
+  isRtlText,
+  parseInlineMarkdown,
+  parseMarkdownBlocks,
+} from '../src/utils/markdown.ts';
 
 describe('mobile Markdown parser and bidi direction helper', () => {
   it('parses headings, lists, inline bold/code/links, quotes, tables, and fenced code', () => {
@@ -36,6 +41,12 @@ describe('mobile Markdown parser and bidi direction helper', () => {
     assert.ok(inline.some((s) => s.type === 'bold' && s.text === 'bold'));
     assert.ok(inline.some((s) => s.type === 'code' && s.text === 'code'));
     assert.ok(inline.some((s) => s.type === 'link' && s.label === 'Pui'));
+  });
+
+  it('strips Pi internal image-coordinate annotations from user bubbles', () => {
+    const raw =
+      'Check these screenshots\n\n[Image: original 1080x2520, displayed at 857x2000. Multiply coordinates by 1.26 to map to original image.]\n[Image: original 1080x2520, displayed at 857x2000. Multiply coordinates by 1.26 to map to original image.]';
+    assert.equal(cleanUserDisplayText(raw), 'Check these screenshots');
   });
 
   it('detects per-paragraph RTL vs LTR accurately', () => {
