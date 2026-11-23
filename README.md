@@ -51,6 +51,32 @@ A badge collects chats that finished or are waiting for an answer, even ones run
 
 ![Pui workspace in light mode](docs/images/workspace-light.png)
 
+## Mobile companion (Android)
+
+Control Pui from your Android phone over your private [Tailscale](https://tailscale.com) network—no cloud relay or third-party servers required.
+
+<p align="center">
+  <img src="docs/images/mobile-sessions.png" width="250" alt="Pui Mobile sessions list" />
+  &nbsp;&nbsp;
+  <img src="docs/images/mobile-chat.png" width="250" alt="Pui Mobile live conversation with grouped activity" />
+  &nbsp;&nbsp;
+  <img src="docs/images/mobile-usage.png" width="250" alt="Pui Mobile context and provider rate limits" />
+</p>
+
+### What it does
+
+- **Parallel sessions.** Open, start, or message any chat from your phone without switching or interrupting the chat open on your Mac.
+- **Full agent control.** Watch live streaming replies and grouped tool activity, queue or steer follow-ups while Pi is working, attach photos, use `/` commands and `@` workspace file mentions, and switch models, effort levels, or permission modes.
+- **Approvals, questions & notifications.** Approve or deny tool calls, answer `pui_ask_questions` prompts, and get native Android notifications over Tailscale when an agent finishes replying or needs your input (with optional background keep-alive).
+- **Files, diffs, artifacts & rate limits.** Browse workspace files and Git diffs, preview inline HTML visuals and images, inspect context usage and live per-provider rate limits, and match all 8 Pui light/dark color themes.
+
+### How to connect
+
+1. Install **Tailscale** on your Mac and your Android phone, signed into the same tailnet.
+2. Download and install the latest **`pui-android-v*.apk`** from [Releases](https://github.com/RebliNk17/pui/releases) (the app checks GitHub Releases automatically when newer APKs are published).
+3. In **Pui Desktop**, open **Settings → Remote & Mobile** and turn on **Enable remote access** (defaults to *Tailscale only* on port `4817`).
+4. Open **Pui** on your phone, tap **Pair with Pui Desktop**, and scan the QR code shown in Desktop settings (or paste the pairing link / enter your Tailscale IP and token manually).
+
 ## Install
 
 1. Download the latest **Pui.dmg** (Apple Silicon) from [Releases](https://github.com/RebliNk17/pui/releases).
@@ -90,6 +116,7 @@ Tests: `scripts/test-rust.sh` and `node --test tests/*.test.mjs`. See [test exec
 
 ## Learn more
 
+- [Mobile companion guide](mobile/README.md) and [remote protocol spec](docs/mobile-remote-protocol.md)
 - [Full reference](docs/reference.md): every feature and design decision in detail
 - [Bundled runtime](docs/bundled-runtime.md): what ships inside the app and how providers are set up
 - [Releases and CI](docs/releases.md): how builds are signed and published
