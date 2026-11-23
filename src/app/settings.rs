@@ -169,6 +169,7 @@ mod appearance;
 mod model_editor;
 mod page;
 mod providers;
+pub(in crate::app) use providers::{AuthSummary, CustomProviderSummary};
 mod resources;
 mod scale;
 pub(super) use page::{View, search_entries};

@@ -203,8 +203,34 @@ impl ProvidersManager {
         }
     }
 
+    pub(in crate::app) fn start_oauth_login(&mut self, ctx: &egui::Context, target: &str) {
+        let base = registry::family(target);
+        if base == "antigravity" {
+            self.open_antigravity_for(target);
+        } else {
+            self.accounts.login = Some(start_browser_login(ctx, target, base));
+        }
+    }
+
+    pub(in crate::app) fn provider_display_name(&mut self, target: &str) -> String {
+        let base = registry::family(target);
+        let name = family_name(base);
+        let label = self.registry().label(target).map(str::to_owned);
+        match label {
+            Some(label) if !label.is_empty() => format!("{name} ({label})"),
+            _ if registry::is_alias(target) => {
+                let suffix = target
+                    .split_once(registry::SEPARATOR)
+                    .map(|(_, s)| s)
+                    .unwrap_or(target);
+                format!("{name} #{suffix}")
+            }
+            _ => name,
+        }
+    }
+
     pub(in crate::app) fn reconnect_account(&mut self, ctx: &egui::Context, target: &str) {
-        let base = target.split('~').next().unwrap_or(target);
+        let base = registry::family(target);
         let auth_kind = self
             .saved_auth
             .iter()
@@ -214,10 +240,12 @@ impl ProvidersManager {
             self.open_antigravity_for(target);
         } else if base == "google-vertex" {
             self.open_vertex_modal();
+        } else if auth_kind == Some("api_key") {
+            self.open_api_key_modal(Some(target));
         } else if auth_kind == Some("oauth") || matches!(base, "anthropic" | "openai-codex") {
             self.accounts.login = Some(start_browser_login(ctx, target, base));
         } else {
-            self.open_api_key_modal(Some(base));
+            self.open_api_key_modal(Some(target));
         }
     }
 

@@ -3,6 +3,7 @@ mod agents;
 mod approval_view;
 mod attachments;
 mod attention;
+mod auth_prompt;
 mod automation;
 mod catalog;
 mod changes;
@@ -233,6 +234,7 @@ pub struct Pui {
     rename_text: String,
     usage: crate::usage::Usage,
     dismissed_usage_warning: Option<String>,
+    dismissed_auth_error: Option<String>,
     sessions: Vec<Session>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
@@ -398,6 +400,7 @@ impl Pui {
                     .unwrap_or_default()
             },
             dismissed_usage_warning: None,
+            dismissed_auth_error: None,
             sessions: Vec::new(),
             session_rx: None,
             session_watch: if options.demo || cfg!(test) {
@@ -1132,6 +1135,7 @@ impl Pui {
             self.settings_view.providers.reload_requested = false;
             self.refresh_providers_catalog();
             self.catalog.request(&self.ctx);
+            self.on_provider_credentials_updated();
         } else if !self.demo
             && self
                 .settings_view
@@ -1761,6 +1765,7 @@ impl Pui {
         let settings_before = self.prefs.settings.clone();
         self.permission_confirmation(ui);
         self.propagate_settings(&settings_before);
+        self.auth_error_banner(ui, ctx);
         self.usage_limit_banner(ui);
         let mut submit = false;
         let mut alternate = false;
@@ -2563,6 +2568,7 @@ impl eframe::App for Pui {
             || self.menu.about
             || self.resource_reload.confirming()
             || self.updates.open
+            || self.settings_view.providers.any_modal_open()
             || self.search_open
             || self.attention.open;
         let terminal_input = !self.settings_open
@@ -2749,6 +2755,9 @@ impl eframe::App for Pui {
             self.history_confirmation(ctx);
         }
         self.pi_folder_prompt(ctx);
+        if !self.settings_open {
+            self.settings_view.providers.show_modals(ctx);
+        }
         if !theater {
             self.transcript.gallery.viewer(ctx);
             self.draft_images.gallery.viewer(ctx);

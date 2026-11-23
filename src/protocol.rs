@@ -19,6 +19,8 @@ pub struct Message {
     pub role: String,
     pub text: String,
     pub thinking: String,
+    #[serde(default)]
+    pub provider: String,
     pub model: String,
     pub error: Option<String>,
     pub tools: Vec<Tool>,
@@ -272,6 +274,7 @@ impl Message {
             role: string(value, "role").to_owned(),
             text: content_text(&value["content"]),
             images: crate::media::attachments(&value["content"]),
+            provider: string(value, "provider").to_owned(),
             model: string(value, "model").to_owned(),
             error: value["errorMessage"].as_str().map(str::to_owned),
             timestamp: value["timestamp"].as_i64().unwrap_or_default(),

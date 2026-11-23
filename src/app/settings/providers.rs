@@ -927,6 +927,17 @@ fn validate_provider_id(id: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
+fn validate_auth_provider_id(id: &str) -> Result<String, String> {
+    let trimmed = id.trim();
+    if let Some((base, suffix)) = trimmed.split_once(crate::accounts::SEPARATOR) {
+        if crate::accounts::valid_segment(base) && crate::accounts::valid_segment(suffix) {
+            return Ok(trimmed.to_owned());
+        }
+        return Err("Account alias must look like 'provider~2'.".into());
+    }
+    validate_provider_id(trimmed)
+}
+
 impl ProvidersManager {
     pub(in crate::app) fn ensure_loaded(&mut self, demo: bool) {
         if self.loaded {
@@ -1467,14 +1478,17 @@ impl ProvidersManager {
     }
 
     pub(in crate::app) fn open_api_key_modal(&mut self, provider_id: Option<&str>) {
-        let idx = provider_id
-            .and_then(|id| BUILTIN_KEY_PROVIDERS.iter().position(|(k, _)| *k == id))
-            .unwrap_or(0);
+        let builtin =
+            provider_id.and_then(|id| BUILTIN_KEY_PROVIDERS.iter().position(|(k, _)| *k == id));
+        let custom_provider = match (provider_id, builtin) {
+            (Some(id), None) if !id.trim().is_empty() => id.trim().to_owned(),
+            _ => String::new(),
+        };
         self.api_key_modal = ApiKeyModal {
             open: true,
             additional: false,
-            provider_index: idx,
-            custom_provider: String::new(),
+            provider_index: builtin.unwrap_or(0),
+            custom_provider,
             api_key: String::new(),
             error: None,
         };
@@ -1676,7 +1690,7 @@ impl ProvidersManager {
 
     fn save_api_key_to_disk(&mut self) -> Result<(), String> {
         let provider = if !self.api_key_modal.custom_provider.trim().is_empty() {
-            validate_provider_id(&self.api_key_modal.custom_provider)?
+            validate_auth_provider_id(&self.api_key_modal.custom_provider)?
         } else {
             BUILTIN_KEY_PROVIDERS
                 .get(self.api_key_modal.provider_index)
@@ -1689,7 +1703,9 @@ impl ProvidersManager {
         }
         let path = auth_json_path().ok_or("Cannot resolve ~/.pi/agent/auth.json.")?;
         let mut root = read_json_object(&path);
-        let additional = self.api_key_modal.additional && root[&provider].is_object();
+        let additional = self.api_key_modal.additional
+            && !crate::accounts::is_alias(&provider)
+            && root[&provider].is_object();
         let provider = if additional {
             self.account_target(&provider)
         } else {
@@ -2552,7 +2568,9 @@ impl ProvidersManager {
                 } else {
                     self.api_key_modal.custom_provider.trim().to_owned()
                 };
-                if self.saved_auth.iter().any(|a| a.provider == selected) {
+                if !crate::accounts::is_alias(&selected)
+                    && self.saved_auth.iter().any(|a| a.provider == selected)
+                {
                     ui.add_space(6.0);
                     prompt_ui::compact_toggle_row(
                         ui,
