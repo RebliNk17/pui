@@ -423,14 +423,17 @@ test('Cancel/deny and mode changes cannot install an always-allow grant',async()
   assert.equal((await h.gate('bash',{command:'npm test'})).block,true);
   assert.equal((await h.gate('bash',{command:'npm test'})).block,true);
 });
-test('automation authorizes future runs explicitly without AI classification and guards unmanaged agents',async()=>{
+test('Auto judges automation by its repeated command/prompt and guards unmanaged agents',async()=>{
   for (const name of ['pui_create_monitor','pui_create_cron','pui_update_job']) {
     const args={name:'Check',command:'curl https://example.com/health',schedule:'0 9 * * *',message:'Review',operation:'resume'};
-    const denied=host('auto',{decision:'allow',approve:false});
+    const allowed=host('auto',{decision:'allow',approve:false});
+    assert.equal(await allowed.gate(name,args),undefined);
+    assert.equal(allowed.calls.length,1); assert.equal(allowed.prompts.length,0);
+    const denied=host('auto',{decision:'deny',approve:true});
     assert.equal((await denied.gate(name,args)).block,true);
-    assert.equal(denied.calls.length,0); assert.equal(denied.prompts.length,1);
-    const allowed=host('auto',{approve:true});
-    assert.equal(await allowed.gate(name,args),undefined); assert.equal(allowed.calls.length,0);
+    assert.equal(denied.calls.length,1); assert.equal(denied.prompts.length,0);
+    const manual=host('manual',{approve:true});
+    assert.equal(await manual.gate(name,args),undefined); assert.equal(manual.calls.length,0); assert.equal(manual.prompts.length,1);
     assert.equal((await host('plan').gate(name,args)).block,true);
     assert.equal((await host('dontAsk').gate(name,args)).block,true);
   }
@@ -439,6 +442,10 @@ test('automation authorizes future runs explicitly without AI classification and
     assert.equal((await h.gate('pui_create_monitor',{command:'pi --print do stuff'})).block,true);
     assert.equal(h.calls.length,0); assert.equal(h.prompts.length,0);
   }
+  // Built-in destructive rules apply to the monitor's command without a classifier call.
+  const risky=host('auto',{decision:'allow',approve:true});
+  assert.equal((await risky.gate('pui_create_monitor',{command:'git fetch && git reset --hard FETCH_HEAD'})).block,true);
+  assert.equal(risky.calls.length,0); assert.equal(risky.prompts.length,0);
   assert.equal(await host('plan').gate('pui_jobs',{}),undefined);
 });
 test('mode changes invalidate outstanding approval',async()=>{
