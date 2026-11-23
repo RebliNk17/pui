@@ -140,6 +140,19 @@ jobs:
             echo "has_play_key=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Restore Android SDK extras cache (NDK, CMake, API 37)
+        id: android-sdk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.1.12297006
+            /usr/local/lib/android/sdk/cmake/3.22.1
+            /usr/local/lib/android/sdk/platforms/android-37.0
+            /usr/local/lib/android/sdk/build-tools/37.0.0
+          key: android-sdk-v1-api37-ndk27-${{ hashFiles('mobile/package-lock.json') }}
+          restore-keys: |
+            android-sdk-v1-api37-ndk27-
+
       - name: Restore Gradle cache
         id: gradle-cache
         uses: actions/cache/restore@v4
@@ -151,6 +164,25 @@ jobs:
           key: gradle-v2-pui-mobile-${{ hashFiles('mobile/package-lock.json', 'mobile/app.config.ts', 'mobile/plugins/*.js') }}
           restore-keys: |
             gradle-v2-pui-mobile-
+
+      - name: Restore native C++ module builds (.cxx/build)
+        id: android-cxx-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            mobile/node_modules/react-native-reanimated/android/.cxx
+            mobile/node_modules/react-native-reanimated/android/build
+            mobile/node_modules/react-native-worklets/android/.cxx
+            mobile/node_modules/react-native-worklets/android/build
+            mobile/node_modules/react-native-screens/android/.cxx
+            mobile/node_modules/react-native-screens/android/build
+            mobile/node_modules/react-native-gesture-handler/android/.cxx
+            mobile/node_modules/react-native-gesture-handler/android/build
+            mobile/node_modules/expo-modules-core/android/.cxx
+            mobile/node_modules/expo-modules-core/android/build
+          key: android-cxx-v1-arm64-${{ hashFiles('mobile/package-lock.json') }}
+          restore-keys: |
+            android-cxx-v1-arm64-
 
       - name: Expo prebuild Android project
         env:
@@ -190,6 +222,17 @@ jobs:
           GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC
         run: ./gradlew bundleRelease --no-daemon --parallel --build-cache --max-workers=4
 
+      - name: Save Android SDK extras cache
+        if: always() && steps.android-sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.1.12297006
+            /usr/local/lib/android/sdk/cmake/3.22.1
+            /usr/local/lib/android/sdk/platforms/android-37.0
+            /usr/local/lib/android/sdk/build-tools/37.0.0
+          key: android-sdk-v1-api37-ndk27-${{ hashFiles('mobile/package-lock.json') }}
+
       - name: Save Gradle cache
         if: always() && steps.gradle-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -199,6 +242,23 @@ jobs:
             ~/.gradle/wrapper
             ~/.android/build-cache
           key: gradle-v2-pui-mobile-${{ hashFiles('mobile/package-lock.json', 'mobile/app.config.ts', 'mobile/plugins/*.js') }}
+
+      - name: Save native C++ module builds (.cxx/build)
+        if: success() && steps.android-cxx-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            mobile/node_modules/react-native-reanimated/android/.cxx
+            mobile/node_modules/react-native-reanimated/android/build
+            mobile/node_modules/react-native-worklets/android/.cxx
+            mobile/node_modules/react-native-worklets/android/build
+            mobile/node_modules/react-native-screens/android/.cxx
+            mobile/node_modules/react-native-screens/android/build
+            mobile/node_modules/react-native-gesture-handler/android/.cxx
+            mobile/node_modules/react-native-gesture-handler/android/build
+            mobile/node_modules/expo-modules-core/android/.cxx
+            mobile/node_modules/expo-modules-core/android/build
+          key: android-cxx-v1-arm64-${{ hashFiles('mobile/package-lock.json') }}
 
       - name: Collect APK, AAB, and checksums
         env:
@@ -265,10 +325,7 @@ jobs:
           fi
 
   publish-google-play-internal:
-    if: >-
-      (startsWith(github.ref, 'refs/tags/v') ||
-      github.event_name == 'release' ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish_play_internal))
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_play_internal
     needs: android-build
     runs-on: ubuntu-latest
     steps:

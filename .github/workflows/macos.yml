@@ -7,12 +7,16 @@ on:
     paths-ignore:
       - 'mobile/**'
       - '.github/workflows/android.yml'
+      - 'README.md'
+      - 'docs/**'
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   pull_request:
     paths-ignore:
       - 'mobile/**'
       - '.github/workflows/android.yml'
+      - 'README.md'
+      - 'docs/**'
 
 permissions:
   contents: read
