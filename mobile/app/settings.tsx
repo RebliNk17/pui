@@ -32,7 +32,7 @@ import {
 } from '../src/utils/appVersion';
 import {
   checkForMobileUpdate,
-  getPlayStoreUrl,
+  GITHUB_REPO,
   type UpdateCheckResult,
 } from '../src/utils/updates';
 
@@ -396,32 +396,19 @@ export default function SettingsScreen() {
                     Download APK (v{updateResult.latest.version})
                   </Text>
                 </Pressable>
-                <Pressable
-                  onPress={() => void Linking.openURL(getPlayStoreUrl(getAndroidPackageId()))}
-                  style={[
-                    styles.saveBtn,
-                    {
-                      backgroundColor: colors.surfaceElevated,
-                      borderColor: colors.border,
-                      alignItems: 'center',
-                    },
-                  ]}
-                >
-                  <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
-                    Play Store
-                  </Text>
-                </Pressable>
               </View>
             </>
           ) : (
             <>
               <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
               <Pressable
-                onPress={() => void Linking.openURL(getPlayStoreUrl(getAndroidPackageId()))}
+                onPress={() =>
+                  void Linking.openURL(`https://github.com/${GITHUB_REPO}/releases`)
+                }
                 style={styles.row}
               >
                 <Text style={[styles.rowTitle, { color: colors.text }]}>
-                  Open in Google Play
+                  View GitHub Releases
                 </Text>
                 <Ionicons name="open-outline" size={16} color={colors.dim} />
               </Pressable>
