@@ -9,6 +9,7 @@ const config: ExpoConfig = {
   name: 'Pui',
   slug: 'pui-mobile',
   version: versionName,
+  icon: './assets/icon.png',
   scheme: 'pui',
   orientation: 'portrait',
   userInterfaceStyle: 'automatic',
@@ -16,7 +17,9 @@ const config: ExpoConfig = {
     package: androidPackage,
     versionCode,
     adaptiveIcon: {
-      backgroundColor: '#111318',
+      foregroundImage: './assets/adaptive-icon.png',
+      monochromeImage: './assets/adaptive-icon.png',
+      backgroundColor: '#25202F',
     },
     permissions: ['android.permission.CAMERA', 'android.permission.INTERNET'],
   },
