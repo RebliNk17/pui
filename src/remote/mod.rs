@@ -286,6 +286,10 @@ pub enum RemoteCommand {
         path: Option<PathBuf>,
         index: usize,
     },
+    SteerQueued {
+        path: Option<PathBuf>,
+        index: usize,
+    },
     RefreshUsage,
 }
 
@@ -1212,6 +1216,35 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
             let _ = shared
                 .cmd_tx
                 .send(RemoteCommand::RemoveQueued { path, index });
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
+        }
+        ("POST", "/v1/sessions/queue/steer") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(index) = body["index"].as_u64().map(|n| n as usize) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing queue index." }),
+                );
+                return;
+            };
+            let path = body["path"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
+            let _ = shared
+                .cmd_tx
+                .send(RemoteCommand::SteerQueued { path, index });
             (shared.wake)();
             let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
         }

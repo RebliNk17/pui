@@ -115,6 +115,7 @@ export interface PuiTransport {
   }): Promise<void>;
   abortSession(path?: string): Promise<void>;
   removeQueuedMessage(path: string | undefined, index: number): Promise<void>;
+  steerQueuedMessage(path: string | undefined, index: number): Promise<void>;
   answerDialog(input: {
     path?: string;
     dialog_id: string;
@@ -361,6 +362,13 @@ export class DirectTransport implements PuiTransport {
 
   async removeQueuedMessage(path: string | undefined, index: number): Promise<void> {
     await this.requestJson('/v1/sessions/queue/remove', {
+      method: 'POST',
+      body: JSON.stringify({ path, index }),
+    });
+  }
+
+  async steerQueuedMessage(path: string | undefined, index: number): Promise<void> {
+    await this.requestJson('/v1/sessions/queue/steer', {
       method: 'POST',
       body: JSON.stringify({ path, index }),
     });

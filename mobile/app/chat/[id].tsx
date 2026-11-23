@@ -332,6 +332,11 @@ export default function ChatScreen() {
               waitingMessages={detail?.waiting_messages ?? []}
               onRemoveQueued={async (index) => {
                 await transport?.removeQueuedMessage(sessionPath, index);
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 150);
+              }}
+              onSteerQueued={async (index) => {
+                await transport?.steerQueuedMessage(sessionPath, index);
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 150);
               }}
               onFetchFileMentions={fetchMentions}
               onSend={async (text, images, mode) => {
@@ -343,6 +348,7 @@ export default function ChatScreen() {
                   mode,
                   origin: clientOrigin(),
                 });
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 180);
               }}
               onAbort={async () => {
                 await transport?.abortSession(sessionPath);

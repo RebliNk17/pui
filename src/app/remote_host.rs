@@ -328,12 +328,36 @@ impl Pui {
             RemoteCommand::RemoveQueued { path, index } => {
                 let target = path.or_else(|| self.state.session_file.as_ref().map(PathBuf::from));
                 if let Some(target_path) = target {
-                    if let Some(queue) = self.waiting.get_mut(&target_path) {
-                        if index < queue.len() {
-                            queue.remove(index);
+                    let key = self
+                        .waiting
+                        .keys()
+                        .find(|p| sidebar_tree::same_path(p, &target_path))
+                        .cloned();
+                    if let Some(key) = key {
+                        if let Some(queue) = self.waiting.get_mut(&key) {
+                            if index < queue.len() {
+                                queue.remove(index);
+                            }
+                            if queue.is_empty() {
+                                self.waiting.remove(&key);
+                            }
                         }
-                        if queue.is_empty() {
-                            self.waiting.remove(&target_path);
+                    }
+                }
+            }
+            RemoteCommand::SteerQueued { path, index } => {
+                let target = path.or_else(|| self.state.session_file.as_ref().map(PathBuf::from));
+                if let Some(target_path) = target {
+                    let key = self
+                        .waiting
+                        .keys()
+                        .find(|p| sidebar_tree::same_path(p, &target_path))
+                        .cloned();
+                    if let Some(key) = key {
+                        if let Some(queue) = self.waiting.get_mut(&key) {
+                            if let Some(item) = queue.get_mut(index) {
+                                item.mode = settings::DeliveryMode::Steer;
+                            }
                         }
                     }
                 }
@@ -347,8 +371,9 @@ impl Pui {
 
     fn waiting_items_for(&self, path: &std::path::Path) -> Vec<WaitingItem> {
         self.waiting
-            .get(path)
-            .map(|list| {
+            .iter()
+            .find(|(p, _)| sidebar_tree::same_path(p, path))
+            .map(|(_, list)| {
                 list.iter()
                     .enumerate()
                     .map(|(index, msg)| WaitingItem {
@@ -362,14 +387,27 @@ impl Pui {
             .unwrap_or_default()
     }
 
+    fn waiting_fingerprint(items: &[WaitingItem]) -> u64 {
+        let mut h: u64 = (items.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        for item in items {
+            h = h.rotate_left(7) ^ (item.index as u64) ^ (item.image_count as u64).rotate_left(13);
+            for b in item.mode.as_bytes() {
+                h = h.wrapping_mul(31).wrapping_add(u64::from(*b));
+            }
+            for b in item.text.as_bytes() {
+                h = h.wrapping_mul(31).wrapping_add(u64::from(*b));
+            }
+        }
+        h
+    }
+
     fn publish_remote_snapshot(&mut self) {
         self.remote_snapshot_tick = self.remote_snapshot_tick.wrapping_add(1);
         let active_path = self.state.session_file.clone();
-        let active_waiting_len = active_path
+        let active_waiting = active_path
             .as_deref()
-            .and_then(|p| self.waiting.get(std::path::Path::new(p)))
-            .map(Vec::len)
-            .unwrap_or(0) as u64;
+            .map(|p| self.waiting_items_for(std::path::Path::new(p)))
+            .unwrap_or_default();
         let active_detail_rev = self
             .state
             .transcript_revision
@@ -378,7 +416,7 @@ impl Pui {
             .wrapping_add(u64::from(self.state.busy) << 56)
             .wrapping_add((self.state.dialogs.len() as u64) << 48)
             .wrapping_add((self.state.pending_messages.len() as u64) << 40)
-            .wrapping_add(active_waiting_len << 32);
+            ^ Self::waiting_fingerprint(&active_waiting);
 
         let mut details = BTreeMap::new();
         let mut allowed_artifacts = BTreeSet::new();
@@ -428,7 +466,7 @@ impl Pui {
                 origin,
                 messages: self.state.messages.clone(),
                 pending_messages: self.state.pending_messages.clone(),
-                waiting_messages: self.waiting_items_for(&path),
+                waiting_messages: active_waiting,
                 dialogs: self.state.dialogs.iter().cloned().collect(),
                 commands: self.state.commands.clone(),
                 models: self.state.models.clone(),
@@ -465,13 +503,16 @@ impl Pui {
                 .and_then(|m| m.title.clone())
                 .or_else(|| node.map(|n| n.name.clone()))
                 .unwrap_or_else(|| "Conversation".into());
+            let parked_waiting = self.waiting_items_for(&path);
             let detail_rev = chat
                 .state
                 .transcript_revision
                 .wrapping_mul(31)
                 .wrapping_add(chat.state.outputs_revision)
                 .wrapping_add(u64::from(chat.state.busy) << 56)
-                .wrapping_add((chat.state.dialogs.len() as u64) << 48);
+                .wrapping_add((chat.state.dialogs.len() as u64) << 48)
+                .wrapping_add((chat.state.pending_messages.len() as u64) << 40)
+                ^ Self::waiting_fingerprint(&parked_waiting);
             details.insert(
                 path_str.clone(),
                 SessionDetail {
@@ -502,7 +543,7 @@ impl Pui {
                     origin,
                     messages: chat.state.messages.clone(),
                     pending_messages: chat.state.pending_messages.clone(),
-                    waiting_messages: self.waiting_items_for(&path),
+                    waiting_messages: parked_waiting,
                     dialogs: chat.state.dialogs.iter().cloned().collect(),
                     commands: chat.state.commands.clone(),
                     models: chat.state.models.clone(),

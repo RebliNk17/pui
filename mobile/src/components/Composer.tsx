@@ -48,6 +48,7 @@ interface Props {
   slashCommands: SlashCommandItem[];
   waitingMessages?: WaitingMessageItem[];
   onRemoveQueued?: (index: number) => Promise<void>;
+  onSteerQueued?: (index: number) => Promise<void>;
   onFetchFileMentions: (cwd: string, query: string) => Promise<FileMentionItem[]>;
   onSend: (
     text: string,
@@ -75,6 +76,7 @@ export function Composer({
   slashCommands,
   waitingMessages = [],
   onRemoveQueued,
+  onSteerQueued,
   onFetchFileMentions,
   onSend,
   onAbort,
@@ -272,7 +274,7 @@ export function Composer({
           ]}
         >
           <Text style={[styles.queueHeader, { color: colors.muted }]}>
-            Queued ({waitingMessages.length})
+            Waiting messages · {waitingMessages.length}
           </Text>
           {waitingMessages.map((item) => (
             <View
@@ -284,9 +286,20 @@ export function Composer({
                   {item.mode === 'steer' ? 'Steer' : 'Queue'}
                 </Text>
               </View>
-              <Text numberOfLines={1} style={[styles.queueText, { color: colors.text }]}>
+              <Text numberOfLines={2} style={[styles.queueText, { color: colors.text }]}>
                 {item.text || `${item.image_count} image(s)`}
               </Text>
+              {item.mode !== 'steer' && onSteerQueued ? (
+                <Pressable
+                  onPress={() => void onSteerQueued(item.index)}
+                  style={[styles.steerNowBtn, { borderColor: colors.border }]}
+                  hitSlop={6}
+                >
+                  <Text style={{ color: colors.accent, fontSize: 10.5, fontWeight: '600' }}>
+                    Steer
+                  </Text>
+                </Pressable>
+              ) : null}
               {onRemoveQueued ? (
                 <Pressable onPress={() => void onRemoveQueued(item.index)} hitSlop={8}>
                   <Ionicons name="close" size={16} color={colors.dim} />
@@ -614,6 +627,12 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 12.5,
     textAlign: 'left',
+  },
+  steerNowBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 6,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
   },
   deliveryBar: {
     flexDirection: 'row',
