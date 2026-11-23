@@ -432,9 +432,12 @@ fn main() -> eframe::Result {
             .with_fullsize_content_view(true),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Pui",
         native,
         Box::new(move |cc| Ok(Box::new(app::Pui::new(cc, options)))),
-    )
+    );
+    // The app (and all browser views) are dropped; shut Chromium down once.
+    chromium::shutdown();
+    result
 }

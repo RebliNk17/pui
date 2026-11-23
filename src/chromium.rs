@@ -11,22 +11,40 @@ pub(crate) use privacy::{context_handler, context_settings};
 #[cfg(target_os = "macos")]
 pub use mac::{Runtime, prepare_application};
 
+// CEF supports exactly one initialize/shutdown cycle per process: calling
+// `cef_initialize` again after `cef_shutdown` (or after unloading the
+// framework) segfaults inside Chromium. The runtime is therefore created at
+// most once and retained until `shutdown` at application exit, and an
+// initialization failure is remembered instead of retried.
 #[cfg(target_os = "macos")]
 thread_local! {
-    static SHARED_RUNTIME: std::cell::RefCell<std::rc::Weak<Runtime>> = Default::default();
+    static SHARED_RUNTIME: std::cell::RefCell<Option<Result<std::rc::Rc<Runtime>, String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(target_os = "macos")]
 pub fn shared(ctx: &eframe::egui::Context) -> Result<std::rc::Rc<Runtime>, String> {
     SHARED_RUNTIME.with(|shared| {
-        if let Some(runtime) = shared.borrow().upgrade() {
-            return Ok(runtime);
-        }
-        let runtime = std::rc::Rc::new(Runtime::initialize(ctx)?);
-        *shared.borrow_mut() = std::rc::Rc::downgrade(&runtime);
-        Ok(runtime)
+        shared
+            .borrow_mut()
+            .get_or_insert_with(|| Runtime::initialize(ctx).map(std::rc::Rc::new))
+            .clone()
     })
 }
+
+/// Releases the process-wide runtime once the UI (and every browser) is gone.
+/// Later `shared` calls report an error rather than re-initializing CEF.
+#[cfg(target_os = "macos")]
+pub fn shutdown() {
+    let runtime = SHARED_RUNTIME.with(|shared| {
+        shared
+            .borrow_mut()
+            .replace(Err("Chromium has shut down.".into()))
+    });
+    drop(runtime);
+}
+#[cfg(not(target_os = "macos"))]
+pub fn shutdown() {}
 
 #[cfg(target_os = "macos")]
 pub fn live_browser_created() {
