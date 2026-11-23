@@ -56,6 +56,7 @@ const config: ExpoConfig = {
     './plugins/withTailscaleCleartext.js',
     './plugins/withReleaseSigning.js',
     './plugins/withKeepAliveService.js',
+    './plugins/withShareTarget.js',
   ],
   experiments: {
     typedRoutes: true,

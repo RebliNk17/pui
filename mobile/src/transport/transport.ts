@@ -116,6 +116,10 @@ export interface PuiTransport {
   abortSession(path?: string): Promise<void>;
   removeQueuedMessage(path: string | undefined, index: number): Promise<void>;
   steerQueuedMessage(path: string | undefined, index: number): Promise<void>;
+  renameSession(path: string, title: string): Promise<void>;
+  pinSession(path: string, pinned: boolean): Promise<void>;
+  deleteSession(path: string): Promise<void>;
+  forkSession(path: string, origin: SessionOrigin): Promise<{ ok: boolean; path?: string }>;
   answerDialog(input: {
     path?: string;
     dialog_id: string;
@@ -371,6 +375,34 @@ export class DirectTransport implements PuiTransport {
     await this.requestJson('/v1/sessions/queue/steer', {
       method: 'POST',
       body: JSON.stringify({ path, index }),
+    });
+  }
+
+  async renameSession(path: string, title: string): Promise<void> {
+    await this.requestJson('/v1/sessions/rename', {
+      method: 'POST',
+      body: JSON.stringify({ path, title }),
+    });
+  }
+
+  async pinSession(path: string, pinned: boolean): Promise<void> {
+    await this.requestJson('/v1/sessions/pin', {
+      method: 'POST',
+      body: JSON.stringify({ path, pinned }),
+    });
+  }
+
+  async deleteSession(path: string): Promise<void> {
+    await this.requestJson('/v1/sessions/delete', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    });
+  }
+
+  async forkSession(path: string, origin: SessionOrigin): Promise<{ ok: boolean; path?: string }> {
+    return this.requestJson('/v1/sessions/fork', {
+      method: 'POST',
+      body: JSON.stringify({ path, origin }),
     });
   }
 

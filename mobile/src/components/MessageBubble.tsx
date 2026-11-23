@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import type { MessageRecord, ToolRecord } from '../protocol/types';
 import { usePalette, type Palette } from '../theme/colors';
@@ -118,15 +119,24 @@ interface Props {
 export function MessageBubble({
   message,
   inlineTools,
+  highlighted = false,
   onOpenImage,
   onOpenFileTarget,
-}: Props) {
+}: Props & { highlighted?: boolean }) {
   const colors = usePalette();
   const isUser = message.role === 'user';
+  const [copiedMsg, setCopiedMsg] = useState(false);
 
   const toolsToShow = inlineTools ?? message.tools;
   const visualTools = toolsToShow.filter((t) => Boolean(t.visual));
   const openTools = toolsToShow.filter((t) => Boolean(t.open_target));
+
+  const copyText = (text: string) => {
+    if (!text.trim()) return;
+    void Clipboard.setStringAsync(text);
+    setCopiedMsg(true);
+    setTimeout(() => setCopiedMsg(false), 1600);
+  };
 
   if (isUser) {
     const displayText = cleanUserDisplayText(message.text);
@@ -134,10 +144,15 @@ export function MessageBubble({
     const singleImage = message.images.length === 1;
     return (
       <View style={styles.userRow}>
-        <View
+        <Pressable
+          onLongPress={() => copyText(displayText)}
           style={[
             styles.userBubble,
-            { backgroundColor: colors.userBubble, borderColor: colors.border },
+            {
+              backgroundColor: colors.userBubble,
+              borderColor: highlighted ? colors.accent : colors.border,
+              borderWidth: highlighted ? 1.5 : StyleSheet.hairlineWidth,
+            },
           ]}
         >
           {displayText ? (
@@ -184,14 +199,41 @@ export function MessageBubble({
               })}
             </ScrollView>
           ) : null}
-        </View>
+        </Pressable>
       </View>
     );
   }
 
   return (
-    <View style={styles.assistantRow}>
+    <View
+      style={[
+        styles.assistantRow,
+        highlighted && {
+          backgroundColor: colors.accentBg,
+          borderRadius: 12,
+          paddingVertical: 6,
+        },
+      ]}
+    >
       {message.text ? <MarkdownView text={message.text} colors={colors} /> : null}
+      {message.text.trim() ? (
+        <View style={styles.msgActionRow}>
+          <Pressable
+            onPress={() => copyText(message.text)}
+            hitSlop={8}
+            style={styles.msgCopyBtn}
+          >
+            <Ionicons
+              name={copiedMsg ? 'checkmark' : 'copy-outline'}
+              size={13}
+              color={copiedMsg ? colors.green : colors.dim}
+            />
+            <Text style={{ color: copiedMsg ? colors.green : colors.dim, fontSize: 11 }}>
+              {copiedMsg ? 'Copied' : 'Copy'}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {message.images.length > 0 ? (
         <View style={styles.imageGrid}>
@@ -412,23 +454,7 @@ function MarkdownBlockItem({
     );
   }
   if (block.type === 'code') {
-    return (
-      <View
-        style={[
-          styles.codeBlock,
-          { backgroundColor: colors.codeBg, borderColor: colors.border },
-        ]}
-      >
-        {block.lang ? (
-          <Text style={[styles.codeLang, { color: colors.dim }]}>{block.lang}</Text>
-        ) : null}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <Text selectable style={[styles.codeText, { color: colors.text }]}>
-            {block.code}
-          </Text>
-        </ScrollView>
-      </View>
-    );
+    return <CodeBlockCard lang={block.lang} code={block.code} colors={colors} />;
   }
   if (block.type === 'blockquote') {
     return (
@@ -505,6 +531,53 @@ function MarkdownBlockItem({
     );
   }
   return <InlineText text={block.text} colors={colors} />;
+}
+
+function CodeBlockCard({
+  lang,
+  code,
+  colors,
+}: {
+  lang: string;
+  code: string;
+  colors: Palette;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <View
+      style={[
+        styles.codeBlock,
+        { backgroundColor: colors.codeBg, borderColor: colors.border },
+      ]}
+    >
+      <View style={styles.codeHeadRow}>
+        <Text style={[styles.codeLang, { color: colors.dim }]}>{lang || 'code'}</Text>
+        <Pressable
+          onPress={() => {
+            void Clipboard.setStringAsync(code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1600);
+          }}
+          hitSlop={8}
+          style={styles.codeCopyBtn}
+        >
+          <Ionicons
+            name={copied ? 'checkmark' : 'copy-outline'}
+            size={12}
+            color={copied ? colors.green : colors.muted}
+          />
+          <Text style={{ color: copied ? colors.green : colors.muted, fontSize: 11 }}>
+            {copied ? 'Copied' : 'Copy'}
+          </Text>
+        </Pressable>
+      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <Text selectable style={[styles.codeText, { color: colors.text }]}>
+          {code}
+        </Text>
+      </ScrollView>
+    </View>
+  );
 }
 
 function ToolItem({
@@ -700,10 +773,34 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
   },
+  codeHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  codeCopyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  msgActionRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    marginTop: 6,
+  },
+  msgCopyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 2,
+  },
   codeLang: {
     fontSize: 10,
     fontWeight: '700',
-    marginBottom: 5,
     textTransform: 'uppercase',
   },
   codeText: {

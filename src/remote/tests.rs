@@ -262,6 +262,7 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
                 created_at: None,
             },
             parent_session: None,
+            pinned: false,
             is_active: true,
         }],
         details,
@@ -480,6 +481,8 @@ fn notifications_fire_on_finish_approval_and_questions_without_duplicates() {
     assert_eq!(n1.len(), 1);
     assert_eq!(n1[0].kind, "approval");
     assert_eq!(n1[0].body, "Allow bash?");
+    assert_eq!(n1[0].dialog_id.as_deref(), Some("dlg-1"));
+    assert_eq!(n1[0].dialog_method.as_deref(), Some("confirm"));
 
     // Repeated snapshot with same dialog emits zero duplicates.
     let n1_dup = server.collect_notifications(&make_snap(3, true, "", vec![approval]));

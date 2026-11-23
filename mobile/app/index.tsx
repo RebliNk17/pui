@@ -22,6 +22,7 @@ import { usePreferences } from '../src/store/preferencesStore';
 import { usePalette } from '../src/theme/colors';
 import { isRtlText } from '../src/utils/markdown';
 import {
+  childrenOfSession,
   filterSessions,
   formatRelativeAge,
   groupSessions,
@@ -46,6 +47,8 @@ export default function SessionsScreen() {
     deviceName,
     retryConnection,
     refreshSessions,
+    pendingShare,
+    setPendingShare,
   } = usePui();
 
   const [query, setQuery] = useState('');
@@ -57,6 +60,10 @@ export default function SessionsScreen() {
   const [usageOpen, setUsageOpen] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<ReleaseInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [actionTarget, setActionTarget] = useState<SessionSummary | null>(null);
+  const [renameMode, setRenameMode] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const { bindings, metrics } = useCustomScrollbar();
 
   useEffect(() => {
@@ -117,6 +124,8 @@ export default function SessionsScreen() {
 
   const renderSessionRow = ({ item }: { item: SessionSummary }) => {
     const isPhone = item.origin.platform === 'android' || item.origin.platform === 'ios';
+    const isChild = Boolean(item.parent_session);
+    const childCount = childrenOfSession(sessions, item.path).length;
     const dotColor = item.has_pending_dialog
       ? colors.amber
       : item.busy
@@ -128,31 +137,48 @@ export default function SessionsScreen() {
     return (
       <Pressable
         onPress={() => openSession(item)}
+        onLongPress={() => {
+          setActionTarget(item);
+          setRenameMode(false);
+          setRenameDraft(item.title);
+          setConfirmDelete(false);
+        }}
         style={({ pressed }) => [
           styles.sessionRow,
+          isChild && { paddingLeft: 28 },
           (pressed || item.has_pending_dialog) && {
             backgroundColor: colors.surface,
           },
         ]}
       >
+        {isChild ? (
+          <Ionicons name="return-down-forward-outline" size={12} color={colors.dim} />
+        ) : null}
         <View style={[styles.rowDot, { backgroundColor: dotColor }]} />
         <View style={styles.rowMiddle}>
-          <Text
-            numberOfLines={1}
-            style={[
-              styles.rowTitle,
-              {
-                color: colors.text,
-                textAlign: titleRtl ? 'right' : 'left',
-              },
-            ]}
-          >
-            {item.title}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+            {item.pinned ? (
+              <Ionicons name="pin" size={11} color={colors.accent} />
+            ) : null}
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.rowTitle,
+                {
+                  flex: 1,
+                  color: colors.text,
+                  textAlign: titleRtl ? 'right' : 'left',
+                },
+              ]}
+            >
+              {item.title}
+            </Text>
+          </View>
           <View style={styles.rowSubLine}>
             <Text numberOfLines={1} style={[styles.rowMeta, { color: colors.muted }]}>
               {item.project_name}
               {item.busy ? ' · Working…' : item.has_pending_dialog ? ' · Needs approval' : ''}
+              {childCount > 0 ? ` · ${childCount} subagent${childCount > 1 ? 's' : ''}` : ''}
             </Text>
             {isPhone ? (
               <View style={[styles.originPill, { backgroundColor: colors.accentBg }]}>
@@ -227,6 +253,29 @@ export default function SessionsScreen() {
           </Pressable>
         </View>
       </View>
+
+      {pendingShare ? (
+        <View
+          style={[
+            styles.banner,
+            {
+              backgroundColor: colors.accentBg,
+              borderBottomWidth: StyleSheet.hairlineWidth,
+              borderBottomColor: colors.accent,
+            },
+          ]}
+        >
+          <Ionicons name="share-outline" size={16} color={colors.accent} />
+          <Text numberOfLines={2} style={{ color: colors.text, fontSize: 12, flex: 1, textAlign: 'left' }}>
+            {pendingShare.imageBase64
+              ? 'Shared photo ready — tap any chat to attach it.'
+              : 'Shared text ready — tap any chat to prefill it.'}
+          </Text>
+          <Pressable onPress={() => setPendingShare(null)} hitSlop={8}>
+            <Ionicons name="close" size={16} color={colors.muted} />
+          </Pressable>
+        </View>
+      ) : null}
 
       {availableUpdate && !updateDismissed ? (
         <View
@@ -477,6 +526,156 @@ export default function SessionsScreen() {
             ))}
           </Pressable>
         </Pressable>
+      </Modal>
+
+      {/* Long-press Session Management Sheet (Pin / Rename / Fork / Delete) */}
+      <Modal
+        visible={Boolean(actionTarget)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setActionTarget(null)}
+      >
+        <View style={styles.modalBg}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setActionTarget(null)}
+          />
+          {actionTarget ? (
+            <View
+              style={[
+                styles.sheet,
+                { backgroundColor: colors.surface, borderColor: colors.border },
+              ]}
+            >
+              <Text numberOfLines={1} style={[styles.sheetTitle, { color: colors.text }]}>
+                {actionTarget.title}
+              </Text>
+
+              {renameMode ? (
+                <View style={{ gap: 10, paddingTop: 4 }}>
+                  <TextInput
+                    autoFocus
+                    value={renameDraft}
+                    onChangeText={setRenameDraft}
+                    placeholder="New session title"
+                    placeholderTextColor={colors.dim}
+                    style={[
+                      styles.renameInput,
+                      {
+                        backgroundColor: colors.bg,
+                        color: colors.text,
+                        borderColor: colors.border,
+                      },
+                    ]}
+                  />
+                  <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+                    <Pressable
+                      onPress={() => setRenameMode(false)}
+                      style={[styles.actionMiniBtn, { borderColor: colors.border }]}
+                    >
+                      <Text style={{ color: colors.muted, fontSize: 13 }}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={async () => {
+                        const trimmed = renameDraft.trim();
+                        if (trimmed && transport) {
+                          await transport.renameSession(actionTarget.path, trimmed).catch(() => {});
+                          setTimeout(() => void refreshSessions().catch(() => {}), 200);
+                        }
+                        setActionTarget(null);
+                      }}
+                      style={[styles.actionMiniBtn, { backgroundColor: colors.accent, borderColor: colors.accent }]}
+                    >
+                      <Text style={{ color: '#fff', fontSize: 13, fontWeight: '600' }}>Save</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : (
+                <>
+                  <Pressable
+                    onPress={async () => {
+                      if (transport) {
+                        await transport
+                          .pinSession(actionTarget.path, !actionTarget.pinned)
+                          .catch(() => {});
+                        setTimeout(() => void refreshSessions().catch(() => {}), 200);
+                      }
+                      setActionTarget(null);
+                    }}
+                    style={[styles.sheetRow, { gap: 10 }]}
+                  >
+                    <Ionicons
+                      name={actionTarget.pinned ? 'pin-outline' : 'pin'}
+                      size={17}
+                      color={colors.accent}
+                    />
+                    <Text style={{ color: colors.text, fontSize: 14, flex: 1 }}>
+                      {actionTarget.pinned ? 'Unpin session' : 'Pin session'}
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={() => setRenameMode(true)}
+                    style={[styles.sheetRow, { gap: 10 }]}
+                  >
+                    <Ionicons name="pencil-outline" size={17} color={colors.muted} />
+                    <Text style={{ color: colors.text, fontSize: 14, flex: 1 }}>
+                      Rename session
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={async () => {
+                      const target = actionTarget;
+                      setActionTarget(null);
+                      if (!transport) return;
+                      try {
+                        const res = await transport.forkSession(target.path, clientOrigin());
+                        void refreshSessions().catch(() => {});
+                        if (res.path) {
+                          void transport.openSession(res.path).catch(() => {});
+                          router.push({
+                            pathname: '/chat/[id]',
+                            params: { id: encodeURIComponent(res.path) },
+                          });
+                        }
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    style={[styles.sheetRow, { gap: 10 }]}
+                  >
+                    <Ionicons name="git-branch-outline" size={17} color={colors.muted} />
+                    <Text style={{ color: colors.text, fontSize: 14, flex: 1 }}>
+                      Fork conversation
+                    </Text>
+                  </Pressable>
+
+                  <Pressable
+                    onPress={async () => {
+                      if (!confirmDelete) {
+                        setConfirmDelete(true);
+                        return;
+                      }
+                      const target = actionTarget;
+                      setActionTarget(null);
+                      if (transport) {
+                        await transport.deleteSession(target.path).catch(() => {});
+                        setTimeout(() => void refreshSessions().catch(() => {}), 200);
+                      }
+                    }}
+                    style={[styles.sheetRow, { gap: 10 }]}
+                  >
+                    <Ionicons name="trash-outline" size={17} color={colors.red} />
+                    <Text style={{ color: colors.red, fontSize: 14, fontWeight: confirmDelete ? '700' : '500', flex: 1 }}>
+                      {confirmDelete ? 'Tap again to confirm delete' : 'Delete session'}
+                    </Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          ) : null}
+        </View>
       </Modal>
 
       <UsageSheet
@@ -771,5 +970,19 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '700',
+  },
+  renameInput: {
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    fontSize: 14,
+    textAlign: 'left',
+  },
+  actionMiniBtn: {
+    borderWidth: 1,
+    borderRadius: 9,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
   },
 });

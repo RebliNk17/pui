@@ -18,6 +18,7 @@ import type {
   SlashCommandItem,
   WaitingMessageItem,
 } from '../protocol/types';
+import { clearChatDraft, loadChatDraft, saveChatDraft } from '../services/drafts';
 import { usePalette } from '../theme/colors';
 import {
   applyCompletion,
@@ -36,8 +37,10 @@ interface DraftImage {
 }
 
 interface Props {
+  sessionPath?: string;
   cwd: string;
   busy: boolean;
+  prefill?: { id: number; text?: string; imageBase64?: string; imageMime?: string } | null;
   permissionMode: string;
   permissionModes: PermissionModeOption[];
   currentModelId: string;
@@ -64,8 +67,10 @@ interface Props {
 }
 
 export function Composer({
+  sessionPath,
   cwd,
   busy,
+  prefill,
   permissionMode,
   permissionModes,
   currentModelId,
@@ -97,6 +102,58 @@ export function Composer({
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [deliveryMode, setDeliveryMode] = useState<'steer' | 'queue'>('queue');
+  const [draftHydrated, setDraftHydrated] = useState(false);
+
+  // Hydrate offline per-chat draft on open.
+  useEffect(() => {
+    let cancelled = false;
+    setDraftHydrated(false);
+    if (!sessionPath) {
+      setDraftHydrated(true);
+      return;
+    }
+    loadChatDraft(sessionPath)
+      .then((saved) => {
+        if (!cancelled && saved) {
+          setText((cur) => (cur ? cur : saved));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setDraftHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionPath]);
+
+  // Autosave unsent composer text per chat (debounced).
+  useEffect(() => {
+    if (!sessionPath || !draftHydrated) return;
+    const handle = setTimeout(() => {
+      void saveChatDraft(sessionPath, text);
+    }, 350);
+    return () => clearTimeout(handle);
+  }, [sessionPath, text, draftHydrated]);
+
+  // Apply incoming prefill (from Android Share Sheet or Changes tab actions).
+  useEffect(() => {
+    if (!prefill) return;
+    if (prefill.text) {
+      setText((cur) => (cur ? `${cur}\n${prefill.text}` : prefill.text!));
+    }
+    if (prefill.imageBase64) {
+      const mime = prefill.imageMime || 'image/jpeg';
+      setImages((prev) => [
+        ...prev,
+        {
+          uri: `data:${mime};base64,${prefill.imageBase64}`,
+          data_base64: prefill.imageBase64!,
+          mime,
+          name: 'shared-image.jpg',
+        },
+      ]);
+    }
+  }, [prefill]);
 
   const token = useMemo(
     () => detectCompletionToken(text, selection.start),
@@ -193,6 +250,7 @@ export function Composer({
       setText('');
       setImages([]);
       setSelection({ start: 0, end: 0 });
+      if (sessionPath) void clearChatDraft(sessionPath);
     } finally {
       setSending(false);
     }

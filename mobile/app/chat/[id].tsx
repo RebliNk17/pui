@@ -7,8 +7,10 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -28,6 +30,8 @@ import type { SlashCommandItem } from '../../src/protocol/types';
 import { usePui } from '../../src/store/connectionStore';
 import { usePreferences } from '../../src/store/preferencesStore';
 import { usePalette } from '../../src/theme/colors';
+import { findMatchingEntryIndices } from '../../src/utils/search';
+import { childrenOfSession } from '../../src/utils/sessions';
 import { groupTranscript } from '../../src/utils/transcript';
 
 type Tab = 'chat' | 'artifacts' | 'files' | 'changes';
@@ -46,6 +50,8 @@ export default function ChatScreen() {
     clientOrigin,
     loadSessionDetail,
     setActiveChatPath,
+    pendingShare,
+    setPendingShare,
   } = usePui();
 
   useEffect(() => {
@@ -61,7 +67,29 @@ export default function ChatScreen() {
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findCursor, setFindCursor] = useState(0);
+  const [composerPrefill, setComposerPrefill] = useState<{
+    id: number;
+    text?: string;
+    imageBase64?: string;
+    imageMime?: string;
+  } | null>(null);
   const [androidKeyboardHeight, setAndroidKeyboardHeight] = useState(0);
+
+  // Consume any incoming Android Share Sheet payload when entering this chat.
+  useEffect(() => {
+    if (!pendingShare) return;
+    setComposerPrefill({
+      id: Date.now(),
+      text: pendingShare.text,
+      imageBase64: pendingShare.imageBase64,
+      imageMime: pendingShare.imageMime,
+    });
+    setPendingShare(null);
+    setTab('chat');
+  }, [pendingShare, setPendingShare]);
   const listRef = useRef<FlatList>(null);
   const { bindings, metrics } = useCustomScrollbar();
 
@@ -113,6 +141,37 @@ export default function ChatScreen() {
     () => groupTranscript(detail?.messages ?? []).reverse(),
     [detail?.messages],
   );
+  const childAgents = useMemo(
+    () => childrenOfSession(sessions, sessionPath),
+    [sessions, sessionPath],
+  );
+  const findMatches = useMemo(
+    () => (findOpen ? findMatchingEntryIndices(reversedEntries, findQuery) : []),
+    [findOpen, reversedEntries, findQuery],
+  );
+  const activeMatchIndex =
+    findMatches.length > 0 ? findMatches[findCursor % findMatches.length] : -1;
+
+  useEffect(() => {
+    setFindCursor(0);
+  }, [findQuery]);
+
+  const jumpToMatch = (nextCursor: number) => {
+    if (findMatches.length === 0) return;
+    const normalized = ((nextCursor % findMatches.length) + findMatches.length) % findMatches.length;
+    setFindCursor(normalized);
+    const targetIdx = findMatches[normalized];
+    try {
+      listRef.current?.scrollToIndex({ index: targetIdx, animated: true, viewPosition: 0.5 });
+    } catch {
+      // ignore if item hasn't measured yet
+    }
+  };
+
+  const prefillInChat = (promptText: string) => {
+    setTab('chat');
+    setComposerPrefill({ id: Date.now(), text: promptText });
+  };
   const contextProgress =
     detail && detail.context_window > 0 && detail.context_tokens != null
       ? detail.context_tokens / detail.context_window
@@ -186,6 +245,103 @@ export default function ChatScreen() {
         </View>
       </View>
 
+      {/* Subagents bar (when this chat has spawned child workers) */}
+      {tab === 'chat' && childAgents.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={[styles.subagentBar, { borderBottomColor: colors.hairline, backgroundColor: colors.surface }]}
+          contentContainerStyle={styles.subagentBarContent}
+        >
+          <Ionicons name="git-branch-outline" size={13} color={colors.muted} />
+          <Text style={{ color: colors.dim, fontSize: 11, fontWeight: '600' }}>
+            Subagents ({childAgents.length})
+          </Text>
+          {childAgents.map((child) => (
+            <Pressable
+              key={child.path}
+              onPress={() => {
+                void transport?.openSession(child.path).catch(() => {});
+                router.push({
+                  pathname: '/chat/[id]',
+                  params: { id: encodeURIComponent(child.path) },
+                });
+              }}
+              style={[
+                styles.subagentChip,
+                { backgroundColor: colors.bg, borderColor: colors.border },
+              ]}
+            >
+              <View
+                style={[
+                  styles.subagentDot,
+                  {
+                    backgroundColor: child.has_pending_dialog
+                      ? colors.amber
+                      : child.busy
+                        ? colors.accent
+                        : colors.green,
+                  },
+                ]}
+              />
+              <Text numberOfLines={1} style={{ color: colors.text, fontSize: 11.5, maxWidth: 140 }}>
+                {child.title}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      ) : null}
+
+      {/* In-chat Find bar */}
+      {tab === 'chat' && findOpen ? (
+        <View
+          style={[
+            styles.findBar,
+            { backgroundColor: colors.surface, borderBottomColor: colors.border },
+          ]}
+        >
+          <Ionicons name="search-outline" size={15} color={colors.dim} />
+          <TextInput
+            autoFocus
+            value={findQuery}
+            onChangeText={setFindQuery}
+            placeholder="Find in chat…"
+            placeholderTextColor={colors.dim}
+            style={[styles.findInput, { color: colors.text }]}
+          />
+          {findQuery.trim() ? (
+            <Text style={{ color: colors.muted, fontSize: 11.5 }}>
+              {findMatches.length > 0 ? `${(findCursor % findMatches.length) + 1}/${findMatches.length}` : '0'}
+            </Text>
+          ) : null}
+          <Pressable
+            onPress={() => jumpToMatch(findCursor + 1)}
+            disabled={findMatches.length === 0}
+            hitSlop={6}
+            style={{ opacity: findMatches.length > 0 ? 1 : 0.35 }}
+          >
+            <Ionicons name="chevron-up" size={18} color={colors.text} />
+          </Pressable>
+          <Pressable
+            onPress={() => jumpToMatch(findCursor - 1)}
+            disabled={findMatches.length === 0}
+            hitSlop={6}
+            style={{ opacity: findMatches.length > 0 ? 1 : 0.35 }}
+          >
+            <Ionicons name="chevron-down" size={18} color={colors.text} />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              setFindOpen(false);
+              setFindQuery('');
+            }}
+            hitSlop={6}
+          >
+            <Ionicons name="close" size={18} color={colors.muted} />
+          </Pressable>
+        </View>
+      ) : null}
+
       <KeyboardAvoidingView
         style={{ flex: 1, paddingBottom: Platform.OS === 'android' ? androidKeyboardHeight : 0 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -210,8 +366,12 @@ export default function ChatScreen() {
                   initialNumToRender={12}
                   maxToRenderPerBatch={10}
                   windowSize={7}
+                  onScrollToIndexFailed={({ index }) => {
+                    listRef.current?.scrollToOffset({ offset: index * 120, animated: true });
+                  }}
                   contentContainerStyle={{ paddingVertical: 10 }}
-                  renderItem={({ item }) => {
+                  renderItem={({ item, index }) => {
+                    const isHit = index === activeMatchIndex;
                     if (item.kind === 'activity') {
                       return (
                         <ActivityGroupRow
@@ -229,6 +389,7 @@ export default function ChatScreen() {
                       return (
                         <MessageBubble
                           message={item.message}
+                          highlighted={isHit}
                           onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
                           onOpenFileTarget={openFileInTree}
                         />
@@ -238,6 +399,7 @@ export default function ChatScreen() {
                       <MessageBubble
                         message={item.message}
                         inlineTools={item.inlineTools}
+                        highlighted={isHit}
                         onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
                         onOpenFileTarget={openFileInTree}
                       />
@@ -311,8 +473,10 @@ export default function ChatScreen() {
             ) : null}
 
             <Composer
+              sessionPath={sessionPath}
               cwd={cwd}
               busy={Boolean(detail?.busy)}
+              prefill={composerPrefill}
               permissionMode={detail?.permission_mode ?? 'auto'}
               permissionModes={permissionModes}
               currentModelId={detail?.model ?? ''}
@@ -390,7 +554,7 @@ export default function ChatScreen() {
             onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
           />
         ) : (
-          <ChangesView cwd={cwd} transport={transport} />
+          <ChangesView cwd={cwd} transport={transport} onAskPi={prefillInChat} />
         )}
       </KeyboardAvoidingView>
 
@@ -467,6 +631,18 @@ export default function ChatScreen() {
             })}
 
             <View style={[styles.menuDivider, { backgroundColor: colors.hairline }]} />
+
+            <Pressable
+              onPress={() => {
+                setTab('chat');
+                setFindOpen(true);
+                setMenuOpen(false);
+              }}
+              style={styles.menuRow}
+            >
+              <Ionicons name="search-outline" size={17} color={colors.muted} />
+              <Text style={[styles.menuLabel, { color: colors.text }]}>Find in chat</Text>
+            </Pressable>
 
             <Pressable
               onPress={() => {
@@ -643,5 +819,44 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  subagentBar: {
+    flexGrow: 0,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  subagentBarContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  subagentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  subagentDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  findBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  findInput: {
+    flex: 1,
+    fontSize: 13.5,
+    paddingVertical: 4,
+    textAlign: 'left',
   },
 });

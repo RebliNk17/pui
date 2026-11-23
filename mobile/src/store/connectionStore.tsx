@@ -12,6 +12,7 @@ import type {
 } from '../protocol/types';
 import { startBackgroundKeepAlive, stopBackgroundKeepAlive } from '../services/keepAlive';
 import { presentAgentNotification } from '../services/notifications';
+import type { SharedPayload } from '../services/shareIntent';
 import {
   CloudRelayTransport,
   DirectTransport,
@@ -97,6 +98,8 @@ export interface PuiContextValue {
   refreshSessions: () => Promise<void>;
   loadSessionDetail: (path: string) => Promise<SessionDetail | null>;
   setActiveChatPath: (path: string | null) => void;
+  pendingShare: SharedPayload | null;
+  setPendingShare: (payload: SharedPayload | null) => void;
 }
 
 const PuiContext = createContext<PuiContextValue | null>(null);
@@ -118,6 +121,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [detailsByPath, setDetailsByPath] = useState<Record<string, SessionDetail>>({});
   const [transport, setTransport] = useState<PuiTransport | null>(null);
+  const [pendingShare, setPendingShare] = useState<SharedPayload | null>(null);
 
   const appStateRef = useRef<string>(AppState.currentState || 'active');
   const activeChatPathRef = useRef<string | null>(null);
@@ -406,6 +410,8 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     refreshSessions,
     loadSessionDetail,
     setActiveChatPath,
+    pendingShare,
+    setPendingShare,
   };
 
   return <PuiContext.Provider value={value}>{children}</PuiContext.Provider>;

@@ -389,6 +389,94 @@ impl Pui {
                     }
                 }
             }
+            RemoteCommand::RenameSession { path, title } => {
+                if self
+                    .sessions
+                    .iter()
+                    .any(|s| sidebar_tree::same_path(&s.path, &path))
+                {
+                    let canonical = self
+                        .sessions
+                        .iter()
+                        .find(|s| sidebar_tree::same_path(&s.path, &path))
+                        .map(|s| s.path.clone())
+                        .unwrap_or(path);
+                    self.prefs.chats.entry(canonical.clone()).or_default().title =
+                        Some(title.clone());
+                    let _ = self.with_live_chat(&canonical, |app| {
+                        app.state.session_name = title.clone();
+                        app.send(json!({ "type": "set_session_name", "name": title }));
+                    });
+                    self.refresh_sessions();
+                }
+            }
+            RemoteCommand::PinSession { path, pinned } => {
+                if let Some(canonical) = self
+                    .sessions
+                    .iter()
+                    .find(|s| sidebar_tree::same_path(&s.path, &path))
+                    .map(|s| s.path.clone())
+                {
+                    self.prefs.chats.entry(canonical).or_default().pinned = pinned;
+                }
+            }
+            RemoteCommand::DeleteSession { path } => {
+                let Some(canonical) = self
+                    .sessions
+                    .iter()
+                    .find(|s| sidebar_tree::same_path(&s.path, &path))
+                    .map(|s| s.path.clone())
+                else {
+                    return;
+                };
+                let is_desktop_active =
+                    self.state.session_file.as_deref().is_some_and(|p| {
+                        sidebar_tree::same_path(std::path::Path::new(p), &canonical)
+                    });
+                if is_desktop_active {
+                    // Never rip Desktop's currently visible chat out from under the user; hide instead.
+                    self.prefs.chats.entry(canonical).or_default().hidden = true;
+                } else {
+                    if let Some(id) = self.agent_for_path(&canonical) {
+                        if let Some(mut parked) = self.agents.parked.remove(&id) {
+                            if let Some(client) = parked.client.take() {
+                                client.retire();
+                            }
+                        }
+                        self.agents.nodes.remove(&id);
+                    }
+                    let _ = std::fs::remove_file(&canonical);
+                    self.prefs.chats.remove(&canonical);
+                    self.sessions
+                        .retain(|s| !sidebar_tree::same_path(&s.path, &canonical));
+                    self.refresh_sessions();
+                }
+            }
+            RemoteCommand::RegisterFork {
+                source,
+                target,
+                origin,
+            } => {
+                let source_title = self
+                    .prefs
+                    .chats
+                    .get(&source)
+                    .and_then(|m| m.title.clone())
+                    .or_else(|| {
+                        self.sessions
+                            .iter()
+                            .find(|s| sidebar_tree::same_path(&s.path, &source))
+                            .map(|s| s.title.clone())
+                    })
+                    .unwrap_or_else(|| "Conversation".into());
+                let meta = self.prefs.chats.entry(target.clone()).or_default();
+                meta.parent_session = Some(source);
+                meta.title = Some(format!("{source_title} (fork)"));
+                meta.origin = Some(origin.clone());
+                sessions::remember_origin(&target, origin);
+                self.refresh_sessions();
+                let _ = self.ensure_background_live_chat(&target);
+            }
             RemoteCommand::RefreshUsage => {
                 let ctx = self.ctx.clone();
                 self.usage.refresh(&ctx, true);
@@ -599,6 +687,10 @@ impl Pui {
             if !seen_paths.insert(path_str.clone()) {
                 continue;
             }
+            if self.prefs.chats.get(&s.path).is_some_and(|m| m.hidden) {
+                continue;
+            }
+            let pinned = self.prefs.chats.get(&s.path).is_some_and(|m| m.pinned);
             let is_active = active_path
                 .as_deref()
                 .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), &s.path));
@@ -651,6 +743,7 @@ impl Pui {
                 created_ms,
                 origin,
                 parent_session,
+                pinned,
                 is_active,
             });
         }
@@ -675,6 +768,7 @@ impl Pui {
                         created_ms: detail.origin.created_at,
                         origin: detail.origin.clone(),
                         parent_session: None,
+                        pinned: false,
                         is_active: active_path.as_deref() == Some(path_str.as_str()),
                     },
                 );

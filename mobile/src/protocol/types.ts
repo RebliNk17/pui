@@ -52,6 +52,7 @@ export interface SessionSummary {
   created_ms?: number | null;
   origin: SessionOrigin;
   parent_session?: string | null;
+  pinned?: boolean;
   is_active: boolean;
 }
 
@@ -266,6 +267,8 @@ export interface NotificationEvent {
   title: string;
   body: string;
   timestamp: number;
+  dialog_id?: string | null;
+  dialog_method?: string | null;
 }
 
 export type WsServerEvent =

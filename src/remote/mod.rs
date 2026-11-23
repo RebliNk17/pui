@@ -157,6 +157,8 @@ pub struct SessionSummary {
     pub origin: SessionOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
     pub is_active: bool,
 }
 
@@ -234,6 +236,10 @@ pub struct NotificationEvent {
     pub title: String,
     pub body: String,
     pub timestamp: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -300,6 +306,22 @@ pub enum RemoteCommand {
     SteerQueued {
         path: Option<PathBuf>,
         index: usize,
+    },
+    RenameSession {
+        path: PathBuf,
+        title: String,
+    },
+    PinSession {
+        path: PathBuf,
+        pinned: bool,
+    },
+    DeleteSession {
+        path: PathBuf,
+    },
+    RegisterFork {
+        source: PathBuf,
+        target: PathBuf,
+        origin: SessionOrigin,
     },
     RefreshUsage,
 }
@@ -568,6 +590,7 @@ impl RemoteServer {
                     continue;
                 }
                 let (kind, body) = classify_dialog_notification(dialog);
+                let dialog_method = dialog["method"].as_str().map(str::to_owned);
                 events.push(NotificationEvent {
                     id: format!("{kind}:{dialog_id}"),
                     kind: kind.to_owned(),
@@ -575,6 +598,8 @@ impl RemoteServer {
                     title: session_title.clone(),
                     body,
                     timestamp: now,
+                    dialog_id: Some(dialog_id.to_owned()),
+                    dialog_method,
                 });
             }
 
@@ -588,6 +613,8 @@ impl RemoteServer {
                     title: session_title,
                     body,
                     timestamp: now,
+                    dialog_id: None,
+                    dialog_method: None,
                 });
             }
         }
@@ -1353,6 +1380,164 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
             (shared.wake)();
             let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
         }
+        ("POST", "/v1/sessions/rename") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(path) = body["path"].as_str().filter(|s| !s.is_empty()) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing session path." }),
+                );
+                return;
+            };
+            let title = body["title"].as_str().unwrap_or("").trim();
+            if title.is_empty() {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Title cannot be empty." }),
+                );
+                return;
+            }
+            let _ = shared.cmd_tx.send(RemoteCommand::RenameSession {
+                path: PathBuf::from(path),
+                title: title.chars().take(120).collect(),
+            });
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
+        }
+        ("POST", "/v1/sessions/pin") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(path) = body["path"].as_str().filter(|s| !s.is_empty()) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing session path." }),
+                );
+                return;
+            };
+            let pinned = body["pinned"].as_bool().unwrap_or(true);
+            let _ = shared.cmd_tx.send(RemoteCommand::PinSession {
+                path: PathBuf::from(path),
+                pinned,
+            });
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
+        }
+        ("POST", "/v1/sessions/delete") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(path) = body["path"].as_str().filter(|s| !s.is_empty()) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing session path." }),
+                );
+                return;
+            };
+            let _ = shared.cmd_tx.send(RemoteCommand::DeleteSession {
+                path: PathBuf::from(path),
+            });
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
+        }
+        ("POST", "/v1/sessions/fork") => {
+            let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Invalid JSON." }),
+                );
+                return;
+            };
+            let Some(path_str) = body["path"].as_str().filter(|s| !s.is_empty()) else {
+                let _ = http::write_json(
+                    stream,
+                    400,
+                    "Bad Request",
+                    &json!({ "error": "Missing session path." }),
+                );
+                return;
+            };
+            let known = shared
+                .snapshot
+                .read()
+                .ok()
+                .is_some_and(|s| s.sessions.iter().any(|item| item.path == path_str));
+            if !known {
+                let _ = http::write_json(
+                    stream,
+                    404,
+                    "Not Found",
+                    &json!({ "error": "Session not found." }),
+                );
+                return;
+            }
+            let origin: SessionOrigin = body
+                .get("origin")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or(SessionOrigin {
+                    platform: OriginPlatform::Android,
+                    device: None,
+                    client: Some("pui-mobile".into()),
+                    created_at: Some(chrono::Utc::now().timestamp_millis()),
+                })
+                .sanitized();
+            let source = PathBuf::from(path_str);
+            match fork_session_jsonl(&source, &origin) {
+                Ok(target) => {
+                    let target_str = target.to_string_lossy().into_owned();
+                    let _ = shared.cmd_tx.send(RemoteCommand::RegisterFork {
+                        source,
+                        target,
+                        origin,
+                    });
+                    (shared.wake)();
+                    let _ = http::write_json(
+                        stream,
+                        201,
+                        "Created",
+                        &json!({ "ok": true, "path": target_str }),
+                    );
+                }
+                Err(msg) => {
+                    let _ = http::write_json(
+                        stream,
+                        500,
+                        "Internal Server Error",
+                        &json!({ "error": msg }),
+                    );
+                }
+            }
+        }
         ("GET", "/v1/completions/commands") => {
             let query = req
                 .query_param("q")
@@ -1624,4 +1809,38 @@ fn classify_dialog_notification(dialog: &Value) -> (&'static str, String) {
         "Tool approval needed.".to_owned()
     };
     ("approval", truncate_chars(&body, 140))
+}
+
+fn fork_session_jsonl(source: &std::path::Path, origin: &SessionOrigin) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Invalid session directory.".to_owned())?;
+    let raw = std::fs::read_to_string(source)
+        .map_err(|e| format!("Could not read source session: {e}"))?;
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
+    let target = parent.join(format!("{ts}_{new_id}.jsonl"));
+
+    let mut lines: Vec<String> = raw.lines().map(str::to_owned).collect();
+    if let Some(first) = lines.first_mut() {
+        if let Ok(mut hdr) = serde_json::from_str::<Value>(first) {
+            if hdr.get("type").and_then(Value::as_str) == Some("session") {
+                hdr["id"] = Value::String(new_id);
+                hdr["timestamp"] = Value::String(chrono::Utc::now().to_rfc3339());
+                hdr["parentSession"] = Value::String(source.to_string_lossy().into_owned());
+                if let Ok(serialized) = serde_json::to_string(&hdr) {
+                    *first = serialized;
+                }
+            }
+        }
+    }
+    if let Ok(origin_line) = serde_json::to_string(&origin.custom_jsonl_entry()) {
+        lines.push(origin_line);
+    }
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    std::fs::write(&target, output).map_err(|e| format!("Could not write forked session: {e}"))?;
+    Ok(target)
 }

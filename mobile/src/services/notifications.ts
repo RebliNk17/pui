@@ -3,6 +3,10 @@ import * as Notifications from 'expo-notifications';
 import type { NotificationEvent } from '../protocol/types';
 import { formatNotificationContent } from '../utils/notifications';
 
+export const APPROVAL_CATEGORY_ID = 'pui-approval';
+export const ACTION_APPROVE = 'pui-approve';
+export const ACTION_DENY = 'pui-deny';
+
 let initialized = false;
 
 export async function initNotifications(): Promise<void> {
@@ -17,6 +21,20 @@ export async function initNotifications(): Promise<void> {
       shouldSetBadge: false,
     }),
   });
+
+  // Register interactive Approve / Deny lock-screen buttons for tool approval notifications.
+  await Notifications.setNotificationCategoryAsync(APPROVAL_CATEGORY_ID, [
+    {
+      identifier: ACTION_APPROVE,
+      buttonTitle: 'Approve',
+      options: { opensAppToForeground: false },
+    },
+    {
+      identifier: ACTION_DENY,
+      buttonTitle: 'Deny',
+      options: { opensAppToForeground: false, isDestructive: true },
+    },
+  ]).catch(() => {});
 
   if (Platform.OS === 'android') {
     await Notifications.setNotificationChannelAsync('pui-agent-finished', {
@@ -61,7 +79,7 @@ export async function requestNotificationPermission(): Promise<
     if (res.granted) return 'granted';
     return res.canAskAgain ? 'undetermined' : 'denied';
   } catch {
-    return 'denied';
+    return 'undetermined';
   }
 }
 
@@ -72,14 +90,19 @@ export async function presentAgentNotification(event: NotificationEvent): Promis
   if (status !== 'granted') return;
 
   const formatted = formatNotificationContent(event);
+  const canQuickApprove = event.kind === 'approval' && Boolean(event.dialog_id);
+
   await Notifications.scheduleNotificationAsync({
     content: {
       title: formatted.title,
       body: formatted.body,
       sound: 'default',
+      ...(canQuickApprove ? { categoryIdentifier: APPROVAL_CATEGORY_ID } : {}),
       data: {
         path: event.path,
         kind: event.kind,
+        dialogId: event.dialog_id ?? null,
+        dialogMethod: event.dialog_method ?? null,
       },
       ...(Platform.OS === 'android' ? { channelId: formatted.channelId } : {}),
     },

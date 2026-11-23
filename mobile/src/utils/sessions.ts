@@ -85,17 +85,44 @@ export function sortSessions(
   return copy;
 }
 
+export function childrenOfSession(
+  sessions: SessionSummary[],
+  parentPath: string,
+): SessionSummary[] {
+  return sessions
+    .filter((s) => s.parent_session === parentPath)
+    .sort((a, b) => b.modified_ms - a.modified_ms);
+}
+
 export function groupSessions(
   sessions: SessionSummary[],
   grouping: SessionGrouping,
   ordering: SessionOrdering,
   nowMs = Date.now(),
 ): SessionSection[] {
-  const sorted = sortSessions(sessions, ordering);
+  const pinned = sortSessions(
+    sessions.filter((s) => Boolean(s.pinned)),
+    ordering,
+  );
+  const rest = sortSessions(
+    sessions.filter((s) => !s.pinned),
+    ordering,
+  );
+  const sections: SessionSection[] = [];
+  if (pinned.length > 0) {
+    sections.push({
+      key: 'pinned',
+      title: 'Pinned',
+      count: pinned.length,
+      data: pinned,
+    });
+  }
+  const sorted = rest;
   if (grouping === 'none') {
-    return sorted.length > 0
-      ? [{ key: 'all', title: '', count: sorted.length, data: sorted }]
-      : [];
+    if (sorted.length > 0) {
+      sections.push({ key: 'all', title: '', count: sorted.length, data: sorted });
+    }
+    return sections;
   }
   if (grouping === 'project') {
     const map = new Map<string, SessionSummary[]>();
@@ -105,12 +132,15 @@ export function groupSessions(
       bucket.push(s);
       map.set(key, bucket);
     }
-    return Array.from(map.entries()).map(([title, data]) => ({
-      key: `project:${title}`,
-      title,
-      count: data.length,
-      data,
-    }));
+    for (const [title, data] of map.entries()) {
+      sections.push({
+        key: `project:${title}`,
+        title,
+        count: data.length,
+        data,
+      });
+    }
+    return sections;
   }
 
   // 'date' grouping (Today / Yesterday / Last week / Older — matches Pui Desktop sidebar).
@@ -123,7 +153,6 @@ export function groupSessions(
     list.push(s);
     map.set(bucket, list);
   }
-  const sections: SessionSection[] = [];
   for (const label of order) {
     const data = map.get(label);
     if (data && data.length > 0) {
