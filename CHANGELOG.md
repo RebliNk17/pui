@@ -5,6 +5,8 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-23
+
 ### Added
 
 - Bundled Pi upgraded to 1.6.0; Settings → General shows the Pi version in use.
