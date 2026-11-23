@@ -108,8 +108,8 @@ jobs:
             target/agent-runtime-cache
           key: downloads-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}
 
-      - name: Save compiled outputs (only after a successful build; at most one snapshot per day)
-        if: success() && steps.restore-compiled.outputs.cache-hit != 'true'
+      - name: Save compiled outputs (at most one snapshot per day)
+        if: always() && steps.restore-compiled.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
