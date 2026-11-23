@@ -5,6 +5,46 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-23
+
+Pui 1.0: an Android companion app, remote access to your desktop chats, safer Auto mode, and a much more stable built-in browser.
+
+### Pui Mobile (Android)
+
+- New Android companion app, downloadable as an APK from this release. Pair it with Pui Desktop by scanning a QR code or entering the host address, including over Tailscale.
+- Continue any desktop chat from your phone: live history, queued messages with **Steer**, image uploads, Markdown, grouped tool activity, favorites, themes and a verbose mode. Desktop and phone sessions can run side by side.
+- See live per-provider rate limits and refresh them from the phone.
+- The app checks GitHub Releases for updates.
+
+### Remote & Mobile
+
+- Redesigned **Remote & Mobile** settings with clearer pairing, endpoint and connection diagnostics.
+- Saved chat history loads immediately on connect, and parked sessions reconnect automatically.
+
+### Permissions
+
+- When Auto blocks a risky action, you can authorize that specific action directly in the chat.
+- Actions flagged by built-in safety rules go through strict classification instead of being blocked outright.
+- Auto now classifies monitors and scheduled (cron) jobs instead of always asking.
+
+### Chat and composer
+
+- Shell code blocks in replies can be run in the project terminal with one click.
+- Rotating composer placeholders now include inline action hints, and the toolbar adapts to narrow windows.
+- Updates show a download progress bar with a Cancel button.
+- **Resources** settings can add MCP servers directly, and pause, resume or remove them.
+
+### Browser
+
+- Menus and popups that overlap the browser no longer hide the whole page; the page stays visible around them.
+- Page loading is shown in the browser toolbar and no longer changes the page height.
+- The page zoom setting in viewport settings no longer closes the settings popup.
+
+### Fixed
+
+- Fixed crashes when reopening the browser or an inline visual after closing them, when quitting Pui, and shortly after launch when the first browser page or visual opened.
+- Header pills in the Changes panel no longer overlap icon controls in narrow panes.
+
 ## [0.2.2] - 2026-11-23
 
 ### Added
