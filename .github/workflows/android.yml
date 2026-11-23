@@ -236,10 +236,12 @@ jobs:
       - name: Attach APK to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job: gh must not infer the repository from Git.
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            gh release create "$TAG" --title "Pui ${TAG#v}" --generate-notes --verify-tag
           fi
           gh release upload "$TAG" dist-apk/*.apk dist-apk/*.apk.sha256 --clobber
 
