@@ -68,6 +68,13 @@ struct Options {
     console_query: String,
     console_paused: Option<std::collections::VecDeque<console::ConsoleLine>>,
 }
+fn loading_indicator(ui: &mut egui::Ui) {
+    let colors = theme::palette(ui.ctx());
+    ui.label(theme::small(ui, "Loading…"));
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+    theme::status::indicator(ui, rect.center(), "Working", colors.accent, 3.5);
+}
+
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -334,6 +341,7 @@ impl BrowserView {
                     .get(key)
                     .is_some_and(|options| options.device == Device::Custom));
         let available = cfg!(target_os = "macos") && !self.unavailable;
+        let loading = self.state(key).loading;
         if self
             .viewport_editor
             .as_ref()
@@ -444,6 +452,11 @@ impl BrowserView {
                         }
                     }
                 });
+                // Loading lives in the toolbar: the native page composites
+                // above egui, and reserving space below it would resize it.
+                if loading && !narrow {
+                    loading_indicator(ui);
+                }
             });
         });
     }
@@ -622,7 +635,7 @@ impl BrowserView {
         if !available.is_positive() {
             return egui::Rect::NOTHING;
         }
-        if state.error.is_some() || state.loading {
+        if state.error.is_some() {
             let status_h = 26.0_f32.min(available.height() * 0.4);
             let status_rect = egui::Rect::from_min_max(
                 egui::pos2(available.left() + 8.0, available.bottom() - status_h),
@@ -648,26 +661,6 @@ impl BrowserView {
                         resp.on_hover_text(
                             "Check the URL and connection, then Reload. Certificate checks remain enabled.",
                         );
-                    } else if state.loading {
-                        egui::Frame::new()
-                            .fill(colors.surface)
-                            .stroke(egui::Stroke::new(1.0_f32, colors.border))
-                            .corner_radius(6)
-                            .inner_margin(egui::Margin::symmetric(8, 3))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let (rect, _) =
-                                        ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                                    theme::status::indicator(
-                                        ui,
-                                        rect.center(),
-                                        "Working",
-                                        colors.accent,
-                                        3.5,
-                                    );
-                                    ui.label(theme::small(ui, "Loading page…"));
-                                });
-                            });
                     }
                 });
             });
@@ -706,6 +699,7 @@ impl BrowserView {
         key: &str,
         url: Option<&str>,
         html: Option<&str>,
+        holes: &[egui::Rect],
         ctx: &egui::Context,
     ) -> Result<(), String> {
         if self.active != key {
@@ -721,12 +715,13 @@ impl BrowserView {
                 url,
                 html,
                 self.options.entry(key.into()).or_default(),
+                holes,
                 ctx,
             )
         };
         #[cfg(not(target_os = "macos"))]
         let result = {
-            let _ = (frame, rect, url, html, ctx);
+            let _ = (frame, rect, url, html, holes, ctx);
             Err("Bundled Chromium is currently packaged for macOS only. File/Markdown/image viewing and HTML Source remain available.".into())
         };
         self.unavailable = result.is_err();

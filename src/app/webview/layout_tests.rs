@@ -74,10 +74,32 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                         rect.is_finite() && rect.is_positive(),
                         "{device:?} {zoom}: {rect:?}"
                     );
-                    assert!(
-                        status_bottom < f32::INFINITY && rect.bottom() <= status_bottom,
-                        "Page obscures status: {device:?} {zoom}: {rect:?} / {status_bottom}"
-                    );
+                    if error {
+                        assert!(
+                            status_bottom < f32::INFINITY && rect.bottom() <= status_bottom,
+                            "Page obscures status: {device:?} {zoom}: {rect:?} / {status_bottom}"
+                        );
+                    } else {
+                        // Loading never reserves space below the native page.
+                        assert_eq!(status_bottom, f32::INFINITY, "{device:?} {zoom}");
+                        let idle = ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(650.0, 700.0),
+                                )),
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                egui::CentralPanel::default().show(ctx, |ui| {
+                                    let idle =
+                                        browser.viewport_with_state(ui, key, PageState::default());
+                                    assert_eq!(idle, rect, "Loading resized page: {device:?} {zoom}");
+                                });
+                            },
+                        );
+                        let _ = idle;
+                    }
                     assert!(
                         rect.bottom() < console.top(),
                         "Page obscures console: {device:?} {zoom}: {rect:?} / {console:?}"

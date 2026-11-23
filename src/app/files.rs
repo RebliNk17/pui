@@ -819,12 +819,12 @@ impl Browser {
         self.web.hide();
     }
 
-    fn web_obscured(&self, ctx: &egui::Context) -> bool {
+    /// Floating egui surfaces overlapping the page. Native Chromium views sit
+    /// above egui, so the page is masked around them (see `chromium::mask`).
+    fn web_overlays(&self, ctx: &egui::Context) -> Vec<egui::Rect> {
         let Some(preview) = &self.web_preview else {
-            return false;
+            return Vec::new();
         };
-        // Native Chromium views sit above egui. Only hide for floating surfaces
-        // that actually cover the page, not unrelated popups in the chat pane.
         let overlays = ctx.memory(|memory| {
             memory
                 .areas()
@@ -834,16 +834,30 @@ impl Browser {
                 .filter_map(|layer| memory.area_rect(layer.id).map(|rect| (layer, rect)))
                 .collect::<Vec<_>>()
         });
-        overlays.into_iter().any(|(layer, rect)| {
-            let rect = ctx
-                .layer_transform_to_global(layer)
-                .map_or(rect, |transform| transform * rect);
-            preview.rect.intersects(rect)
-        })
+        overlays
+            .into_iter()
+            .map(|(layer, rect)| {
+                ctx.layer_transform_to_global(layer)
+                    .map_or(rect, |transform| transform * rect)
+            })
+            .filter(|rect| preview.rect.intersects(*rect))
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn web_obscured(&self, ctx: &egui::Context) -> bool {
+        !self.web_overlays(ctx).is_empty()
     }
 
     pub(super) fn show_web(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
-        if !self.open || self.web_obscured(ctx) {
+        let overlays = self.web_overlays(ctx);
+        // A surface covering the whole page (e.g. a modal backdrop) still hides
+        // it, releasing native keyboard focus as before.
+        let covered = self
+            .web_preview
+            .as_ref()
+            .is_some_and(|preview| overlays.iter().any(|o| o.contains_rect(preview.rect)));
+        if !self.open || covered {
             self.web.hide();
             return;
         }
@@ -854,6 +868,7 @@ impl Browser {
                 &preview.key,
                 preview.url.as_deref(),
                 preview.html.as_deref(),
+                &overlays,
                 ctx,
             );
             if let Err(error) = result {
@@ -1584,7 +1599,7 @@ impl Pui {
 
     pub(super) fn web_preview_allowed(&self, theater: bool, confirming: bool) -> bool {
         // Agent questions and permissions are inline, not workspace overlays.
-        // Actual floating surfaces are still checked by Browser::web_obscured.
+        // Actual floating surfaces are still checked by Browser::web_overlays.
         !self.settings_open
             && !self.kanban.open
             && !self.automation.open

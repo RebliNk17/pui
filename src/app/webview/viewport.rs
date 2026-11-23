@@ -340,13 +340,14 @@ pub(super) fn settings(
             ui.separator();
             prompt_ui::compact_toggle_row(ui, &mut options.console, "Show console");
             ui.label(theme::small(ui, "Page zoom"));
-            egui::ComboBox::from_id_salt(("preview-zoom", key))
-                .selected_text(format!("{}%", (options.zoom * 100.0) as u32))
-                .show_ui(ui, |ui| {
-                    for value in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
-                        ui.selectable_value(&mut options.zoom, value, format!("{}%", (value * 100.0) as u32));
-                    }
-                });
+            // Inline choices: egui keeps one popup open per viewport, so a
+            // nested ComboBox would close this settings popup instead.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for value in [0.5, 0.75, 1.0, 1.25, 1.5, 2.0] {
+                    ui.selectable_value(&mut options.zoom, value, format!("{}%", (value * 100.0) as u32));
+                }
+            });
             if options.mobile() {
                 ui.add(egui::Label::new(theme::small(ui, "Touch + Android user agent. Not a real device. Reload for server-side detection.")).wrap());
             }

@@ -1,11 +1,12 @@
 //! CEF child views. Every tab owns its Browser; hidden tabs keep DOM/history.
 mod inspection;
+mod mask;
 #[cfg(debug_assertions)]
 mod smoke;
 use super::{Action, Options, PageState, console, safe_html, web_url};
 use cef::*;
 use eframe::egui;
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+use objc2::{MainThreadMarker, rc::Retained};
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -291,7 +292,7 @@ struct Tab {
     _snapshot_observer: Option<Registration>,
     // CEF can resize its child during navigation. Its parent must be the pane,
     // never Pui's entire content view (which also contains chat and console).
-    container: Retained<NSView>,
+    container: Retained<mask::Container>,
     #[cfg(debug_assertions)]
     diagnostics: smoke::Diagnostics,
 }
@@ -530,6 +531,7 @@ impl Engine {
         url: Option<&str>,
         html: Option<&str>,
         options: &Options,
+        holes: &[egui::Rect],
         ctx: &egui::Context,
     ) -> Result<(), String> {
         if !rect.is_finite() || rect.width() < 1.0 || rect.height() < 1.0 {
@@ -597,8 +599,8 @@ impl Engine {
             )
             .ok_or("Cannot create private browser context")?;
             let mtm = MainThreadMarker::new().ok_or("Browser must run on the main thread")?;
-            let container = NSView::initWithFrame(
-                NSView::alloc(mtm),
+            let container = mask::Container::new(
+                mtm,
                 NSRect::new(
                     NSPoint::new(0.0, 0.0),
                     NSSize::new(bounds.width as f64, bounds.height as f64),
@@ -660,6 +662,7 @@ impl Engine {
             self.active = key.into();
         }
         let tab = self.tabs.get_mut(key).unwrap();
+        let page = rect;
         {
             let y = if parent.isFlipped() {
                 bounds.y as f64
@@ -683,6 +686,22 @@ impl Engine {
                     view.setAutoresizingMask(mask);
                 }
             }
+            // Popups overlapping the page show through masked holes.
+            let holes = holes
+                .iter()
+                .map(|hole| hole.intersect(page))
+                .filter(|hole| hole.is_positive())
+                .map(|hole| {
+                    NSRect::new(
+                        NSPoint::new(
+                            (hole.left() - page.left()) as f64 * zoom,
+                            (page.bottom() - hole.bottom()) as f64 * zoom,
+                        ),
+                        NSSize::new(hole.width() as f64 * zoom, hole.height() as f64 * zoom),
+                    )
+                })
+                .collect();
+            tab.container.set_holes(holes);
             if tab.container.isHidden() {
                 tab.container.setHidden(false);
             }

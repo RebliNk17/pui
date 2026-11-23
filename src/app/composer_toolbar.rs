@@ -80,8 +80,16 @@ pub(super) fn layout(available: f32, w: &Widths) -> Layout {
 /// Shift a popup anchor horizontally so a `TOP_START` popup of `width`
 /// stays inside `bounds` (the chat pane). Popups spilling over a docked
 /// native browser would otherwise force the page to hide while open.
+/// Popup frames add margins/strokes beyond the requested width. Keep a gutter
+/// so composer popups never spill into a neighbouring native browser page,
+/// which would hide the page while the popup is open.
+const POPUP_GUTTER: f32 = 16.0;
+
 pub(super) fn fit_anchor(anchor: egui::Rect, width: f32, bounds: egui::Rect) -> egui::Rect {
-    let left = anchor.left().min(bounds.right() - width).max(bounds.left());
+    let left = anchor
+        .left()
+        .min(bounds.right() - width - POPUP_GUTTER)
+        .max(bounds.left());
     anchor.translate(Vec2::new(left - anchor.left(), 0.0))
 }
 
@@ -238,7 +246,7 @@ mod tests {
         let button = egui::Rect::from_min_size(egui::pos2(270.0, 860.0), Vec2::new(40.0, 28.0));
         let fitted = fit_anchor(button, 275.0, bounds);
         assert_eq!(fitted.right() - fitted.left(), button.width());
-        assert!(fitted.left() + 275.0 <= bounds.right());
+        assert!(fitted.left() + 275.0 + POPUP_GUTTER <= bounds.right());
         assert_eq!(fitted.top(), button.top());
         // Already fits: untouched. Pane narrower than popup: pinned left.
         let narrow = egui::Rect::from_min_size(egui::pos2(20.0, 860.0), Vec2::new(40.0, 28.0));
