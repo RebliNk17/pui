@@ -398,3 +398,53 @@ fn inline_errors_are_labels_not_numbered_patch_and_disconnection_is_visible() {
         );
     }
 }
+
+#[test]
+fn narrow_changes_heading_keeps_pills_clear_of_icon_controls() {
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        mode.apply(&ctx);
+        let mut changes = Changes::default();
+        let workspace = Workspace {
+            root: "/fixture/a-rather-long-worktree-name".into(),
+            branch: "feature/very-long-branch-name-for-overflow".into(),
+            ..Default::default()
+        };
+        for width in [560.0, 640.0, 900.0] {
+            for _ in 0..3 {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        changes.show(
+                            ctx,
+                            std::path::Path::new("/fixture"),
+                            "chat",
+                            &workspace,
+                            (&[], 0),
+                            false,
+                        );
+                        egui::CentralPanel::default().show(ctx, |_| {});
+                    },
+                );
+            }
+            let refresh = ctx
+                .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("changes-refresh")))
+                .expect("Refresh icon rect");
+            let (_, branch) = ctx
+                .data(|d| d.get_temp::<(egui::Id, egui::Rect)>(egui::Id::new("branch-trigger")))
+                .expect("Branch trigger rect");
+            // The search toggle (26px) sits immediately left of refresh.
+            assert!(
+                branch.max.x <= refresh.min.x - 26.0,
+                "width {width}: branch {branch:?} overlaps icons left of {refresh:?}"
+            );
+        }
+    }
+}

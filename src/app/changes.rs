@@ -319,18 +319,12 @@ impl Changes {
             .exact_height(42.0)
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
             .show_inside(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(
-                        RichText::new("Changes")
-                            .size(12.5)
-                            .strong()
-                            .color(colors.text),
-                    );
-                    self.worktree_button(ui, workspace);
-                    self.branch_button(ui, workspace);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
+                // Lay out the fixed icon group first (right to left) so the
+                // label/worktree/branch controls only get the remaining width
+                // and can never overlap the icons in a narrow pane.
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    {
                         let close = icons::button(ui, Icon::Close, "Hide changes pane");
                         if close.clicked() {
                             self.close_branches(ui.ctx());
@@ -399,6 +393,22 @@ impl Changes {
                                 self.query.clear();
                             }
                         }
+                    }
+                    ui.add_space(5.0);
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Changes")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(colors.text),
+                            )
+                            .truncate(),
+                        );
+                        self.worktree_button(ui, workspace);
+                        self.branch_button(ui, workspace);
                     });
                 });
             });
@@ -737,7 +747,21 @@ impl Changes {
         let galley =
             ui.painter()
                 .layout_no_wrap(label.clone(), FontId::proportional(11.5), colors.text);
-        let pill_w = (galley.size().x + 34.0).clamp(64.0, 140.0);
+        let pill_w = (galley.size().x + 34.0)
+            .clamp(64.0, 140.0)
+            .min((ui.available_width() * 0.5).max(28.0));
+        let galley = if galley.size().x + 34.0 > pill_w {
+            let mut job = egui::text::LayoutJob::simple_singleline(
+                label.clone(),
+                FontId::proportional(11.5),
+                colors.text,
+            );
+            job.wrap.max_width = (pill_w - 30.0).max(0.0);
+            job.wrap.max_rows = 1;
+            ui.painter().layout_job(job)
+        } else {
+            galley
+        };
         let (_, rect) = ui.allocate_space(egui::vec2(pill_w, 26.0));
         let resp = ui
             .interact(rect, popup_id.with("trigger"), Sense::click())
@@ -767,11 +791,13 @@ impl Changes {
             Icon::Folder,
             colors.muted,
         );
-        ui.painter().galley(
-            rect.left_center() + egui::vec2(24.0, -galley.size().y / 2.0),
-            galley,
-            colors.text,
-        );
+        if pill_w > 40.0 {
+            ui.painter().galley(
+                rect.left_center() + egui::vec2(24.0, -galley.size().y / 2.0),
+                galley,
+                colors.text,
+            );
+        }
         let width = (ui.ctx().screen_rect().width() - 32.0).clamp(180.0, 290.0);
         egui::Popup::from_toggle_button_response(&resp)
             .id(popup_id)
