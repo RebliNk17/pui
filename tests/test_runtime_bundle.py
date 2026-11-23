@@ -31,7 +31,7 @@ class BundleTests(unittest.TestCase):
     def test_package_graph_is_locked_and_all_remote_entries_have_integrity(self):
         package = json.loads((ROOT / "packaging/runtime/package.json").read_text())
         lock = json.loads((ROOT / "packaging/runtime/package-lock.json").read_text())
-        self.assertEqual(package["dependencies"], {"@earendil-works/pi-coding-agent": "1.5.2"})
+        self.assertEqual(package["dependencies"], {"@earendil-works/pi-coding-agent": "1.6.0"})
         self.assertEqual(lock["packages"][""]["dependencies"], package["dependencies"])
         for path, entry in lock["packages"].items():
             if path:

@@ -12,7 +12,7 @@ Under `Contents/Resources/runtime/`:
 - `bin/node`, `npm`, `npx`: links to the included official Node distribution;
 - `bin/fd` and `bin/rg`: pinned native Apple Silicon search tools;
 - `node/`: official Node **22.23.5**, npm/npx and all npm dependencies;
-- `pi/`: Pi **1.5.2** and the complete locked production npm dependency graph,
+- `pi/`: Pi **1.6.0** and the complete locked production npm dependency graph,
   including SDK-internal modules, worker entries, WASM and native platform addon;
 - `manifest.json`: versions, official archive URLs/SHA-256 pins, npm lock hash;
 - `notices/`: Node's combined license, search-tool licenses, package inventories,

@@ -7,8 +7,8 @@ are recorded in the npm lock and official archive pins.
 
 Sources:
 
-- `Pi-MIT.txt`: <https://raw.githubusercontent.com/earendil-works/pi/v1.5.2/LICENSE>
-  (applies to the `@earendil-works/pi-*` 1.5.2 workspace packages).
+- `Pi-MIT.txt`: <https://raw.githubusercontent.com/earendil-works/pi/v1.6.0/LICENSE>
+  (applies to the `@earendil-works/pi-*` 1.6.0 workspace packages).
 - `data-uri-to-buffer-README.md`: upstream commit
   `85cd8c854aefbf1bb636789d80364cfac8ea1583` README, including its MIT notice.
 - `proxy-agents-MIT.txt`: MIT/Nathan Rajlich notice retained from the same

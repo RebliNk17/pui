@@ -23,7 +23,7 @@ GitHub Actions provides the active Apple Silicon build via `.github/workflows/ma
   serial cross-window sync/table projection/table export groups, then the
   automation restart/OS-lock regression separately. No test groups are omitted
   and failures are not retried.
-- Adapter tests install the checked-in `packaging/runtime` npm lock (Pi 1.5.2)
+- Adapter tests install the checked-in `packaging/runtime` npm lock (Pi 1.6.0)
   under `target/pi-sdk` with lifecycle scripts disabled and set `PUI_PI_SDK`.
   No developer Pi installation or provider key is used. A post-bundle smoke
   checks Node/npm, RPC, SDK, core search and Settings resources offline using
@@ -69,7 +69,7 @@ Release assets:
   archive hashes), and `CHANGELOG.md` (release notes).
 
 The ZIP contains `Pui.app`; the DMG contains it plus an Applications shortcut.
-The app includes Pi 1.5.2, Node.js 22.23.5/npm, and pinned fd/ripgrep, with
+The app includes Pi 1.6.0, Node.js 22.23.5/npm, and pinned fd/ripgrep, with
 licenses and an integrity manifest. No separate Pi/Node/Homebrew installation is
 needed by the packaged app; provider authentication is still required. See
 [bundled runtime](bundled-runtime.md). Intel/universal builds, Linux/Windows
