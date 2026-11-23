@@ -1298,7 +1298,7 @@ mod tests {
             .1;
         let composer = text
             .iter()
-            .find(|(t, _)| t.starts_with("Message Pi…"))
+            .find(|(t, _)| t == "Ask a follow-up…")
             .unwrap()
             .1;
         assert!(

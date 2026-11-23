@@ -341,7 +341,7 @@ mod tests {
             let allow = text.iter().find(|(t, _, _)| t == "Allow once").unwrap();
             let composer = text
                 .iter()
-                .find(|(t, _, _)| t.starts_with("Message Pi…"))
+                .find(|(t, _, _)| t == "Ask a follow-up…")
                 .unwrap();
             assert!(command.1.bottom() < allow.1.top() && allow.1.bottom() < composer.1.top());
             assert!(allow.2.contains_rect(allow.1));

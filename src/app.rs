@@ -9,6 +9,7 @@ mod catalog;
 mod changes;
 mod chat_find;
 mod completions;
+mod composer_hints;
 mod composer_history;
 mod composer_text;
 mod confirmations;
@@ -200,6 +201,8 @@ pub struct Pui {
     dictation: dictation::Dictation,
     context_chips: context_capture::Draft,
     recall: composer_history::Recall,
+    composer_hints: composer_hints::Hints,
+    demo_composer_hints: bool,
     recall_width: f32,
     completions: completions::View,
     draft_images: attachments::DraftImages,
@@ -360,6 +363,8 @@ impl Pui {
             dictation: dictation::Dictation::default(),
             context_chips: Default::default(),
             recall: Default::default(),
+            composer_hints: Default::default(),
+            demo_composer_hints: options.demo_composer_hints,
             recall_width: 700.0,
             completions: Default::default(),
             draft_images: Default::default(),
@@ -751,6 +756,12 @@ impl Pui {
                 app.state.notice = Some("Returned to the selected prompt. Review the draft, then send when ready. Nothing was rerun.".into());
                 app.state.add_diagnostic("MCP server unavailable (HTTP 503). The remote service could not be reached. Local chat is still available.".into());
                 app.diagnostics_open = true;
+            }
+            if options.demo_composer_hints {
+                app.state.busy = true;
+                app.draft.clear();
+                app.focus_composer = false;
+                app.prefs.settings.delivery = settings::DeliveryMode::Steer;
             }
             if options.demo_send_now {
                 app.state.busy = true;
@@ -1832,14 +1843,6 @@ impl Pui {
                         };
                         let output = egui::TextEdit::multiline(&mut buffer)
                             .id(egui::Id::new("composer"))
-                            .hint_text(
-                                RichText::new(if self.demo {
-                                    "Start a real session to talk to Pi…"
-                                } else {
-                                    "Message Pi… (/ commands, @ files, or drop files)"
-                                })
-                                .color(colors.dim),
-                            )
                             .font(FontId::proportional(14.0))
                             .layouter(&mut layouter)
                             .frame(false)
@@ -1905,6 +1908,7 @@ impl Pui {
                     response.request_focus();
                     self.focus_composer = false;
                 }
+                self.composer_hints(ui, editor_rect, &response);
                 if response.has_focus()
                     && !self.attention.open
                     && !self.model_picker_open
@@ -1950,6 +1954,8 @@ impl Pui {
                             && !self.demo;
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+                        #[cfg(test)]
+                        ctx.data_mut(|d| d.insert_temp(egui::Id::new("composer-send-rect"), rect));
                         let response = if enabled {
                             response.on_hover_cursor(egui::CursorIcon::PointingHand)
                         } else {
@@ -1978,14 +1984,21 @@ impl Pui {
                             )
                         });
                         if response
-                            .on_hover_text(if busy {
-                                if self.prefs.settings.delivery == settings::DeliveryMode::Steer {
-                                    "Steer · Enter · ⌘Enter to queue"
+                            .on_hover_text({
+                                let command = if ctx.os() == egui::os::OperatingSystem::Mac {
+                                    "⌘"
                                 } else {
-                                    "Queue · Enter · ⌘Enter to steer"
+                                    "Ctrl+"
+                                };
+                                if busy {
+                                    format!(
+                                        "{} · Enter\n{command}Enter to {}\nShift+Enter for a new line",
+                                        self.prefs.settings.delivery.label(),
+                                        self.prefs.settings.delivery.opposite().label().to_lowercase()
+                                    )
+                                } else {
+                                    "Send · Enter\nShift+Enter for a new line".to_owned()
                                 }
-                            } else {
-                                "Send · Enter"
                             })
                             .clicked()
                             && enabled
@@ -2024,19 +2037,6 @@ impl Pui {
                     });
                 });
             });
-        ui.add_space(3.0);
-        ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{} · Enter: {} · ⌘Enter: {} · Shift+Enter: new line",
-                    self.permission_label(),
-                    self.prefs.settings.delivery.label(),
-                    self.prefs.settings.delivery.opposite().label()
-                ))
-                .size(10.0)
-                .color(colors.dim),
-            );
-        });
         if let Some((anchor, layer)) = completion_anchor {
             self.completion_popup(ctx, anchor, layer);
         }

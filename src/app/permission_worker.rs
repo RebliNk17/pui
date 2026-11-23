@@ -27,13 +27,6 @@ impl Pui {
             .get(&self.agents.active)
             .is_some_and(|n| n.access == "read-only")
     }
-    pub(super) fn permission_label(&self) -> &'static str {
-        if self.readonly_worker() {
-            "Read-only"
-        } else {
-            self.active_permission().label()
-        }
-    }
     pub(super) fn set_permission(&mut self, mode: PermissionMode) {
         if self.agents.nodes.contains_key(&self.agents.active) {
             if self.readonly_worker() && mode != PermissionMode::Plan {

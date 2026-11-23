@@ -65,22 +65,18 @@ fn long_drafts_have_a_bounded_scrolling_editor_and_visible_bottom_controls() {
                     app.transcript.viewport > 80.0,
                     "draft must not consume the conversation"
                 );
-                let hint = output
-                    .shapes
-                    .iter()
-                    .find_map(|s| match &s.shape {
-                        egui::Shape::Text(t)
-                            if t.galley.text().contains("Shift+Enter: new line") =>
-                        {
-                            Some(t.galley.rect.translate(t.pos.to_vec2()))
-                        }
-                        _ => None,
-                    })
-                    .expect("composer footer is painted");
-                assert!(hint.bottom() <= ctx.screen_rect().bottom() + 1.0);
+                let send = ctx
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("composer-send-rect")))
+                    .expect("send control is laid out");
+                assert!(send.bottom() <= ctx.screen_rect().bottom() + 1.0);
+                assert!(send.top() > viewport.bottom(), "controls stay below editor");
                 assert!(
-                    hint.top() > viewport.bottom(),
-                    "controls and hint stay below editor"
+                    !output.shapes.iter().any(|s| matches!(
+                        &s.shape,
+                        egui::Shape::Text(t) if t.galley.text().contains("Shift+Enter: new line")
+                            || t.galley.text().starts_with("to send")
+                    )),
+                    "drafts have no footer or empty-state hint"
                 );
                 assert_eq!(app.draft, original);
                 assert!(app.deliveries.is_empty());

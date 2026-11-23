@@ -177,9 +177,7 @@ mod tests {
             let hint = output
                 .shapes
                 .iter()
-                .find_map(|s| {
-                    text_shape(&s.shape, "Message Pi… (/ commands, @ files, or drop files)")
-                })
+                .find_map(|s| text_shape(&s.shape, "Message Pi…"))
                 .expect("placeholder rendered");
             assert!(
                 hint.job

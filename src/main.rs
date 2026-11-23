@@ -49,6 +49,7 @@ pub struct Options {
     pub demo_sections: bool,
     pub demo_view_menu: bool,
     pub demo_compacting: bool,
+    pub demo_composer_hints: bool,
     pub demo_working: bool,
     pub demo_settings: bool,
     pub settings: bool,
@@ -232,6 +233,10 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_attention = true;
                 options.demo_attention_dock |= arg == "--demo-attention-dock";
+            }
+            "--demo-composer-hints" => {
+                options.demo = true;
+                options.demo_composer_hints = true;
             }
             "--demo-send-now" => {
                 options.demo = true;
