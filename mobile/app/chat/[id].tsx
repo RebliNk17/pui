@@ -4,6 +4,7 @@ import {
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -53,6 +54,7 @@ export default function ChatScreen() {
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [androidKeyboardHeight, setAndroidKeyboardHeight] = useState(0);
   const listRef = useRef<FlatList>(null);
   const { bindings, metrics } = useCustomScrollbar();
@@ -133,7 +135,16 @@ export default function ChatScreen() {
           { backgroundColor: colors.bg, borderBottomColor: colors.hairline },
         ]}
       >
-        <Pressable onPress={() => router.back()} style={styles.iconBtn}>
+        <Pressable
+          onPress={() => {
+            if (tab !== 'chat') {
+              setTab('chat');
+            } else {
+              router.back();
+            }
+          }}
+          style={styles.iconBtn}
+        >
           <Ionicons name="arrow-back" size={21} color={colors.text} />
         </Pressable>
 
@@ -143,7 +154,11 @@ export default function ChatScreen() {
           </Text>
           <Text numberOfLines={1} style={[styles.subText, { color: colors.muted }]}>
             {projectLabel}
-            {detail?.busy ? ' · Working…' : ''}
+            {tab !== 'chat'
+              ? ` · ${tab === 'artifacts' ? 'Artifacts' : tab === 'files' ? 'Files' : 'Changes'}`
+              : detail?.busy
+                ? ' · Working…'
+                : ''}
           </Text>
         </View>
 
@@ -156,58 +171,13 @@ export default function ChatScreen() {
             <ContextRing progress={contextProgress} size={22} />
           </Pressable>
           <Pressable
-            onPress={() =>
-              updatePrefs({
-                transcriptView: verbose ? 'normal' : 'verbose',
-              })
-            }
+            onPress={() => setMenuOpen(true)}
             style={styles.iconBtn}
-            accessibilityLabel="Toggle verbose transcript"
+            accessibilityLabel="Session menu"
           >
-            <Ionicons
-              name={verbose ? 'eye' : 'eye-outline'}
-              size={19}
-              color={verbose ? colors.accent : colors.muted}
-            />
+            <Ionicons name="ellipsis-vertical" size={19} color={colors.muted} />
           </Pressable>
         </View>
-      </View>
-
-      {/* Compact pill switcher */}
-      <View style={[styles.tabBar, { borderBottomColor: colors.hairline }]}>
-        {(
-          [
-            ['chat', 'Chat'],
-            ['artifacts', artifacts.length ? `Artifacts (${artifacts.length})` : 'Artifacts'],
-            ['files', 'Files'],
-            ['changes', 'Changes'],
-          ] as [Tab, string][]
-        ).map(([key, label]) => {
-          const active = tab === key;
-          return (
-            <Pressable
-              key={key}
-              onPress={() => setTab(key)}
-              style={[
-                styles.tabPill,
-                {
-                  backgroundColor: active ? colors.surfaceElevated : 'transparent',
-                  borderColor: active ? colors.border : 'transparent',
-                },
-              ]}
-            >
-              <Text
-                numberOfLines={1}
-                style={[
-                  styles.tabLabel,
-                  { color: active ? colors.text : colors.muted },
-                ]}
-              >
-                {label}
-              </Text>
-            </Pressable>
-          );
-        })}
       </View>
 
       <KeyboardAvoidingView
@@ -398,6 +368,120 @@ export default function ChatScreen() {
         )}
       </KeyboardAvoidingView>
 
+      <Modal
+        visible={menuOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <Pressable style={styles.menuBackdrop} onPress={() => setMenuOpen(false)}>
+          <Pressable
+            onPress={(e) => e.stopPropagation()}
+            style={[
+              styles.menuCard,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            {(
+              [
+                ['chat', 'Chat', 'chatbubble-outline', null],
+                [
+                  'artifacts',
+                  'Artifacts',
+                  'layers-outline',
+                  artifacts.length > 0 ? String(artifacts.length) : null,
+                ],
+                ['files', 'Files', 'folder-outline', null],
+                ['changes', 'Changes', 'git-compare-outline', null],
+              ] as [Tab, string, keyof typeof Ionicons.glyphMap, string | null][]
+            ).map(([key, label, icon, badge]) => {
+              const active = tab === key;
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => {
+                    setTab(key);
+                    setMenuOpen(false);
+                  }}
+                  style={[
+                    styles.menuRow,
+                    active && { backgroundColor: colors.accentBg },
+                  ]}
+                >
+                  <Ionicons
+                    name={icon}
+                    size={17}
+                    color={active ? colors.accent : colors.muted}
+                  />
+                  <Text
+                    style={[
+                      styles.menuLabel,
+                      { color: active ? colors.accent : colors.text },
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                  {badge ? (
+                    <View
+                      style={[
+                        styles.menuBadge,
+                        { backgroundColor: colors.surfaceElevated },
+                      ]}
+                    >
+                      <Text style={{ color: colors.muted, fontSize: 11, fontWeight: '600' }}>
+                        {badge}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {active ? (
+                    <Ionicons name="checkmark" size={16} color={colors.accent} />
+                  ) : null}
+                </Pressable>
+              );
+            })}
+
+            <View style={[styles.menuDivider, { backgroundColor: colors.hairline }]} />
+
+            <Pressable
+              onPress={() => {
+                updatePrefs({
+                  transcriptView: verbose ? 'normal' : 'verbose',
+                });
+                setMenuOpen(false);
+              }}
+              style={styles.menuRow}
+            >
+              <Ionicons
+                name={verbose ? 'eye' : 'eye-outline'}
+                size={17}
+                color={verbose ? colors.accent : colors.muted}
+              />
+              <Text style={[styles.menuLabel, { color: colors.text }]}>
+                Verbose transcript
+              </Text>
+              <View
+                style={[
+                  styles.menuBadge,
+                  {
+                    backgroundColor: verbose ? colors.accentBg : colors.surfaceElevated,
+                  },
+                ]}
+              >
+                <Text
+                  style={{
+                    color: verbose ? colors.accent : colors.muted,
+                    fontSize: 11,
+                    fontWeight: '600',
+                  }}
+                >
+                  {verbose ? 'On' : 'Off'}
+                </Text>
+              </View>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <UsageSheet
         visible={usageOpen}
         detail={detail}
@@ -451,23 +535,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  tabBar: {
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'flex-end',
+    paddingTop: 58,
+    paddingRight: 12,
+  },
+  menuCard: {
+    width: 224,
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingVertical: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 10,
+    direction: 'ltr',
+  },
+  menuRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    marginHorizontal: 4,
+    borderRadius: 9,
   },
-  tabPill: {
-    paddingHorizontal: 11,
-    paddingVertical: 5,
+  menuLabel: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'left',
+  },
+  menuBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
   },
-  tabLabel: {
-    fontSize: 12,
-    fontWeight: '600',
+  menuDivider: {
+    height: StyleSheet.hairlineWidth,
+    marginVertical: 5,
+    marginHorizontal: 12,
   },
   listWrap: {
     flex: 1,
