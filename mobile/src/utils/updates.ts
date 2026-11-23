@@ -69,12 +69,20 @@ export function parseGithubRelease(raw: RawGithubRelease): ReleaseInfo | null {
   if (!tagName || !parseSemver(tagName)) return null;
 
   const assets = Array.isArray(raw.assets) ? (raw.assets as RawGithubAsset[]) : [];
-  const apkAsset = assets.find(
-    (a) =>
-      typeof a?.name === 'string' &&
-      (a.name === ANDROID_APK_ASSET_NAME || a.name.toLowerCase().endsWith('.apk')) &&
-      typeof a?.browser_download_url === 'string',
-  );
+  const apkAsset =
+    assets.find(
+      (a) =>
+        typeof a?.name === 'string' &&
+        a.name.toLowerCase().startsWith('pui-android') &&
+        a.name.toLowerCase().endsWith('.apk') &&
+        typeof a?.browser_download_url === 'string',
+    ) ??
+    assets.find(
+      (a) =>
+        typeof a?.name === 'string' &&
+        a.name.toLowerCase().endsWith('.apk') &&
+        typeof a?.browser_download_url === 'string',
+    );
 
   return {
     tagName,

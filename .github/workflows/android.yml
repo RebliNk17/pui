@@ -129,17 +129,22 @@ jobs:
         run: ./gradlew bundleRelease --no-daemon
 
       - name: Collect APK, AAB, and checksums
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
         run: |
           mkdir -p dist-apk
           APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
           test -n "$APK"
-          cp "$APK" dist-apk/pui-android.apk
-          (cd dist-apk && sha256sum pui-android.apk > pui-android.apk.sha256)
+          APK_NAME="pui-android-v${VERSION_NAME}.apk"
+          cp "$APK" "dist-apk/${APK_NAME}"
+          (cd dist-apk && sha256sum "${APK_NAME}" > "${APK_NAME}.sha256")
           AAB=$(find android/app/build/outputs/bundle/release -name '*.aab' 2>/dev/null | head -n 1 || true)
           if [ -n "$AAB" ]; then
-            cp "$AAB" dist-apk/pui-android.aab
-            (cd dist-apk && sha256sum pui-android.aab > pui-android.aab.sha256)
+            AAB_NAME="pui-android-v${VERSION_NAME}.aab"
+            cp "$AAB" "dist-apk/${AAB_NAME}"
+            (cd dist-apk && sha256sum "${AAB_NAME}" > "${AAB_NAME}.sha256")
           fi
+          ls -lh dist-apk
 
       - name: Upload Android build artifacts
         uses: actions/upload-artifact@v4
@@ -170,7 +175,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --title "$TAG" --generate-notes
           fi
-          gh release upload "$TAG" dist-apk/pui-android.apk dist-apk/pui-android.apk.sha256 --clobber
+          gh release upload "$TAG" dist-apk/*.apk dist-apk/*.apk.sha256 --clobber
 
   publish-google-play-internal:
     if: >-
@@ -190,8 +195,10 @@ jobs:
         env:
           PLAY_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
         run: |
-          if [ -n "$PLAY_JSON" ] && [ -f dist-apk/pui-android.aab ]; then
+          AAB=$(find dist-apk -maxdepth 1 -name '*.aab' | head -n 1 || true)
+          if [ -n "$PLAY_JSON" ] && [ -n "$AAB" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "aab_path=${AAB}" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "Skipping Google Play upload (requires ANDROID_KEYSTORE_BASE64 + GOOGLE_PLAY_SERVICE_ACCOUNT_JSON secrets)."
@@ -203,6 +210,6 @@ jobs:
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: ${{ vars.PUI_ANDROID_PACKAGE || 'com.reblink17.pui' }}
-          releaseFiles: dist-apk/pui-android.aab
+          releaseFiles: ${{ steps.play_ready.outputs.aab_path }}
           track: internal
           status: completed

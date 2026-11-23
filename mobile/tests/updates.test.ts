@@ -34,14 +34,14 @@ describe('mobile update version comparison and release parsing', () => {
           browser_download_url: 'https://example.com/pui-macos.dmg',
         },
         {
-          name: 'pui-android.apk',
-          browser_download_url: 'https://example.com/pui-android.apk',
+          name: 'pui-android-v0.3.0.apk',
+          browser_download_url: 'https://example.com/pui-android-v0.3.0.apk',
         },
       ],
     });
     assert.ok(rel);
     assert.equal(rel.version, '0.3.0');
-    assert.equal(rel.apkUrl, 'https://example.com/pui-android.apk');
+    assert.equal(rel.apkUrl, 'https://example.com/pui-android-v0.3.0.apk');
   });
 
   it('ignores draft releases', () => {
