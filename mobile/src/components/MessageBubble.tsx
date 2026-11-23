@@ -12,31 +12,121 @@ import {
 } from '../utils/markdown';
 import { HtmlArtifactCard } from './HtmlArtifactCard';
 
+/**
+ * Pui Desktop-style grouped activity disclosure row:
+ * Collapses consecutive tool calls & reasoning into ONE quiet line ("ran 4 commands · edited 3 files")
+ * that expands smoothly into a clean card with each step, output, and diff.
+ */
+export function ActivityGroupRow({
+  summary,
+  tools,
+  thinking,
+  hasRunning,
+  hasError,
+  verbose = false,
+  onOpenImage,
+}: {
+  summary: string;
+  tools: ToolRecord[];
+  thinking: string[];
+  hasRunning: boolean;
+  hasError: boolean;
+  verbose?: boolean;
+  onOpenImage: (uri: string, title?: string) => void;
+}) {
+  const colors = usePalette();
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  const open = openOverride ?? verbose;
+
+  return (
+    <View style={styles.activityWrap}>
+      <Pressable
+        onPress={() => setOpenOverride(!open)}
+        style={({ pressed }) => [
+          styles.activityBar,
+          open && {
+            backgroundColor: colors.surface,
+            borderColor: colors.border,
+            borderWidth: StyleSheet.hairlineWidth,
+            borderBottomLeftRadius: 0,
+            borderBottomRightRadius: 0,
+          },
+          pressed && { opacity: 0.8 },
+        ]}
+      >
+        <Ionicons
+          name={open ? 'chevron-down' : 'chevron-forward'}
+          size={13}
+          color={colors.dim}
+        />
+        {hasRunning ? (
+          <View style={[styles.actDot, { backgroundColor: colors.accent }]} />
+        ) : hasError ? (
+          <View style={[styles.actDot, { backgroundColor: colors.red }]} />
+        ) : null}
+        <Text numberOfLines={1} style={[styles.activitySummary, { color: colors.muted }]}>
+          {summary}
+        </Text>
+      </Pressable>
+
+      {open ? (
+        <View
+          style={[
+            styles.activityBody,
+            { backgroundColor: colors.surface, borderColor: colors.border },
+          ]}
+        >
+          {thinking.map((thought, idx) => (
+            <Text
+              key={`think-${idx}`}
+              selectable
+              style={[
+                styles.thinkingText,
+                {
+                  color: colors.muted,
+                  borderLeftColor: colors.border,
+                  textAlign: isRtlText(thought) ? 'right' : 'left',
+                },
+              ]}
+            >
+              {thought}
+            </Text>
+          ))}
+          <View style={styles.toolList}>
+            {tools.map((tool, idx) => (
+              <ToolItem
+                key={tool.id || `${tool.name}-${idx}`}
+                tool={tool}
+                defaultOpen={verbose}
+                onOpenImage={onOpenImage}
+              />
+            ))}
+          </View>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 interface Props {
   message: MessageRecord;
-  verbose?: boolean;
-  showHeader?: boolean;
+  inlineTools?: ToolRecord[];
   onOpenImage: (uri: string, title?: string) => void;
   onOpenFileTarget: (target: string) => void;
 }
 
 export function MessageBubble({
   message,
-  verbose = false,
-  showHeader = true,
+  inlineTools,
   onOpenImage,
   onOpenFileTarget,
 }: Props) {
   const colors = usePalette();
   const isUser = message.role === 'user';
-  const [thinkingOverride, setThinkingOverride] = useState<boolean | null>(null);
-  const [toolsOverride, setToolsOverride] = useState<boolean | null>(null);
-  const showThinking = thinkingOverride ?? verbose;
-  const showTools = toolsOverride ?? verbose;
 
-  const visualTools = message.tools.filter((t) => Boolean(t.visual));
-  const openTools = message.tools.filter((t) => Boolean(t.open_target));
-  const activityTools = message.tools.filter((t) => !t.visual);
+  const toolsToShow = inlineTools ?? message.tools;
+  const visualTools = toolsToShow.filter((t) => Boolean(t.visual));
+  const openTools = toolsToShow.filter((t) => Boolean(t.open_target));
 
   if (isUser) {
     const displayText = cleanUserDisplayText(message.text);
@@ -94,95 +184,8 @@ export function MessageBubble({
     );
   }
 
-  const isToolOnly =
-    !message.text.trim() &&
-    !message.error &&
-    message.images.length === 0 &&
-    visualTools.length === 0 &&
-    openTools.length === 0;
-
   return (
-    <View style={[styles.assistantRow, isToolOnly && styles.assistantRowCompact]}>
-      {showHeader && !isToolOnly && (message.model || message.cost > 0) ? (
-        <View style={styles.metaRow}>
-          <Text style={[styles.roleLabel, { color: colors.dim }]}>
-            {message.model || 'Pi'}
-          </Text>
-          {message.cost > 0 ? (
-            <Text style={[styles.metaRight, { color: colors.dim }]}>
-              ${message.cost.toFixed(4)}
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
-
-      {message.thinking ? (
-        <Pressable
-          onPress={() => setThinkingOverride(!showThinking)}
-          style={[
-            styles.collapsePill,
-            { backgroundColor: colors.surface, borderColor: colors.border },
-          ]}
-        >
-          <Ionicons
-            name={showThinking ? 'chevron-down' : 'chevron-forward'}
-            size={12}
-            color={colors.muted}
-          />
-          <Text style={[styles.collapseText, { color: colors.muted }]}>
-            Reasoning ({message.thinking.length} chars)
-          </Text>
-        </Pressable>
-      ) : null}
-      {showThinking && message.thinking ? (
-        <Text
-          selectable
-          style={[
-            styles.thinkingText,
-            {
-              color: colors.muted,
-              borderLeftColor: colors.border,
-              textAlign: isRtlText(message.thinking) ? 'right' : 'left',
-            },
-          ]}
-        >
-          {message.thinking}
-        </Text>
-      ) : null}
-
-      {activityTools.length > 0 ? (
-        <View style={styles.toolsWrap}>
-          <Pressable
-            onPress={() => setToolsOverride(!showTools)}
-            style={[
-              styles.collapsePill,
-              { backgroundColor: colors.surface, borderColor: colors.border },
-            ]}
-          >
-            <Ionicons
-              name={showTools ? 'chevron-down' : 'chevron-forward'}
-              size={12}
-              color={colors.muted}
-            />
-            <Text style={[styles.collapseText, { color: colors.muted }]}>
-              {summarizeTools(activityTools)}
-            </Text>
-          </Pressable>
-          {showTools ? (
-            <View style={styles.toolList}>
-              {activityTools.map((tool, idx) => (
-                <ToolItem
-                  key={tool.id || `${tool.name}-${idx}`}
-                  tool={tool}
-                  defaultOpen={verbose}
-                  onOpenImage={onOpenImage}
-                />
-              ))}
-            </View>
-          ) : null}
-        </View>
-      ) : null}
-
+    <View style={styles.assistantRow}>
       {message.text ? <MarkdownView text={message.text} colors={colors} /> : null}
 
       {message.images.length > 0 ? (
@@ -302,12 +305,13 @@ function InlineText({
             </Text>
           );
         }
-        if (seg.type === 'code') {
+        if (seg.type === 'code' || seg.type === 'bold_code') {
           return (
             <Text
               key={i}
               style={{
                 fontFamily: 'monospace',
+                fontWeight: seg.type === 'bold_code' ? '700' : '400',
                 fontSize: Math.max(12, baseSize - 1.5),
                 backgroundColor: colors.inlineCodeBg,
                 color: colors.inlineCodeText,
@@ -537,8 +541,38 @@ const styles = StyleSheet.create({
     marginVertical: 7,
     direction: 'ltr',
   },
-  assistantRowCompact: {
-    marginVertical: 2,
+  activityWrap: {
+    paddingHorizontal: 14,
+    marginVertical: 4,
+    direction: 'ltr',
+  },
+  activityBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+  },
+  actDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    flexShrink: 0,
+  },
+  activitySummary: {
+    fontSize: 12.5,
+    fontWeight: '500',
+    flex: 1,
+    textAlign: 'left',
+  },
+  activityBody: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 0,
+    borderBottomLeftRadius: 10,
+    borderBottomRightRadius: 10,
+    padding: 10,
+    gap: 6,
   },
   metaRow: {
     flexDirection: 'row',

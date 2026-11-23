@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -21,12 +21,13 @@ import { CustomScrollbarOverlay, useCustomScrollbar } from '../../src/components
 import { DialogCard } from '../../src/components/DialogCard';
 import { FileTreeView } from '../../src/components/FileTreeView';
 import { ImageModal } from '../../src/components/ImageModal';
-import { MessageBubble } from '../../src/components/MessageBubble';
+import { ActivityGroupRow, MessageBubble } from '../../src/components/MessageBubble';
 import { UsageSheet } from '../../src/components/UsageSheet';
 import type { SlashCommandItem } from '../../src/protocol/types';
 import { usePui } from '../../src/store/connectionStore';
 import { usePreferences } from '../../src/store/preferencesStore';
 import { usePalette } from '../../src/theme/colors';
+import { groupTranscript } from '../../src/utils/transcript';
 
 type Tab = 'chat' | 'artifacts' | 'files' | 'changes';
 
@@ -99,6 +100,10 @@ export default function ChatScreen() {
   const projectLabel = summary?.project_name || cwd.split('/').filter(Boolean).pop() || '';
   const artifacts = detail?.artifacts ?? [];
   const dialogs = detail?.dialogs ?? [];
+  const transcriptEntries = useMemo(
+    () => groupTranscript(detail?.messages ?? []),
+    [detail?.messages],
+  );
   const contextProgress =
     detail && detail.context_window > 0 && detail.context_tokens != null
       ? detail.context_tokens / detail.context_window
@@ -222,21 +227,40 @@ export default function ChatScreen() {
                 <FlatList
                   ref={listRef}
                   {...bindings}
-                  data={detail.messages}
-                  keyExtractor={(item, idx) => `${item.role}-${item.timestamp}-${idx}`}
+                  data={transcriptEntries}
+                  keyExtractor={(item) => item.key}
                   contentContainerStyle={{ paddingVertical: 10 }}
                   onContentSizeChange={(w, h) => {
                     bindings.onContentSizeChange(w, h);
                     listRef.current?.scrollToEnd({ animated: false });
                   }}
-                  renderItem={({ item, index }) => {
-                    const prev = index > 0 ? detail.messages[index - 1] : null;
-                    const showHeader = !prev || prev.role !== 'assistant' || prev.model !== item.model;
+                  renderItem={({ item }) => {
+                    if (item.kind === 'activity') {
+                      return (
+                        <ActivityGroupRow
+                          summary={item.summary}
+                          tools={item.tools}
+                          thinking={item.thinking}
+                          hasRunning={item.hasRunning}
+                          hasError={item.hasError}
+                          verbose={verbose}
+                          onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                        />
+                      );
+                    }
+                    if (item.kind === 'user') {
+                      return (
+                        <MessageBubble
+                          message={item.message}
+                          onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                          onOpenFileTarget={openFileInTree}
+                        />
+                      );
+                    }
                     return (
                       <MessageBubble
-                        message={item}
-                        verbose={verbose}
-                        showHeader={showHeader}
+                        message={item.message}
+                        inlineTools={item.inlineTools}
                         onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
                         onOpenFileTarget={openFileInTree}
                       />

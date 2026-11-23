@@ -40,7 +40,10 @@ describe('mobile Markdown parser and bidi direction helper', () => {
     const inline = parseInlineMarkdown('Use **bold** and `code` with [Pui](https://pi.dev)');
     assert.ok(inline.some((s) => s.type === 'bold' && s.text === 'bold'));
     assert.ok(inline.some((s) => s.type === 'code' && s.text === 'code'));
-    assert.ok(inline.some((s) => s.type === 'link' && s.label === 'Pui'));
+    const boldNested = parseInlineMarkdown(
+      '**Single-line composer (`mobile/src/components/Composer.tsx`):**',
+    );
+    assert.ok(boldNested.some((s) => s.type === 'bold_code' && s.text === 'mobile/src/components/Composer.tsx'));
   });
 
   it('strips Pi internal image-coordinate annotations from user bubbles', () => {

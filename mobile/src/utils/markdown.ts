@@ -3,6 +3,7 @@
 export type InlineSegment =
   | { type: 'text'; text: string }
   | { type: 'bold'; text: string }
+  | { type: 'bold_code'; text: string }
   | { type: 'italic'; text: string }
   | { type: 'strike'; text: string }
   | { type: 'code'; text: string }
@@ -77,14 +78,24 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
     }
     const token = match[0];
     if (token.startsWith('**`') && token.endsWith('`**')) {
-      out.push({ type: 'code', text: token.slice(3, -3) });
+      out.push({ type: 'bold_code', text: token.slice(3, -3) });
     } else if (token.startsWith('`') && token.endsWith('`')) {
       out.push({ type: 'code', text: token.slice(1, -1) });
     } else if (
       (token.startsWith('**') && token.endsWith('**')) ||
       (token.startsWith('__') && token.endsWith('__'))
     ) {
-      out.push({ type: 'bold', text: token.slice(2, -2) });
+      // Recursively handle inline `code` spans nested inside **bold** text.
+      const inner = token.slice(2, -2);
+      const codeSplit = inner.split(/(`[^`]+`)/g);
+      for (const part of codeSplit) {
+        if (!part) continue;
+        if (part.startsWith('`') && part.endsWith('`')) {
+          out.push({ type: 'bold_code', text: part.slice(1, -1) });
+        } else {
+          out.push({ type: 'bold', text: part });
+        }
+      }
     } else if (token.startsWith('~~') && token.endsWith('~~')) {
       out.push({ type: 'strike', text: token.slice(2, -2) });
     } else if (token.startsWith('[')) {
