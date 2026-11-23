@@ -17,6 +17,19 @@ const KINDS: [(&str, &str, Icon); 7] = [
     ("themes", "CLI themes", Icon::Sliders),
     ("packages", "Packages", Icon::Folder),
 ];
+/// Maps a browse category (`KINDS` index) to the add-form type index, so "+ Add…"
+/// opens on the type being viewed. "All resources" keeps Pui Engineering skills.
+fn add_kind_for_category(category: usize) -> usize {
+    match KINDS.get(category).map(|k| k.0) {
+        Some("skills") => 1,
+        Some("mcp") => 2,
+        Some("extensions") => 3,
+        Some("prompts") => 4,
+        Some("themes") => 5,
+        Some("packages") => 0,
+        _ => 6,
+    }
+}
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Catalog {

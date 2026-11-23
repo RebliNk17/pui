@@ -10,6 +10,44 @@ impl Resources {
             self.review_dialog(ctx, demo);
         }
     }
+    /// Opens the add form preselected for `kind` (form index), saving personally
+    /// unless the project is trusted. MCP servers default to personal scope since
+    /// they usually carry machine-specific commands or credentials.
+    pub(super) fn open_add(&mut self, kind: usize) {
+        let trusted = self.catalog.as_ref().is_some_and(|c| c.trusted);
+        self.form = Form {
+            open: true,
+            kind,
+            scope: if trusted && kind != 2 { "project" } else { "user" }.into(),
+            transport: if kind == 2 { 1 } else { 0 },
+            ..Default::default()
+        };
+    }
+    /// One-click pause/resume: stages the enabled flag where it is effective and
+    /// opens review. Project overrides win when present; otherwise personal
+    /// servers change their personal default.
+    pub(super) fn pause_server(
+        &mut self,
+        ctx: &egui::Context,
+        item: &Resource,
+        enable: bool,
+        demo: bool,
+    ) {
+        let state = if enable { "on" } else { "off" };
+        let trusted = self.catalog.as_ref().is_some_and(|c| c.trusted);
+        let project_override = self.selection(item, "project") != "inherit";
+        let scope = if item.inherited && !(trusted && project_override) {
+            "user"
+        } else {
+            "project"
+        };
+        if scope == "project" && !trusted {
+            self.error = Some("Trust this project in Pi to change its MCP servers.".into());
+            return;
+        }
+        self.select_state(item, scope, state);
+        self.request_review(ctx, demo);
+    }
     pub(super) fn edit_server(&mut self, item: &Resource) {
         self.form = Form {
             open: true,

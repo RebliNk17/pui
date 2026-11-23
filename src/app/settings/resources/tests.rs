@@ -296,6 +296,48 @@ fn selections_are_staged_and_defaults_remain_separate() {
     assert_eq!(manager.selection(&item, "project"), "inherit");
 }
 #[test]
+fn add_opens_on_viewed_category_and_mcp_defaults_to_personal_stdio() {
+    assert_eq!(add_kind_for_category(0), 6);
+    assert_eq!(add_kind_for_category(1), 1);
+    assert_eq!(add_kind_for_category(2), 2);
+    assert_eq!(add_kind_for_category(6), 0);
+    let mut manager = Resources {
+        catalog: Some(demo_catalog()),
+        ..Default::default()
+    };
+    manager.open_add(2);
+    assert!(manager.form.open);
+    assert_eq!((manager.form.kind, manager.form.transport), (2, 1));
+    assert_eq!(manager.form.scope, "user");
+    manager.form.name = "browsermcp".into();
+    manager.form.command = "npx".into();
+    manager.form.args = "[\"-y\", \"@browsermcp/mcp@latest\"]".into();
+    let request = manager.form_request().unwrap();
+    assert_eq!(request["action"], "mcp-add");
+    let definition: Value = serde_json::from_str(request["definition"].as_str().unwrap()).unwrap();
+    assert_eq!(definition["command"], "npx");
+    assert_eq!(definition["args"][1], "@browsermcp/mcp@latest");
+}
+#[test]
+fn pause_server_stages_the_effective_scope() {
+    let ctx = egui::Context::default();
+    let mut manager = Resources {
+        catalog: Some(demo_catalog()),
+        ..Default::default()
+    };
+    let items = manager.catalog.as_ref().unwrap().items.clone();
+    let personal = items.iter().find(|r| r.kind == "mcp" && r.inherited).unwrap();
+    manager.pause_server(&ctx, personal, false, true);
+    assert_eq!(manager.selection(personal, "user"), "off");
+    assert!(!manager.effective(personal));
+    manager.drafts.clear();
+    manager.review = None;
+    let project = items.iter().find(|r| r.kind == "mcp" && !r.inherited).unwrap();
+    manager.pause_server(&ctx, project, true, true);
+    assert_eq!(manager.selection(project, "project"), "on");
+    assert!(manager.effective(project));
+}
+#[test]
 fn filters_and_package_ownership_use_real_metadata() {
     let mut manager = Resources {
         catalog: Some(demo_catalog()),

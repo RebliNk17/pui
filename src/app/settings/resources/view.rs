@@ -30,17 +30,7 @@ impl Resources {
                     )
                     .clicked()
                 {
-                    self.form = Form {
-                        open: true,
-                        kind: 6,
-                        scope: if self.catalog.as_ref().is_some_and(|c| c.trusted) {
-                            "project"
-                        } else {
-                            "user"
-                        }
-                        .into(),
-                        ..Default::default()
-                    };
+                    self.open_add(add_kind_for_category(self.kind));
                 }
                 if ui
                     .add_enabled(self.job.is_none(), egui::Button::new("Refresh"))
@@ -487,10 +477,24 @@ impl Resources {
         let colors = theme::palette(ui.ctx());
         if items.is_empty() {
             ui.add_space(24.0);
-            ui.label(theme::small(
-                ui,
-                "No matching resources. Change filters or add a resource.",
-            ));
+            if KINDS[self.kind].0 == "mcp" && self.mode != Mode::Packages {
+                ui.label(theme::small(
+                    ui,
+                    "No MCP servers configured. Add a stdio or streamable HTTP server.",
+                ));
+                ui.add_space(8.0);
+                if ui
+                    .add_enabled(self.job.is_none(), egui::Button::new("+ Add MCP server…"))
+                    .clicked()
+                {
+                    self.open_add(2);
+                }
+            } else {
+                ui.label(theme::small(
+                    ui,
+                    "No matching resources. Change filters or add a resource.",
+                ));
+            }
             return;
         }
         if !ui.ctx().wants_keyboard_input() {
@@ -988,7 +992,12 @@ if theme::choice(ui,self.selection(item,"project")==state,label).clicked(){self.
             if item.kind=="mcp" {
                 ui.label(theme::caption(ui,"SERVER CONFIGURATION"));ui.label(theme::small(ui,format!("{} · {} exposure",item.transport,item.exposure)));
                 ui.add(egui::Label::new(theme::small(ui,"Credentials, URLs and command arguments are not loaded here. Enabled does not mean connected.")).wrap());
-                if ui.add_enabled(editable,egui::Button::new("Edit server…")).clicked(){self.edit_server(item);}
+                let running=self.effective(item);
+                ui.horizontal_wrapped(|ui|{
+                    if ui.add_enabled(editable,egui::Button::new(if running{"Pause server"}else{"Resume server"})).on_hover_text("Stages enabled=false/true in the defining MCP configuration, then opens review. The entry is kept.").clicked(){self.pause_server(ui.ctx(),item,!running,demo);}
+                    if ui.add_enabled(editable,egui::Button::new("Edit server…")).clicked(){self.edit_server(item);}
+                    if item.removable&&ui.add_enabled(editable,egui::Button::new("Remove…")).clicked(){self.remove=Some(item.clone());}
+                });
                 if ui.button("Copy diagnostic command").on_hover_text("Running pi mcp list connects enabled servers. This view does not.").clicked(){ui.ctx().copy_text("pi mcp list".into());}
             } else if item.kind=="packages" {
                 let owned:Vec<_>=self.catalog.as_ref().map(|c|c.items.iter().filter(|r|r.kind!="packages"&&!item.owner.is_empty()&&r.owner==item.owner).map(|r|r.name.clone()).collect()).unwrap_or_default();
@@ -1011,7 +1020,7 @@ if theme::choice(ui,self.selection(item,"project")==state,label).clicked(){self.
             if !item.owner.is_empty()&&item.kind!="packages"&&ui.button("View owning package →").clicked(){self.mode=Mode::Packages;self.source_group=item.owner.clone();}
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(!demo,egui::Button::new("Open config ↗")).clicked(){transport::open_config(item.config.clone().into());}
-                if item.removable&&ui.add_enabled(editable,egui::Button::new(if item.kind=="packages"{"Uninstall…"}else{"Remove…"})).clicked(){self.remove=Some(item.clone());}
+                if item.removable&&item.kind!="mcp"&&ui.add_enabled(editable,egui::Button::new(if item.kind=="packages"{"Uninstall…"}else{"Remove…"})).clicked(){self.remove=Some(item.clone());}
             });
         });
     }
