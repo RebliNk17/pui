@@ -156,9 +156,9 @@ export function ModelEffortSheet({
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={closeAll}>
-      <Pressable style={styles.backdrop} onPress={closeAll}>
-        <Pressable
-          onPress={(e) => e.stopPropagation()}
+      <View style={styles.backdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={closeAll} />
+        <View
           style={[styles.sheet, { backgroundColor: colors.bg, borderColor: colors.border }]}
         >
           <View style={[styles.handle, { backgroundColor: colors.border }]} />
@@ -350,8 +350,8 @@ export function ModelEffortSheet({
               </View>
             </View>
           )}
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }

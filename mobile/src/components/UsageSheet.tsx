@@ -134,9 +134,9 @@ export function UsageSheet({ visible, detail, transport, onClose, onRefreshSessi
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable
-          onPress={(e) => e.stopPropagation()}
+      <View style={styles.backdrop}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View
           style={[styles.sheet, { backgroundColor: colors.bg, borderColor: colors.border }]}
         >
           <View style={[styles.handle, { backgroundColor: colors.border }]} />
@@ -155,7 +155,12 @@ export function UsageSheet({ visible, detail, transport, onClose, onRefreshSessi
           </View>
 
           <View style={styles.scrollWrap}>
-            <ScrollView {...bindings} contentContainerStyle={styles.body}>
+            <ScrollView
+              {...bindings}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.body}
+            >
               {/* Context window (when opened from a chat) */}
               {detail ? (
                 <>
@@ -316,8 +321,8 @@ export function UsageSheet({ visible, detail, transport, onClose, onRefreshSessi
             </ScrollView>
             <CustomScrollbarOverlay {...metrics} />
           </View>
-        </Pressable>
-      </Pressable>
+        </View>
+      </View>
     </Modal>
   );
 }
