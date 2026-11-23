@@ -190,7 +190,7 @@ fn edited_html_files_render_compact_card_and_emit_open_action() {
     });
     assert_eq!(
         captured_action,
-        Some(TranscriptAction::OpenTarget(
+        Some(TranscriptAction::Open(
             "docs/campaign-map-designs.html".into()
         ))
     );
@@ -254,9 +254,7 @@ fn pui_open_url_renders_browser_preview_card_with_title_and_open_button() {
         });
         assert_eq!(
             captured,
-            Some(TranscriptAction::OpenTarget(
-                "http://127.0.0.1:8765/".into()
-            ))
+            Some(TranscriptAction::Open("http://127.0.0.1:8765/".into()))
         );
     }
 }
@@ -314,8 +312,10 @@ fn markdown_inline_local_photo_resolves_safely_and_remote_images_never_fetch() {
         )],
         ..Default::default()
     }];
-    let mut transcript = Transcript::default();
-    transcript.cwd = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let mut transcript = Transcript {
+        cwd: Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        ..Default::default()
+    };
     let out = ctx.run(
         egui::RawInput {
             screen_rect: Some(Rect::from_min_size(

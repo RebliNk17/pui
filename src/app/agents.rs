@@ -2072,7 +2072,7 @@ mod tests {
         let parent = app.agents.active.clone();
         let dir = std::env::temp_dir().join(format!("pui-spawn-mode-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut spawn_mode = |app: &mut Pui, permission: Option<&str>| {
+        let spawn_mode = |app: &mut Pui, permission: Option<&str>| {
             let mut request =
                 json!({"action":"spawn","name":"w","task":"t","access":"worktree","cwd":dir});
             if let Some(mode) = permission {

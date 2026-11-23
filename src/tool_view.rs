@@ -219,7 +219,7 @@ fn row_with_view(
         ui.add_space(5.0);
     }
     if !tool.images.is_empty()
-        && let Some(gallery) = gallery.as_deref_mut()
+        && let Some(gallery) = gallery
     {
         ui.add_space(4.0);
         ui.indent(id.with("tool-images"), |ui| {

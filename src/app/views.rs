@@ -1031,7 +1031,7 @@ impl Pui {
                 self.attention_rendered(ui);
                 if let Some(action) = self.transcript.action.take() {
                     match action {
-                        crate::transcript::TranscriptAction::OpenTarget(target) => {
+                        crate::transcript::TranscriptAction::Open(target) => {
                             if let Err(error) =
                                 self.files.open_target(ctx, &self.prefs.cwd, &target)
                             {
@@ -1041,7 +1041,7 @@ impl Pui {
                                 self.inspector_panel = false;
                             }
                         }
-                        crate::transcript::TranscriptAction::OpenTargetSource(target) => {
+                        crate::transcript::TranscriptAction::ViewSource(target) => {
                             let candidate = std::path::Path::new(&target);
                             let resolved = if candidate.is_absolute() {
                                 candidate.to_path_buf()

@@ -19,8 +19,8 @@ pub use progress::Progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptAction {
-    OpenTarget(String),
-    OpenTargetSource(String),
+    Open(String),
+    ViewSource(String),
     OpenVisual {
         id: String,
         title: String,

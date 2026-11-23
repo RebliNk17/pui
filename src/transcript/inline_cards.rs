@@ -149,7 +149,7 @@ pub(super) fn compact_file_card(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(format!("{path}\nClick to open in Pui"));
     if response.clicked() {
-        *action = Some(TranscriptAction::OpenTarget(path.to_owned()));
+        *action = Some(TranscriptAction::Open(path.to_owned()));
     }
     response.context_menu(|ui| {
         crate::theme::menu_controls(ui);
@@ -161,11 +161,11 @@ pub(super) fn compact_file_card(
             })
             .clicked()
         {
-            *action = Some(TranscriptAction::OpenTarget(path.to_owned()));
+            *action = Some(TranscriptAction::Open(path.to_owned()));
             ui.close();
         }
         if badge == "HTML" && ui.button("View Source in Files").clicked() {
-            *action = Some(TranscriptAction::OpenTargetSource(path.to_owned()));
+            *action = Some(TranscriptAction::ViewSource(path.to_owned()));
             ui.close();
         }
         if ui.button("Copy Path").clicked() {
@@ -241,7 +241,7 @@ pub(super) fn open_card(
 
     // Browser preview card (Screenshot 3 style)
     let colors = crate::theme::palette(ui.ctx());
-    let card_width = ui.available_width().min(500.0).max(220.0);
+    let card_width = ui.available_width().clamp(220.0, 500.0);
     let preview_height = (card_width * 0.42).clamp(140.0, 220.0);
     let host_label = host_or_name(target);
     let title = visuals
@@ -309,7 +309,7 @@ pub(super) fn open_card(
                 .on_hover_text(format!("Open {target} in Browser"))
                 .clicked()
             {
-                *action = Some(TranscriptAction::OpenTarget(target.to_owned()));
+                *action = Some(TranscriptAction::Open(target.to_owned()));
             }
 
             // Divider line
@@ -340,12 +340,11 @@ pub(super) fn open_card(
                             egui::Popup::menu(&more).show(|ui| {
                                 crate::theme::menu_controls(ui);
                                 if ui.button("Open in Browser").clicked() {
-                                    *action = Some(TranscriptAction::OpenTarget(target.to_owned()));
+                                    *action = Some(TranscriptAction::Open(target.to_owned()));
                                     ui.close();
                                 }
                                 if is_html && ui.button("View Source in Files").clicked() {
-                                    *action =
-                                        Some(TranscriptAction::OpenTargetSource(target.to_owned()));
+                                    *action = Some(TranscriptAction::ViewSource(target.to_owned()));
                                     ui.close();
                                 }
                                 if ui
@@ -373,7 +372,7 @@ pub(super) fn open_card(
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
                             if open_btn.clicked() {
-                                *action = Some(TranscriptAction::OpenTarget(target.to_owned()));
+                                *action = Some(TranscriptAction::Open(target.to_owned()));
                             }
 
                             ui.with_layout(Layout::top_down(Align::LEFT), |ui| {

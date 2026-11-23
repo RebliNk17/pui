@@ -489,7 +489,7 @@ impl Gallery {
             return;
         }
         let colors = crate::theme::palette(ui.ctx());
-        let max_width = ui.available_width().min(680.0).max(120.0);
+        let max_width = ui.available_width().clamp(120.0, 680.0);
         let max_height = 460.0_f32;
         self.request_inline(ui, image);
         let state = self.inline_cache.get(&image.key).map(|c| match &c.entry {
