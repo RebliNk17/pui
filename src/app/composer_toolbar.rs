@@ -222,7 +222,7 @@ mod tests {
                     "overflow at {available}: {l:?}"
                 );
             }
-            assert!(!(last.0 && !l.wrap), "unwrapped while narrowing");
+            assert!(!last.0 || l.wrap, "unwrapped while narrowing");
             assert!(
                 !(last.1 && !l.effort_compact && !l.wrap),
                 "effort label returned on the same row while narrowing"

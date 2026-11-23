@@ -413,7 +413,7 @@ fn narrow_changes_heading_keeps_pills_clear_of_icon_controls() {
         };
         for width in [560.0, 640.0, 900.0] {
             for _ in 0..3 {
-                ctx.run(
+                let _ = ctx.run(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,

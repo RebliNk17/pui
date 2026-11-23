@@ -94,7 +94,10 @@ fn status_and_console_stay_outside_native_rect_in_every_device_and_theme() {
                                 egui::CentralPanel::default().show(ctx, |ui| {
                                     let idle =
                                         browser.viewport_with_state(ui, key, PageState::default());
-                                    assert_eq!(idle, rect, "Loading resized page: {device:?} {zoom}");
+                                    assert_eq!(
+                                        idle, rect,
+                                        "Loading resized page: {device:?} {zoom}"
+                                    );
                                 });
                             },
                         );

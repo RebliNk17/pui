@@ -224,6 +224,7 @@ pub fn encode(text: &str) -> Option<QrMatrix> {
     // Alignment patterns.
     for &ay in spec.alignments {
         for &ax in spec.alignments {
+            #[allow(clippy::nonminimal_bool)]
             let overlaps_finder =
                 (ax <= 8 && ay <= 8) || (ax >= size - 9 && ay <= 8) || (ax <= 8 && ay >= size - 9);
             if !overlaps_finder {

@@ -692,6 +692,7 @@ impl BrowserView {
         );
         rect.intersect(available).intersect(ui.clip_rect())
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn show(
         &mut self,
         frame: &eframe::Frame,

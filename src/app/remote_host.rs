@@ -274,7 +274,7 @@ impl Pui {
                     if let Some(origin) = origin {
                         if let Some(path_str) = app.state.session_file.clone() {
                             let p = std::path::Path::new(&path_str);
-                            if !app.prefs.chats.get(p).is_some_and(|m| m.origin.is_some())
+                            if app.prefs.chats.get(p).is_none_or(|m| m.origin.is_none())
                                 && app.state.messages.is_empty()
                             {
                                 app.record_session_origin(p, origin);

@@ -326,13 +326,19 @@ fn pause_server_stages_the_effective_scope() {
         ..Default::default()
     };
     let items = manager.catalog.as_ref().unwrap().items.clone();
-    let personal = items.iter().find(|r| r.kind == "mcp" && r.inherited).unwrap();
+    let personal = items
+        .iter()
+        .find(|r| r.kind == "mcp" && r.inherited)
+        .unwrap();
     manager.pause_server(&ctx, personal, false, true);
     assert_eq!(manager.selection(personal, "user"), "off");
     assert!(!manager.effective(personal));
     manager.drafts.clear();
     manager.review = None;
-    let project = items.iter().find(|r| r.kind == "mcp" && !r.inherited).unwrap();
+    let project = items
+        .iter()
+        .find(|r| r.kind == "mcp" && !r.inherited)
+        .unwrap();
     manager.pause_server(&ctx, project, true, true);
     assert_eq!(manager.selection(project, "project"), "on");
     assert!(manager.effective(project));

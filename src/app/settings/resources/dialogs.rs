@@ -18,7 +18,12 @@ impl Resources {
         self.form = Form {
             open: true,
             kind,
-            scope: if trusted && kind != 2 { "project" } else { "user" }.into(),
+            scope: if trusted && kind != 2 {
+                "project"
+            } else {
+                "user"
+            }
+            .into(),
             transport: if kind == 2 { 1 } else { 0 },
             ..Default::default()
         };
