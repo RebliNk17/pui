@@ -69,6 +69,10 @@ fn clean_label(label: &str) -> Option<String> {
 }
 
 pub fn path() -> Option<PathBuf> {
+    // Unit tests must never read (or write) the developer's real account labels.
+    if cfg!(test) {
+        return None;
+    }
     crate::runtime::agent_dir().map(|dir| dir.join(FILE))
 }
 
