@@ -506,16 +506,21 @@ impl Pui {
             );
             if !self.prefs.remote.enabled {
                 settings::page_separator(ui);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Remote server is off. Turn it on to generate a Tailscale pairing QR code.",
-                        )
-                        .size(12.0)
-                        .color(colors.muted),
-                    )
-                    .wrap(),
-                );
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(18, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Remote server is off. Turn it on to generate a Tailscale pairing QR code.",
+                                )
+                                .size(12.0)
+                                .color(colors.muted),
+                            )
+                            .wrap(),
+                        );
+                    });
             }
         });
 
@@ -557,179 +562,165 @@ impl Pui {
             let copied_id = ui.id().with("remote-copied-label");
             let copied_notice: Option<String> = ui.ctx().data(|d| d.get_temp::<String>(copied_id));
 
-            let wide = ui.available_width() >= 480.0;
-            let render_details = |ui: &mut egui::Ui, app: &mut Pui| {
-                ui.horizontal_wrapped(|ui| {
-                    egui::Frame::new()
-                        .fill(status_color.gamma_multiply(0.14))
-                        .stroke(Stroke::new(1.0_f32, status_color.gamma_multiply(0.38)))
-                        .corner_radius(99)
-                        .inner_margin(egui::Margin::symmetric(9, 3))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0;
-                                icons::inline(ui, Icon::Phone, status_color);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&status_text)
-                                            .size(11.5)
-                                            .strong()
-                                            .color(status_color),
-                                    )
-                                    .wrap(),
-                                );
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(20, 18))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let wide = ui.available_width() >= 480.0;
+
+                    let render_details = |ui: &mut egui::Ui, app: &mut Pui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+
+                        // Top row: crisp 24px status pill on the left, quiet Refresh IP on the right.
+                        ui.horizontal(|ui| {
+                            status_pill(ui, &status_text, status_color);
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                if ghost_button(ui, "Refresh IP", Some(Icon::Refresh)).clicked()
+                                    && !app.demo
+                                {
+                                    app.remote.refresh_tailscale_ip();
+                                    if app.prefs.remote.enabled && !app.remote.is_running() {
+                                        app.remote.start_listener();
+                                    }
+                                }
                             });
                         });
-                    if ui.button("Refresh IP").clicked() && !app.demo {
-                        app.remote.refresh_tailscale_ip();
-                        if app.prefs.remote.enabled && !app.remote.is_running() {
-                            app.remote.start_listener();
-                        }
-                    }
-                });
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new("Scan with Pui Mobile")
-                            .size(14.0)
-                            .strong()
-                            .color(colors.text),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(2.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Open Pui on your phone → Pair with Pui Desktop → scan this code over Tailscale.",
-                        )
-                        .size(12.0)
-                        .color(colors.muted),
-                    )
-                    .wrap(),
-                );
-                if let Some(ws) = &ws {
-                    ui.add_space(8.0);
-                    egui::Frame::new()
-                        .fill(colors.bg)
-                        .stroke(Stroke::new(1.0_f32, colors.border))
-                        .corner_radius(6)
-                        .inner_margin(egui::Margin::symmetric(8, 5))
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(ws)
-                                        .font(FontId::monospace(11.0))
-                                        .color(colors.muted),
-                                )
-                                .wrap()
-                                .selectable(true),
-                            );
-                        });
-                }
-                if let Some(uri) = &uri {
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Copy pairing link").clicked() {
-                            ui.ctx().copy_text(uri.clone());
-                            ui.ctx().data_mut(|d| {
-                                d.insert_temp(copied_id, "Pairing link copied".to_owned())
-                            });
-                        }
-                        if ui.button("Copy token").clicked() {
-                            ui.ctx().copy_text(app.prefs.remote.token.clone());
-                            ui.ctx()
-                                .data_mut(|d| d.insert_temp(copied_id, "Token copied".to_owned()));
-                        }
-                        if ui.button("Regenerate").clicked() {
-                            app.prefs.remote.regenerate_token();
-                            if !app.demo {
-                                app.remote.apply_config(app.prefs.remote.clone());
-                            }
-                            ui.ctx().data_mut(|d| {
-                                d.insert_temp(copied_id, "New token generated".to_owned())
-                            });
-                        }
-                    });
-                    if let Some(notice) = &copied_notice {
+
+                        ui.add_space(10.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Scan with Pui Mobile")
+                                    .size(14.0)
+                                    .strong()
+                                    .color(colors.text),
+                            )
+                            .wrap(),
+                        );
                         ui.add_space(4.0);
                         ui.add(
-                            egui::Label::new(RichText::new(notice).size(11.0).color(colors.accent))
-                                .wrap(),
+                            egui::Label::new(
+                                RichText::new(
+                                    "Open Pui on your phone → Pair with Pui Desktop → point camera at this code.",
+                                )
+                                .size(12.0)
+                                .color(colors.muted),
+                            )
+                            .wrap(),
                         );
-                    }
-                }
-            };
 
-            if wide && let Some(mat) = &matrix {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 18.0;
-                    paint_qr(ui, mat, 156.0);
-                    ui.vertical(|ui| {
-                        render_details(ui, self);
-                    });
-                });
-            } else {
-                if let Some(mat) = &matrix {
-                    paint_qr(ui, mat, 168.0_f32.min(ui.available_width()));
-                    ui.add_space(10.0);
-                }
-                render_details(ui, self);
-            }
-
-            let devices = self.remote.connected_devices();
-            settings::page_separator(ui);
-            ui.horizontal_wrapped(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new("Connected devices")
-                            .size(11.5)
-                            .color(colors.muted),
-                    )
-                    .wrap(),
-                );
-                if devices.is_empty() {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new("None yet · waiting for Pui Mobile")
-                                .size(11.5)
-                                .color(colors.dim),
-                        )
-                        .wrap(),
-                    );
-                } else {
-                    for dev in devices {
-                        egui::Frame::new()
-                            .fill(colors.surface)
-                            .stroke(Stroke::new(1.0_f32, colors.border))
-                            .corner_radius(99)
-                            .inner_margin(egui::Margin::symmetric(9, 3))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 5.0;
-                                    let icon = if dev.platform == OriginPlatform::Web {
-                                        Icon::Globe
-                                    } else {
-                                        Icon::Phone
-                                    };
-                                    icons::inline(ui, icon, colors.accent);
+                        if let Some(ws) = &ws {
+                            ui.add_space(10.0);
+                            egui::Frame::new()
+                                .fill(colors.bg)
+                                .stroke(Stroke::new(1.0_f32, colors.border))
+                                .corner_radius(7)
+                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(format!(
-                                                "{} · {}",
-                                                dev.device,
-                                                dev.platform.label()
-                                            ))
-                                            .size(11.5)
-                                            .color(colors.text),
+                                            RichText::new(ws)
+                                                .font(FontId::monospace(11.5))
+                                                .color(colors.muted),
+                                        )
+                                        .wrap()
+                                        .selectable(true),
+                                    );
+                                });
+                        }
+
+                        if let Some(uri) = &uri {
+                            ui.add_space(10.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+                                if accent_button(ui, "Copy pairing link").clicked() {
+                                    ui.ctx().copy_text(uri.clone());
+                                    ui.ctx().data_mut(|d| {
+                                        d.insert_temp(copied_id, "Link copied".to_owned())
+                                    });
+                                }
+                                if secondary_button(ui, "Copy token").clicked() {
+                                    ui.ctx().copy_text(app.prefs.remote.token.clone());
+                                    ui.ctx().data_mut(|d| {
+                                        d.insert_temp(copied_id, "Token copied".to_owned())
+                                    });
+                                }
+                                if ghost_button(ui, "Regenerate", None).clicked() {
+                                    app.prefs.remote.regenerate_token();
+                                    if !app.demo {
+                                        app.remote.apply_config(app.prefs.remote.clone());
+                                    }
+                                    ui.ctx().data_mut(|d| {
+                                        d.insert_temp(copied_id, "New token".to_owned())
+                                    });
+                                }
+                                if let Some(notice) = &copied_notice {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(notice)
+                                                .size(11.0)
+                                                .color(colors.accent),
                                         )
                                         .wrap(),
                                     );
-                                });
+                                }
                             });
+                        }
+                    };
+
+                    if wide && let Some(mat) = &matrix {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 20.0;
+                            paint_qr(ui, mat, 148.0);
+                            ui.vertical(|ui| {
+                                ui.set_width(ui.available_width());
+                                render_details(ui, self);
+                            });
+                        });
+                    } else {
+                        if let Some(mat) = &matrix {
+                            paint_qr(ui, mat, 156.0_f32.min(ui.available_width()));
+                            ui.add_space(12.0);
+                        }
+                        render_details(ui, self);
                     }
-                }
-            });
+                });
+
+            let devices = self.remote.connected_devices();
+            settings::page_separator(ui);
+            egui::Frame::new()
+                .fill(colors.bg.gamma_multiply(0.45))
+                .corner_radius(egui::CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: 9,
+                    se: 9,
+                })
+                .inner_margin(egui::Margin::symmetric(20, 11))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Connected devices")
+                                .size(11.5)
+                                .color(colors.muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            if devices.is_empty() {
+                                ui.label(
+                                    RichText::new("None yet · waiting for Pui Mobile")
+                                        .size(11.5)
+                                        .color(colors.dim),
+                                );
+                            } else {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for dev in devices.iter().rev() {
+                                    device_pill(ui, dev);
+                                }
+                            }
+                        });
+                    });
+                });
         });
 
         let adv_id = ui.id().with("remote-advanced-open");
@@ -747,10 +738,12 @@ impl Pui {
                 self.prefs.remote.host_name
             );
             settings::page_row(ui, "Network & host settings", &summary, |ui| {
-                if ui
-                    .button(if adv_open { "Hide" } else { "Configure" })
-                    .clicked()
-                {
+                let label = if adv_open {
+                    "▾ Hide"
+                } else {
+                    "▸ Configure"
+                };
+                if ghost_button(ui, label, None).clicked() {
                     adv_open = !adv_open;
                     ui.ctx().data_mut(|d| d.insert_temp(adv_id, adv_open));
                 }
@@ -838,6 +831,165 @@ impl Pui {
     }
 }
 
+fn status_pill(ui: &mut egui::Ui, label: &str, color: Color32) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(11.5), color);
+    let height = 24.0;
+    let width = (galley.size().x + 28.0).min(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        12,
+        color.gamma_multiply(0.12),
+        Stroke::new(1.0_f32, color.gamma_multiply(0.32)),
+        egui::StrokeKind::Inside,
+    );
+    painter.circle_filled(egui::pos2(rect.left() + 11.0, rect.center().y), 3.5, color);
+    painter.galley(
+        egui::pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+}
+
+fn device_pill(ui: &mut egui::Ui, dev: &crate::remote::ConnectedDevice) {
+    let colors = crate::theme::palette(ui.ctx());
+    let label = format!("{} · {}", dev.device, dev.platform.label());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label, FontId::proportional(11.5), colors.text);
+    let height = 24.0;
+    let width = (galley.size().x + 32.0).min(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    ui.painter().rect(
+        rect,
+        12,
+        colors.surface,
+        Stroke::new(1.0_f32, colors.border),
+        egui::StrokeKind::Inside,
+    );
+    let icon = if dev.platform == OriginPlatform::Web {
+        Icon::Globe
+    } else {
+        Icon::Phone
+    };
+    icons::draw(
+        ui,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 13.0, rect.center().y),
+            Vec2::splat(12.0),
+        ),
+        icon,
+        colors.accent,
+    );
+    ui.painter().galley(
+        egui::pos2(rect.left() + 23.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        colors.text,
+    );
+}
+
+fn accent_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let colors = crate::theme::palette(ui.ctx());
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(12.0), colors.accent);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(galley.size().x + 24.0, 28.0), Sense::click());
+    let fill = if response.hovered() {
+        colors.accent.gamma_multiply(0.24)
+    } else {
+        colors.accent_bg
+    };
+    ui.painter().rect(
+        rect,
+        7,
+        fill,
+        Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.45)),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        colors.accent,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn secondary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let colors = crate::theme::palette(ui.ctx());
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(12.0), colors.text);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(galley.size().x + 24.0, 28.0), Sense::click());
+    let fill = if response.hovered() {
+        colors.hover
+    } else {
+        colors.surface
+    };
+    ui.painter().rect(
+        rect,
+        7,
+        fill,
+        Stroke::new(1.0_f32, colors.border),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        colors.text,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn ghost_button(ui: &mut egui::Ui, label: &str, icon: Option<Icon>) -> egui::Response {
+    let colors = crate::theme::palette(ui.ctx());
+    let fg = colors.muted;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(12.0), fg);
+    let icon_pad = if icon.is_some() { 18.0 } else { 0.0 };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x + icon_pad + 18.0, 28.0),
+        Sense::click(),
+    );
+    let text_color = if response.hovered() { colors.text } else { fg };
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 7, colors.hover);
+    }
+    let mut text_x = rect.left() + 9.0;
+    if let Some(icon) = icon {
+        icons::draw(
+            ui,
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 14.0, rect.center().y),
+                Vec2::splat(12.0),
+            ),
+            icon,
+            text_color,
+        );
+        text_x += 18.0;
+    }
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(12.0), text_color);
+    ui.painter().galley(
+        egui::pos2(text_x, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text_color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn paint_qr(ui: &mut egui::Ui, matrix: &qr::QrMatrix, target_size: f32) {
     // ISO/IEC 18004 mandates a 4-module quiet zone so phone cameras scan reliably on dark UIs.
     let quiet = 4usize;
@@ -846,7 +998,7 @@ fn paint_qr(ui: &mut egui::Ui, matrix: &qr::QrMatrix, target_size: f32) {
     let side = cell * total as f32;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 8, Color32::WHITE);
+    painter.rect_filled(rect, 10, Color32::WHITE);
     for y in 0..matrix.size {
         for x in 0..matrix.size {
             if matrix.get(x, y) {
