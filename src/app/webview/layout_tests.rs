@@ -131,6 +131,11 @@ fn fixed_viewports_scale_down_automatically_without_reflow_or_zoom_changes() {
                 );
             }
             assert!(native.is_positive() && pane.contains_rect(native));
+            assert!(
+                native.left() >= pane.left() + NATIVE_EDGE_INSET
+                    && native.right() <= pane.right() - NATIVE_EDGE_INSET,
+                "{device}: native page must leave the pane's resize edges visible"
+            );
             if let Some((w, h)) = expected.dimensions() {
                 assert!(
                     (native.width() / native.height() - w as f32 / h as f32).abs() < 0.01,
@@ -138,7 +143,7 @@ fn fixed_viewports_scale_down_automatically_without_reflow_or_zoom_changes() {
                 );
                 assert!(native.width() <= w as f32 && native.height() <= h as f32);
             } else {
-                assert_eq!(native, pane);
+                assert_eq!(native, pane.shrink2(Vec2::new(NATIVE_EDGE_INSET, 0.0)));
             }
             assert_eq!(
                 browser.options["fixture"], expected,

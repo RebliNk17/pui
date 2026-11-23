@@ -2,6 +2,11 @@
 use super::*;
 use std::collections::BTreeMap;
 
+/// Native pages composite above egui, hiding anything painted beneath them.
+/// Keep the pane's left/right hairlines (panel separators and resize handles)
+/// visible along the full height by leaving them uncovered.
+pub(super) const NATIVE_EDGE_INSET: f32 = 2.0;
+
 pub(super) mod chrome;
 mod console;
 mod inspection;
@@ -610,7 +615,10 @@ impl BrowserView {
             console::pause::toggle(&mut options.console_paused, &state.console, ui.ctx());
         }
         // Native views composite above egui: reserve bottom status space without shifting the page top.
-        let mut available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+        let mut available = ui
+            .available_rect_before_wrap()
+            .intersect(ui.clip_rect())
+            .shrink2(Vec2::new(NATIVE_EDGE_INSET, 0.0));
         if !available.is_positive() {
             return egui::Rect::NOTHING;
         }

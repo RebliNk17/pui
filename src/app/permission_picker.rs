@@ -67,6 +67,23 @@ impl Pui {
             self.apply_settings();
         }
     }
+    pub(super) fn permission_chip_width(&self, ui: &egui::Ui) -> f32 {
+        let label = if self.readonly_worker() {
+            "Read-only"
+        } else {
+            self.active_permission().short_label()
+        };
+        ui.painter()
+            .layout_no_wrap(
+                label.into(),
+                FontId::proportional(11.5),
+                crate::theme::palette(ui.ctx()).muted,
+            )
+            .size()
+            .x
+            + 21.0
+    }
+
     pub(super) fn permission_button(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
         let before = self.prefs.settings.clone();
@@ -115,6 +132,11 @@ impl Pui {
                 "Agent permission mode · applies to subsequent tool calls in this chat"
             });
         egui::Popup::menu(&button)
+            .anchor(super::composer_toolbar::fit_anchor(
+                button.rect,
+                275.0,
+                ui.clip_rect(),
+            ))
             .align(egui::emath::RectAlign::TOP_START)
             .align_alternatives(&[])
             .width(275.0)

@@ -100,8 +100,11 @@ fn compact_html_eye_toggle_hides_native_preview_and_controls_then_restores() {
                 assert!(eye.right() < size.left() && size.right() < console.left());
                 let preview = browser.web_preview.as_ref().unwrap().rect;
                 assert!(
-                    preview.left().abs() < 1.0
-                        && (preview.right() - ctx.screen_rect().right()).abs() < 1.0,
+                    (preview.left() - super::super::webview::NATIVE_EDGE_INSET).abs() < 1.0
+                        && (preview.right() + super::super::webview::NATIVE_EDGE_INSET
+                            - ctx.screen_rect().right())
+                        .abs()
+                            < 1.0,
                     "HTML preview should be edge-to-edge: {preview:?}"
                 );
                 let field = ctx

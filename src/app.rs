@@ -12,6 +12,7 @@ mod completions;
 mod composer_hints;
 mod composer_history;
 mod composer_text;
+mod composer_toolbar;
 mod confirmations;
 pub(crate) mod context_capture;
 mod deletion;
@@ -1938,6 +1939,15 @@ impl Pui {
                     alternate = ctx.input(|i| i.modifiers.command);
                 }
                 ui.add_space(4.0);
+                let toolbar = self.composer_toolbar_layout(ui, 4.0);
+                if toolbar.wrap {
+                    ui.horizontal(|ui| {
+                        ui.set_height(theme::COMPACT_HEIGHT);
+                        theme::compact_controls(ui);
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        self.composer_pickers(ui, &toolbar);
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.set_height(theme::COMPACT_HEIGHT);
                     theme::compact_controls(ui);
@@ -1958,11 +1968,9 @@ impl Pui {
                         }
                     });
 
-                    let (rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 28.0), Sense::hover());
-                    icons::draw(ui, rect, Icon::Spark, colors.accent);
-                    self.model_button(ui);
-                    self.effort_button(ui);
-                    self.permission_button(ui);
+                    if !toolbar.wrap {
+                        self.composer_pickers(ui, &toolbar);
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let busy = !self.state.ready();
                         let enabled = !self.loading_chat

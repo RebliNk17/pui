@@ -706,7 +706,11 @@ impl Pui {
             }
         }
         text.max.x -= 14.0;
-        paint_text(ui, label, text, 11.0, colors.muted);
+        // Icon-only chips (narrow composer) keep the label for accessibility
+        // and the tooltip, but have no room to paint it.
+        if text.width() >= 8.0 {
+            paint_text(ui, label, text, 11.0, colors.muted);
+        }
         icons::chevron(
             ui,
             egui::Rect::from_center_size(
@@ -741,34 +745,16 @@ impl Pui {
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
+    #[cfg(test)]
     pub(super) fn model_button(&mut self, ui: &mut egui::Ui) {
-        let colors = theme::palette(ui.ctx());
-        let effort = thinking_label(&self.state.thinking);
-        let effort_width = ui
-            .painter()
-            .layout_no_wrap(effort, FontId::proportional(11.0), colors.muted)
-            .size()
-            .x
-            + 40.0;
+        let effort_width = self.effort_chip_width(ui);
+        let (natural, min) = self.model_chip_widths(ui);
+        let width = natural.min((ui.available_width() - effort_width - 170.0).max(min));
+        self.model_button_sized(ui, width);
+    }
+
+    pub(super) fn model_button_sized(&mut self, ui: &mut egui::Ui, width: f32) {
         let label = model_label(&self.state);
-        let hint = if !self.state.provider.is_empty() {
-            self.state.provider.as_str()
-        } else {
-            self.state.model.as_str()
-        };
-        let logo_pad = if icons::has_provider_logo(hint) {
-            18.0
-        } else {
-            0.0
-        };
-        let natural = ui
-            .painter()
-            .layout_no_wrap(label.clone(), FontId::proportional(11.0), colors.muted)
-            .size()
-            .x
-            + 22.0
-            + logo_pad;
-        let width = natural.min((ui.available_width() - effort_width - 170.0).max(45.0));
         let response = self
             .composer_choice(
                 ui,
@@ -795,18 +781,24 @@ impl Pui {
                 self.model_picker_focus = true;
             }
         }
-        self.model_anchor = Some((response.rect, ui.layer_id()));
+        self.model_anchor = Some((
+            super::composer_toolbar::fit_anchor(response.rect, 320.0, ui.clip_rect()),
+            ui.layer_id(),
+        ));
     }
 
+    #[cfg(test)]
     pub(super) fn effort_button(&mut self, ui: &mut egui::Ui) {
-        let colors = theme::palette(ui.ctx());
+        self.effort_button_sized(ui, false);
+    }
+
+    pub(super) fn effort_button_sized(&mut self, ui: &mut egui::Ui, compact: bool) {
         let label = thinking_label(&self.state.thinking);
-        let width = ui
-            .painter()
-            .layout_no_wrap(label.clone(), FontId::proportional(11.0), colors.muted)
-            .size()
-            .x
-            + 40.0;
+        let width = if compact {
+            super::composer_toolbar::EFFORT_COMPACT
+        } else {
+            self.effort_chip_width(ui)
+        };
         let response = self.composer_choice(ui, &label, "composer-effort", width, Some(Icon::Sliders), self.effort_picker_open)
             .on_hover_text(format!("Thinking effort: {label}{}\nApplies to subsequent model requests; the response in progress is unchanged.", if self.ultracode { " · Ultracode on" } else { "" }));
         if response.clicked() {
@@ -820,7 +812,10 @@ impl Pui {
             self.model_picker_open = false;
             self.effort_picker_focus = self.effort_picker_open;
         }
-        self.effort_anchor = Some((response.rect, ui.layer_id()));
+        self.effort_anchor = Some((
+            super::composer_toolbar::fit_anchor(response.rect, 240.0, ui.clip_rect()),
+            ui.layer_id(),
+        ));
     }
 
     pub(super) fn model_picker(&mut self, ctx: &egui::Context) {
