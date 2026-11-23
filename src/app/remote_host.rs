@@ -330,13 +330,8 @@ impl Pui {
                 self.run_on_remote_target(path.as_deref(), |app| {
                     if let Some(key) = permission_mode.as_deref() {
                         if let Some(mode) = settings::PermissionMode::from_key(key) {
-                            let active_id = app.agents.active.clone();
-                            if let Some(node) = app.agents.nodes.get_mut(&active_id) {
-                                node.permission = Some(mode);
-                            }
-                            let mut s = app.prefs.settings.clone();
-                            s.permission = mode;
-                            app.send(json!({ "type": "set_settings", "settings": s.payload() }));
+                            app.select_permission(mode);
+                            app.state.permission_mode = Some(mode.key().to_owned());
                         }
                     }
                     if let Some(model_id) = model {
@@ -504,7 +499,7 @@ impl Pui {
                     .state
                     .permission_mode
                     .clone()
-                    .unwrap_or_else(|| self.prefs.settings.permission.key().to_owned()),
+                    .unwrap_or_else(|| self.active_permission().key().to_owned()),
                 cost: self.state.cost,
                 context_tokens: self.state.context_tokens,
                 context_window: self.state.context_window,
@@ -578,7 +573,7 @@ impl Pui {
                         .state
                         .permission_mode
                         .clone()
-                        .unwrap_or_else(|| self.prefs.settings.permission.key().to_owned()),
+                        .unwrap_or_else(|| self.agent_settings(id).permission.key().to_owned()),
                     cost: chat.state.cost,
                     context_tokens: chat.state.context_tokens,
                     context_window: chat.state.context_window,

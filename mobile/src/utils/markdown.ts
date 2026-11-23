@@ -106,7 +106,16 @@ export function parseInlineMarkdown(input: string): InlineSegment[] {
         url: token.slice(mid + 2, -1),
       });
     } else if (token.startsWith('*') && token.endsWith('*')) {
-      out.push({ type: 'italic', text: token.slice(1, -1) });
+      const inner = token.slice(1, -1);
+      const codeSplit = inner.split(/(`[^`]+`)/g);
+      for (const part of codeSplit) {
+        if (!part) continue;
+        if (part.startsWith('`') && part.endsWith('`')) {
+          out.push({ type: 'code', text: part.slice(1, -1) });
+        } else {
+          out.push({ type: 'italic', text: part });
+        }
+      }
     } else {
       out.push({ type: 'text', text: token });
     }

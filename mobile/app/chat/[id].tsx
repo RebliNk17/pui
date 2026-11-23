@@ -328,6 +328,7 @@ export default function ChatScreen() {
                   path: sessionPath,
                   permission_mode: key,
                 });
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 180);
               }}
               onChangeModel={async (provider, model) => {
                 await transport?.updateSessionSettings({
@@ -335,12 +336,15 @@ export default function ChatScreen() {
                   provider,
                   model,
                 });
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 180);
               }}
               onChangeThinking={async (thinking) => {
+                updatePrefs({ defaultEffort: thinking });
                 await transport?.updateSessionSettings({
                   path: sessionPath,
                   thinking,
                 });
+                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 180);
               }}
               onLocalCommand={(name) => {
                 if (name === 'files') setTab('files');
