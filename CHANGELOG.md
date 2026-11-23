@@ -5,6 +5,12 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-23
+
+### Fixed
+
+- The update dialog renders release notes as Markdown (headings, lists, bold and code) instead of showing raw `###` and `**` markers.
+
 ## [0.2.0] - 2026-11-23
 
 ### Added
