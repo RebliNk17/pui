@@ -10,6 +10,7 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 ### Fixed
 
 - The update dialog renders release notes as Markdown (headings, lists, bold and code) instead of showing raw `###` and `**` markers.
+- Moving the Pi folder into Pui no longer rewrites recorded scheduled-check results. Previously this could make Scheduled tasks reject all saved jobs ("Invalid retained check evidence") after migrating.
 
 ## [0.2.0] - 2026-11-23
 

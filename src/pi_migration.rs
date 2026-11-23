@@ -235,7 +235,12 @@ pub fn migrate(source: &Path, target: &Path) -> Result<Option<Moved>, String> {
     Ok(moved)
 }
 
-/// Rewrite saved paths under `from` to `to` in strings and object keys.
+/// Immutable records: captured check evidence and its provenance (path
+/// excerpts are bounded and hashed at capture), never rewritten.
+const IMMUTABLE_KEYS: &[&str] = &["evidence", "previous_checks", "provenance"];
+
+/// Rewrite saved paths under `from` to `to` in strings and object keys,
+/// leaving immutable evidence records untouched.
 pub fn rewrite_paths(value: &mut Value, from: &Path, to: &Path) -> bool {
     let (from, to) = (
         from.to_string_lossy().into_owned(),
@@ -259,7 +264,9 @@ pub fn rewrite_paths(value: &mut Value, from: &Path, to: &Path) -> bool {
                 let mut changed = false;
                 let entries: Vec<_> = std::mem::take(object).into_iter().collect();
                 for (key, mut item) in entries {
-                    changed |= walk(&mut item, map);
+                    if !IMMUTABLE_KEYS.contains(&key.as_str()) {
+                        changed |= walk(&mut item, map);
+                    }
                     let key = map(&key).inspect(|_| changed = true).unwrap_or(key);
                     object.insert(key, item);
                 }
@@ -393,6 +400,26 @@ mod tests {
         );
         assert_eq!(value["other"], "/h/.pi/agent/sessions-backup/a.jsonl");
         assert_eq!(value["list"][0], "/p/pi-agent/sessions");
+        // Recorded check evidence keeps the path it was captured with.
+        let mut job = json!({
+            "creator": {"path": "/h/.pi/agent/sessions/a.jsonl"},
+            "evidence": {"provenance": {"session": {"excerpt": "/h/.pi/agent/sessions/a.jsonl"}}},
+            "previous_checks": [{"provenance": {"session": {"excerpt": "/h/.pi/agent/sessions/a.jsonl"}}}]
+        });
+        assert!(rewrite_paths(
+            &mut job,
+            Path::new("/h/.pi/agent/sessions"),
+            Path::new("/p/pi-agent/sessions")
+        ));
+        assert_eq!(job["creator"]["path"], "/p/pi-agent/sessions/a.jsonl");
+        assert_eq!(
+            job["evidence"]["provenance"]["session"]["excerpt"],
+            "/h/.pi/agent/sessions/a.jsonl"
+        );
+        assert_eq!(
+            job["previous_checks"][0]["provenance"]["session"]["excerpt"],
+            "/h/.pi/agent/sessions/a.jsonl"
+        );
     }
 
     #[test]
