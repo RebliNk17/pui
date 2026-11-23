@@ -7,7 +7,6 @@ const config: ExpoConfig = {
   scheme: 'pui',
   orientation: 'portrait',
   userInterfaceStyle: 'automatic',
-  newArchEnabled: true,
   android: {
     package: 'dev.pi.pui.mobile',
     adaptiveIcon: {
