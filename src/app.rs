@@ -2571,6 +2571,10 @@ impl eframe::App for Pui {
                 && !self.draft_images.gallery.is_open(),
             !self.search_blocked(),
         );
+        if let Some(command) = crate::markdown::take_terminal_command(ctx) {
+            self.terminals
+                .run_command(ctx, &self.prefs.cwd, self.demo, &command);
+        }
         self.terminals.context_inputs(
             ctx,
             !self.settings_open && !self.search_open && !self.kanban.open && !self.automation.open,

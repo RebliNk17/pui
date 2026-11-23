@@ -12,6 +12,43 @@ fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 }
 
 #[test]
+fn run_command_opens_terminal_and_echoes_in_demo_without_executing() {
+    let ctx = egui::Context::default();
+    let mut terminals = Terminals::default();
+    let root = PathBuf::from("/tmp/pui-run-command");
+    terminals.run_command(&ctx, &root, true, "git status\ngit log -1");
+    assert!(terminals.is_open());
+    let project = terminals.projects.get(&root).unwrap();
+    assert_eq!(project.tabs.len(), 1);
+    let screen = project
+        .active()
+        .unwrap()
+        .demo
+        .as_ref()
+        .unwrap()
+        .screen()
+        .contents();
+    assert!(screen.contains("git status"), "{screen}");
+    assert!(screen.contains("git log -1"), "{screen}");
+    assert!(screen.contains("not run"), "{screen}");
+    // A second run reuses the same shell instead of opening another tab.
+    terminals.run_command(&ctx, &root, true, "pwd");
+    assert_eq!(terminals.projects.get(&root).unwrap().tabs.len(), 1);
+}
+
+#[test]
+fn queued_run_input_waits_for_the_shell_to_start() {
+    let (_tx, rx) = mpsc::channel();
+    let mut tab = Tab {
+        pending: b"echo hi\r".to_vec(),
+        starting: Some(rx),
+        ..Default::default()
+    };
+    tabs::poll_tab(&mut tab);
+    assert_eq!(tab.pending, b"echo hi\r");
+}
+
+#[test]
 fn terminal_keys_and_safe_bracketed_paste() {
     for (keycode, bytes) in [
         (egui::Key::Enter, b"\r".as_slice()),

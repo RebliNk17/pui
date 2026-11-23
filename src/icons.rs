@@ -46,6 +46,7 @@ pub enum Icon {
     Collapse,
     Check,
     Mic,
+    Play,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -379,6 +380,13 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((-7.0, 0.0), (-3.0, 5.0));
             line((3.0, -5.0), (7.0, 0.0));
             line((7.0, 0.0), (3.0, 5.0));
+        }
+        Icon::Play => {
+            p.add(egui::Shape::convex_polygon(
+                vec![pt(-3.5, -5.5), pt(5.5, 0.0), pt(-3.5, 5.5)],
+                Color32::TRANSPARENT,
+                Stroke::new(s.width, color),
+            ));
         }
         Icon::Mic => {
             // Microphone capsule

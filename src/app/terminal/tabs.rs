@@ -20,7 +20,13 @@ pub(super) fn poll_tab(tab: &mut Tab) {
     match rx.try_recv() {
         Ok(result) => {
             match result {
-                Ok(session) => tab.session = Some(session),
+                Ok(session) => {
+                    let pending = std::mem::take(&mut tab.pending);
+                    if let Err(error) = session.send(pending) {
+                        tab.error = Some(error);
+                    }
+                    tab.session = Some(session);
+                }
                 Err(error) => tab.error = Some(error),
             }
             tab.starting = None;

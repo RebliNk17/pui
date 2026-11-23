@@ -34,6 +34,8 @@ struct Tab {
     scroll: f32,
     demo: Option<vt100::Parser>,
     restored: bool,
+    /// Input queued while the shell is still starting (e.g. Run in terminal).
+    pending: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -188,6 +190,60 @@ impl Terminals {
             capture::clear(ctx);
             self.surrender_focus(ctx);
         }
+    }
+    /// Run a command from a chat reply in this project's active shell,
+    /// opening the terminal (and a shell) when needed.
+    pub(super) fn run_command(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        demo: bool,
+        command: &str,
+    ) {
+        if !self.open {
+            self.toggle(ctx, root, demo);
+        } else {
+            self.workspace(ctx, root, demo);
+            self.open_shell(ctx, demo);
+        }
+        let usable = |tab: &Tab| {
+            tab.starting.is_some()
+                || tab.session.as_ref().is_some_and(Session::running)
+                || tab.demo.is_some()
+        };
+        if !self
+            .projects
+            .get(&self.root)
+            .and_then(Project::active)
+            .is_some_and(usable)
+        {
+            self.start(ctx, demo);
+        }
+        let Some(tab) = self
+            .projects
+            .get_mut(&self.root)
+            .and_then(Project::active_mut)
+        else {
+            return;
+        };
+        let mut input = command
+            .replace("\r\n", "\n")
+            .replace('\n', "\r")
+            .into_bytes();
+        input.push(b'\r');
+        if let Some(parser) = &mut tab.demo {
+            parser.process(command.replace('\n', "\r\n").as_bytes());
+            parser.process(b"\r\nDemo mode: the command was not run.\r\n");
+        } else if let Some(session) = tab.session.as_ref().filter(|s| s.running()) {
+            if let Err(error) = session.send(input) {
+                tab.error = Some(error);
+            }
+        } else {
+            tab.pending.extend(input);
+        }
+        tab.focus(ctx);
+        self.focus = true;
+        ctx.request_repaint();
     }
     fn workspace(&mut self, ctx: &egui::Context, root: &Path, demo: bool) {
         if self.root != root {

@@ -536,6 +536,52 @@ fn format(
         ..Default::default()
     }
 }
+fn terminal_command_id() -> egui::Id {
+    egui::Id::new("pui-markdown-run-in-terminal")
+}
+
+/// Shell commands from assistant replies get a Run action. Unlabeled fences
+/// qualify too: agents often omit the language for one-off commands.
+fn runnable_command(language: &str, code: &str) -> Option<String> {
+    let language = language.split_whitespace().next().unwrap_or("");
+    let shell = [
+        "",
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "shell",
+        "console",
+        "terminal",
+        "shellsession",
+    ];
+    if !shell.iter().any(|l| l.eq_ignore_ascii_case(language)) {
+        return None;
+    }
+    let lines: Vec<&str> = code
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            trimmed
+                .strip_prefix("$ ")
+                .or_else(|| trimmed.strip_prefix("% "))
+                .unwrap_or(line)
+        })
+        .collect();
+    let command = lines.join("\n").trim().to_owned();
+    (!command.is_empty() && lines.len() <= 20).then_some(command)
+}
+
+fn request_terminal_command(ctx: &egui::Context, command: String) {
+    ctx.data_mut(|d| d.insert_temp(terminal_command_id(), command));
+    ctx.request_repaint();
+}
+
+/// The app takes at most one pending Run request per frame.
+pub fn take_terminal_command(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|d| d.remove_temp::<String>(terminal_command_id()))
+}
+
 pub fn show(ui: &mut Ui, source: &str) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
@@ -787,6 +833,18 @@ fn show_events_with_media(
                                     .clicked()
                                     {
                                         ui.ctx().copy_text(code_text.clone());
+                                    }
+                                    if reply
+                                        && let Some(command) =
+                                            runnable_command(&language, &code_text)
+                                        && crate::icons::button(
+                                            ui,
+                                            crate::icons::Icon::Play,
+                                            "Run in terminal",
+                                        )
+                                        .clicked()
+                                    {
+                                        request_terminal_command(ui.ctx(), command);
                                     }
                                     if is_mermaid {
                                         let toggle_label = if show_mermaid_source {
@@ -1107,6 +1165,33 @@ pub fn diff(ui: &mut Ui, source: &str) {
 mod tests {
     use super::*;
     use egui::cache::ComputerMut;
+
+    #[test]
+    fn only_shell_fences_offer_run_and_prompt_markers_are_stripped() {
+        assert_eq!(
+            runnable_command("", "git status && git log -1\n").as_deref(),
+            Some("git status && git log -1")
+        );
+        assert_eq!(
+            runnable_command("console", "$ cargo test\n$ cargo fmt\n").as_deref(),
+            Some("cargo test\ncargo fmt")
+        );
+        assert_eq!(runnable_command("bash title", "ls").as_deref(), Some("ls"));
+        for language in ["rust", "json", "diff", "mermaid"] {
+            assert!(runnable_command(language, "ls").is_none());
+        }
+        assert!(runnable_command("sh", "  \n").is_none());
+        assert!(runnable_command("sh", &"echo\n".repeat(21)).is_none());
+    }
+
+    #[test]
+    fn run_requests_are_taken_once() {
+        let ctx = egui::Context::default();
+        request_terminal_command(&ctx, "ls".into());
+        assert_eq!(take_terminal_command(&ctx).as_deref(), Some("ls"));
+        assert!(take_terminal_command(&ctx).is_none());
+    }
+
     #[test]
     fn github_callouts_render_titles_without_raw_markers_or_execution() {
         for mode in [theme::Theme::Light, theme::Theme::Dark] {
