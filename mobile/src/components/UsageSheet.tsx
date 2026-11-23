@@ -51,41 +51,80 @@ export function UsageSheet({ visible, detail, transport, onClose, onRefreshSessi
   const colors = usePalette();
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [expandedModels, setExpandedModels] = useState<Record<string, boolean>>({});
   const { bindings, metrics } = useCustomScrollbar();
 
-  const fetchUsage = useCallback(async () => {
-    if (!transport) return;
+  const fetchUsage = useCallback(async (): Promise<UsageResponse | null> => {
+    if (!transport) return null;
     try {
       const data = await transport.getUsage();
       setUsage(data);
-    } catch {
-      // ignore if older host doesn't expose /v1/usage yet
+      setErrorMsg(null);
+      return data;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404')) {
+        setErrorMsg(
+          'Your running Pui Desktop instance is from an earlier build. Quit (⌘Q) and reopen Pui Desktop to enable live provider rate limits.',
+        );
+      } else {
+        setErrorMsg(msg);
+      }
+      return null;
     }
   }, [transport]);
 
-  useEffect(() => {
-    if (visible) {
-      void fetchUsage();
-    }
-  }, [visible, fetchUsage]);
-
-  const handleRefresh = async () => {
+  const triggerRefreshAndPoll = useCallback(async () => {
+    if (!transport) return;
     setLoading(true);
+    setErrorMsg(null);
     try {
       onRefreshSession?.();
-      if (transport) {
-        await transport.refreshUsage().catch(() => {});
-        // Give host a moment to update provider metrics, then fetch.
-        setTimeout(() => {
-          void fetchUsage().finally(() => setLoading(false));
-        }, 900);
+      await transport.refreshUsage();
+      // Host runs a background Node helper across providers (~1–4s); poll until populated.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 700 : 1000));
+        const latest = await fetchUsage();
+        if (latest && (latest.providers.length > 0 || latest.data)) {
+          break;
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('404')) {
+        setErrorMsg(
+          'Your running Pui Desktop instance is from an earlier build. Quit (⌘Q) and reopen Pui Desktop to enable live provider rate limits.',
+        );
+      } else {
+        setErrorMsg(msg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [transport, onRefreshSession, fetchUsage]);
+
+  useEffect(() => {
+    if (!visible || !transport) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const data = await fetchUsage();
+      if (cancelled) return;
+      if (data && data.providers.length === 0 && !data.data) {
+        // Auto-trigger a live host fetch if Desktop hasn't populated usage yet.
+        await triggerRefreshAndPoll();
       } else {
         setLoading(false);
       }
-    } catch {
-      setLoading(false);
-    }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, transport, fetchUsage, triggerRefreshAndPoll]);
+
+  const handleRefresh = () => {
+    void triggerRefreshAndPoll();
   };
 
   const tokens = detail?.context_tokens ?? 0;
@@ -158,16 +197,32 @@ export function UsageSheet({ visible, detail, transport, onClose, onRefreshSessi
 
               {/* Provider Subscription Rate Limits */}
               <Text style={[styles.section, { color: colors.dim }]}>PROVIDER RATE LIMITS</Text>
-              {providers.length === 0 ? (
+              {errorMsg ? (
+                <View
+                  style={[
+                    styles.card,
+                    { backgroundColor: colors.surface, borderColor: colors.red },
+                  ]}
+                >
+                  <Text style={{ color: colors.red, fontSize: 12.5, lineHeight: 18 }}>
+                    {errorMsg}
+                  </Text>
+                </View>
+              ) : providers.length === 0 ? (
                 <View
                   style={[
                     styles.card,
                     { backgroundColor: colors.surface, borderColor: colors.border },
                   ]}
                 >
-                  <Text style={{ color: colors.muted, fontSize: 13 }}>
-                    No provider subscription limits loaded yet. Tap ↻ above to refresh from Pui Desktop.
-                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    {loading ? <ActivityIndicator size="small" color={colors.accent} /> : null}
+                    <Text style={{ color: colors.muted, fontSize: 13, flex: 1 }}>
+                      {loading
+                        ? 'Loading provider rate limits from Pui Desktop…'
+                        : 'No provider subscription limits available. Tap ↻ above to retry.'}
+                    </Text>
+                  </View>
                 </View>
               ) : (
                 providers.map((prov) => (
