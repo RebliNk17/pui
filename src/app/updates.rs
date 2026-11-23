@@ -4,6 +4,8 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 const DEFAULT_REPOSITORY: &str = "RebliNk17/pui";
 const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -15,8 +17,58 @@ pub(super) struct Release {
     pub body: String,
     pub zip_url: Option<String>,
     pub sums_url: Option<String>,
+    /// Archive size advertised by GitHub; used as the progress total.
+    pub zip_size: Option<u64>,
     pub newer: bool,
 }
+
+/// Shared between the UI and the download worker. Lock-free so painting never
+/// waits on the worker.
+#[derive(Default)]
+pub(super) struct Progress {
+    downloaded: AtomicU64,
+    total: AtomicU64,
+    phase: AtomicU8,
+    cancel: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Phase {
+    Downloading,
+    Verifying,
+    Extracting,
+    CheckingSignature,
+}
+
+impl Progress {
+    fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Relaxed);
+    }
+
+    pub(super) fn phase(&self) -> Phase {
+        match self.phase.load(Ordering::Relaxed) {
+            1 => Phase::Verifying,
+            2 => Phase::Extracting,
+            3 => Phase::CheckingSignature,
+            _ => Phase::Downloading,
+        }
+    }
+
+    /// Downloaded bytes and known total, if any.
+    pub(super) fn bytes(&self) -> (u64, Option<u64>) {
+        let total = self.total.load(Ordering::Relaxed);
+        (
+            self.downloaded.load(Ordering::Relaxed),
+            (total > 0).then_some(total),
+        )
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+const CANCELLED: &str = "Update download cancelled.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum InstallState {
@@ -45,6 +97,7 @@ pub(super) struct Updates {
     rx: Option<Receiver<Result<Release, String>>>,
     install: InstallState,
     install_rx: Option<Receiver<Result<StagedInstall, String>>>,
+    progress: Option<Arc<Progress>>,
     last_auto_check: Option<std::time::Instant>,
     checked: bool,
     cleaned_up: bool,
@@ -59,6 +112,7 @@ impl Default for Updates {
             rx: None,
             install: InstallState::Idle,
             install_rx: None,
+            progress: None,
             last_auto_check: None,
             checked: false,
             cleaned_up: false,
@@ -117,6 +171,7 @@ fn release(repo: &str, current: &str, data: &Value) -> Result<Release, String> {
     let current =
         semver::Version::parse(current).map_err(|_| "This build has an invalid version.")?;
     let mut zip_url = None;
+    let mut zip_size = None;
     let mut sums_url = None;
     if let Some(assets) = data["assets"].as_array() {
         // Prefer signed notarized macOS arm64 zip over adhoc zip if both exist.
@@ -138,6 +193,7 @@ fn release(repo: &str, current: &str, data: &Value) -> Result<Release, String> {
                 && (zip_url.is_none() || !name.contains("-adhoc."))
             {
                 zip_url = Some(download.to_owned());
+                zip_size = asset["size"].as_u64().filter(|&size| size > 0);
             }
         }
     }
@@ -154,6 +210,7 @@ fn release(repo: &str, current: &str, data: &Value) -> Result<Release, String> {
         body,
         zip_url,
         sums_url,
+        zip_size,
         newer: version > current,
     })
 }
@@ -287,8 +344,13 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn download_url_to_file(url: &str, dest: &Path, max_bytes: u64) -> Result<(), String> {
-    let status = std::process::Command::new("/usr/bin/curl")
+fn download_url_to_file(
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+    progress: Option<(&Progress, &egui::Context)>,
+) -> Result<(), String> {
+    let mut child = std::process::Command::new("/usr/bin/curl")
         .args([
             "-fsSL",
             "--max-time",
@@ -302,8 +364,32 @@ fn download_url_to_file(url: &str, dest: &Path, max_bytes: u64) -> Result<(), St
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
         .map_err(|_| "Cannot start curl to download the update.")?;
+    // Poll the partial file's size for progress; curl writes it incrementally.
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| "Update download failed.")? {
+            break status;
+        }
+        if let Some((progress, ctx)) = progress {
+            if progress.cancelled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CANCELLED.into());
+            }
+            let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            if size != progress.downloaded.swap(size, Ordering::Relaxed) {
+                ctx.request_repaint();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if let Some((progress, ctx)) = progress {
+        if let Ok(meta) = std::fs::metadata(dest) {
+            progress.downloaded.store(meta.len(), Ordering::Relaxed);
+        }
+        ctx.request_repaint();
+    }
     if !status.success() {
         return Err("Update download failed. Check your connection and try again.".into());
     }
@@ -314,6 +400,8 @@ fn download_and_stage(
     repo: &str,
     zip_url: &str,
     sums_url: Option<&str>,
+    progress: &Progress,
+    ctx: &egui::Context,
 ) -> Result<(PathBuf, PathBuf, Option<PathBuf>), String> {
     if !valid_asset_url(repo, zip_url) {
         return Err("Refusing to download from an untrusted update URL.".into());
@@ -333,10 +421,19 @@ fn download_and_stage(
         .map_err(|_| "Cannot create temporary directory for update.")?;
     let result = (|| -> Result<(PathBuf, PathBuf, Option<PathBuf>), String> {
         let zip_path = staging.join(filename);
-        download_url_to_file(zip_url, &zip_path, 600 * 1024 * 1024)?;
+        download_url_to_file(zip_url, &zip_path, 600 * 1024 * 1024, Some((progress, ctx)))?;
+        let step = |phase| {
+            if progress.cancelled() {
+                return Err(String::from(CANCELLED));
+            }
+            progress.set_phase(phase);
+            ctx.request_repaint();
+            Ok(())
+        };
         if let Some(sums_url) = sums_url {
+            step(Phase::Verifying)?;
             let sums_path = staging.join("SHA256SUMS");
-            download_url_to_file(sums_url, &sums_path, 1024 * 1024)?;
+            download_url_to_file(sums_url, &sums_path, 1024 * 1024, None)?;
             let sums_text =
                 std::fs::read_to_string(&sums_path).map_err(|_| "Cannot read update checksums.")?;
             let expected = parse_expected_sha256(&sums_text, filename)
@@ -346,6 +443,7 @@ fn download_and_stage(
                 return Err("Downloaded update failed SHA-256 checksum verification.".into());
             }
         }
+        step(Phase::Extracting)?;
         let unpack = staging.join("unpacked");
         std::fs::create_dir_all(&unpack).map_err(|_| "Cannot create unpack directory.")?;
         let status = std::process::Command::new("/usr/bin/ditto")
@@ -367,6 +465,7 @@ fn download_and_stage(
         if !staged_app.join("Contents/MacOS/pui").is_file() {
             return Err("Extracted update does not contain a valid Pui.app bundle.".into());
         }
+        step(Phase::CheckingSignature)?;
         let verify = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(&staged_app)
@@ -377,6 +476,9 @@ fn download_and_stage(
             .map_err(|_| "Cannot verify the downloaded app signature.")?;
         if !verify.success() {
             return Err("Downloaded Pui.app failed macOS code-signature verification.".into());
+        }
+        if progress.cancelled() {
+            return Err(CANCELLED.into());
         }
         Ok((staging.clone(), staged_app, current_app_bundle()))
     })();
@@ -539,13 +641,31 @@ impl Updates {
             let _ = std::fs::remove_dir_all(staged_dir);
         }
         self.install = InstallState::Downloading;
+        let progress = Arc::new(Progress::default());
+        progress
+            .total
+            .store(release.zip_size.unwrap_or(0), Ordering::Relaxed);
+        self.progress = Some(progress.clone());
         let (tx, rx) = mpsc::channel();
         self.install_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(download_and_stage(repo, &zip_url, sums_url.as_deref()));
+            let _ = tx.send(download_and_stage(
+                repo,
+                &zip_url,
+                sums_url.as_deref(),
+                &progress,
+                &ctx,
+            ));
             ctx.request_repaint();
         });
+    }
+
+    /// Ask the worker to stop; it kills curl, removes staging and reports back.
+    pub(super) fn cancel_download(&mut self) {
+        if let Some(progress) = &self.progress {
+            progress.cancel.store(true, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn cancel_staged(&mut self) {
@@ -563,7 +683,13 @@ impl Updates {
         }
         if let Some(result) = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.install_rx = None;
+            let cancelled = self.progress.take().is_some_and(|p| p.cancelled());
             self.install = match result {
+                Ok((staged_dir, ..)) if cancelled => {
+                    let _ = std::fs::remove_dir_all(staged_dir);
+                    InstallState::Idle
+                }
+                Err(_) if cancelled => InstallState::Idle,
                 Ok((staged_dir, staged_app, target_app)) => InstallState::Ready {
                     staged_dir,
                     staged_app,
@@ -656,6 +782,7 @@ impl Updates {
         let mut install_now = None;
         let mut reveal_staged = None;
         let mut discard_staged = false;
+        let mut cancel_download = false;
         let response = prompt_ui::modal(ctx, egui::Id::new("pui-updates"), 360.0, |ui| {
             let mut close = prompt_ui::close(ui);
             prompt_ui::badge(ui, Icon::Refresh, false);
@@ -674,6 +801,10 @@ impl Updates {
                         }
                     }
                 });
+            if let (InstallState::Downloading, Some(progress)) = (&self.install, &self.progress) {
+                ui.add_space(14.0);
+                cancel_download = download_progress(ui, progress);
+            }
             ui.add_space(14.0);
             installed_version(ui);
             ui.add_space(8.0);
@@ -801,6 +932,9 @@ impl Updates {
         if discard_staged {
             self.cancel_staged();
         }
+        if cancel_download {
+            self.cancel_download();
+        }
         if let Some(app_path) = reveal_staged {
             let _ = std::process::Command::new("/usr/bin/open")
                 .arg("-R")
@@ -836,6 +970,88 @@ impl Updates {
         }
         false
     }
+}
+
+fn format_mb(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb < 10.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{mb:.0} MB")
+    }
+}
+
+/// Label and determinate fraction (None = indeterminate) for the progress row.
+fn progress_text(progress: &Progress) -> (String, Option<f32>) {
+    if progress.cancelled() {
+        return ("Cancelling…".into(), None);
+    }
+    match progress.phase() {
+        Phase::Downloading => match progress.bytes() {
+            (done, Some(total)) => {
+                let fraction = (done as f64 / total as f64).clamp(0.0, 1.0);
+                (
+                    format!(
+                        "Downloading {} of {} · {}%",
+                        format_mb(done.min(total)),
+                        format_mb(total),
+                        (fraction * 100.0).floor() as u32
+                    ),
+                    Some(fraction as f32),
+                )
+            }
+            (0, None) => ("Starting download…".into(), None),
+            (done, None) => (format!("Downloading {}…", format_mb(done)), None),
+        },
+        Phase::Verifying => ("Verifying checksum…".into(), None),
+        Phase::Extracting => ("Extracting…".into(), None),
+        Phase::CheckingSignature => ("Checking code signature…".into(), None),
+    }
+}
+
+/// Progress label, bar and cancel action. Returns true when cancel is clicked.
+fn download_progress(ui: &mut egui::Ui, progress: &Progress) -> bool {
+    let (label, fraction) = progress_text(progress);
+    let colors = theme::palette(ui.ctx());
+    let mut cancel = false;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width((ui.available_width() - 38.0).max(80.0));
+            ui.label(theme::small(ui, &label).color(colors.muted));
+            ui.add_space(6.0);
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), Sense::hover());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, &label)
+            });
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 2, prompt_ui::border(ui.ctx()));
+            let fill = match fraction {
+                Some(fraction) => egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(rect.width() * fraction, rect.height()),
+                ),
+                None => {
+                    // Sliding segment for phases without a measurable total.
+                    let segment = rect.width() * 0.3;
+                    let t = (ui.input(|i| i.time) * 0.8).fract() as f32;
+                    let x = rect.left() - segment + t * (rect.width() + segment);
+                    ui.ctx().request_repaint_after(Duration::from_millis(16));
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, rect.top()),
+                        egui::vec2(segment, rect.height()),
+                    )
+                }
+            };
+            painter.rect_filled(fill, 2, colors.accent);
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            cancel =
+                prompt_ui::icon_action(ui, Icon::Close, "Cancel download", !progress.cancelled())
+                    .clicked();
+        });
+    });
+    cancel
 }
 
 // Allocate the dot and label in the same centered row; never top-align the dot.
@@ -956,6 +1172,7 @@ mod tests {
                 body: String::new(),
                 zip_url: Some("https://github.com/example/pui/releases/download/v0.2.0/Pui-0.2.0-macos-arm64-adhoc.zip".into()),
                 sums_url: None,
+                zip_size: None,
                 newer,
             }));
             assert_eq!(
@@ -969,6 +1186,22 @@ mod tests {
         }
         updates.install = InstallState::Downloading;
         assert_eq!(updates.status(true).0, "Downloading update…");
+        let progress = Progress::default();
+        assert_eq!(
+            progress_text(&progress),
+            ("Starting download…".into(), None)
+        );
+        progress.total.store(129 * 1024 * 1024, Ordering::Relaxed);
+        progress
+            .downloaded
+            .store(114 * 1024 * 1024, Ordering::Relaxed);
+        let (label, fraction) = progress_text(&progress);
+        assert_eq!(label, "Downloading 114 MB of 129 MB · 88%");
+        assert!((fraction.unwrap() - 114.0 / 129.0).abs() < 1e-4);
+        progress.set_phase(Phase::CheckingSignature);
+        assert_eq!(progress_text(&progress).1, None);
+        progress.cancel.store(true, Ordering::Relaxed);
+        assert_eq!(progress_text(&progress).0, "Cancelling…");
         updates.install = InstallState::Ready {
             staged_dir: PathBuf::from("/tmp/pui-update-test"),
             staged_app: PathBuf::from("/tmp/pui-update-test/unpacked/Pui.app"),
@@ -1006,6 +1239,7 @@ mod tests {
             body: "### Added\n\n- **Bold** feature with `code`\n".into(),
             zip_url: None,
             sums_url: None,
+            zip_size: None,
             newer: true,
         }));
         let mut text = Vec::new();
@@ -1030,6 +1264,47 @@ mod tests {
         assert!(all.contains("Bold"), "{all}");
         assert!(!all.contains("###"), "heading markers rendered: {all}");
         assert!(!all.contains("**"), "emphasis markers rendered: {all}");
+    }
+
+    #[test]
+    fn download_progress_row_renders_label_and_bar_in_both_themes() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            mode.apply(&ctx);
+            let mut updates = Updates {
+                open: true,
+                install: InstallState::Downloading,
+                ..Default::default()
+            };
+            let progress = Arc::new(Progress::default());
+            progress.total.store(100 * 1024 * 1024, Ordering::Relaxed);
+            progress
+                .downloaded
+                .store(50 * 1024 * 1024, Ordering::Relaxed);
+            updates.progress = Some(progress.clone());
+            let mut text = Vec::new();
+            for _ in 0..2 {
+                let output = ctx.run(Default::default(), |ctx| {
+                    updates.show(ctx);
+                });
+                text.clear();
+                fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+                    match shape {
+                        egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                        egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                        _ => {}
+                    }
+                }
+                for shape in output.shapes {
+                    walk(&shape.shape, &mut text);
+                }
+            }
+            let all = text.join("\n");
+            assert!(all.contains("Downloading 50 MB of 100 MB · 50%"), "{all}");
+            updates.cancel_download();
+            assert!(progress.cancelled());
+        }
     }
 
     #[test]
