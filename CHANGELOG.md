@@ -11,15 +11,23 @@ Pui 1.0: an Android companion app, remote access to your desktop chats, safer Au
 
 ### Pui Mobile (Android)
 
-- New Android companion app, downloadable as an APK from this release. Pair it with Pui Desktop by scanning a QR code or entering the host address, including over Tailscale.
-- Continue any desktop chat from your phone: live history, queued messages with **Steer**, image uploads, Markdown, grouped tool activity, favorites, themes and a verbose mode. Desktop and phone sessions can run side by side.
-- See live per-provider rate limits and refresh them from the phone.
-- The app checks GitHub Releases for updates.
+- New Android companion app. Download the APK from this release and install it directly on your phone.
+- **Pairing:** scan the QR code shown in Pui Desktop with the built-in camera viewfinder, or enter the host address manually. The Connect screen has separate tabs for both.
+- **Continue any desktop chat from your phone:** live message history (newest messages load first), Markdown with inline code (including inside bold and italic text), grouped tool activity like Pui Desktop, and a verbose mode to show every tool step.
+- **Composer:** single-line message box, multiple image uploads with previews in the draft and in sent messages, and a queue bar where queued messages can be promoted to **Steer**.
+- Change the model, thinking level and agent permission mode from the phone; mode changes are applied by Pui Desktop exactly like a desktop change.
+- Chat tabs and the verbose toggle live in a top-right ⋮ menu. Favorite chats, light/dark themes and a left-to-right layout throughout.
+- Desktop and phone can work on different chats at the same time.
+- Live per-provider rate limits load automatically and can be refreshed from the phone.
+- The app checks GitHub Releases for new versions and offers the update. It shows a clear error when the desktop Pui is too old for the app.
+- Sheets and menus no longer block scrolling on Android, and large images no longer overflow message bubbles.
 
-### Remote & Mobile
+### Remote & Mobile (desktop)
 
-- Redesigned **Remote & Mobile** settings with clearer pairing, endpoint and connection diagnostics.
-- Saved chat history loads immediately on connect, and parked sessions reconnect automatically.
+- New **Remote & Mobile** settings page that runs a remote host for the mobile app. By default it listens only on your Tailscale address (optionally behind `tailscale serve` for HTTPS), never on public Wi-Fi unless you choose "All interfaces". Access uses a random pairing token.
+- Pairing QR code, endpoint display and connection diagnostics, with a redesigned layout.
+- Chats started or continued from a phone or the web show a phone/globe badge in the sidebar.
+- Saved chat history loads immediately on connect, parked chats reconnect automatically, and queued messages stay in sync between desktop and phone.
 
 ### Permissions
 
@@ -30,15 +38,21 @@ Pui 1.0: an Android companion app, remote access to your desktop chats, safer Au
 ### Chat and composer
 
 - Shell code blocks in replies can be run in the project terminal with one click.
-- Rotating composer placeholders now include inline action hints, and the toolbar adapts to narrow windows.
-- Updates show a download progress bar with a Cancel button.
-- **Resources** settings can add MCP servers directly, and pause, resume or remove them.
+- The empty composer shows rotating placeholders with inline action hints and platform-specific shortcuts, replacing the separate permissions/shortcut footer below it.
+- The composer toolbar adapts to narrow windows: model and agent-mode labels truncate, thinking effort collapses to an icon, then the pickers move to their own row so they never overlap the mic, context and send buttons. The decorative spark icon was removed.
+- Model, effort and agent-mode menus stay inside the chat pane.
+
+### Settings and updates
+
+- **Resources:** MCP servers can be added directly (**+ Add…** opens the MCP server form when viewing MCP, and an empty MCP list offers **+ Add MCP server…**), and each server can be paused, resumed, edited or removed.
+- Installing an update shows a download progress bar with a Cancel button.
 
 ### Browser
 
 - Menus and popups that overlap the browser no longer hide the whole page; the page stays visible around them.
 - Page loading is shown in the browser toolbar and no longer changes the page height.
 - The page zoom setting in viewport settings no longer closes the settings popup.
+- Browser pages are inset slightly so panel separators and resize handles stay visible.
 
 ### Fixed
 
