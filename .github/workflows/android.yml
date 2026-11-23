@@ -226,6 +226,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Shared with the macOS release job so the two never race on one release.
+    concurrency:
+      group: pui-github-releases
+      cancel-in-progress: false
     steps:
       - name: Download Android artifacts
         uses: actions/download-artifact@v4
@@ -240,10 +244,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
+          # One release for macOS and Android: a draft until both a .dmg and an
+          # .apk are attached. The macOS job supplies the changelog notes.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "Pui ${TAG#v}" --generate-notes --verify-tag
+            gh release create "$TAG" --draft --verify-tag --title "Pui ${TAG#v}" \
+              --notes "Release notes are added when the macOS build finishes."
           fi
           gh release upload "$TAG" dist-apk/*.apk dist-apk/*.apk.sha256 --clobber
+          assets=$(gh release view "$TAG" --json assets -q '.assets[].name')
+          if grep -q '\.dmg$' <<<"$assets" && grep -q '\.apk$' <<<"$assets"; then
+            gh release edit "$TAG" --draft=false --latest
+          else
+            echo "Waiting for the macOS build before publishing $TAG."
+          fi
 
   publish-google-play-internal:
     if: >-

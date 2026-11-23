@@ -152,17 +152,19 @@ jobs:
           CI_COMMIT_SHA: ${{ github.sha }}
         run: |
           python3 scripts/release.py check
-          # The Android workflow may already have created this release to
-          # attach its APK; then update it instead of failing.
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release edit "${GITHUB_REF_NAME}" \
-              --title "Pui ${GITHUB_REF_NAME#v}" \
-              --notes-file dist/releases/CHANGELOG.md
-            gh release upload "${GITHUB_REF_NAME}" dist/releases/* --clobber
+          tag="${GITHUB_REF_NAME}"
+          # macOS and Android attach to one release. It stays a draft until
+          # both a .dmg and an .apk are attached; whichever workflow finishes
+          # second publishes it (both jobs share the pui-github-releases group).
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --verify-tag \
+              --title "Pui ${tag#v}" --notes-file dist/releases/CHANGELOG.md
+          fi
+          gh release edit "$tag" --title "Pui ${tag#v}" --notes-file dist/releases/CHANGELOG.md
+          gh release upload "$tag" dist/releases/* --clobber
+          assets=$(gh release view "$tag" --json assets -q '.assets[].name')
+          if grep -q '\.dmg$' <<<"$assets" && grep -q '\.apk$' <<<"$assets"; then
+            gh release edit "$tag" --draft=false --latest
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              dist/releases/* \
-              --title "Pui ${GITHUB_REF_NAME#v}" \
-              --notes-file dist/releases/CHANGELOG.md \
-              --verify-tag
+            echo "Waiting for the Android APK before publishing $tag."
           fi
