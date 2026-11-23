@@ -1,21 +1,27 @@
 import type { ExpoConfig } from 'expo/config';
 
+const versionName = process.env.PUI_ANDROID_VERSION_NAME?.trim() || '0.1.0';
+const versionCodeRaw = Number(process.env.PUI_ANDROID_VERSION_CODE ?? '1');
+const versionCode = Number.isInteger(versionCodeRaw) && versionCodeRaw > 0 ? versionCodeRaw : 1;
+const androidPackage = process.env.PUI_ANDROID_PACKAGE?.trim() || 'com.reblink17.pui';
+
 const config: ExpoConfig = {
   name: 'Pui',
   slug: 'pui-mobile',
-  version: '0.1.0',
+  version: versionName,
   scheme: 'pui',
   orientation: 'portrait',
   userInterfaceStyle: 'automatic',
   android: {
-    package: 'dev.pi.pui.mobile',
+    package: androidPackage,
+    versionCode,
     adaptiveIcon: {
       backgroundColor: '#111318',
     },
     permissions: ['android.permission.CAMERA', 'android.permission.INTERNET'],
   },
   ios: {
-    bundleIdentifier: 'dev.pi.pui.mobile',
+    bundleIdentifier: androidPackage,
     supportsTablet: true,
     infoPlist: {
       NSCameraUsageDescription: 'Scan the QR code from Pui Desktop to pair your phone.',
@@ -32,6 +38,7 @@ const config: ExpoConfig = {
       },
     ],
     './plugins/withTailscaleCleartext.js',
+    './plugins/withReleaseSigning.js',
   ],
   experiments: {
     typedRoutes: true,

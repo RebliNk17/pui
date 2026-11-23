@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Linking,
   Modal,
   Pressable,
   RefreshControl,
@@ -28,6 +29,8 @@ import {
   type SessionGrouping,
   type SessionOrdering,
 } from '../src/utils/sessions';
+import { getCurrentAppVersion } from '../src/utils/appVersion';
+import { checkForMobileUpdate, type ReleaseInfo } from '../src/utils/updates';
 
 export default function SessionsScreen() {
   const colors = usePalette();
@@ -52,7 +55,23 @@ export default function SessionsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<ReleaseInfo | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const { bindings, metrics } = useCustomScrollbar();
+
+  useEffect(() => {
+    let cancelled = false;
+    checkForMobileUpdate(getCurrentAppVersion())
+      .then((res) => {
+        if (!cancelled && res.updateAvailable && res.latest) {
+          setAvailableUpdate(res.latest);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const grouping = prefs.defaultGrouping;
   const ordering = prefs.defaultOrdering;
@@ -208,6 +227,31 @@ export default function SessionsScreen() {
           </Pressable>
         </View>
       </View>
+
+      {availableUpdate && !updateDismissed ? (
+        <View
+          style={[
+            styles.banner,
+            { backgroundColor: colors.accentBg, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+          ]}
+        >
+          <Ionicons name="arrow-up-circle-outline" size={16} color={colors.accent} />
+          <Text style={{ color: colors.text, fontSize: 12, flex: 1, textAlign: 'left' }}>
+            Pui Mobile v{availableUpdate.version} is available
+          </Text>
+          <Pressable
+            onPress={() =>
+              void Linking.openURL(availableUpdate.apkUrl || availableUpdate.releaseUrl)
+            }
+            style={[styles.retryBtn, { backgroundColor: colors.accent }]}
+          >
+            <Text style={{ color: '#fff', fontSize: 11.5, fontWeight: '700' }}>Update</Text>
+          </Pressable>
+          <Pressable onPress={() => setUpdateDismissed(true)} hitSlop={8}>
+            <Ionicons name="close" size={16} color={colors.muted} />
+          </Pressable>
+        </View>
+      ) : null}
 
       {connectionError ? (
         <View style={[styles.banner, { backgroundColor: colors.redBg }]}>

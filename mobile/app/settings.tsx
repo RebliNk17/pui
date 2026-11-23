@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -23,6 +25,16 @@ import {
   type LightStyleId,
   type ThemeMode,
 } from '../src/theme/colors';
+import {
+  getAndroidPackageId,
+  getCurrentAppVersion,
+  getCurrentVersionCode,
+} from '../src/utils/appVersion';
+import {
+  checkForMobileUpdate,
+  getPlayStoreUrl,
+  type UpdateCheckResult,
+} from '../src/utils/updates';
 
 const DARK_ORDER: DarkStyleId[] = ['classic', 'midnight', 'forest', 'plum'];
 const LIGHT_ORDER: LightStyleId[] = ['classic', 'ivory', 'sage', 'rose'];
@@ -37,6 +49,21 @@ export default function SettingsScreen() {
   const [favModalOpen, setFavModalOpen] = useState(false);
   const [favQuery, setFavQuery] = useState('');
   const [favProvider, setFavProvider] = useState('All');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+
+  const currentVersion = getCurrentAppVersion();
+  const currentVersionCode = getCurrentVersionCode();
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const res = await checkForMobileUpdate(currentVersion);
+      setUpdateResult(res);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   // Collect all unique models reported across any loaded session on the connected host.
   const allModels = useMemo(() => {
@@ -309,6 +336,97 @@ export default function SettingsScreen() {
               </Pressable>
             </View>
           </View>
+        </View>
+
+        <Text style={[styles.sectionLabel, { color: colors.dim }]}>APP &amp; UPDATES</Text>
+        <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+          <View style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={[styles.rowTitle, { color: colors.text }]}>
+                Pui Mobile v{currentVersion}
+                {currentVersionCode ? ` (${currentVersionCode})` : ''}
+              </Text>
+              <Text numberOfLines={2} style={[styles.rowSub, { color: colors.muted }]}>
+                {updateResult?.error
+                  ? updateResult.error
+                  : updateResult?.updateAvailable && updateResult.latest
+                    ? `Update available: v${updateResult.latest.version}`
+                    : updateResult
+                      ? 'You are on the latest version'
+                      : getAndroidPackageId()}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => void handleCheckUpdate()}
+              disabled={checkingUpdate}
+              style={[
+                styles.saveBtn,
+                { backgroundColor: colors.surfaceElevated, borderColor: colors.border },
+              ]}
+            >
+              {checkingUpdate ? (
+                <ActivityIndicator size="small" color={colors.accent} />
+              ) : (
+                <Text style={{ color: colors.text, fontSize: 12.5, fontWeight: '600' }}>Check</Text>
+              )}
+            </Pressable>
+          </View>
+
+          {updateResult?.updateAvailable && updateResult.latest ? (
+            <>
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <View style={[styles.cardBlock, { flexDirection: 'row', gap: 8 }]}>
+                <Pressable
+                  onPress={() =>
+                    void Linking.openURL(
+                      updateResult.latest?.apkUrl || updateResult.latest?.releaseUrl || '',
+                    )
+                  }
+                  style={[
+                    styles.saveBtn,
+                    {
+                      flex: 1,
+                      backgroundColor: colors.accent,
+                      borderColor: colors.accent,
+                      alignItems: 'center',
+                    },
+                  ]}
+                >
+                  <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                    Download APK (v{updateResult.latest.version})
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => void Linking.openURL(getPlayStoreUrl(getAndroidPackageId()))}
+                  style={[
+                    styles.saveBtn,
+                    {
+                      backgroundColor: colors.surfaceElevated,
+                      borderColor: colors.border,
+                      alignItems: 'center',
+                    },
+                  ]}
+                >
+                  <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
+                    Play Store
+                  </Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              <View style={[styles.divider, { backgroundColor: colors.hairline }]} />
+              <Pressable
+                onPress={() => void Linking.openURL(getPlayStoreUrl(getAndroidPackageId()))}
+                style={styles.row}
+              >
+                <Text style={[styles.rowTitle, { color: colors.text }]}>
+                  Open in Google Play
+                </Text>
+                <Ionicons name="open-outline" size={16} color={colors.dim} />
+              </Pressable>
+            </>
+          )}
         </View>
       </ScrollView>
       <CustomScrollbarOverlay {...metrics} />
