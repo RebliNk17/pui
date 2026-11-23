@@ -207,7 +207,10 @@ mod tests {
             hidden: vec!["anthropic/old".into()],
         });
         let payload = settings.payload();
-        assert_eq!(payload["classifierProviders"], json!(["anthropic", "antigravity"]));
+        assert_eq!(
+            payload["classifierProviders"],
+            json!(["anthropic", "antigravity"])
+        );
         assert_eq!(payload["hiddenModels"], json!(["anthropic/old"]));
         let saved = serde_json::to_value(&settings).unwrap();
         assert!(saved.get("model_scope").is_none());

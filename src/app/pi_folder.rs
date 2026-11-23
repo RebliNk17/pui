@@ -55,7 +55,9 @@ impl Preferences {
     }
 
     fn rewrite_session_paths(&mut self, moved: &pi_migration::Moved) {
-        let Ok(mut value) = serde_json::to_value(&*self) else { return };
+        let Ok(mut value) = serde_json::to_value(&*self) else {
+            return;
+        };
         if pi_migration::rewrite_paths(&mut value, &moved.old_sessions, &moved.new_sessions) {
             if let Ok(rewritten) = serde_json::from_value::<Preferences>(value) {
                 *self = rewritten;
@@ -105,7 +107,8 @@ impl Pui {
         if !self.pi_folder.open || self.pi_folder.offer.is_empty() {
             return;
         }
-        let candidate = self.pi_folder.offer[self.pi_folder.choice.min(self.pi_folder.offer.len() - 1)].clone();
+        let candidate =
+            self.pi_folder.offer[self.pi_folder.choice.min(self.pi_folder.offer.len() - 1)].clone();
         let offer = self.pi_folder.offer.clone();
         let mut choice = self.pi_folder.choice;
         let result = confirmations::Dialog::new(
@@ -187,12 +190,15 @@ impl Pui {
             match result {
                 Some(confirmations::Choice::Confirm) => {
                     self.pi_folder.reimport = None;
-                    match target.ok_or("Pui's Pi folder is unavailable.".to_owned()).and_then(|target| {
-                        pi_migration::import_settings(&found.dir, &target)
-                    }) {
+                    match target
+                        .ok_or("Pui's Pi folder is unavailable.".to_owned())
+                        .and_then(|target| pi_migration::import_settings(&found.dir, &target))
+                    {
                         Ok(()) => {
-                            self.pi_folder.notice =
-                                Some("Copied Pi's settings into Pui. Chats pick them up automatically.".into())
+                            self.pi_folder.notice = Some(
+                                "Copied Pi's settings into Pui. Chats pick them up automatically."
+                                    .into(),
+                            )
                         }
                         Err(error) => self.pi_folder.error = Some(error),
                     }
@@ -204,7 +210,11 @@ impl Pui {
     }
 
     pub(super) fn settings_pi_folder(&mut self, ui: &mut egui::Ui) {
-        page_section(ui, "Pi data", "Where Pui keeps Pi's providers, logins, models, defaults, skills, extensions and chats.");
+        page_section(
+            ui,
+            "Pi data",
+            "Where Pui keeps Pi's providers, logins, models, defaults, skills, extensions and chats.",
+        );
         let managed = crate::runtime::managed_agent_dir();
         let colors = theme::palette(ui.ctx());
         settings_card(ui, |ui| {
@@ -215,7 +225,11 @@ impl Pui {
                 .unwrap_or_default();
             settings_row(
                 ui,
-                if managed.is_some() { "Pui's Pi folder" } else { "Shared Pi folder" },
+                if managed.is_some() {
+                    "Pui's Pi folder"
+                } else {
+                    "Shared Pi folder"
+                },
                 &location,
                 |ui| {
                     if managed.is_some() {
@@ -223,7 +237,10 @@ impl Pui {
                             let target = managed.clone().unwrap_or_default();
                             match pi_migration::scan(&target).into_iter().next() {
                                 Some(found) => self.pi_folder.reimport = Some(found),
-                                None => self.pi_folder.notice = Some("No other Pi folder was found to copy from.".into()),
+                                None => {
+                                    self.pi_folder.notice =
+                                        Some("No other Pi folder was found to copy from.".into())
+                                }
                             }
                         }
                     } else if ui.button("Move into Pui\u{2026}").clicked() {
@@ -245,15 +262,24 @@ impl Pui {
                     keys.join(", ")
                 )
             };
-            settings_row(ui, "Use provider keys from environment", &description, |ui| {
-                let mut enabled = self.prefs.use_environment_keys;
-                super::settings::toggle_switch(ui, &mut enabled, "Use provider keys from environment");
-                if enabled != self.prefs.use_environment_keys {
-                    self.prefs.use_environment_keys = enabled;
-                    crate::runtime::set_use_environment_keys(enabled);
-                    self.catalog.request(&self.ctx);
-                }
-            });
+            settings_row(
+                ui,
+                "Use provider keys from environment",
+                &description,
+                |ui| {
+                    let mut enabled = self.prefs.use_environment_keys;
+                    super::settings::toggle_switch(
+                        ui,
+                        &mut enabled,
+                        "Use provider keys from environment",
+                    );
+                    if enabled != self.prefs.use_environment_keys {
+                        self.prefs.use_environment_keys = enabled;
+                        crate::runtime::set_use_environment_keys(enabled);
+                        self.catalog.request(&self.ctx);
+                    }
+                },
+            );
         });
         for (text, color) in [
             (self.pi_folder.notice.clone(), colors.green),
@@ -273,7 +299,12 @@ fn page_section(ui: &mut egui::Ui, title: &str, description: &str) {
 fn settings_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     super::settings::page_card(ui, body);
 }
-fn settings_row(ui: &mut egui::Ui, title: &str, description: &str, body: impl FnOnce(&mut egui::Ui)) {
+fn settings_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) {
     super::settings::page_row(ui, title, description, body);
 }
 fn settings_separator(ui: &mut egui::Ui) {

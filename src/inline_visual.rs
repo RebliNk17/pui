@@ -8,7 +8,10 @@ use crate::{
     icons::{self, Icon},
     protocol::InlineVisual,
 };
-use eframe::egui::{self, Align, ColorImage, FontId, Layout, RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{
+    self, Align, ColorImage, FontId, Layout, RichText, Sense, Stroke, TextureHandle,
+    TextureOptions, Vec2,
+};
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
@@ -43,11 +46,13 @@ impl PageSnapshots {
                     map.remove(&first);
                 }
             }
-            let entry = map.entry(target.to_owned()).or_insert_with(|| PageSnapshotData {
-                title: String::new(),
-                image: None,
-                revision: 0,
-            });
+            let entry = map
+                .entry(target.to_owned())
+                .or_insert_with(|| PageSnapshotData {
+                    title: String::new(),
+                    image: None,
+                    revision: 0,
+                });
             if entry.title != title {
                 entry.title = title;
             }
@@ -64,11 +69,13 @@ impl PageSnapshots {
                     map.remove(&first);
                 }
             }
-            let entry = map.entry(target.to_owned()).or_insert_with(|| PageSnapshotData {
-                title: String::new(),
-                image: None,
-                revision: 0,
-            });
+            let entry = map
+                .entry(target.to_owned())
+                .or_insert_with(|| PageSnapshotData {
+                    title: String::new(),
+                    image: None,
+                    revision: 0,
+                });
             if let Some(title) = title.filter(|t| !t.is_empty()) {
                 entry.title = title;
             }
@@ -88,7 +95,10 @@ impl PageSnapshots {
     fn snapshot(&self, target: &str) -> Option<(u64, ColorImage)> {
         self.inner.lock().ok().and_then(|map| {
             let entry = map.get(target)?;
-            entry.image.as_ref().map(|img| (entry.revision, img.clone()))
+            entry
+                .image
+                .as_ref()
+                .map(|img| (entry.revision, img.clone()))
         })
     }
 }
@@ -337,7 +347,10 @@ impl InlineVisualHost {
             };
             let entry = match done.result {
                 Ok(image) => VisualEntry::Ready(ctx.load_texture(
-                    format!("inline-visual-{}-{}-{}", key.content_hash, key.width, key.dark),
+                    format!(
+                        "inline-visual-{}-{}-{}",
+                        key.content_hash, key.width, key.dark
+                    ),
                     image,
                     TextureOptions::LINEAR,
                 )),
@@ -389,7 +402,13 @@ impl InlineVisualHost {
         Some(tex)
     }
 
-    fn request(&mut self, ui: &egui::Ui, visual: &InlineVisual, width: u32, dark: bool) -> VisualKey {
+    fn request(
+        &mut self,
+        ui: &egui::Ui,
+        visual: &InlineVisual,
+        width: u32,
+        dark: bool,
+    ) -> VisualKey {
         self.tick = self.tick.wrapping_add(1);
         let key = VisualKey {
             content_hash: hash_visual(&visual.html, visual.height),
@@ -547,7 +566,10 @@ impl InlineVisualHost {
             self.live = None;
             let html = prepare_visual_html(&visual.html, dark);
             let scale = ctx.pixels_per_point().clamp(1.0, 3.0);
-            if let Ok(visual) = self.osr.start_live(&ctx, osr_key, &html, width, height, scale) {
+            if let Ok(visual) = self
+                .osr
+                .start_live(&ctx, osr_key, &html, width, height, scale)
+            {
                 let now = std::time::Instant::now();
                 self.live = Some(LiveSession {
                     tool_id: tool_id.to_owned(),
@@ -567,7 +589,12 @@ impl InlineVisualHost {
         live.last_shown = now;
         live.visual.resize(width, height);
         let focus_id = ui.make_persistent_id(("inline-visual-focus", tool_id));
-        let local = |p: egui::Pos2| ((p.x - rect.min.x).round() as i32, (p.y - rect.min.y).round() as i32);
+        let local = |p: egui::Pos2| {
+            (
+                (p.x - rect.min.x).round() as i32,
+                (p.y - rect.min.y).round() as i32,
+            )
+        };
         let modifiers = ctx.input(|i| i.modifiers);
         let events = ctx.input(|i| i.events.clone());
         for event in &events {
@@ -577,9 +604,19 @@ impl InlineVisualHost {
                     live.last_pos = (x, y);
                     live.hovered = true;
                     live.last_active = now;
-                    live.visual.mouse_move(x, y, cef_osr::event_flags(modifiers, live.left_down), false);
+                    live.visual.mouse_move(
+                        x,
+                        y,
+                        cef_osr::event_flags(modifiers, live.left_down),
+                        false,
+                    );
                 }
-                Event::PointerButton { pos, button, pressed, modifiers } if rect.contains(*pos) => {
+                Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers,
+                } if rect.contains(*pos) => {
                     let (x, y) = local(*pos);
                     if *button == PointerButton::Primary {
                         live.left_down = *pressed;
@@ -589,15 +626,30 @@ impl InlineVisualHost {
                         live.visual.focus(true);
                         ctx.memory_mut(|m| m.request_focus(focus_id));
                     }
-                    let count = if ctx.input(|i| i.pointer.button_double_clicked(*button)) { 2 } else { 1 };
+                    let count = if ctx.input(|i| i.pointer.button_double_clicked(*button)) {
+                        2
+                    } else {
+                        1
+                    };
                     live.last_active = now;
-                    live.visual.click(x, y, *button, !*pressed, count, cef_osr::event_flags(*modifiers, false));
+                    live.visual.click(
+                        x,
+                        y,
+                        *button,
+                        !*pressed,
+                        count,
+                        cef_osr::event_flags(*modifiers, false),
+                    );
                 }
                 Event::PointerButton { pressed: true, .. } if live.focused => {
                     live.focused = false;
                     live.visual.focus(false);
                 }
-                Event::PointerButton { pressed: false, button: PointerButton::Primary, .. } if live.left_down => {
+                Event::PointerButton {
+                    pressed: false,
+                    button: PointerButton::Primary,
+                    ..
+                } if live.left_down => {
                     // Drag released outside: finish the page's selection/drag.
                     live.left_down = false;
                     let (x, y) = live.last_pos;
@@ -616,7 +668,8 @@ impl InlineVisualHost {
             let delta = ctx.input(|i| i.smooth_scroll_delta);
             if delta != Vec2::ZERO {
                 let (x, y) = live.last_pos;
-                live.visual.wheel(x, y, delta.x.round() as i32, delta.y.round() as i32, 0);
+                live.visual
+                    .wheel(x, y, delta.x.round() as i32, delta.y.round() as i32, 0);
                 live.last_active = now;
                 ctx.input_mut(|i| {
                     i.smooth_scroll_delta = Vec2::ZERO;
@@ -624,7 +677,10 @@ impl InlineVisualHost {
                 });
             }
         }
-        if live.focused && !ctx.memory(|m| m.has_focus(focus_id)) && ctx.memory(|m| m.focused().is_some()) {
+        if live.focused
+            && !ctx.memory(|m| m.has_focus(focus_id))
+            && ctx.memory(|m| m.focused().is_some())
+        {
             // Another control (e.g. the composer) took keyboard focus.
             live.focused = false;
             live.visual.focus(false);
@@ -649,7 +705,11 @@ impl InlineVisualHost {
                     .filter(|e| {
                         matches!(
                             e,
-                            Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut | Event::Key { .. }
+                            Event::Text(_)
+                                | Event::Paste(_)
+                                | Event::Copy
+                                | Event::Cut
+                                | Event::Key { .. }
                         )
                     })
                     .cloned()
@@ -657,14 +717,22 @@ impl InlineVisualHost {
                 i.events.retain(|e| {
                     !matches!(
                         e,
-                        Event::Text(_) | Event::Paste(_) | Event::Copy | Event::Cut | Event::Key { .. }
+                        Event::Text(_)
+                            | Event::Paste(_)
+                            | Event::Copy
+                            | Event::Cut
+                            | Event::Key { .. }
                     )
                 });
                 taken
             });
             for event in typed {
                 match event {
-                    Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                    Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    } => {
                         live.focused = false;
                         live.visual.focus(false);
                         ctx.memory_mut(|m| m.surrender_focus(focus_id));
@@ -673,10 +741,18 @@ impl InlineVisualHost {
                     Event::Paste(_) => live.visual.edit(cef_osr::Edit::Paste),
                     Event::Copy => live.visual.edit(cef_osr::Edit::Copy),
                     Event::Cut => live.visual.edit(cef_osr::Edit::Cut),
-                    Event::Key { key: egui::Key::A, pressed: true, modifiers, .. } if modifiers.mac_cmd => {
-                        live.visual.edit(cef_osr::Edit::SelectAll)
-                    }
-                    Event::Key { key, pressed, modifiers, .. } => {
+                    Event::Key {
+                        key: egui::Key::A,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.mac_cmd => live.visual.edit(cef_osr::Edit::SelectAll),
+                    Event::Key {
+                        key,
+                        pressed,
+                        modifiers,
+                        ..
+                    } => {
                         live.visual.key(key, pressed, modifiers);
                     }
                     _ => {}
@@ -690,7 +766,12 @@ impl InlineVisualHost {
         live.texture.as_ref().map(TextureHandle::id)
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, tool_id: &str, visual: &InlineVisual) -> VisualOutcome {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        tool_id: &str,
+        visual: &InlineVisual,
+    ) -> VisualOutcome {
         let colors = crate::theme::palette(ui.ctx());
         let dark = ui.ctx().style().visuals.dark_mode;
         let open_id = ui.make_persistent_id(("inline-visual-open", tool_id));
@@ -821,8 +902,7 @@ impl InlineVisualHost {
                                     (logical.x * scale).min(inner_width),
                                     (logical.y * scale).clamp(80.0, 820.0),
                                 );
-                                let (rect, _resp) =
-                                    ui.allocate_exact_size(display, Sense::hover());
+                                let (rect, _resp) = ui.allocate_exact_size(display, Sense::hover());
                                 #[cfg(target_os = "macos")]
                                 let painted = self.interact(ui, tool_id, visual, &key, dark, rect);
                                 #[cfg(not(target_os = "macos"))]
@@ -835,11 +915,7 @@ impl InlineVisualHost {
                             }
                             Some((None, Some(error))) => {
                                 egui::Frame::new().inner_margin(12).show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new(error)
-                                            .size(11.5)
-                                            .color(colors.muted),
-                                    );
+                                    ui.label(RichText::new(error).size(11.5).color(colors.muted));
                                     ui.add_space(6.0);
                                     ui.horizontal(|ui| {
                                         if ui.button("Open in Browser").clicked() {
@@ -853,8 +929,8 @@ impl InlineVisualHost {
                             }
                             _ => {
                                 let h = visual.height.unwrap_or(240).clamp(120, 420) as f32;
-                                let (rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(inner_width, h), Sense::hover());
+                                let (rect, _) = ui
+                                    .allocate_exact_size(Vec2::new(inner_width, h), Sense::hover());
                                 if ui.is_rect_visible(rect) {
                                     ui.painter().text(
                                         rect.center(),

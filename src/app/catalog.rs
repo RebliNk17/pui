@@ -110,12 +110,19 @@ impl AppCatalog {
     /// Pi's file-based providers come from the SDK; providers that Pui's own
     /// extension registers at runtime are only visible inside Pi, so keep the
     /// latest list Pi reported for them.
-    pub fn learn_extension_models(&self, reported: &[protocol::Model], saved: &mut Vec<protocol::Model>) {
+    pub fn learn_extension_models(
+        &self,
+        reported: &[protocol::Model],
+        saved: &mut Vec<protocol::Model>,
+    ) {
         if !self.loaded || reported.is_empty() {
             return;
         }
-        let file_based: std::collections::BTreeSet<_> =
-            self.models.iter().map(|m| m.model.provider.as_str()).collect();
+        let file_based: std::collections::BTreeSet<_> = self
+            .models
+            .iter()
+            .map(|m| m.model.provider.as_str())
+            .collect();
         let learned: Vec<_> = reported
             .iter()
             .filter(|m| !file_based.contains(m.provider.as_str()))
@@ -405,7 +412,10 @@ mod tests {
     #[test]
     fn extension_providers_are_learned_from_pi_and_kept_without_a_chat() {
         let mut catalog = AppCatalog {
-            models: fixture(&[("anthropic", "opus", 5.0, 25.0), ("Nvidia", "glm", 0.0, 0.0)]),
+            models: fixture(&[
+                ("anthropic", "opus", 5.0, 25.0),
+                ("Nvidia", "glm", 0.0, 0.0),
+            ]),
             loaded: true,
             ..Default::default()
         };
@@ -420,7 +430,10 @@ mod tests {
         let mut saved = Vec::new();
         catalog.learn_extension_models(&reported, &mut saved);
         assert_eq!(
-            saved.iter().map(|m| m.provider.as_str()).collect::<Vec<_>>(),
+            saved
+                .iter()
+                .map(|m| m.provider.as_str())
+                .collect::<Vec<_>>(),
             ["antigravity", "antigravity~2"]
         );
         catalog.with_extensions(&saved);
@@ -434,7 +447,10 @@ mod tests {
     #[test]
     fn enabled_models_patterns_and_defaults_parse() {
         assert!(in_scope(&[], "any/model"));
-        let scope = vec!["google/gemini-*".to_owned(), "anthropic/claude-opus-5-5".into()];
+        let scope = vec![
+            "google/gemini-*".to_owned(),
+            "anthropic/claude-opus-5-5".into(),
+        ];
         assert!(in_scope(&scope, "google/gemini-2.5-pro"));
         assert!(in_scope(&scope, "anthropic/claude-opus-5-5"));
         assert!(!in_scope(&scope, "anthropic/claude-haiku-4-5"));

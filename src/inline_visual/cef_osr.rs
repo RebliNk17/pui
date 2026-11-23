@@ -699,10 +699,25 @@ impl LiveVisual {
     }
     pub fn mouse_move(&self, x: i32, y: i32, flags: u32, leave: bool) {
         if let Some(host) = self.host() {
-            host.send_mouse_move_event(Some(&MouseEvent { x, y, modifiers: flags }), leave as i32);
+            host.send_mouse_move_event(
+                Some(&MouseEvent {
+                    x,
+                    y,
+                    modifiers: flags,
+                }),
+                leave as i32,
+            );
         }
     }
-    pub fn click(&self, x: i32, y: i32, button: egui::PointerButton, up: bool, count: i32, flags: u32) {
+    pub fn click(
+        &self,
+        x: i32,
+        y: i32,
+        button: egui::PointerButton,
+        up: bool,
+        count: i32,
+        flags: u32,
+    ) {
         let button = match button {
             egui::PointerButton::Secondary => MouseButtonType::RIGHT,
             egui::PointerButton::Middle => MouseButtonType::MIDDLE,
@@ -710,7 +725,11 @@ impl LiveVisual {
         };
         if let Some(host) = self.host() {
             host.send_mouse_click_event(
-                Some(&MouseEvent { x, y, modifiers: flags }),
+                Some(&MouseEvent {
+                    x,
+                    y,
+                    modifiers: flags,
+                }),
                 button,
                 up as i32,
                 count,
@@ -719,12 +738,23 @@ impl LiveVisual {
     }
     pub fn wheel(&self, x: i32, y: i32, dx: i32, dy: i32, flags: u32) {
         if let Some(host) = self.host() {
-            host.send_mouse_wheel_event(Some(&MouseEvent { x, y, modifiers: flags }), dx, dy);
+            host.send_mouse_wheel_event(
+                Some(&MouseEvent {
+                    x,
+                    y,
+                    modifiers: flags,
+                }),
+                dx,
+                dy,
+            );
         }
     }
     /// Clipboard and selection commands run in the page's frame (not page JS).
     pub fn edit(&self, command: Edit) {
-        let Some(frame) = (self.browser.is_valid() == 1).then(|| self.browser.main_frame()).flatten() else {
+        let Some(frame) = (self.browser.is_valid() == 1)
+            .then(|| self.browser.main_frame())
+            .flatten()
+        else {
             return;
         };
         match command {
@@ -764,7 +794,9 @@ impl LiveVisual {
         if letter && !modifiers.mac_cmd {
             return false;
         }
-        let Some(host) = self.host() else { return false };
+        let Some(host) = self.host() else {
+            return false;
+        };
         let event = KeyEvent {
             type_: if pressed {
                 KeyEventType::RAWKEYDOWN
@@ -779,7 +811,12 @@ impl LiveVisual {
             ..Default::default()
         };
         host.send_key_event(Some(&event));
-        if pressed && matches!(key, egui::Key::Enter | egui::Key::Tab | egui::Key::Backspace) {
+        if pressed
+            && matches!(
+                key,
+                egui::Key::Enter | egui::Key::Tab | egui::Key::Backspace
+            )
+        {
             host.send_key_event(Some(&KeyEvent {
                 type_: KeyEventType::CHAR,
                 ..event

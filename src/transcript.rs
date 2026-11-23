@@ -1030,7 +1030,15 @@ fn assistant_with_media(
         if pending.is_empty() {
             return false;
         }
-        let changed = action_run(ui, pending, *group_index, running_run, expand, view, gallery);
+        let changed = action_run(
+            ui,
+            pending,
+            *group_index,
+            running_run,
+            expand,
+            view,
+            gallery,
+        );
         inline_cards::html_file_cards(ui, pending, action);
         pending.clear();
         *group_index += 1;
@@ -1043,11 +1051,13 @@ fn assistant_with_media(
             // thinking must not split one action run into many summary rows.
             // Verbose retains legacy reasoning before the reply.
             if view == View::Verbose && !message.thinking.is_empty() {
-                changed |= flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
+                changed |=
+                    flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
                 changed |= thinking_text(ui, &message.thinking, (message_index, "legacy"));
             }
             if !message.text.is_empty() {
-                changed |= flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
+                changed |=
+                    flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
                 if !task_output || !crate::task_output::show(ui, &message.text) {
                     markdown::show_reply_with_media(
                         ui,
@@ -1500,10 +1510,7 @@ fn activity(
             let toggle_right = if shown_thumbs > 0 {
                 Some(
                     ui.interact(
-                        Rect::from_min_max(
-                            egui::pos2(thumbs_right, rect.top()),
-                            rect.max,
-                        ),
+                        Rect::from_min_max(egui::pos2(thumbs_right, rect.top()), rect.max),
                         id.with("header-chevron"),
                         Sense::click(),
                     )
@@ -1584,7 +1591,12 @@ fn activity(
                     );
                     cursor_x = thumb_rect.left() - thumb_gap;
                     if gallery
-                        .compact_thumb(ui, thumb_rect, &run_images[rev_i], id.with(("thumb", rev_i)))
+                        .compact_thumb(
+                            ui,
+                            thumb_rect,
+                            &run_images[rev_i],
+                            id.with(("thumb", rev_i)),
+                        )
                         .clicked()
                     {
                         gallery.open(&run_images, rev_i);
@@ -1627,7 +1639,9 @@ fn activity(
                 }
                 let hidden = if running && !all { earlier } else { 0 };
                 for (i, item) in items.iter().enumerate().skip(hidden) {
-                    ui.push_id(i, |ui| crate::tool_view::row_with_gallery(ui, item, gallery));
+                    ui.push_id(i, |ui| {
+                        crate::tool_view::row_with_gallery(ui, item, gallery)
+                    });
                     if i + 1 < items.len() {
                         ui.add(egui::Separator::default().spacing(1.0));
                     }

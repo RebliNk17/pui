@@ -21,12 +21,17 @@ pub struct Candidate {
 
 impl Candidate {
     pub fn summary(&self) -> String {
-        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let plural =
+            |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         [
             plural(self.logins, "login", "logins"),
             plural(self.providers, "custom provider", "custom providers"),
             plural(self.sessions, "chat", "chats"),
-            plural(self.resources, "skill or extension", "skills and extensions"),
+            plural(
+                self.resources,
+                "skill or extension",
+                "skills and extensions",
+            ),
         ]
         .join(" · ")
     }
@@ -41,7 +46,9 @@ fn read_object(path: &Path) -> Value {
 }
 
 fn count_sessions(dir: &Path) -> usize {
-    let Ok(projects) = fs::read_dir(dir) else { return 0 };
+    let Ok(projects) = fs::read_dir(dir) else {
+        return 0;
+    };
     projects
         .flatten()
         .filter_map(|project| fs::read_dir(project.path()).ok())
@@ -53,13 +60,19 @@ fn count_sessions(dir: &Path) -> usize {
 /// Inspect one Pi folder; `None` when it holds nothing worth moving.
 pub fn inspect(dir: &Path) -> Option<Candidate> {
     let has = |name: &str| dir.join(name).exists();
-    if !dir.is_dir() || !["auth.json", "models.json", "settings.json", "sessions"].iter().any(|n| has(n)) {
+    if !dir.is_dir()
+        || !["auth.json", "models.json", "settings.json", "sessions"]
+            .iter()
+            .any(|n| has(n))
+    {
         return None;
     }
     let count_entries = |name: &str| fs::read_dir(dir.join(name)).map(|e| e.count()).unwrap_or(0);
     Some(Candidate {
         dir: dir.to_path_buf(),
-        logins: read_object(&dir.join("auth.json")).as_object().map_or(0, |o| o.len()),
+        logins: read_object(&dir.join("auth.json"))
+            .as_object()
+            .map_or(0, |o| o.len()),
         providers: read_object(&dir.join("models.json"))["providers"]
             .as_object()
             .map_or(0, |o| o.len()),
@@ -100,8 +113,11 @@ fn write_marker(target: &Path, source: Option<&Path>) -> Result<(), String> {
             .map(|d| d.as_secs())
             .unwrap_or_default(),
     });
-    fs::write(target.join(crate::runtime::MANAGED_MARKER), marker.to_string())
-        .map_err(|_| "Could not write Pui's Pi folder marker.".to_owned())
+    fs::write(
+        target.join(crate::runtime::MANAGED_MARKER),
+        marker.to_string(),
+    )
+    .map_err(|_| "Could not write Pui's Pi folder marker.".to_owned())
 }
 
 /// A fresh install: start Pui's own empty Pi folder.
@@ -121,8 +137,11 @@ fn private(path: &Path) {
 }
 
 fn copy_tree(source: &Path, target: &Path, skip_top: &[&str]) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|e| format!("Could not create {}: {e}", target.display()))?;
-    for entry in fs::read_dir(source).map_err(|e| format!("Could not read {}: {e}", source.display()))? {
+    fs::create_dir_all(target)
+        .map_err(|e| format!("Could not create {}: {e}", target.display()))?;
+    for entry in
+        fs::read_dir(source).map_err(|e| format!("Could not read {}: {e}", source.display()))?
+    {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
         if skip_top.iter().any(|skip| name == *skip) {
@@ -170,12 +189,14 @@ pub fn migrate(source: &Path, target: &Path) -> Result<Option<Moved>, String> {
     if target.exists() {
         // An earlier attempt stopped before finishing; keep it aside, never delete.
         let aside = parent.join(format!("pi-agent.incomplete-{}", uuid::Uuid::new_v4()));
-        fs::rename(target, &aside).map_err(|_| "Could not set aside an incomplete Pui Pi folder.")?;
+        fs::rename(target, &aside)
+            .map_err(|_| "Could not set aside an incomplete Pui Pi folder.")?;
         if let Ok(sessions) = fs::read_dir(aside.join("sessions")) {
             // Sessions already moved by that attempt stay in use.
             let _ = sessions;
             fs::create_dir_all(target).map_err(|e| e.to_string())?;
-            fs::rename(aside.join("sessions"), target.join("sessions")).map_err(|e| e.to_string())?;
+            fs::rename(aside.join("sessions"), target.join("sessions"))
+                .map_err(|e| e.to_string())?;
         }
     }
     let staging = parent.join(format!(".pi-agent.migrating-{}", uuid::Uuid::new_v4()));
@@ -200,7 +221,10 @@ pub fn migrate(source: &Path, target: &Path) -> Result<Option<Moved>, String> {
             #[cfg(unix)]
             std::os::unix::fs::symlink(&new_sessions, &old_sessions)
                 .map_err(|_| "Moved chats, but could not leave a link at the old location.")?;
-            Some(Moved { old_sessions, new_sessions })
+            Some(Moved {
+                old_sessions,
+                new_sessions,
+            })
         }
         _ => {
             fs::create_dir_all(&new_sessions).map_err(|e| e.to_string())?;
@@ -213,7 +237,10 @@ pub fn migrate(source: &Path, target: &Path) -> Result<Option<Moved>, String> {
 
 /// Rewrite saved paths under `from` to `to` in strings and object keys.
 pub fn rewrite_paths(value: &mut Value, from: &Path, to: &Path) -> bool {
-    let (from, to) = (from.to_string_lossy().into_owned(), to.to_string_lossy().into_owned());
+    let (from, to) = (
+        from.to_string_lossy().into_owned(),
+        to.to_string_lossy().into_owned(),
+    );
     let map = |text: &str| -> Option<String> {
         let rest = text.strip_prefix(&from)?;
         (rest.is_empty() || rest.starts_with('/')).then(|| format!("{to}{rest}"))
@@ -246,7 +273,9 @@ pub fn rewrite_paths(value: &mut Value, from: &Path, to: &Path) -> bool {
 
 /// Rewrite session paths in Pui's own JSON stores (tasks, automation).
 pub fn rewrite_stores(moved: &Moved) {
-    let Some(data) = dirs::data_local_dir().map(|dir| dir.join("pui")) else { return };
+    let Some(data) = dirs::data_local_dir().map(|dir| dir.join("pui")) else {
+        return;
+    };
     let mut files = vec![data.join("automation-v1/jobs.json")];
     if let Ok(tasks) = fs::read_dir(data.join("tasks-v1")) {
         files.extend(
@@ -257,8 +286,12 @@ pub fn rewrite_stores(moved: &Moved) {
         );
     }
     for file in files {
-        let Ok(text) = fs::read_to_string(&file) else { continue };
-        let Ok(mut value) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         if rewrite_paths(&mut value, &moved.old_sessions, &moved.new_sessions) {
             let temp = file.with_extension(format!("json.{}", uuid::Uuid::new_v4()));
             if fs::write(&temp, value.to_string()).is_ok() && fs::rename(&temp, &file).is_err() {
@@ -285,22 +318,52 @@ mod tests {
         fs::create_dir_all(source.join("sessions/--proj--")).unwrap();
         fs::create_dir_all(source.join("skills/review")).unwrap();
         fs::create_dir_all(source.join("bin")).unwrap();
-        fs::write(source.join("auth.json"), r#"{"anthropic":{},"antigravity":{}}"#).unwrap();
+        fs::write(
+            source.join("auth.json"),
+            r#"{"anthropic":{},"antigravity":{}}"#,
+        )
+        .unwrap();
         fs::write(source.join("models.json"), r#"{"providers":{"Nvidia":{}}}"#).unwrap();
         fs::write(source.join("settings.json"), r#"{"defaultModel":"x"}"#).unwrap();
         fs::write(source.join("sessions/--proj--/a.jsonl"), "{}\n").unwrap();
         fs::write(source.join("bin/pi"), "binary").unwrap();
         let candidate = inspect(&source).unwrap();
-        assert_eq!((candidate.logins, candidate.providers, candidate.sessions, candidate.resources), (2, 1, 1, 1));
+        assert_eq!(
+            (
+                candidate.logins,
+                candidate.providers,
+                candidate.sessions,
+                candidate.resources
+            ),
+            (2, 1, 1, 1)
+        );
         let target = root.join("app/pi-agent");
         let moved = migrate(&source, &target).unwrap().unwrap();
         assert!(target.join(crate::runtime::MANAGED_MARKER).is_file());
-        assert_eq!(fs::read_to_string(target.join("models.json")).unwrap(), r#"{"providers":{"Nvidia":{}}}"#);
+        assert_eq!(
+            fs::read_to_string(target.join("models.json")).unwrap(),
+            r#"{"providers":{"Nvidia":{}}}"#
+        );
         assert!(target.join("skills/review").is_dir());
-        assert!(!target.join("bin").exists(), "Pi's own binaries are not copied");
-        assert!(target.join("sessions/--proj--/a.jsonl").is_file(), "sessions moved");
-        assert!(fs::symlink_metadata(source.join("sessions")).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_to_string(source.join("sessions/--proj--/a.jsonl")).unwrap(), "{}\n", "old paths still resolve");
+        assert!(
+            !target.join("bin").exists(),
+            "Pi's own binaries are not copied"
+        );
+        assert!(
+            target.join("sessions/--proj--/a.jsonl").is_file(),
+            "sessions moved"
+        );
+        assert!(
+            fs::symlink_metadata(source.join("sessions"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("sessions/--proj--/a.jsonl")).unwrap(),
+            "{}\n",
+            "old paths still resolve"
+        );
         assert!(source.join("auth.json").is_file(), "originals are kept");
         assert_eq!(moved.new_sessions, target.join("sessions"));
         assert_eq!(migrate(&source, &target).unwrap(), None, "idempotent");
@@ -317,9 +380,17 @@ mod tests {
             "other": "/h/.pi/agent/sessions-backup/a.jsonl",
             "list": ["/h/.pi/agent/sessions"]
         });
-        assert!(rewrite_paths(&mut value, Path::new("/h/.pi/agent/sessions"), Path::new("/p/pi-agent/sessions")));
+        assert!(rewrite_paths(
+            &mut value,
+            Path::new("/h/.pi/agent/sessions"),
+            Path::new("/p/pi-agent/sessions")
+        ));
         assert_eq!(value["last_session"], "/p/pi-agent/sessions/--p--/a.jsonl");
-        assert!(value["chats"].get("/p/pi-agent/sessions/--p--/a.jsonl").is_some());
+        assert!(
+            value["chats"]
+                .get("/p/pi-agent/sessions/--p--/a.jsonl")
+                .is_some()
+        );
         assert_eq!(value["other"], "/h/.pi/agent/sessions-backup/a.jsonl");
         assert_eq!(value["list"][0], "/p/pi-agent/sessions");
     }

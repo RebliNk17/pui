@@ -99,7 +99,10 @@ fn collapsed_activity_row_thumbnails_open_gallery_without_toggling_disclosure() 
     let mut header_height = 0.0;
     let out = ctx.run(
         egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 700.0))),
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(800.0, 700.0),
+            )),
             ..Default::default()
         },
         |ctx| {
@@ -153,7 +156,10 @@ fn edited_html_files_render_compact_card_and_emit_open_action() {
     let mut transcript = Transcript::default();
     let out = ctx.run(
         egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 700.0))),
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(800.0, 700.0),
+            )),
             ..Default::default()
         },
         |ctx| {
@@ -209,7 +215,10 @@ fn pui_open_url_renders_browser_preview_card_with_title_and_open_button() {
             .record_title("http://127.0.0.1:8765/", "Error response".into());
         let out = ctx.run(
             egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(620.0, 700.0))),
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(620.0, 700.0),
+                )),
                 ..Default::default()
             },
             |ctx| {
@@ -223,9 +232,11 @@ fn pui_open_url_renders_browser_preview_card_with_title_and_open_button() {
             collect_text_rects(&clipped.shape, &mut texts);
         }
         assert!(texts.iter().any(|(t, _)| t == "Error response"));
-        assert!(texts
-            .iter()
-            .any(|(t, _)| t == "127.0.0.1:8765, opened in Browser"));
+        assert!(
+            texts
+                .iter()
+                .any(|(t, _)| t == "127.0.0.1:8765, opened in Browser")
+        );
         let open_pos = texts
             .iter()
             .find(|(t, _)| t == "Open")
@@ -268,7 +279,10 @@ fn pui_visual_renders_header_and_body_in_light_dark_and_narrow_widths() {
         let mut transcript = Transcript::default();
         let out = ctx.run(
             egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 700.0))),
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(width, 700.0),
+                )),
                 ..Default::default()
             },
             |ctx| {
@@ -304,7 +318,10 @@ fn markdown_inline_local_photo_resolves_safely_and_remote_images_never_fetch() {
     transcript.cwd = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     let out = ctx.run(
         egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 700.0))),
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(800.0, 700.0),
+            )),
             ..Default::default()
         },
         |ctx| {
@@ -320,9 +337,14 @@ fn markdown_inline_local_photo_resolves_safely_and_remote_images_never_fetch() {
     // Remote image falls back to link text "Remote" without fetching, while local image renders its inline photo box.
     assert!(labels.iter().any(|t| t.contains("Remote")));
     assert!(
-        crate::markdown::resolve_local_image("https://example.com/pic.png", transcript.cwd.as_deref()).is_none()
+        crate::markdown::resolve_local_image(
+            "https://example.com/pic.png",
+            transcript.cwd.as_deref()
+        )
+        .is_none()
     );
     assert!(
-        crate::markdown::resolve_local_image("assets/icon.png", transcript.cwd.as_deref()).is_some()
+        crate::markdown::resolve_local_image("assets/icon.png", transcript.cwd.as_deref())
+            .is_some()
     );
 }

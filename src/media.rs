@@ -256,8 +256,8 @@ impl Gallery {
         let attachment = image.clone();
         let tx = self.tx.clone();
         let ctx = ui.ctx().clone();
-        let side = ((ui.available_width() * ui.ctx().pixels_per_point()).round() as u32)
-            .clamp(720, 1600);
+        let side =
+            ((ui.available_width() * ui.ctx().pixels_per_point()).round() as u32).clamp(720, 1600);
         thread::spawn(move || {
             let result = decode(&attachment, side);
             let _ = tx.send(Decoded {
@@ -548,11 +548,7 @@ impl Gallery {
                     .corner_radius(8)
                     .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .size(11.0)
-                                .color(colors.muted),
-                        );
+                        ui.label(egui::RichText::new(label).size(11.0).color(colors.muted));
                     });
             }
             _ => {
@@ -1453,7 +1449,8 @@ mod tests {
         assert!(Attachment::from_local_image("/tmp/.ssh/key.png".into()).is_none());
         assert!(Attachment::from_local_image("relative/shot.png".into()).is_none());
         assert!(Attachment::from_local_image("/tmp/not-image.txt".into()).is_none());
-        let icon = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
+        let icon =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icon.png"));
         let attachment = Attachment::from_local_image(icon).unwrap();
         let decoded = decode(&attachment, 128).unwrap();
         assert_eq!(decoded.size, [128, 128]);

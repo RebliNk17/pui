@@ -2073,26 +2073,48 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pui-spawn-mode-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut spawn_mode = |app: &mut Pui, permission: Option<&str>| {
-            let mut request = json!({"action":"spawn","name":"w","task":"t","access":"worktree","cwd":dir});
+            let mut request =
+                json!({"action":"spawn","name":"w","task":"t","access":"worktree","cwd":dir});
             if let Some(mode) = permission {
                 request["permission"] = json!(mode);
             }
             app.agent_control(&parent, &request).map(|r| {
                 let id = r["agent_id"].as_str().unwrap().to_owned();
-                (r["permission"].as_str().unwrap().to_owned(), app.agent_settings(&id).permission.key())
+                (
+                    r["permission"].as_str().unwrap().to_owned(),
+                    app.agent_settings(&id).permission.key(),
+                )
             })
         };
-        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Bypass);
-        assert_eq!(spawn_mode(&mut app, None).unwrap().1, "bypassPermissions", "inherits by default");
-        for mode in ["auto", "acceptEdits", "manual", "dontAsk", "plan", "bypassPermissions"] {
-            assert_eq!(spawn_mode(&mut app, Some(mode)).unwrap(), (mode.to_owned(), mode), "{mode}");
+        app.agents.nodes.get_mut(&parent).unwrap().permission =
+            Some(settings::PermissionMode::Bypass);
+        assert_eq!(
+            spawn_mode(&mut app, None).unwrap().1,
+            "bypassPermissions",
+            "inherits by default"
+        );
+        for mode in [
+            "auto",
+            "acceptEdits",
+            "manual",
+            "dontAsk",
+            "plan",
+            "bypassPermissions",
+        ] {
+            assert_eq!(
+                spawn_mode(&mut app, Some(mode)).unwrap(),
+                (mode.to_owned(), mode),
+                "{mode}"
+            );
         }
-        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Auto);
+        app.agents.nodes.get_mut(&parent).unwrap().permission =
+            Some(settings::PermissionMode::Auto);
         assert_eq!(spawn_mode(&mut app, Some("manual")).unwrap().1, "manual");
         let error = spawn_mode(&mut app, Some("bypassPermissions")).unwrap_err();
         assert!(error.contains("cannot exceed"), "{error}");
         assert!(spawn_mode(&mut app, Some("root")).is_err());
-        app.agents.nodes.get_mut(&parent).unwrap().permission = Some(settings::PermissionMode::Manual);
+        app.agents.nodes.get_mut(&parent).unwrap().permission =
+            Some(settings::PermissionMode::Manual);
         assert!(spawn_mode(&mut app, Some("auto")).is_err());
         assert!(spawn_mode(&mut app, Some("acceptEdits")).is_err());
         assert_eq!(spawn_mode(&mut app, Some("dontAsk")).unwrap().1, "dontAsk");

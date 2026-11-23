@@ -171,8 +171,7 @@ impl ModelEditDraft {
         let cache_write_cost_text = format_price(target.cache_write_cost);
         let thinking_level = Some(target.thinking_level.clone().unwrap_or_default());
         let thinking_format = Some(target.thinking_format.clone().unwrap_or_default());
-        let advanced_open =
-            target.thinking_level.is_some() || target.thinking_format.is_some();
+        let advanced_open = target.thinking_level.is_some() || target.thinking_format.is_some();
         Self {
             name: target.name.clone(),
             vision: target.vision,
@@ -277,15 +276,17 @@ impl ModelEditDraft {
                 patch.reasoning = FieldEdit::Set(self.reasoning);
             }
             if self.context_text.trim() != self.initial_context_text {
-                let ctx = parse_token_count(&self.context_text, 4_096, 10_000_000)
-                    .ok_or("Context window must be between 4k and 10M tokens (for example 200k or 1M).")?;
+                let ctx = parse_token_count(&self.context_text, 4_096, 10_000_000).ok_or(
+                    "Context window must be between 4k and 10M tokens (for example 200k or 1M).",
+                )?;
                 if ctx != init.context_window.max(4_096) {
                     patch.context_window = FieldEdit::Set(ctx);
                 }
             }
             if self.max_tokens_text.trim() != self.initial_max_tokens_text {
-                let max_out = parse_token_count(&self.max_tokens_text, 256, 2_000_000)
-                    .ok_or("Max output tokens must be between 256 and 2M (for example 16k or 64k).")?;
+                let max_out = parse_token_count(&self.max_tokens_text, 256, 2_000_000).ok_or(
+                    "Max output tokens must be between 256 and 2M (for example 16k or 64k).",
+                )?;
                 if max_out != init.max_tokens.max(1_024) {
                     patch.max_tokens = FieldEdit::Set(max_out);
                 }
@@ -354,13 +355,15 @@ impl ModelEditDraft {
                 TriToggle::Off => FieldEdit::Set(false),
             };
             if !self.context_text.trim().is_empty() {
-                let ctx = parse_token_count(&self.context_text, 4_096, 10_000_000)
-                    .ok_or("Context window must be between 4k and 10M tokens (for example 200k or 1M).")?;
+                let ctx = parse_token_count(&self.context_text, 4_096, 10_000_000).ok_or(
+                    "Context window must be between 4k and 10M tokens (for example 200k or 1M).",
+                )?;
                 patch.context_window = FieldEdit::Set(ctx);
             }
             if !self.max_tokens_text.trim().is_empty() {
-                let max_out = parse_token_count(&self.max_tokens_text, 256, 2_000_000)
-                    .ok_or("Max output tokens must be between 256 and 2M (for example 16k or 64k).")?;
+                let max_out = parse_token_count(&self.max_tokens_text, 256, 2_000_000).ok_or(
+                    "Max output tokens must be between 256 and 2M (for example 16k or 64k).",
+                )?;
                 patch.max_tokens = FieldEdit::Set(max_out);
             }
             if !self.input_cost_text.trim().is_empty() {
@@ -387,11 +390,10 @@ impl ModelEditDraft {
                 MultiFallbackMode::Keep => {}
                 MultiFallbackMode::Clear => patch.fallback = FieldEdit::Clear,
                 MultiFallbackMode::Set => {
-                    let target = self
-                        .fallback
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .ok_or("Choose a fallback model, or switch fallback to Keep or Clear.")?;
+                    let target =
+                        self.fallback.as_deref().filter(|s| !s.is_empty()).ok_or(
+                            "Choose a fallback model, or switch fallback to Keep or Clear.",
+                        )?;
                     validate_fallback_target(&edited_keys, target, existing_fallbacks)?;
                     patch.fallback = FieldEdit::Set(target.to_owned());
                 }
@@ -455,9 +457,15 @@ pub(in crate::app) fn parse_token_count(input: &str, min: u64, max: u64) -> Opti
         return None;
     }
     let raw = if let Some(num) = s.strip_suffix('m') {
-        num.trim().parse::<f64>().ok().map(|v| (v * 1_000_000.0).round())
+        num.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1_000_000.0).round())
     } else if let Some(num) = s.strip_suffix('k') {
-        num.trim().parse::<f64>().ok().map(|v| (v * 1_000.0).round())
+        num.trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| (v * 1_000.0).round())
     } else {
         s.parse::<f64>().ok().map(f64::round)
     }?;
@@ -558,8 +566,12 @@ pub(in crate::app) fn read_model_overrides(
                 reasoning: ov["reasoning"].as_bool(),
                 context_window: ov["contextWindow"].as_u64().filter(|&v| v > 0),
                 max_tokens: ov["maxTokens"].as_u64().filter(|&v| v > 0),
-                input_cost: ov["cost"]["input"].as_f64().filter(|v| v.is_finite() && *v >= 0.0),
-                output_cost: ov["cost"]["output"].as_f64().filter(|v| v.is_finite() && *v >= 0.0),
+                input_cost: ov["cost"]["input"]
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v >= 0.0),
+                output_cost: ov["cost"]["output"]
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v >= 0.0),
                 cache_read_cost: ov["cost"]["cacheRead"]
                     .as_f64()
                     .filter(|v| v.is_finite() && *v >= 0.0),
@@ -890,45 +902,41 @@ pub(in crate::app) fn show_model_editor(
     let colors = theme::palette(ctx);
     let max_body_height = (ctx.screen_rect().height() - 220.0).clamp(180.0, 520.0);
 
-    let response = prompt_ui::modal(
-        ctx,
-        egui::Id::new("pui-edit-model-dialog"),
-        510.0,
-        |ui| {
-            let mut close = prompt_ui::close(ui);
-            prompt_ui::badge(ui, Icon::Sliders, false);
-            if is_multi {
-                prompt_ui::heading(
-                    ui,
-                    &format!("Edit {} Models", draft.targets.len()),
-                    "Only fields you change will be updated; untouched fields keep each model's current setting.",
-                );
-            } else {
-                let target = &draft.targets[0];
-                let provider_label = crate::accounts::display_provider(&target.provider);
-                prompt_ui::heading(
-                    ui,
-                    "Edit Model",
-                    &format!("{provider_label} · {}", target.id),
-                );
-            }
+    let response = prompt_ui::modal(ctx, egui::Id::new("pui-edit-model-dialog"), 510.0, |ui| {
+        let mut close = prompt_ui::close(ui);
+        prompt_ui::badge(ui, Icon::Sliders, false);
+        if is_multi {
+            prompt_ui::heading(
+                ui,
+                &format!("Edit {} Models", draft.targets.len()),
+                "Only fields you change will be updated; untouched fields keep each model's current setting.",
+            );
+        } else {
+            let target = &draft.targets[0];
+            let provider_label = crate::accounts::display_provider(&target.provider);
+            prompt_ui::heading(
+                ui,
+                "Edit Model",
+                &format!("{provider_label} · {}", target.id),
+            );
+        }
 
-            if is_multi {
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                    let show_count = draft.targets.len().min(4);
-                    for target in &draft.targets[..show_count] {
-                        chip(ui, &target.id);
-                    }
-                    if draft.targets.len() > show_count {
-                        chip(ui, &format!("+{} more", draft.targets.len() - show_count));
-                    }
-                });
-            }
+        if is_multi {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                let show_count = draft.targets.len().min(4);
+                for target in &draft.targets[..show_count] {
+                    chip(ui, &target.id);
+                }
+                if draft.targets.len() > show_count {
+                    chip(ui, &format!("+{} more", draft.targets.len() - show_count));
+                }
+            });
+        }
 
-            ui.add_space(12.0);
-            egui::ScrollArea::vertical()
+        ui.add_space(12.0);
+        egui::ScrollArea::vertical()
                 .id_salt("pui-edit-model-scroll")
                 .max_height(max_body_height)
                 .show(ui, |ui| {
@@ -1280,55 +1288,48 @@ pub(in crate::app) fn show_model_editor(
                     }
                 });
 
-            if let Some(err) = &draft.error {
-                ui.add_space(8.0);
-                ui.add(
-                    egui::Label::new(RichText::new(err).size(11.5).color(colors.red)).wrap(),
-                );
-            }
+        if let Some(err) = &draft.error {
+            ui.add_space(8.0);
+            ui.add(egui::Label::new(RichText::new(err).size(11.5).color(colors.red)).wrap());
+        }
 
-            ui.add_space(14.0);
-            let save_label = if is_multi {
-                format!("Apply to {} models", draft.targets.len())
-            } else {
-                "Save".to_owned()
-            };
-            let reset_label = if is_multi {
-                "Reset all to defaults"
-            } else {
-                "Reset to defaults"
-            };
-            let any_customized = draft.targets.iter().any(|t| t.has_customizations);
-            let mut trigger_save = false;
-            let mut trigger_reset = false;
-            ui.horizontal(|ui| {
-                if prompt_ui::button(
-                    ui,
-                    reset_label,
-                    prompt_ui::Button::Secondary,
-                    any_customized,
-                )
-                .clicked()
-                {
-                    trigger_reset = true;
+        ui.add_space(14.0);
+        let save_label = if is_multi {
+            format!("Apply to {} models", draft.targets.len())
+        } else {
+            "Save".to_owned()
+        };
+        let reset_label = if is_multi {
+            "Reset all to defaults"
+        } else {
+            "Reset to defaults"
+        };
+        let any_customized = draft.targets.iter().any(|t| t.has_customizations);
+        let mut trigger_save = false;
+        let mut trigger_reset = false;
+        ui.horizontal(|ui| {
+            if prompt_ui::button(
+                ui,
+                reset_label,
+                prompt_ui::Button::Secondary,
+                any_customized,
+            )
+            .clicked()
+            {
+                trigger_reset = true;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if prompt_ui::button(ui, &save_label, prompt_ui::Button::Primary, true).clicked() {
+                    trigger_save = true;
                 }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if prompt_ui::button(ui, &save_label, prompt_ui::Button::Primary, true)
-                        .clicked()
-                    {
-                        trigger_save = true;
-                    }
-                    if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true)
-                        .clicked()
-                    {
-                        close = true;
-                    }
-                });
+                if prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true).clicked() {
+                    close = true;
+                }
             });
-            (close, trigger_save, trigger_reset)
-        },
-    );
+        });
+        (close, trigger_save, trigger_reset)
+    });
 
     let (close, trigger_save, trigger_reset) = response.inner;
     if trigger_reset {
@@ -1356,12 +1357,7 @@ pub(in crate::app) fn show_model_editor(
 
 fn group_heading(ui: &mut egui::Ui, text: &str) {
     let colors = theme::palette(ui.ctx());
-    ui.label(
-        RichText::new(text)
-            .size(10.5)
-            .strong()
-            .color(colors.dim),
-    );
+    ui.label(RichText::new(text).size(10.5).strong().color(colors.dim));
     ui.add_space(4.0);
 }
 
@@ -1462,7 +1458,11 @@ fn summarize_bools(mut values: impl Iterator<Item = bool>) -> &'static str {
         return "none";
     };
     if values.all(|v| v == first) {
-        if first { "currently On" } else { "currently Off" }
+        if first {
+            "currently On"
+        } else {
+            "currently Off"
+        }
     } else {
         "currently mixed"
     }
@@ -1494,7 +1494,8 @@ mod tests {
 
     #[test]
     fn single_edit_only_writes_changed_fields_and_roundtrips_json() {
-        let mut draft = ModelEditDraft::single(target("Nvidia", "z-ai/glm-5.3-flash", false, false));
+        let mut draft =
+            ModelEditDraft::single(target("Nvidia", "z-ai/glm-5.3-flash", false, false));
         draft.vision = true;
         draft.reasoning = true;
         draft.context_text = "1M".into();
@@ -1528,13 +1529,10 @@ mod tests {
                 }
             }
         });
-        assert!(apply_override_patch_to_json(
-            &mut models_root,
-            "Nvidia",
-            "z-ai/glm-5.3-flash",
-            &patch
-        )
-        .unwrap());
+        assert!(
+            apply_override_patch_to_json(&mut models_root, "Nvidia", "z-ai/glm-5.3-flash", &patch)
+                .unwrap()
+        );
         let ov = &models_root["providers"]["Nvidia"]["modelOverrides"]["z-ai/glm-5.3-flash"];
         assert_eq!(ov["input"], json!(["text", "image"]));
         assert_eq!(ov["reasoning"], json!(true));
@@ -1556,7 +1554,11 @@ mod tests {
             "Nvidia",
             "z-ai/glm-5.3-flash"
         ));
-        assert!(models_root["providers"]["Nvidia"].get("modelOverrides").is_none());
+        assert!(
+            models_root["providers"]["Nvidia"]
+                .get("modelOverrides")
+                .is_none()
+        );
         assert_eq!(
             models_root["providers"]["Nvidia"]["baseUrl"],
             json!("https://integrate.api.nvidia.com/v1")
@@ -1647,7 +1649,8 @@ mod tests {
         ));
         let map = read_model_thinking_levels(&settings);
         assert_eq!(
-            map.get(&("Nvidia".into(), "glm".into())).map(String::as_str),
+            map.get(&("Nvidia".into(), "glm".into()))
+                .map(String::as_str),
             Some("high")
         );
         assert!(apply_thinking_level_to_settings(
@@ -1712,12 +1715,8 @@ mod tests {
                 let ctx = egui::Context::default();
                 mode.apply(&ctx);
                 ctx.set_zoom_factor(zoom);
-                let mut draft = ModelEditDraft::single(target(
-                    "Nvidia",
-                    "z-ai/glm-5.3-flash",
-                    true,
-                    true,
-                ));
+                let mut draft =
+                    ModelEditDraft::single(target("Nvidia", "z-ai/glm-5.3-flash", true, true));
                 let existing = BTreeMap::new();
                 let mut outcome = EditorOutcome::Open;
                 let _ = ctx.run(

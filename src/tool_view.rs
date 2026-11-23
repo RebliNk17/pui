@@ -47,11 +47,7 @@ pub fn row(ui: &mut egui::Ui, tool: &Tool) {
     row_with_view(ui, tool, false, None);
 }
 
-pub fn row_with_gallery(
-    ui: &mut egui::Ui,
-    tool: &Tool,
-    gallery: &mut crate::media::Gallery,
-) {
+pub fn row_with_gallery(ui: &mut egui::Ui, tool: &Tool, gallery: &mut crate::media::Gallery) {
     row_with_view(ui, tool, false, Some(gallery));
 }
 

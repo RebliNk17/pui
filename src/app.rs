@@ -29,9 +29,9 @@ mod notifications;
 mod panel_resize;
 mod permission_picker;
 mod permission_worker;
-mod pi_folder;
 #[cfg(test)]
 mod persistence_tests;
+mod pi_folder;
 mod prompt_ui;
 #[cfg(test)]
 mod prompt_ui_tests;

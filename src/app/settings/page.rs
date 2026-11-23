@@ -535,7 +535,11 @@ pub(super) struct Dropdown<'a> {
 fn model_label(model: &protocol::Model) -> String {
     format!(
         "{} · {}",
-        if model.name.is_empty() { &model.id } else { &model.name },
+        if model.name.is_empty() {
+            &model.id
+        } else {
+            &model.name
+        },
         crate::accounts::display_provider(&model.provider)
     )
 }
@@ -564,12 +568,26 @@ pub(super) fn model_dropdown(
     ui.painter().rect(
         rect,
         7,
-        if *open || response.hovered() { colors.hover } else { colors.surface },
-        Stroke::new(1.0, if response.has_focus() { colors.accent } else { colors.border }),
+        if *open || response.hovered() {
+            colors.hover
+        } else {
+            colors.surface
+        },
+        Stroke::new(
+            1.0,
+            if response.has_focus() {
+                colors.accent
+            } else {
+                colors.border
+            },
+        ),
         egui::StrokeKind::Inside,
     );
-    let mut job =
-        egui::text::LayoutJob::simple_singleline(label.clone(), FontId::proportional(12.0), colors.text);
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        label.clone(),
+        FontId::proportional(12.0),
+        colors.text,
+    );
     job.wrap.max_width = (rect.width() - 34.0).max(0.0);
     job.wrap.max_rows = 1;
     let galley = ui.painter().layout_job(job);
@@ -580,7 +598,10 @@ pub(super) fn model_dropdown(
     );
     icons::chevron(
         ui,
-        egui::Rect::from_center_size(rect.right_center() - egui::vec2(14.0, 0.0), Vec2::splat(10.0)),
+        egui::Rect::from_center_size(
+            rect.right_center() - egui::vec2(14.0, 0.0),
+            Vec2::splat(10.0),
+        ),
         false,
         colors.dim,
     );
@@ -596,7 +617,10 @@ pub(super) fn model_dropdown(
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     #[cfg(test)]
     ui.ctx().data_mut(|d| {
-        d.insert_temp(egui::Id::new(format!("{}-rect", dropdown.salt)), response.rect)
+        d.insert_temp(
+            egui::Id::new(format!("{}-rect", dropdown.salt)),
+            response.rect,
+        )
     });
     if response.clicked() {
         *open = !*open;
@@ -609,7 +633,10 @@ pub(super) fn model_dropdown(
         return None;
     }
     if !list_state.provider.is_empty()
-        && !dropdown.models.iter().any(|m| m.provider == list_state.provider)
+        && !dropdown
+            .models
+            .iter()
+            .any(|m| m.provider == list_state.provider)
     {
         list_state.provider.clear();
     }
@@ -1054,7 +1081,10 @@ impl Pui {
                     (version, "Bundled inside Pui; updated with Pui releases.")
                 }
                 Some(version) => (version, "External Pi installation."),
-                None => ("Unknown".to_owned(), "Pi package version could not be read."),
+                None => (
+                    "Unknown".to_owned(),
+                    "Pi package version could not be read.",
+                ),
             };
             row(ui, "Pi version", pi_source, |ui| {
                 ui.label(theme::small(ui, format!("Pi {pi_version}")));
@@ -1395,7 +1425,10 @@ impl Pui {
         }
         let providers = &self.settings_view.providers;
         self.catalog
-            .classifier_models(|p| providers.is_provider_configured(p), &self.prefs.hidden_models)
+            .classifier_models(
+                |p| providers.is_provider_configured(p),
+                &self.prefs.hidden_models,
+            )
             .into_iter()
             .map(|m| m.model.clone())
             .collect()
@@ -1410,9 +1443,10 @@ impl Pui {
                 .unwrap_or_else(|| UNAVAILABLE.into());
         }
         let providers = &self.settings_view.providers;
-        let candidates = self
-            .catalog
-            .classifier_models(|p| providers.is_provider_configured(p), &self.prefs.hidden_models);
+        let candidates = self.catalog.classifier_models(
+            |p| providers.is_provider_configured(p),
+            &self.prefs.hidden_models,
+        );
         let found = match &self.prefs.settings.permission_classifier {
             Some(key) => candidates.iter().find(|m| m.key() == *key),
             None => candidates.iter().find(|m| m.priced),
@@ -1493,23 +1527,28 @@ impl Pui {
             .map(|(p, m)| format!("{p}/{m}"));
         let mut write = None;
         card(ui, |ui| {
-            row(ui, "Default model", "The model a new chat starts with.", |ui| {
-                if let Some(Pick::Model { provider, id }) = model_dropdown(
-                    ui,
-                    &mut self.settings_view.default_open,
-                    &mut self.settings_view.default_list,
-                    Dropdown {
-                        salt: "default-model",
-                        title: "Default model",
-                        models: &visible,
-                        selected: default_key.as_deref(),
-                        automatic: None,
-                        empty: "No models available. Connect a provider in Settings → Providers.",
-                    },
-                ) {
-                    write = Some((Some((provider, id)), None));
-                }
-            });
+            row(
+                ui,
+                "Default model",
+                "The model a new chat starts with.",
+                |ui| {
+                    if let Some(Pick::Model { provider, id }) = model_dropdown(
+                        ui,
+                        &mut self.settings_view.default_open,
+                        &mut self.settings_view.default_list,
+                        Dropdown {
+                            salt: "default-model",
+                            title: "Default model",
+                            models: &visible,
+                            selected: default_key.as_deref(),
+                            automatic: None,
+                            empty: "No models available. Connect a provider in Settings → Providers.",
+                        },
+                    ) {
+                        write = Some((Some((provider, id)), None));
+                    }
+                },
+            );
             separator(ui);
             row(
                 ui,
@@ -1549,11 +1588,18 @@ impl Pui {
         }
         if let Some(error) = &self.settings_view.defaults_error {
             ui.add_space(6.0);
-            ui.label(RichText::new(error).size(11.0).color(theme::palette(ui.ctx()).red));
+            ui.label(
+                RichText::new(error)
+                    .size(11.0)
+                    .color(theme::palette(ui.ctx()).red),
+            );
         }
         section(ui, "Available models", "");
         if let Some(error) = &self.catalog.error {
-            ui.label(theme::small(ui, format!("{error} Showing the last loaded list.")));
+            ui.label(theme::small(
+                ui,
+                format!("{error} Showing the last loaded list."),
+            ));
         } else if self.catalog.loading() && !self.catalog.loaded {
             ui.label(theme::small(ui, "Loading models from Pi…"));
         }
@@ -1658,35 +1704,20 @@ impl Pui {
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
-                            if prompt_ui::button(
-                                ui,
-                                "Clear",
-                                prompt_ui::Button::Secondary,
-                                true,
-                            )
-                            .clicked()
+                            if prompt_ui::button(ui, "Clear", prompt_ui::Button::Secondary, true)
+                                .clicked()
                             {
                                 self.settings_view.models_selected.clear();
                             }
-                            if prompt_ui::button(
-                                ui,
-                                "Hide",
-                                prompt_ui::Button::Secondary,
-                                true,
-                            )
-                            .clicked()
+                            if prompt_ui::button(ui, "Hide", prompt_ui::Button::Secondary, true)
+                                .clicked()
                             {
                                 for (prov, id) in &self.settings_view.models_selected {
                                     self.prefs.hidden_models.insert(format!("{prov}/{id}"));
                                 }
                             }
-                            if prompt_ui::button(
-                                ui,
-                                "Show",
-                                prompt_ui::Button::Secondary,
-                                true,
-                            )
-                            .clicked()
+                            if prompt_ui::button(ui, "Show", prompt_ui::Button::Secondary, true)
+                                .clicked()
                             {
                                 for (prov, id) in &self.settings_view.models_selected {
                                     self.prefs.hidden_models.remove(&format!("{prov}/{id}"));
@@ -1697,13 +1728,8 @@ impl Pui {
                             } else {
                                 format!("Edit {count} models")
                             };
-                            if prompt_ui::button(
-                                ui,
-                                &edit_label,
-                                prompt_ui::Button::Primary,
-                                true,
-                            )
-                            .clicked()
+                            if prompt_ui::button(ui, &edit_label, prompt_ui::Button::Primary, true)
+                                .clicked()
                             {
                                 open_multi = true;
                             }
@@ -1879,15 +1905,13 @@ impl Pui {
             .and_then(|p| p.models.iter().find(|m| m.id == model.id));
         let ov = self.settings_view.providers.model_overrides.get(&key);
 
-        let name = ov
-            .and_then(|o| o.name.clone())
-            .unwrap_or_else(|| {
-                if model.name.is_empty() {
-                    model.id.clone()
-                } else {
-                    model.name.clone()
-                }
-            });
+        let name = ov.and_then(|o| o.name.clone()).unwrap_or_else(|| {
+            if model.name.is_empty() {
+                model.id.clone()
+            } else {
+                model.name.clone()
+            }
+        });
         let vision = ov
             .and_then(|o| o.vision)
             .or_else(|| catalog_entry.map(|c| c.vision))
@@ -1998,11 +2022,7 @@ fn model_settings_row(
             labels.spacing_mut().item_spacing.y = 3.0;
             labels.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 3.0);
-                ui.label(
-                    RichText::new(&target.name)
-                        .size(13.0)
-                        .color(colors.text),
-                );
+                ui.label(RichText::new(&target.name).size(13.0).color(colors.text));
                 if target.has_customizations {
                     row_pill(ui, "Customized", colors.accent_bg, colors.accent);
                 }
@@ -2797,11 +2817,26 @@ mod tests {
 
         let output = frame(&mut app, vec![]);
         let labels = collect_labels(&output);
-        assert!(labels.iter().any(|(t, _)| t == "1M"), "context chip shown on row");
-        assert!(labels.iter().any(|(t, _)| t == "Vision"), "vision pill shown on row");
-        assert!(labels.iter().any(|(t, _)| t == "Reasoning"), "reasoning pill shown on row");
-        assert!(labels.iter().any(|(t, _)| t == "Edit"), "Edit button shown on row");
-        assert!(labels.iter().any(|(t, _)| t == "Select"), "Select toggle shown");
+        assert!(
+            labels.iter().any(|(t, _)| t == "1M"),
+            "context chip shown on row"
+        );
+        assert!(
+            labels.iter().any(|(t, _)| t == "Vision"),
+            "vision pill shown on row"
+        );
+        assert!(
+            labels.iter().any(|(t, _)| t == "Reasoning"),
+            "reasoning pill shown on row"
+        );
+        assert!(
+            labels.iter().any(|(t, _)| t == "Edit"),
+            "Edit button shown on row"
+        );
+        assert!(
+            labels.iter().any(|(t, _)| t == "Select"),
+            "Select toggle shown"
+        );
 
         // Clicking Edit opens single-edit modal.
         let edit_pos = labels.iter().find(|(t, _)| t == "Edit").unwrap().1.center();

@@ -1091,7 +1091,14 @@ mod tests {
                 ..Default::default()
             },
         ];
-        place_tool_images(&mut messages, 1, 0, "read-1", Some("/a/image.png"), Vec::new());
+        place_tool_images(
+            &mut messages,
+            1,
+            0,
+            "read-1",
+            Some("/a/image.png"),
+            Vec::new(),
+        );
         assert_eq!(messages[0].text, "/a/image.png");
     }
     #[test]

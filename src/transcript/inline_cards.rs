@@ -67,11 +67,9 @@ pub(super) fn compact_file_card(
         FontId::new(9.5, egui::FontFamily::Name("body-bold".into())),
         colors.muted,
     );
-    let name_galley = ui.painter().layout_no_wrap(
-        truncated,
-        FontId::proportional(12.5),
-        colors.text,
-    );
+    let name_galley =
+        ui.painter()
+            .layout_no_wrap(truncated, FontId::proportional(12.5), colors.text);
     let badge_w = (badge_galley.size().x + 14.0).max(36.0);
     let card_w = (12.0 + badge_w + 10.0 + name_galley.size().x + 14.0 + 28.0 + 8.0)
         .min(ui.available_width().max(160.0))
@@ -267,8 +265,10 @@ pub(super) fn open_card(
             ui.spacing_mut().item_spacing.y = 0.0;
 
             // Top preview image / placeholder area
-            let (preview_rect, preview_resp) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), preview_height), Sense::click());
+            let (preview_rect, preview_resp) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), preview_height),
+                Sense::click(),
+            );
             if ui.is_rect_visible(preview_rect) {
                 let top_radius = egui::CornerRadius {
                     nw: 9,
@@ -276,7 +276,8 @@ pub(super) fn open_card(
                     sw: 0,
                     se: 0,
                 };
-                ui.painter().rect_filled(preview_rect, top_radius, colors.bg);
+                ui.painter()
+                    .rect_filled(preview_rect, top_radius, colors.bg);
                 if let Some(tex) = visuals.page_texture(ui.ctx(), target) {
                     let uv = top_cover_uv(tex.size_vec2(), preview_rect.size());
                     egui::Image::new((tex.id(), preview_rect.size()))
@@ -390,9 +391,7 @@ pub(super) fn open_card(
                                 );
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(&subtitle)
-                                            .size(11.0)
-                                            .color(colors.muted),
+                                        RichText::new(&subtitle).size(11.0).color(colors.muted),
                                     )
                                     .truncate(),
                                 );

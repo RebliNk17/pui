@@ -214,10 +214,8 @@ pub(in crate::app) struct ProvidersManager {
     pub(in crate::app) saved_auth: Vec<AuthSummary>,
     pub(in crate::app) model_overrides:
         std::collections::BTreeMap<(String, String), super::model_editor::ModelOverride>,
-    pub(in crate::app) model_thinking_levels:
-        std::collections::BTreeMap<(String, String), String>,
-    pub(in crate::app) model_fallbacks:
-        std::collections::BTreeMap<(String, String), String>,
+    pub(in crate::app) model_thinking_levels: std::collections::BTreeMap<(String, String), String>,
+    pub(in crate::app) model_fallbacks: std::collections::BTreeMap<(String, String), String>,
     claude: ClaudeSubscriptionFlow,
     antigravity: AntigravitySubscriptionFlow,
     vertex: VertexModal,
@@ -257,7 +255,11 @@ fn read_json_object(path: &Path) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-pub(super) fn write_json_atomic(path: &Path, value: &Value, private_mode: bool) -> Result<(), String> {
+pub(super) fn write_json_atomic(
+    path: &Path,
+    value: &Value,
+    private_mode: bool,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or("Invalid configuration directory path.")?;
@@ -3107,10 +3109,16 @@ mod config_watch_tests {
             ]
         };
         let mut manager = ProvidersManager::default();
-        assert!(!manager.stamp_changed(paths()), "first check records a baseline");
+        assert!(
+            !manager.stamp_changed(paths()),
+            "first check records a baseline"
+        );
         assert!(!manager.stamp_changed(paths()));
         std::fs::write(dir.join("models.json"), r#"{"providers":{"Nvidia":{}}}"#).unwrap();
-        assert!(manager.stamp_changed(paths()), "new provider file is detected");
+        assert!(
+            manager.stamp_changed(paths()),
+            "new provider file is detected"
+        );
         assert!(!manager.stamp_changed(paths()));
         std::fs::write(dir.join("auth.json"), r#"{"nvidia":{}}"#).unwrap();
         assert!(manager.stamp_changed(paths()), "new login is detected");

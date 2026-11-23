@@ -364,8 +364,16 @@ mod tests {
             .filter(|(_, value)| value.is_none())
             .map(|(name, _)| name.to_string_lossy().into_owned())
             .collect();
-        for name in ["OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"] {
-            assert!(removed.iter().any(|r| r == name), "{name} must be withheld from Pi");
+        for name in [
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "NVIDIA_API_KEY",
+        ] {
+            assert!(
+                removed.iter().any(|r| r == name),
+                "{name} must be withheld from Pi"
+            );
         }
         assert!(!removed.iter().any(|r| r == "PATH" || r == "HOME"));
     }

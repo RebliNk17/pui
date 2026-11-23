@@ -294,6 +294,9 @@ fn saved_bypass_default_is_reset_to_auto_while_existing_chats_keep_bypass() {
     prefs.normalize_default_permission();
     assert!(prefs.settings.permission == PermissionMode::Auto);
     assert!(prefs.agent_tree[0].permission == Some(PermissionMode::Bypass));
-    assert!(prefs.agent_tree[1].permission.is_none(), "read-only stays read-only");
+    assert!(
+        prefs.agent_tree[1].permission.is_none(),
+        "read-only stays read-only"
+    );
     assert!(prefs.agent_tree[2].permission == Some(PermissionMode::Manual));
 }

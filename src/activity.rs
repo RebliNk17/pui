@@ -155,7 +155,10 @@ impl Tool {
             .iter()
             .chain(self.children.iter().flat_map(|c| c.images.iter()))
         {
-            if !out.iter().any(|existing: &crate::media::Attachment| existing.key == image.key) {
+            if !out
+                .iter()
+                .any(|existing: &crate::media::Attachment| existing.key == image.key)
+            {
                 out.push(image.clone());
             }
         }
