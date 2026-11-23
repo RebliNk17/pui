@@ -237,7 +237,7 @@ impl Pui {
         ui.add_space(6.0);
     }
 
-    fn answer_dialog(&mut self, id: &str, mut response: Value) {
+    pub(super) fn answer_dialog(&mut self, id: &str, mut response: Value) {
         if !self.state.dialogs.iter().any(|d| d["id"] == id) {
             return;
         }

@@ -15,6 +15,7 @@ mod media;
 mod pi_migration;
 mod protocol;
 mod pulls;
+mod remote;
 mod rpc;
 mod runtime;
 mod section;

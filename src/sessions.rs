@@ -20,6 +20,27 @@ pub struct Session {
     pub modified: SystemTime,
 }
 
+type OriginCache =
+    std::sync::Mutex<std::collections::HashMap<PathBuf, crate::remote::SessionOrigin>>;
+
+static ORIGIN_CACHE: std::sync::LazyLock<OriginCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub fn origin_for(path: &Path) -> Option<crate::remote::SessionOrigin> {
+    ORIGIN_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(path)
+        .cloned()
+}
+
+pub fn remember_origin(path: &Path, origin: crate::remote::SessionOrigin) {
+    ORIGIN_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(path.to_path_buf(), origin);
+}
+
 pub fn session_root() -> Option<PathBuf> {
     if let Some(dir) = crate::runtime::managed_agent_dir() {
         return Some(dir.join("sessions"));
@@ -136,6 +157,7 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
     let mut prompt = None;
     let mut name = None;
     let mut initial_title = None;
+    let mut origin = None;
     for line in reader.lines().map_while(Result::ok) {
         prefix_bytes += line.len() + 1;
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
@@ -164,6 +186,9 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
         }
         if initial_title.is_none() {
             initial_title = stored_initial_title(&entry);
+        }
+        if origin.is_none() {
+            origin = crate::remote::SessionOrigin::from_jsonl_entry(&entry);
         }
         if string(&entry, "type") == "session_info" {
             name = entry["name"]
@@ -197,6 +222,9 @@ fn read_session(path: &Path, modified: SystemTime) -> Option<Session> {
                 }
             }
         }
+    }
+    if let Some(origin) = origin {
+        remember_origin(path, origin);
     }
     Some(Session {
         path: path.to_path_buf(),

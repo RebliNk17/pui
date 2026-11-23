@@ -2,5 +2,10 @@
 /dist/
 /.cargo-ci/
 /.ci-cache/
+/mobile/node_modules/
+/mobile/.expo/
+/mobile/android/
+/mobile/ios/
+/mobile/dist-apk/
 __pycache__/
 .DS_Store

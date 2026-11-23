@@ -1,0 +1,114 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/android.yml'
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/android.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android-validate-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install mobile dependencies
+        run: npm ci
+
+      - name: Typecheck mobile app
+        run: npm run typecheck
+
+      - name: Run mobile unit tests
+        run: npm test
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-pui-mobile-${{ hashFiles('mobile/package-lock.json', 'mobile/app.config.ts') }}
+          restore-keys: |
+            gradle-pui-mobile-
+
+      - name: Expo prebuild Android project
+        run: npx expo prebuild --platform android --non-interactive
+
+      - name: Build Android APK
+        working-directory: mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Collect APK and checksum
+        run: |
+          mkdir -p dist-apk
+          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          test -n "$APK"
+          cp "$APK" dist-apk/pui-android.apk
+          (cd dist-apk && sha256sum pui-android.apk > pui-android.apk.sha256)
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: mobile/dist-apk/*
+          if-no-files-found: error
+          retention-days: 14
+
+  attach-android-release:
+    needs: android-validate-and-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download Android APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist-apk
+
+      - name: Attach APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Wait briefly for macOS release creation if tag jobs run concurrently; create draftless release if missing.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "Release $TAG"
+          fi
+          gh release upload "$TAG" dist-apk/pui-android.apk dist-apk/pui-android.apk.sha256 --clobber

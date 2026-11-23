@@ -22,6 +22,7 @@ pub(super) struct ChatPrefs {
     pub(super) hidden: bool,
     pub(super) section: Option<String>,
     pub(super) parent_session: Option<PathBuf>,
+    pub(super) origin: Option<crate::remote::SessionOrigin>,
 }
 impl ChatPrefs {
     pub(super) fn is_empty(&self) -> bool {
@@ -33,6 +34,7 @@ impl ChatPrefs {
             && !self.hidden
             && self.section.is_none()
             && self.parent_session.is_none()
+            && self.origin.is_none()
     }
 }
 #[derive(Clone)]
@@ -1058,6 +1060,12 @@ impl Pui {
             ("Saved · status unknown", colors.dim)
         };
         let title = self.session_title(s);
+        let row_origin = self
+            .prefs
+            .chats
+            .get(&path)
+            .and_then(|m| m.origin.clone())
+            .or_else(|| sessions::origin_for(&path));
         let meta = self.prefs.chats.entry(path.clone()).or_default();
         let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
         let mut renamed = None;
@@ -1151,18 +1159,38 @@ impl Pui {
                 self.rename_chat = None;
             }
         } else {
+            let show_origin = row_origin.as_ref().is_some_and(|o| o.platform.is_remote());
+            let title_left = if show_origin { 46.0 } else { 32.0 };
+            if let Some(origin) = row_origin.as_ref().filter(|o| o.platform.is_remote()) {
+                let icon_rect = egui::Rect::from_center_size(
+                    rect.min + egui::vec2(34.0, if compact { rect.height() / 2.0 } else { 15.0 }),
+                    Vec2::splat(13.0),
+                );
+                let origin_icon = if origin.platform == crate::remote::OriginPlatform::Web {
+                    Icon::Globe
+                } else {
+                    Icon::Phone
+                };
+                icons::draw(ui, icon_rect, origin_icon, colors.accent);
+                ui.interact(
+                    icon_rect.expand(3.0),
+                    ui.make_persistent_id(("chat-origin", &path)),
+                    Sense::hover(),
+                )
+                .on_hover_text(origin.badge_tooltip());
+            }
             let elided = paint_text(
                 ui,
                 &title,
-                rect.min + egui::vec2(32.0, if compact { rect.height() / 2.0 } else { 15.0 }),
-                (rect.width() - 107.0).max(1.0),
+                rect.min + egui::vec2(title_left, if compact { rect.height() / 2.0 } else { 15.0 }),
+                (rect.width() - (title_left + 75.0)).max(1.0),
                 FontId::proportional(12.0),
                 colors.text,
             );
             if elided && !deleting {
                 ui.interact(
                     egui::Rect::from_min_max(
-                        rect.min + egui::vec2(32.0, 0.0),
+                        rect.min + egui::vec2(title_left, 0.0),
                         egui::pos2(rect.right() - 75.0, rect.bottom()),
                     ),
                     ui.make_persistent_id(("chat-title", &path)),

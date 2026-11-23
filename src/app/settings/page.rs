@@ -16,9 +16,10 @@ enum Page {
     Models,
     Providers,
     Resources,
+    Remote,
 }
 impl Page {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::General,
         Self::Appearance,
         Self::Notifications,
@@ -27,6 +28,7 @@ impl Page {
         Self::Providers,
         Self::Models,
         Self::Resources,
+        Self::Remote,
     ];
     fn title(self) -> &'static str {
         match self {
@@ -38,6 +40,7 @@ impl Page {
             Self::Models => "Models",
             Self::Providers => "Providers",
             Self::Resources => "Resources",
+            Self::Remote => "Remote & Mobile",
         }
     }
     fn subtitle(self) -> &'static str {
@@ -50,6 +53,7 @@ impl Page {
             Self::Models => "Defaults for new chats and the models Pi provides.",
             Self::Providers => "Connected model providers, managed by Pi.",
             Self::Resources => "Manage skills, MCP servers, extensions and Pi packages.",
+            Self::Remote => "Connect Pui Mobile on Android (and iOS) to this host over Tailscale.",
         }
     }
     fn keywords(self) -> &'static str {
@@ -72,6 +76,9 @@ impl Page {
             Self::Resources => {
                 "skills mcp servers extensions packages install remove prompts templates themes plugins"
             }
+            Self::Remote => {
+                "remote mobile android ios phone tailscale qr pairing token websocket server cloud"
+            }
         }
     }
     fn icon(self) -> Icon {
@@ -84,6 +91,7 @@ impl Page {
             Self::Models => Icon::Code,
             Self::Providers => Icon::Branch,
             Self::Resources => Icon::Code,
+            Self::Remote => Icon::Phone,
         }
     }
     fn matches(self, query: &str) -> bool {
@@ -821,6 +829,7 @@ impl Pui {
                                         &self.prefs.cwd,
                                         self.demo,
                                     ),
+                                    Page::Remote => self.settings_remote(ui),
                                 }
                                 ui.add_space(45.0);
                             });

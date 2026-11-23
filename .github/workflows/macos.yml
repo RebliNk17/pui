@@ -7,6 +7,9 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
   pull_request:
+    paths-ignore:
+      - 'mobile/**'
+      - '.github/workflows/android.yml'
 
 permissions:
   contents: read

@@ -95,7 +95,7 @@ impl Pui {
         self.prefs.projects.insert(0, folder.to_path_buf());
         self.prefs.projects.truncate(32);
     }
-    fn chat_projects(&self) -> Vec<PathBuf> {
+    pub(super) fn chat_projects(&self) -> Vec<PathBuf> {
         let mut projects = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         // No filesystem scans while rendering. Availability is validated when

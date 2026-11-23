@@ -39,6 +39,7 @@ mod prompt_ui;
 mod prompt_ui_tests;
 mod prompts;
 mod questions;
+mod remote_host;
 mod resource_reload;
 mod restart;
 mod rewind;
@@ -119,6 +120,7 @@ struct Preferences {
     extension_models: Vec<protocol::Model>,
     /// Folder to move into Pui's own Pi folder at the next launch.
     pi_migration_pending: Option<PathBuf>,
+    remote: crate::remote::RemoteConfig,
     /// "Not now" on the migration offer; Settings → General can reopen it.
     pi_migration_dismissed: bool,
     /// Give Pi provider API keys from environment variables (off by default).
@@ -266,6 +268,9 @@ pub struct Pui {
     chat_find: chat_find::ChatFind,
     screenshot: Option<PathBuf>,
     frames: usize,
+    remote: crate::remote::RemoteServer,
+    pending_origins: std::collections::BTreeMap<String, crate::remote::SessionOrigin>,
+    remote_snapshot_tick: u64,
 }
 
 impl Pui {
@@ -296,6 +301,16 @@ impl Pui {
         let closed_projects = prefs.closed_projects.clone();
         let expanded_projects = prefs.expanded_projects.clone();
         let usage_cache = prefs.usage_cache.clone();
+        let remote = {
+            let mut remote_cfg = prefs.remote.clone();
+            if options.demo || cfg!(test) {
+                remote_cfg.enabled = false;
+            }
+            let wake_ctx = cc.egui_ctx.clone();
+            crate::remote::RemoteServer::new(remote_cfg, move || {
+                wake_ctx.request_repaint();
+            })
+        };
         prefs.cwd = options
             .cwd
             .or_else(|| {
@@ -438,6 +453,9 @@ impl Pui {
             chat_find: chat_find::ChatFind::default(),
             screenshot: options.screenshot,
             frames: 0,
+            remote,
+            pending_origins: Default::default(),
+            remote_snapshot_tick: 0,
         };
         app.settings_open = options.settings || options.demo_settings;
         if let Some(page) = options.settings_page.as_deref() {
@@ -1170,6 +1188,7 @@ impl Pui {
         self.poll_views();
         self.publish_live();
         self.poll_window_sync();
+        self.poll_remote();
         self.poll_idle_agents(std::time::Instant::now());
     }
     fn poll_rpc(&mut self) -> bool {
