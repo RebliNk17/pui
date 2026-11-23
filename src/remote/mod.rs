@@ -962,6 +962,19 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 return;
             };
             if let Some(detail) = snap.details.get(&path) {
+                if detail.messages.is_empty() && !detail.busy {
+                    let path_buf = PathBuf::from(&path);
+                    if let Ok(preview) = crate::history::load(&path_buf) {
+                        if !preview.messages.is_empty() {
+                            let mut hydrated = detail.clone();
+                            let (artifacts, _) = extract_artifacts(&preview.messages);
+                            hydrated.messages = preview.messages;
+                            hydrated.artifacts = artifacts;
+                            let _ = http::write_json(stream, 200, "OK", &json!(hydrated));
+                            return;
+                        }
+                    }
+                }
                 let _ = http::write_json(stream, 200, "OK", &json!(detail));
                 return;
             }

@@ -108,11 +108,35 @@ impl Pui {
             return true;
         }
         if let Some(id) = self.agent_for_path(path) {
-            if self.agents.parked.contains_key(&id) {
+            if let Some(parked) = self.agents.parked.get(&id) {
+                let needs_reconnect = parked.client.is_none();
                 if self.agents.idle.dormant.contains(&id) {
                     let wake_id = id.clone();
+                    let path_buf = path.to_path_buf();
                     let _ = self.with_live_chat(path, |app| {
                         let _ = app.wake_idle_agent(&wake_id);
+                        if app.state.messages.is_empty() {
+                            if let Ok(preview) = crate::history::load(&path_buf) {
+                                app.state.messages = preview.messages;
+                                app.state.outputs_revision =
+                                    app.state.outputs_revision.wrapping_add(1);
+                            }
+                        }
+                    });
+                    return true;
+                }
+                if needs_reconnect {
+                    let path_buf = path.to_path_buf();
+                    let _ = self.with_live_chat(path, |app| {
+                        let ctx = app.ctx.clone();
+                        app.connect(&ctx, Some(path_buf.clone()));
+                        if app.state.messages.is_empty() {
+                            if let Ok(preview) = crate::history::load(&path_buf) {
+                                app.state.messages = preview.messages;
+                                app.state.outputs_revision =
+                                    app.state.outputs_revision.wrapping_add(1);
+                            }
+                        }
                     });
                 }
                 return true;
@@ -147,6 +171,14 @@ impl Pui {
         self.agents.background = true;
         let ctx = self.ctx.clone();
         self.connect(&ctx, Some(path.to_path_buf()));
+        // Pre-populate messages from disk immediately so mobile never sees a blank frame
+        // while the background Pi process boots and replies to get_entries/get_state.
+        if self.state.messages.is_empty() {
+            if let Ok(preview) = crate::history::load(path) {
+                self.state.messages = preview.messages;
+                self.state.outputs_revision = self.state.outputs_revision.wrapping_add(1);
+            }
+        }
         let parked_chat = self.take_chat();
         self.agents.parked.insert(new_id, parked_chat);
 
@@ -401,6 +433,29 @@ impl Pui {
         h
     }
 
+    fn detail_fingerprint(state: &State, waiting: &[WaitingItem]) -> u64 {
+        let mut h = state
+            .transcript_revision
+            .wrapping_mul(31)
+            .wrapping_add(state.outputs_revision)
+            .wrapping_add((state.messages.len() as u64).rotate_left(17))
+            .wrapping_add((state.models.len() as u64).rotate_left(25))
+            .wrapping_add(u64::from(state.busy) << 56)
+            .wrapping_add((state.dialogs.len() as u64) << 48)
+            .wrapping_add((state.pending_messages.len() as u64) << 40)
+            ^ Self::waiting_fingerprint(waiting);
+        for s in [
+            state.model.as_str(),
+            state.thinking.as_str(),
+            state.permission_mode.as_deref().unwrap_or(""),
+        ] {
+            for b in s.as_bytes() {
+                h = h.wrapping_mul(31).wrapping_add(u64::from(*b));
+            }
+        }
+        h
+    }
+
     fn publish_remote_snapshot(&mut self) {
         self.remote_snapshot_tick = self.remote_snapshot_tick.wrapping_add(1);
         let active_path = self.state.session_file.clone();
@@ -408,15 +463,7 @@ impl Pui {
             .as_deref()
             .map(|p| self.waiting_items_for(std::path::Path::new(p)))
             .unwrap_or_default();
-        let active_detail_rev = self
-            .state
-            .transcript_revision
-            .wrapping_mul(31)
-            .wrapping_add(self.state.outputs_revision)
-            .wrapping_add(u64::from(self.state.busy) << 56)
-            .wrapping_add((self.state.dialogs.len() as u64) << 48)
-            .wrapping_add((self.state.pending_messages.len() as u64) << 40)
-            ^ Self::waiting_fingerprint(&active_waiting);
+        let active_detail_rev = Self::detail_fingerprint(&self.state, &active_waiting);
 
         let mut details = BTreeMap::new();
         let mut allowed_artifacts = BTreeSet::new();
@@ -476,12 +523,17 @@ impl Pui {
             details.insert(path_str.clone(), detail);
         }
 
-        // Also expose parked live agents so mobile can view running background chats seamlessly.
+        // Also expose live parked agents so mobile can view running background chats seamlessly.
+        // Skip evicted/stopped parked shells (client.is_none() with cleared messages) so they don't
+        // shadow disk history in GET /v1/sessions/detail.
         for (id, chat) in &self.agents.parked {
             let Some(path_str) = chat.state.session_file.clone() else {
                 continue;
             };
             if details.contains_key(&path_str) {
+                continue;
+            }
+            if chat.client.is_none() && chat.state.messages.is_empty() {
                 continue;
             }
             let path = PathBuf::from(&path_str);
@@ -504,15 +556,7 @@ impl Pui {
                 .or_else(|| node.map(|n| n.name.clone()))
                 .unwrap_or_else(|| "Conversation".into());
             let parked_waiting = self.waiting_items_for(&path);
-            let detail_rev = chat
-                .state
-                .transcript_revision
-                .wrapping_mul(31)
-                .wrapping_add(chat.state.outputs_revision)
-                .wrapping_add(u64::from(chat.state.busy) << 56)
-                .wrapping_add((chat.state.dialogs.len() as u64) << 48)
-                .wrapping_add((chat.state.pending_messages.len() as u64) << 40)
-                ^ Self::waiting_fingerprint(&parked_waiting);
+            let detail_rev = Self::detail_fingerprint(&chat.state, &parked_waiting);
             details.insert(
                 path_str.clone(),
                 SessionDetail {
