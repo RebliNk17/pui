@@ -156,7 +156,12 @@ export function MessageBubble({
             </Text>
           ) : null}
           {message.images.length > 0 ? (
-            <View style={[styles.imageGrid, !displayText && { marginTop: 0 }]}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={[styles.imageStrip, !displayText && { marginTop: 0 }]}
+              contentContainerStyle={styles.imageStripContent}
+            >
               {message.images.map((img, idx) => {
                 const uri = `data:${img.mime || 'image/png'};base64,${img.data}`;
                 const label = img.file?.name ?? `Image ${idx + 1}`;
@@ -172,12 +177,12 @@ export function MessageBubble({
                     <Image
                       source={{ uri }}
                       style={styles.thumbFill}
-                      resizeMode="contain"
+                      resizeMode="cover"
                     />
                   </Pressable>
                 );
               })}
-            </View>
+            </ScrollView>
           ) : null}
         </View>
       </View>
@@ -531,6 +536,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     maxWidth: '88%',
+    overflow: 'hidden',
   },
   userText: {
     fontSize: 14.5,
@@ -722,18 +728,26 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: 8,
   },
+  imageStrip: {
+    marginTop: 8,
+    flexGrow: 0,
+  },
+  imageStripContent: {
+    flexDirection: 'row',
+    gap: 8,
+  },
   singleThumbWrap: {
-    width: 210,
-    height: 210,
+    width: 148,
+    height: 176,
     borderRadius: 12,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
   multiThumbWrap: {
-    width: 124,
-    height: 156,
+    width: 96,
+    height: 128,
     borderRadius: 10,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
   },
   thumbFill: {

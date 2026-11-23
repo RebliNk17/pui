@@ -63,7 +63,6 @@ export default function ChatScreen() {
     if (Platform.OS !== 'android') return;
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       setAndroidKeyboardHeight(e.endCoordinates?.height ?? 0);
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 80);
     });
     const hideSub = Keyboard.addListener('keyboardDidHide', () => {
       setAndroidKeyboardHeight(0);
@@ -100,8 +99,10 @@ export default function ChatScreen() {
   const projectLabel = summary?.project_name || cwd.split('/').filter(Boolean).pop() || '';
   const artifacts = detail?.artifacts ?? [];
   const dialogs = detail?.dialogs ?? [];
-  const transcriptEntries = useMemo(
-    () => groupTranscript(detail?.messages ?? []),
+  // Inverted FlatList displays index 0 at the bottom so chats open immediately at the latest
+  // message without scrolling down through history from the top.
+  const reversedEntries = useMemo(
+    () => groupTranscript(detail?.messages ?? []).reverse(),
     [detail?.messages],
   );
   const contextProgress =
@@ -227,13 +228,13 @@ export default function ChatScreen() {
                 <FlatList
                   ref={listRef}
                   {...bindings}
-                  data={transcriptEntries}
+                  inverted
+                  data={reversedEntries}
                   keyExtractor={(item) => item.key}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={10}
+                  windowSize={7}
                   contentContainerStyle={{ paddingVertical: 10 }}
-                  onContentSizeChange={(w, h) => {
-                    bindings.onContentSizeChange(w, h);
-                    listRef.current?.scrollToEnd({ animated: false });
-                  }}
                   renderItem={({ item }) => {
                     if (item.kind === 'activity') {
                       return (
@@ -266,8 +267,14 @@ export default function ChatScreen() {
                       />
                     );
                   }}
-                  ListFooterComponent={
+                  ListHeaderComponent={
                     <>
+                      {detail.busy ? (
+                        <View style={styles.workingRow}>
+                          <ActivityIndicator size="small" color={colors.accent} />
+                          <Text style={{ color: colors.muted, fontSize: 12 }}>Pi is working…</Text>
+                        </View>
+                      ) : null}
                       {detail.pending_messages.map((pm) => (
                         <View
                           key={pm.id}
@@ -291,16 +298,10 @@ export default function ChatScreen() {
                           </Text>
                         </View>
                       ))}
-                      {detail.busy ? (
-                        <View style={styles.workingRow}>
-                          <ActivityIndicator size="small" color={colors.accent} />
-                          <Text style={{ color: colors.muted, fontSize: 12 }}>Pi is working…</Text>
-                        </View>
-                      ) : null}
                     </>
                   }
                 />
-                <CustomScrollbarOverlay {...metrics} />
+                <CustomScrollbarOverlay {...metrics} inverted />
               </View>
             )}
 

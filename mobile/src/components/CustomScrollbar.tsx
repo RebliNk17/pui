@@ -51,10 +51,12 @@ export function CustomScrollbarOverlay({
   viewportHeight,
   contentHeight,
   offsetY,
+  inverted = false,
 }: {
   viewportHeight: number;
   contentHeight: number;
   offsetY: number;
+  inverted?: boolean;
 }) {
   const colors = usePalette();
   if (viewportHeight <= 0 || contentHeight <= viewportHeight + 8) {
@@ -68,7 +70,8 @@ export function CustomScrollbarOverlay({
   const maxScroll = Math.max(1, contentHeight - viewportHeight);
   const clampedOffset = Math.max(0, Math.min(offsetY, maxScroll));
   const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-  const thumbTop = padding + (clampedOffset / maxScroll) * maxThumbTop;
+  const progress = clampedOffset / maxScroll;
+  const thumbTop = padding + (inverted ? 1 - progress : progress) * maxThumbTop;
 
   return (
     <View pointerEvents="none" style={styles.track}>
