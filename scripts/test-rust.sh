@@ -21,6 +21,7 @@ fi
 # Preserve caller toolchain, CEF_PATH and CARGO_TARGET_DIR configuration.
 # No retries or ignored failures: every group must pass.
 lock_test=app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery
+orphan_lock_test=app::automation::delete::tests::cross_window_orphan_delete_uses_real_transport_without_creator_and_handles_owner_exit
 cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip app::sync:: --skip app::files::delimited::projection:: --skip app::files::delimited::export:: \
   --skip app::tasks::tests::watch_scope_tests:: --skip app::tasks::refresh::tests:: \
@@ -30,7 +31,7 @@ cargo test --offline --locked -- --test-threads="${PUI_TEST_THREADS:-4}" \
   --skip workspace::commit::tests:: --skip svg_preview::process::lifecycle_tests:: \
   --skip app::changes::index_actions::tests:: \
   --skip app::tasks::recovery::tests:: --skip app::tasks::store_safety_tests:: --skip tasks::apply::tests:: \
-  --skip "$lock_test" --skip app::tasks::save_conflict_tests::
+  --skip "$lock_test" --skip "$orphan_lock_test" --skip app::tasks::save_conflict_tests::
 # Real OS registration competes with concurrent application-context watcher setup.
 # Keep deadlines/assertions unchanged; execute each excluded group once, without retries.
 cargo test --offline --locked --bin pui app::tasks::tests::watch_scope_tests:: -- --test-threads=1
@@ -56,3 +57,5 @@ cargo test --offline --locked --bin pui app::tasks::store_safety_tests:: -- --te
 cargo test --offline --locked --bin pui tasks::apply::tests:: -- --test-threads=1
 # Restart/OS-lock test must not overlap any subprocess-spawning group.
 cargo test --offline --locked --bin pui "$lock_test" -- --exact --test-threads=1
+# Owner-exit lock takeover: a concurrent fork can briefly inherit the released flock.
+cargo test --offline --locked --bin pui "$orphan_lock_test" -- --exact --test-threads=1
