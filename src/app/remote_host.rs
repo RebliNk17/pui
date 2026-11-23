@@ -338,6 +338,10 @@ impl Pui {
                     }
                 }
             }
+            RemoteCommand::RefreshUsage => {
+                let ctx = self.ctx.clone();
+                self.usage.refresh(&ctx, true);
+            }
         }
     }
 
@@ -611,6 +615,7 @@ impl Pui {
             sessions,
             details,
             allowed_artifacts,
+            usage: self.usage.cached().unwrap_or_default(),
         });
     }
 

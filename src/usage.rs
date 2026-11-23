@@ -10,18 +10,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ModelSpend {
     pub name: String,
     pub spend: f64,
 }
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DaySpend {
     pub date: String,
     pub spend: f64,
     pub requests: u64,
 }
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountUsage {
     pub provider: String,
     pub spend: f64,
@@ -92,7 +92,7 @@ impl AccountUsage {
             .map(|max| (self.spend / max).max(0.0) as f32)
     }
 }
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct CachedUsage {
     pub data: Option<AccountUsage>,

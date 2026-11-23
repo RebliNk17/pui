@@ -14,6 +14,7 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { CustomScrollbarOverlay, useCustomScrollbar } from '../src/components/CustomScrollbar';
 import { NewSessionModal } from '../src/components/NewSessionModal';
+import { UsageSheet } from '../src/components/UsageSheet';
 import type { SessionSummary } from '../src/protocol/types';
 import { usePui } from '../src/store/connectionStore';
 import { usePreferences } from '../src/store/preferencesStore';
@@ -50,6 +51,7 @@ export default function SessionsScreen() {
   const [sortModalOpen, setSortModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
   const { bindings, metrics } = useCustomScrollbar();
 
   const grouping = prefs.defaultGrouping;
@@ -170,24 +172,33 @@ export default function SessionsScreen() {
 
         <View style={styles.headerActions}>
           {activeHost ? (
-            <Pressable
-              onPress={() => {
-                setSearchOpen((v) => {
-                  if (v) setQuery('');
-                  return !v;
-                });
-              }}
-              style={[
-                styles.headerIconBtn,
-                searchOpen && { backgroundColor: colors.accentBg },
-              ]}
-            >
-              <Ionicons
-                name={searchOpen ? 'close-outline' : 'search-outline'}
-                size={21}
-                color={searchOpen ? colors.accent : colors.muted}
-              />
-            </Pressable>
+            <>
+              <Pressable
+                onPress={() => setUsageOpen(true)}
+                style={styles.headerIconBtn}
+                accessibilityLabel="Provider rate limits"
+              >
+                <Ionicons name="speedometer-outline" size={20} color={colors.muted} />
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setSearchOpen((v) => {
+                    if (v) setQuery('');
+                    return !v;
+                  });
+                }}
+                style={[
+                  styles.headerIconBtn,
+                  searchOpen && { backgroundColor: colors.accentBg },
+                ]}
+              >
+                <Ionicons
+                  name={searchOpen ? 'close-outline' : 'search-outline'}
+                  size={21}
+                  color={searchOpen ? colors.accent : colors.muted}
+                />
+              </Pressable>
+            </>
           ) : null}
           <Pressable
             onPress={() => router.push('/settings')}
@@ -423,6 +434,12 @@ export default function SessionsScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <UsageSheet
+        visible={usageOpen}
+        transport={transport}
+        onClose={() => setUsageOpen(false)}
+      />
 
       <NewSessionModal
         visible={newOpen}

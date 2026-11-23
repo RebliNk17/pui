@@ -266,6 +266,23 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
         }],
         details,
         allowed_artifacts,
+        usage: crate::usage::CachedUsage {
+            providers: vec![crate::usage::ProviderUsage {
+                id: "anthropic".into(),
+                name: "Claude".into(),
+                plan: Some("Max".into()),
+                windows: vec![crate::usage::UsageWindow {
+                    label: "Current session".into(),
+                    used: 24.0,
+                    resets: Some(1_763_920_000_000.0),
+                    detail: None,
+                }],
+                models: Vec::new(),
+                notes: Vec::new(),
+                error: None,
+            }],
+            ..Default::default()
+        },
     });
 
     // 1. Unauthenticated /v1/health succeeds, /v1/sessions fails with 401.
@@ -286,6 +303,17 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
     assert_eq!(code, 200);
     assert!(body.contains("\"platform\":\"android\""));
     assert!(body.contains("Pixel 9"));
+
+    // 2b. Authenticated /v1/usage returns per-provider rate limits.
+    let (code, body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/usage HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(body.contains("\"name\":\"Claude\""));
+    assert!(body.contains("\"label\":\"Current session\""));
 
     // 3. Slash command completions include both Pui local commands and Pi commands.
     let (code, body) = send_http(

@@ -395,8 +395,9 @@ export default function ChatScreen() {
       <UsageSheet
         visible={usageOpen}
         detail={detail}
+        transport={transport}
         onClose={() => setUsageOpen(false)}
-        onRefresh={() => void loadSessionDetail(sessionPath).catch(() => {})}
+        onRefreshSession={() => void loadSessionDetail(sessionPath).catch(() => {})}
       />
 
       <ImageModal

@@ -9,6 +9,7 @@ import type {
   SessionSummary,
   SlashCommandItem,
   TreeResponse,
+  UsageResponse,
   WsServerEvent,
 } from '../protocol/types';
 import { buildBaseHttpUrl, buildWsUrl } from '../utils/pairing';
@@ -133,6 +134,8 @@ export interface PuiTransport {
   getRawFileUrl(cwd: string, path: string): string;
   getGitChanges(cwd: string): Promise<GitChangesResponse>;
   getGitDiff(cwd: string, path: string, status?: string): Promise<string>;
+  getUsage(): Promise<UsageResponse>;
+  refreshUsage(): Promise<void>;
 }
 
 /**
@@ -430,6 +433,14 @@ export class DirectTransport implements PuiTransport {
     const params = new URLSearchParams({ cwd, path, status });
     const res = await this.requestJson<{ diff: string }>(`/v1/git/diff?${params.toString()}`);
     return res.diff ?? '';
+  }
+
+  getUsage(): Promise<UsageResponse> {
+    return this.requestJson<UsageResponse>('/v1/usage');
+  }
+
+  async refreshUsage(): Promise<void> {
+    await this.requestJson('/v1/usage/refresh', { method: 'POST' });
   }
 }
 

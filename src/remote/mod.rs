@@ -235,6 +235,7 @@ pub struct RemoteSnapshot {
     pub sessions: Vec<SessionSummary>,
     pub details: BTreeMap<String, SessionDetail>,
     pub allowed_artifacts: BTreeSet<PathBuf>,
+    pub usage: crate::usage::CachedUsage,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -285,6 +286,7 @@ pub enum RemoteCommand {
         path: Option<PathBuf>,
         index: usize,
     },
+    RefreshUsage,
 }
 
 struct WsClient {
@@ -917,6 +919,15 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                     ]
                 }),
             );
+        }
+        ("GET", "/v1/usage") => {
+            let snap = shared.snapshot.read().unwrap_or_else(|p| p.into_inner());
+            let _ = http::write_json(stream, 200, "OK", &json!(snap.usage));
+        }
+        ("POST", "/v1/usage/refresh") => {
+            let _ = shared.cmd_tx.send(RemoteCommand::RefreshUsage);
+            (shared.wake)();
+            let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
         }
         ("GET", "/v1/sessions") => {
             let snap = shared.snapshot.read().unwrap_or_else(|p| p.into_inner());

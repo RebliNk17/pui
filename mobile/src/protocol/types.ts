@@ -215,6 +215,42 @@ export interface GitChangeItem {
   removed: string;
 }
 
+export interface UsageWindow {
+  label: string;
+  used: number;
+  resets?: number | null;
+  detail?: string | null;
+}
+
+export interface ProviderUsage {
+  id: string;
+  name: string;
+  plan?: string | null;
+  windows: UsageWindow[];
+  models: UsageWindow[];
+  notes: string[];
+  error?: string | null;
+}
+
+export interface AccountUsage {
+  provider: string;
+  spend: number;
+  max?: number | null;
+  reset?: string | null;
+  duration: string;
+  month: string;
+  month_spend: number;
+  requests: number;
+  total: number;
+}
+
+export interface UsageResponse {
+  data?: AccountUsage | null;
+  providers: ProviderUsage[];
+  unsupported: string[];
+  litellm_error?: string | null;
+}
+
 export interface GitChangesResponse {
   cwd: string;
   branch: string;
