@@ -21,6 +21,7 @@ pub enum Icon {
     ArrowLeft,
     ArrowRight,
     Globe,
+    Cloud,
     Desktop,
     Tablet,
     Phone,
@@ -161,6 +162,25 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             p.circle_stroke(c, 6.5 * scale, s);
             outline(-3.0, -6.5, 6.0, 13.0, 4);
             line((-6.0, 0.0), (6.0, 0.0));
+        }
+        Icon::Cloud => {
+            p.add(egui::Shape::closed_line(
+                vec![
+                    pt(-5.0, 4.5),
+                    pt(5.0, 4.5),
+                    pt(7.0, 3.0),
+                    pt(7.0, 0.5),
+                    pt(5.0, -1.0),
+                    pt(3.5, -1.0),
+                    pt(2.0, -4.5),
+                    pt(-1.5, -5.0),
+                    pt(-4.0, -2.5),
+                    pt(-4.5, -0.5),
+                    pt(-6.5, 0.5),
+                    pt(-6.5, 3.0),
+                ],
+                s,
+            ));
         }
         Icon::Desktop => {
             outline(-7.0, -6.0, 14.0, 10.0, 2);

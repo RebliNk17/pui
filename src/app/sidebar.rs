@@ -1041,6 +1041,7 @@ impl Pui {
                 .is_some_and(|p| sidebar_tree::same_path(p, &path))
         });
         let shared = self.other_window_status(&path).map(str::to_owned);
+        let cloud_meta = self.cloud_session_meta.get(&path).cloned();
         let (status, status_color) = if deleting {
             ("Deleting…", colors.red)
         } else if selected {
@@ -1056,6 +1057,17 @@ impl Pui {
                     colors.accent
                 },
             )
+        } else if let Some(cm) = cloud_meta.as_ref() {
+            let color = if cm.has_pending_dialog {
+                colors.amber
+            } else if cm.busy {
+                colors.accent
+            } else if cm.status == "Idle" {
+                colors.green
+            } else {
+                colors.dim
+            };
+            (cm.status.as_str(), color)
         } else {
             ("Saved · status unknown", colors.dim)
         };
@@ -1159,11 +1171,44 @@ impl Pui {
                 self.rename_chat = None;
             }
         } else {
+            let is_cloud = cloud_meta.is_some() || node.is_some_and(|n| n.cloud_host.is_some());
             let show_origin = row_origin.as_ref().is_some_and(|o| o.platform.is_remote());
-            let title_left = if show_origin { 46.0 } else { 32.0 };
-            if let Some(origin) = row_origin.as_ref().filter(|o| o.platform.is_remote()) {
+            let mut title_left = 32.0;
+            if is_cloud {
                 let icon_rect = egui::Rect::from_center_size(
-                    rect.min + egui::vec2(34.0, if compact { rect.height() / 2.0 } else { 15.0 }),
+                    rect.min
+                        + egui::vec2(
+                            title_left + 2.0,
+                            if compact { rect.height() / 2.0 } else { 15.0 },
+                        ),
+                    Vec2::splat(13.0),
+                );
+                icons::draw(ui, icon_rect, Icon::Cloud, colors.accent);
+                let cloud_tip = match (
+                    &cloud_meta,
+                    row_origin.as_ref().filter(|o| o.platform.is_remote()),
+                ) {
+                    (Some(cm), Some(origin)) => {
+                        format!("Cloud · {} · {}", cm.host.name, origin.badge_tooltip())
+                    }
+                    (Some(cm), None) => format!("Cloud · {}", cm.host.name),
+                    (None, Some(origin)) => format!("Cloud · {}", origin.badge_tooltip()),
+                    (None, None) => "Cloud session".to_owned(),
+                };
+                ui.interact(
+                    icon_rect.expand(3.0),
+                    ui.make_persistent_id(("chat-cloud", &path)),
+                    Sense::hover(),
+                )
+                .on_hover_text(cloud_tip);
+                title_left += 15.0;
+            } else if let Some(origin) = row_origin.as_ref().filter(|o| o.platform.is_remote()) {
+                let icon_rect = egui::Rect::from_center_size(
+                    rect.min
+                        + egui::vec2(
+                            title_left + 2.0,
+                            if compact { rect.height() / 2.0 } else { 15.0 },
+                        ),
                     Vec2::splat(13.0),
                 );
                 let origin_icon = if origin.platform == crate::remote::OriginPlatform::Web {
@@ -1178,7 +1223,9 @@ impl Pui {
                     Sense::hover(),
                 )
                 .on_hover_text(origin.badge_tooltip());
+                title_left += 14.0;
             }
+            let _ = show_origin;
             let elided = paint_text(
                 ui,
                 &title,
@@ -1210,12 +1257,22 @@ impl Pui {
             );
         }
         if !compact {
+            let prefix = if let Some(cm) = cloud_meta.as_ref() {
+                format!("{} · {}", cm.host.name, sessions::project_name(&s.project))
+            } else {
+                sessions::project_name(&s.project)
+            };
             paint_text(
                 ui,
                 &format!(
                     "{} · {}",
-                    sessions::project_name(&s.project),
-                    if deleting || selected || node.is_some() || shared.is_some() {
+                    prefix,
+                    if deleting
+                        || selected
+                        || node.is_some()
+                        || shared.is_some()
+                        || cloud_meta.is_some()
+                    {
                         status.to_owned()
                     } else {
                         format!("Saved · {}", sessions::age(s.modified))

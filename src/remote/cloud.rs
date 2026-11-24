@@ -1366,6 +1366,75 @@ pub fn create_cloud_session(
         .ok_or_else(|| "Cloud host did not return a session path.".to_owned())
 }
 
+#[derive(Clone, Debug)]
+pub struct CloudSessionSummary {
+    pub path: String,
+    pub title: String,
+    pub project: String,
+    pub project_name: String,
+    pub cwd: String,
+    pub status: String,
+    pub busy: bool,
+    pub has_pending_dialog: bool,
+    pub modified_ms: u64,
+    pub created_ms: Option<u64>,
+    pub origin: Option<crate::remote::SessionOrigin>,
+}
+
+/// Maps a cloud worktree path like `/home/ubuntu/workspaces/.worktrees/pui/pui_agent/foo-123456`
+/// to a clean logical project path so `sessions::project_name` shows `pui`.
+pub fn project_path_for_cloud_session(project: &str, project_name: &str, cwd: &str) -> PathBuf {
+    if !project_name.trim().is_empty() && !project_name.contains('/') {
+        return PathBuf::from(format!("cloud/{}", project_name.trim()));
+    }
+    if let Some(rest) = cwd.split("/.worktrees/").nth(1) {
+        if let Some(repo) = rest.split('/').next().filter(|s| !s.is_empty()) {
+            return PathBuf::from(format!("cloud/{repo}"));
+        }
+    }
+    PathBuf::from(if !project.is_empty() { project } else { cwd })
+}
+
+pub fn fetch_cloud_sessions(cfg: &CloudHostConfig) -> Result<Vec<CloudSessionSummary>, String> {
+    let (_, res) = http_request_json(cfg, "GET", "/v1/sessions", None)?;
+    let arr = res["sessions"].as_array().cloned().unwrap_or_default();
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(path) = item["path"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let title = item["title"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("New conversation")
+            .to_owned();
+        let cwd = item["cwd"].as_str().unwrap_or("").to_owned();
+        let project = item["project"].as_str().unwrap_or(&cwd).to_owned();
+        let project_name = item["project_name"].as_str().unwrap_or("").to_owned();
+        let status = item["status"].as_str().unwrap_or("Saved").to_owned();
+        let busy = item["busy"].as_bool().unwrap_or(false);
+        let has_pending_dialog = item["has_pending_dialog"].as_bool().unwrap_or(false);
+        let modified_ms = item["modified_ms"].as_u64().unwrap_or(0);
+        let created_ms = item["created_ms"].as_u64();
+        let origin =
+            serde_json::from_value::<crate::remote::SessionOrigin>(item["origin"].clone()).ok();
+        out.push(CloudSessionSummary {
+            path,
+            title,
+            project,
+            project_name,
+            cwd,
+            status,
+            busy,
+            has_pending_dialog,
+            modified_ms,
+            created_ms,
+            origin,
+        });
+    }
+    Ok(out)
+}
+
 fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

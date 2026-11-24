@@ -83,8 +83,8 @@ function resolveAdapterPath(): string | null {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
-function resolvePermissionsPath(): string | null {
-  const candidate = path.resolve(import.meta.dirname, '../../scripts/permissions.ts');
+function resolveDaemonNodeModules(): string | null {
+  const candidate = path.resolve(import.meta.dirname, '../node_modules');
   return fs.existsSync(candidate) ? candidate : null;
 }
 
@@ -112,6 +112,7 @@ export class LiveAgent {
   private queued: QueuedPayload[] = [];
   private streamingMsg: MessageRecord | null = null;
   private toolById = new Map<string, ToolRecord>();
+  private stderrBuf = '';
 
   title: string;
   origin: SessionOrigin;
@@ -177,31 +178,40 @@ export class LiveAgent {
     if (this.proc) return;
     const cli = resolvePiCliPath();
     const adapter = resolveAdapterPath();
-    const permsExt = resolvePermissionsPath();
     const workflowExt = resolveCloudWorkflowPath();
     const args = [cli, '--mode', 'rpc', '--session', this.sessionPath];
+    // `scripts/ultracode.ts` already installs `scripts/permissions.ts` internally;
+    // do not pass `permissions.ts` directly (it is a helper module, not a Pi extension).
     if (adapter) {
       args.push('--extension', adapter);
-    }
-    if (permsExt) {
-      args.push('--extension', permsExt);
     }
     if (workflowExt && this.branch) {
       args.push('--extension', workflowExt);
     }
 
+    const daemonNodeModules = resolveDaemonNodeModules();
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       PI_SKIP_VERSION_CHECK: '1',
       PUI_AGENT_ACCESS: 'worktree',
       PUI_SETTINGS: JSON.stringify({ permission: 'auto' }),
     };
+    if (daemonNodeModules) {
+      childEnv.NODE_PATH = childEnv.NODE_PATH
+        ? `${daemonNodeModules}:${childEnv.NODE_PATH}`
+        : daemonNodeModules;
+      const sdkDir = path.join(daemonNodeModules, '@earendil-works', 'pi-coding-agent');
+      if (fs.existsSync(sdkDir)) {
+        childEnv.PUI_PI_SDK = sdkDir;
+      }
+    }
     if (this.branch) {
       childEnv.PUI_CLOUD_BRANCH = this.branch;
       childEnv.PUI_CLOUD_BASE_BRANCH = this.baseBranch || 'main';
       childEnv.PUI_CLOUD_WORKTREE = this.cwd;
     }
 
+    this.stderrBuf = '';
     const child = spawn(process.execPath, args, {
       cwd: this.cwd,
       env: childEnv,
@@ -230,14 +240,21 @@ export class LiveAgent {
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8').trim();
       if (text && !text.includes('ExperimentalWarning')) {
+        this.stderrBuf = `${this.stderrBuf}\n${text}`.trim().slice(-1200);
+        console.error(`[pui-daemon agent ${path.basename(this.sessionPath)}] ${text}`);
         this.notice = text.slice(0, 300);
       }
     });
 
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
       this.proc = null;
       this.busy = false;
       this.ready = false;
+      if (code && code !== 0) {
+        const detail = this.stderrBuf || `Pi exited with code ${code}${signal ? ` (${signal})` : ''}`;
+        this.error = detail.slice(0, 600);
+        console.error(`[pui-daemon agent exit ${code}] ${detail}`);
+      }
       this.bump();
     });
 
@@ -390,6 +407,17 @@ export class LiveAgent {
   private handleRecord(rec: Record<string, unknown>): void {
     const type = typeof rec.type === 'string' ? rec.type : '';
 
+    if (type === 'response' && rec.success === false) {
+      const cmd = typeof rec.command === 'string' ? rec.command : '';
+      const errMsg = typeof rec.error === 'string' && rec.error.trim() ? rec.error.trim() : `${cmd || 'Command'} failed.`;
+      this.error = errMsg;
+      if (cmd === 'prompt' || cmd === 'steer') {
+        this.busy = false;
+      }
+      this.bump();
+      return;
+    }
+
     if (type === 'response' && rec.success === true) {
       const cmd = rec.command;
       const data =
@@ -517,6 +545,11 @@ export class LiveAgent {
         }
         for (const t of parsed.tools) this.toolById.set(t.id, t);
         if (parsed.cost > 0) this.cost += parsed.cost;
+        if (parsed.error && parsed.error.trim()) {
+          // Strip multi-line Node stack trace from provider error messages for clean display.
+          const firstLine = parsed.error.split('\n')[0]?.trim() || parsed.error.trim();
+          this.error = firstLine.slice(0, 400);
+        }
         const usage = raw.usage as Record<string, unknown> | undefined;
         if (usage && typeof usage.totalTokens === 'number') {
           this.contextTokens = usage.totalTokens;
@@ -595,10 +628,62 @@ export class LiveAgent {
 
     if (type === 'extension_ui_request') {
       const method = String(rec.method ?? '');
+      if (method === 'setStatus' && rec.statusKey === 'pui-initial-title' && typeof rec.statusText === 'string') {
+        try {
+          const parsed = JSON.parse(rec.statusText) as { title?: string };
+          if (parsed.title && parsed.title.trim()) {
+            this.title = parsed.title.trim();
+            this.bump();
+          }
+        } catch {
+          // ignore
+        }
+        return;
+      }
       if (method === 'notify' || method === 'setStatus' || method === 'setWidget') {
         return;
       }
       const id = String(rec.id ?? crypto.randomUUID());
+      const title = String(rec.title ?? '');
+      const placeholder = String(rec.placeholder ?? '');
+
+      // Internal Pui Desktop RPC handshakes from scripts/ultracode.ts:
+      // never show these as user approval dialogs or push notifications.
+      // When no Desktop /v1/rpc listener is attached, answer immediately so Pi never hangs 30s.
+      const isInternalPuiRpc =
+        method === 'input' &&
+        (title === 'Pui steering window' ||
+          title === 'Pui open' ||
+          title === 'Pui agent control' ||
+          title === 'Pui workflow check');
+      if (isInternalPuiRpc) {
+        if (this.rpcListeners.size === 0) {
+          if (title === 'Pui steering window') {
+            this.sendRpc({ type: 'extension_ui_response', id, value: '' });
+          } else if (title === 'Pui open') {
+            this.sendRpc({
+              type: 'extension_ui_response',
+              id,
+              value: JSON.stringify({ opened: false, note: 'Headless cloud host: file available in workspace.' }),
+            });
+          } else if (title === 'Pui agent control') {
+            let reply: Record<string, unknown> = { ok: false, error: 'Unavailable on headless cloud host.' };
+            try {
+              const reqObj = JSON.parse(placeholder) as { action?: string };
+              if (reqObj.action === 'workflow_tool_guard') {
+                reply = { allow: true };
+              }
+            } catch {
+              // ignore
+            }
+            this.sendRpc({ type: 'extension_ui_response', id, value: JSON.stringify(reply) });
+          } else {
+            this.sendRpc({ type: 'extension_ui_response', id, cancelled: true });
+          }
+        }
+        return;
+      }
+
       if (!this.dialogs.some((d) => d.id === id)) {
         this.dialogs.push(rec);
         this.bump();
@@ -606,9 +691,11 @@ export class LiveAgent {
       if (!this.seenDialogIds.has(id)) {
         this.seenDialogIds.add(id);
         const message = String(rec.message ?? '');
-        const title = String(rec.title ?? '');
         const isQuestion =
-          method === 'pui_ask_questions' || message.includes('pui.questions.v1');
+          method === 'pui_ask_questions' ||
+          title === 'Pui questions' ||
+          message.includes('pui.questions.v1') ||
+          placeholder.includes('"questions"');
         this.onNotify({
           id: `${isQuestion ? 'question' : 'approval'}:${id}`,
           kind: isQuestion ? 'question' : 'approval',

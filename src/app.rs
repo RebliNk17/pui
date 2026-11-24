@@ -157,6 +157,14 @@ impl Preferences {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CloudSessionMeta {
+    pub(super) host: crate::remote::CloudHostConfig,
+    pub(super) status: String,
+    pub(super) busy: bool,
+    pub(super) has_pending_dialog: bool,
+}
+
 pub struct Pui {
     prefs: Preferences,
     sync: sync::WindowSync,
@@ -242,6 +250,16 @@ pub struct Pui {
     dismissed_usage_warning: Option<String>,
     dismissed_auth_error: Option<String>,
     sessions: Vec<Session>,
+    local_sessions: Vec<Session>,
+    cloud_sessions: Vec<Session>,
+    cloud_session_meta: std::collections::HashMap<PathBuf, CloudSessionMeta>,
+    cloud_sessions_rx: Option<
+        Receiver<(
+            Vec<Session>,
+            std::collections::HashMap<PathBuf, CloudSessionMeta>,
+        )>,
+    >,
+    cloud_sessions_last_poll: Option<std::time::Instant>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
     workspace: Workspace,
@@ -423,6 +441,11 @@ impl Pui {
             dismissed_usage_warning: None,
             dismissed_auth_error: None,
             sessions: Vec::new(),
+            local_sessions: Vec::new(),
+            cloud_sessions: Vec::new(),
+            cloud_session_meta: std::collections::HashMap::new(),
+            cloud_sessions_rx: None,
+            cloud_sessions_last_poll: None,
             session_rx: None,
             session_watch: if options.demo || cfg!(test) {
                 None
@@ -889,11 +912,32 @@ impl Pui {
         {
             return;
         }
-        let active_cloud_host = self
-            .agents
-            .nodes
-            .get(&self.agents.active)
-            .and_then(|n| n.cloud_host.clone());
+        let active_cloud_host = if let Some(ref p) = session {
+            if let Some(meta) = self.cloud_session_meta.get(p) {
+                if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+                    node.cloud_host = Some(meta.host.clone());
+                    node.cloud_repo = None;
+                }
+                Some(meta.host.clone())
+            } else if p.is_file() {
+                if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+                    node.cloud_host = None;
+                    node.cloud_repo = None;
+                }
+                None
+            } else {
+                self.agents
+                    .nodes
+                    .get(&self.agents.active)
+                    .and_then(|n| n.cloud_host.clone())
+            }
+        } else {
+            self.agents
+                .nodes
+                .get(&self.agents.active)
+                .and_then(|n| n.cloud_host.clone())
+        };
+        let is_cloud_session = active_cloud_host.is_some();
         #[cfg(not(test))]
         let active_cloud_repo = self
             .agents
@@ -1021,7 +1065,11 @@ impl Pui {
         self.send(protocol::command("get_entries"));
         self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_session_stats"));
-        self.refresh_workspace();
+        if !is_cloud_session {
+            self.refresh_workspace();
+        } else {
+            self.refresh_cloud_sessions(true);
+        }
         #[cfg(not(test))]
         if !self.demo {
             self.usage.refresh(&self.ctx, false);
@@ -1081,11 +1129,19 @@ impl Pui {
             }
         }
         self.discard_empty_new_chat();
+        let target_is_cloud = self.cloud_session_meta.contains_key(&path);
+        let current_is_cloud = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .is_some_and(|n| n.cloud_host.is_some());
         if self.retain_chat_on_switch() {
             self.ensure_agent();
             self.publish_live();
             self.park_tree();
-            self.prefs.cwd = session.cwd;
+            if !target_is_cloud {
+                self.prefs.cwd = session.cwd;
+            }
             self.connect(&self.ctx.clone(), Some(path));
             self.ensure_agent();
             self.enter_session_layout();
@@ -1104,13 +1160,17 @@ impl Pui {
         }
         // Superseding a pending switch gets a fresh client and receiver. Late
         // events/preview results from the abandoned session cannot select it again.
-        let reuse = !self.loading_chat
+        let reuse = !target_is_cloud
+            && !current_is_cloud
+            && !self.loading_chat
             && self.connected
             && self.client.is_some()
             && self.prefs.cwd == session.cwd
             && !self.sync.enabled();
         self.leave_session_layout();
-        self.prefs.cwd = session.cwd;
+        if !target_is_cloud {
+            self.prefs.cwd = session.cwd;
+        }
         self.workspace_rx = None;
         self.draft.clear();
         self.context_chips.clear();
@@ -1502,12 +1562,111 @@ impl Pui {
         }
         had_activity
     }
+    fn merge_sessions(&mut self) {
+        let mut combined = self.local_sessions.clone();
+        let mut seen: std::collections::HashSet<PathBuf> =
+            combined.iter().map(|s| s.path.clone()).collect();
+        for s in &self.cloud_sessions {
+            if seen.insert(s.path.clone()) {
+                combined.push(s.clone());
+            }
+        }
+        combined.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        self.sessions = combined;
+    }
+
+    pub(super) fn refresh_cloud_sessions(&mut self, force: bool) {
+        if self.demo || cfg!(test) {
+            return;
+        }
+        let Some(cfg) = self.prefs.remote.cloud_host.clone() else {
+            if !self.cloud_sessions.is_empty() || !self.cloud_session_meta.is_empty() {
+                self.cloud_sessions.clear();
+                self.cloud_session_meta.clear();
+                self.merge_sessions();
+            }
+            return;
+        };
+        if self.cloud_sessions_rx.is_some() {
+            return;
+        }
+        if !force
+            && self
+                .cloud_sessions_last_poll
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
+        {
+            return;
+        }
+        self.cloud_sessions_last_poll = Some(std::time::Instant::now());
+        let (tx, rx) = mpsc::channel();
+        self.cloud_sessions_rx = Some(rx);
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            if let Ok(items) = crate::remote::cloud::fetch_cloud_sessions(&cfg) {
+                let mut sessions_out = Vec::with_capacity(items.len());
+                let mut meta_out = std::collections::HashMap::with_capacity(items.len());
+                for item in items {
+                    let path = PathBuf::from(&item.path);
+                    if let Some(origin) = item.origin {
+                        sessions::remember_origin(&path, origin);
+                    }
+                    let project = crate::remote::cloud::project_path_for_cloud_session(
+                        &item.project,
+                        &item.project_name,
+                        &item.cwd,
+                    );
+                    let modified =
+                        std::time::UNIX_EPOCH + Duration::from_millis(item.modified_ms.max(1));
+                    let created = item
+                        .created_ms
+                        .map(|ms| std::time::UNIX_EPOCH + Duration::from_millis(ms));
+                    meta_out.insert(
+                        path.clone(),
+                        CloudSessionMeta {
+                            host: cfg.clone(),
+                            status: item.status,
+                            busy: item.busy,
+                            has_pending_dialog: item.has_pending_dialog,
+                        },
+                    );
+                    sessions_out.push(Session {
+                        path,
+                        cwd: PathBuf::from(&item.cwd),
+                        project,
+                        title: item.title,
+                        created,
+                        modified,
+                    });
+                }
+                let _ = tx.send((sessions_out, meta_out));
+                ctx.request_repaint();
+            }
+        });
+    }
+
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.sessions = result;
+            self.local_sessions = result;
+            self.merge_sessions();
             self.session_rx = None;
             self.refresh_session_titles();
         }
+        if let Some(rx) = &self.cloud_sessions_rx {
+            match rx.try_recv() {
+                Ok((cloud_sessions, cloud_meta)) => {
+                    self.cloud_sessions = cloud_sessions;
+                    self.cloud_session_meta = cloud_meta;
+                    self.cloud_sessions_rx = None;
+                    self.merge_sessions();
+                    self.refresh_session_titles();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.cloud_sessions_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        self.refresh_cloud_sessions(false);
         if !self.demo
             && self
                 .session_watch
