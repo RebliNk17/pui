@@ -21,7 +21,7 @@ impl Pui {
                 ..Default::default()
             };
         }
-        let id = egui::Id::new("composer");
+        let id = composer_text::widget_id(ctx, "composer");
         if !ctx.memory(|m| m.has_focus(id)) || self.loading_chat {
             return;
         }

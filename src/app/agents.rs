@@ -92,6 +92,22 @@ pub(super) struct Chat {
     pending_dialog: Option<String>,
 }
 impl Chat {
+    #[cfg(test)]
+    pub(super) fn open_test_gallery(&mut self, image: crate::media::Attachment) {
+        self.transcript.gallery.open(&[image], 0);
+    }
+    #[cfg(test)]
+    pub(super) fn gallery_open(&self) -> bool {
+        self.transcript.gallery.is_open()
+    }
+    pub(super) fn show_galleries(&mut self, ctx: &egui::Context) -> bool {
+        let open = self.transcript.gallery.is_open() || self.images.gallery.is_open();
+        if open {
+            self.transcript.gallery.viewer(ctx);
+            self.images.gallery.viewer(ctx);
+        }
+        open
+    }
     pub(super) fn search_state(&self) -> Option<&State> {
         // Restored placeholders have a path but no loaded transcript. Loaded
         // empty branches are authoritative and must not fall back to disk.

@@ -81,6 +81,8 @@ pub struct Transcript {
     pub message_actions_enabled: bool,
     pub continue_enabled: bool,
     pub task_output: bool,
+    /// Same chat rendering with smaller gutters inside a companion pane.
+    pub embedded: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     pub find: Option<FindTarget>,
     progress_phase: Option<(Progress, f64)>,
@@ -301,8 +303,9 @@ impl Transcript {
         self.gallery.poll(ui.ctx());
         self.visuals.poll(ui.ctx());
         let rect = ui.available_rect_before_wrap();
-        let rail = Rect::from_min_size(rect.min, Vec2::new(24.0, rect.height()));
-        let content = Rect::from_min_max(rect.min + egui::vec2(24.0, 0.0), rect.max);
+        let rail_width = if self.embedded { 0.0 } else { 24.0 };
+        let rail = Rect::from_min_size(rect.min, Vec2::new(rail_width, rect.height()));
+        let content = Rect::from_min_max(rect.min + egui::vec2(rail_width, 0.0), rect.max);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(content)
@@ -312,8 +315,10 @@ impl Transcript {
         child.spacing_mut().item_spacing.y = 4.0;
         child.spacing_mut().interact_size.y = 22.0;
         child.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
-        let column = (content.width() - 64.0).clamp(180.0, 736.0);
-        let padding = ((content.width() - column) / 2.0).max(12.0);
+        let gutter = if self.embedded { 16.0 } else { 64.0 };
+        let column = (content.width() - gutter).clamp(120.0, 736.0);
+        let padding =
+            ((content.width() - column) / 2.0).max(if self.embedded { 8.0 } else { 12.0 });
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("transcript-v2", session))
             .auto_shrink([false, false])

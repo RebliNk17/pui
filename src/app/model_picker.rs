@@ -650,7 +650,7 @@ impl Pui {
                 "composer-model"
             };
             self.close_model_popovers();
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new(id)));
+            ctx.memory_mut(|m| m.request_focus(composer_text::widget_id(ctx, id)));
             return true;
         }
         false
@@ -667,7 +667,7 @@ impl Pui {
     ) -> egui::Response {
         let colors = theme::palette(ui.ctx());
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
-        let response = ui.interact(rect, egui::Id::new(id), Sense::click());
+        let response = ui.interact(rect, composer_text::widget_id(ui.ctx(), id), Sense::click());
         if open || response.hovered() || response.has_focus() {
             ui.painter().rect_filled(rect, 5, colors.hover);
         }
@@ -850,7 +850,7 @@ impl Pui {
         };
         self.settings_view.providers.ensure_loaded(self.demo);
         egui::Popup::new(
-            egui::Id::new("model-picker-dropdown"),
+            composer_text::widget_id(ctx, "model-picker-dropdown"),
             ctx.clone(),
             anchor,
             layer,
@@ -956,7 +956,7 @@ impl Pui {
         if let Some((provider, id)) = selection {
             self.send_model_change(json!({"type":"set_model","provider":provider,"modelId":id}));
             self.model_picker_open = false;
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("composer-model")));
+            ctx.memory_mut(|m| m.request_focus(composer_text::widget_id(ctx, "composer-model")));
         }
     }
 
@@ -972,7 +972,7 @@ impl Pui {
         let mut effort = None;
         let mut ultra = None;
         egui::Popup::new(
-            egui::Id::new("effort-picker-dropdown"),
+            composer_text::widget_id(ctx, "effort-picker-dropdown"),
             ctx.clone(),
             anchor,
             layer,
@@ -1105,7 +1105,7 @@ impl Pui {
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_enabled(
-                                    !self.readonly_worker(),
+                                    !self.readonly_worker() && !self.side_chat.rendering,
                                     egui::DragValue::new(&mut self.prefs.agent_concurrency)
                                         .range(1..=16)
                                         .speed(1.0),
@@ -1119,7 +1119,7 @@ impl Pui {
         if let Some(level) = effort {
             self.send_model_change(json!({"type":"set_thinking_level","level":level}));
             self.effort_picker_open = false;
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("composer-effort")));
+            ctx.memory_mut(|m| m.request_focus(composer_text::widget_id(ctx, "composer-effort")));
         }
         if let Some(enabled) = ultra {
             self.ensure_agent();

@@ -124,7 +124,8 @@ impl Pui {
             terminal: self.terminals.is_open(),
             terminal_focused: !self.settings_open && self.terminals.focused(ctx),
             text_focused: text.is_some(),
-            composer_focused: self.composer_formatting_available(ctx),
+            composer_focused: self.composer_formatting_available(ctx)
+                || self.side_composer_formatting_available(ctx),
             text_selected: text
                 .as_ref()
                 .and_then(|s| s.cursor.char_range())
@@ -229,7 +230,8 @@ impl Pui {
                     SelectAll => key_event(egui::Key::A, egui::Modifiers::COMMAND),
                     Paste => {
                         if !self.settings_open
-                            && ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+                            && (ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+                                || self.side_composer_formatting_available(ctx))
                         {
                             #[cfg(target_os = "macos")]
                             if attachments::clipboard_has_image() {
@@ -283,8 +285,10 @@ impl Pui {
                     Italic => composer_text::Format::Italic,
                     _ => composer_text::Format::Underline,
                 };
-                self.context_chips.clear();
-                composer_text::format(ctx, &mut self.draft, format);
+                if !self.format_side_composer(ctx, format) {
+                    self.context_chips.clear();
+                    composer_text::format(ctx, &mut self.draft, format);
+                }
             }
             TranscriptNormal => self.prefs.transcript_view = crate::transcript::View::Normal,
             TranscriptVerbose => self.prefs.transcript_view = crate::transcript::View::Verbose,
@@ -826,6 +830,36 @@ mod tests {
                 assert!(app.prefs.hide_inspector);
             },
         );
+    }
+    #[test]
+    fn native_formatting_commands_target_the_embedded_composer_not_main() {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::files::tests::app(&ctx);
+        app.demo = false;
+        app.client = Some(rpc::Client::stub());
+        app.connected = true;
+        app.new_chat = false;
+        app.ensure_agent();
+        assert!(app.start_docked_side_chat("hello"));
+        let side = app.docked_side_chat_target().unwrap();
+        for _ in 0..3 {
+            crate::app::files::tests::frame(&ctx, &mut app, vec![]);
+        }
+        let id = egui::Id::new(("btw-editor", side.as_str()));
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(5),
+            )));
+        state.store(&ctx, id);
+        let main = app.draft.clone();
+        assert!(app.menu_state(&ctx).composer_focused);
+        app.menu_command(&ctx, Command::Bold);
+        assert_eq!(app.agents.parked[&side].draft, "**hello**");
+        assert_eq!(app.draft, main);
     }
     #[test]
     fn native_formatting_commands_and_accelerators_are_composer_scoped() {

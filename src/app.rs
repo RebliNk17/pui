@@ -1776,7 +1776,7 @@ impl Pui {
         }
         // Optional extension/MCP diagnostics live in a fixed top-bar popover.
         // Inserting multiline notifications here moves the viewport and composer.
-        if self.demo {
+        if self.demo && !self.side_chat.rendering {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Spark, colors.accent);
                 ui.label(theme::small(ui, "Design preview · example conversation"));
@@ -1836,7 +1836,7 @@ impl Pui {
                     "composer-last-cursor",
                     self.state.session_file.as_deref(),
                 ));
-                let cursor_before = egui::TextEdit::load_state(ctx, egui::Id::new("composer"))
+                let cursor_before = egui::TextEdit::load_state(ctx, composer_text::widget_id(ctx, "composer"))
                     .and_then(|s| s.cursor.char_range());
                 let reveal_cursor = self.focus_composer
                     || ctx.data(|d| {
@@ -1846,7 +1846,7 @@ impl Pui {
                 let mut layouter = composer_text::layout;
                 // Only the editor scrolls: delivery/model controls stay below it.
                 // Bound growth on short windows and at higher UI zoom as well.
-                let max_height = (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0);
+                let max_height = if self.side_chat.rendering { 72.0 } else { (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0) };
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt(("composer-text-scroll", self.state.session_file.as_deref()))
                     .max_height(max_height)
@@ -1862,7 +1862,7 @@ impl Pui {
                             smart_newline,
                         };
                         let output = egui::TextEdit::multiline(&mut buffer)
-                            .id(egui::Id::new("composer"))
+                            .id(composer_text::widget_id(ctx, "composer"))
                             .font(FontId::proportional(14.0))
                             .layouter(&mut layouter)
                             .frame(false)
@@ -1897,7 +1897,7 @@ impl Pui {
                                 .pos_from_cursor(range.primary)
                                 .translate(output.galley_pos.to_vec2());
                             ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new("composer-caret-rect"), caret)
+                                d.insert_temp(composer_text::widget_id(ctx, "composer-caret-rect"), caret)
                             });
                         }
                         output.response
@@ -1914,7 +1914,7 @@ impl Pui {
                 #[cfg(test)]
                 ctx.data_mut(|d| {
                     d.insert_temp(
-                        egui::Id::new("composer-scroll-metrics"),
+                        composer_text::widget_id(ctx, "composer-scroll-metrics"),
                         (editor_rect, scroll.content_size, scroll.state.offset.y),
                     )
                 });
@@ -1982,7 +1982,7 @@ impl Pui {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
                         #[cfg(test)]
-                        ctx.data_mut(|d| d.insert_temp(egui::Id::new("composer-send-rect"), rect));
+                        ctx.data_mut(|d| d.insert_temp(composer_text::widget_id(ctx, "composer-send-rect"), rect));
                         let response = if enabled {
                             response.on_hover_cursor(egui::CursorIcon::PointingHand)
                         } else {
@@ -2520,6 +2520,13 @@ impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::chromium::Runtime::pump(ctx);
         self.files.begin_frame();
+        let side_keyboard = self.side_chat_owns_keyboard(ctx);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("side-chat-main-keyboard-blocked"),
+                side_keyboard,
+            )
+        });
         self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
         self.remember_navigation();
@@ -2612,10 +2619,14 @@ impl eframe::App for Pui {
             && !self.tasks.open
             && !self.automation.open
             && !terminal_input
+            && !self.side_chat_image_inputs(ctx)
         {
             self.image_inputs(ctx);
         }
-        let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
+        let side_theater = self.side_chat_gallery_viewer(ctx);
+        let theater = side_theater
+            || self.transcript.gallery.is_open()
+            || self.draft_images.gallery.is_open();
         if theater {
             self.close_model_popovers();
             self.transcript.gallery.viewer(ctx);
@@ -2637,7 +2648,8 @@ impl eframe::App for Pui {
             self.settings_open = !self.settings_open;
             self.close_model_popovers();
         }
-        let composer_formatting = self.composer_formatting_available(ctx);
+        let composer_formatting =
+            self.composer_formatting_available(ctx) || self.side_chat_owns_keyboard(ctx);
         if !self.attention.open
             && !self.settings_open
             && !composer_formatting
@@ -2664,13 +2676,6 @@ impl eframe::App for Pui {
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
         {
             self.new_session();
-        }
-        if self.side_chat_owns_keyboard(ctx) {
-            // egui releases editor focus before update when Escape arrives.
-            // Previous-frame ownership must still fence main Stop/approval keys.
-            ctx.input_mut(|input| {
-                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-            });
         }
         let searching = self.search_open;
         let leaving_board = !searching

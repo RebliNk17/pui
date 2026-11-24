@@ -303,7 +303,7 @@ fn retain_file(home: &Path, source: &Path, bytes: &[u8]) -> Result<Attachment, S
 }
 
 impl Pui {
-    pub(super) fn image_inputs(&mut self, ctx: &egui::Context) {
+    pub(super) fn poll_image_inputs(&mut self, ctx: &egui::Context) {
         self.draft_images.poll(ctx);
         if let Some(paths) = self
             .image_picker_rx
@@ -313,8 +313,11 @@ impl Pui {
             self.image_picker_rx = None;
             self.draft_images.add_paths(paths, ctx);
         }
+    }
+    pub(super) fn image_inputs(&mut self, ctx: &egui::Context) {
+        self.poll_image_inputs(ctx);
         #[cfg(not(target_os = "macos"))]
-        if ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+        if ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer")))
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::V))
         {
             self.paste_requested.store(true, Ordering::Relaxed);
@@ -377,9 +380,15 @@ impl PasteMonitor {
             block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
                 // SAFETY: AppKit supplies a valid event for the duration of the local callback.
                 let e = unsafe { event.as_ref() };
+                let side_editor = ctx.data(|data| {
+                    data.get_temp::<egui::Id>(egui::Id::new("side-chat-paste-editor"))
+                });
                 if e.keyCode() == 9
                     && e.modifierFlags().contains(NSEventModifierFlags::Command)
-                    && ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+                    && ctx.memory(|m| {
+                        m.has_focus(egui::Id::new("composer"))
+                            || side_editor.is_some_and(|id| m.has_focus(id))
+                    })
                 {
                     let has_image =
                         NSPasteboard::generalPasteboard()
