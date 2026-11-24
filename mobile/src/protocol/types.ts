@@ -27,6 +27,13 @@ export interface PermissionModeOption {
   label: string;
 }
 
+export interface CatalogProject {
+  name: string;
+  git_remote: string;
+  cloned: boolean;
+  path?: string | null;
+}
+
 export interface HostInfo {
   protocol_version: number;
   pui_version: string;
@@ -34,6 +41,7 @@ export interface HostInfo {
   tailscale_ip: string | null;
   active_path: string | null;
   projects: string[];
+  catalog_projects?: CatalogProject[];
   permission_modes: PermissionModeOption[];
   /** Other hosts linked to this one (e.g. the Mac's paired cloud host), advertised to paired phones. */
   linked_hosts?: LinkedHostInfo[];

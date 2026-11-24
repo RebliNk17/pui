@@ -245,6 +245,27 @@ describe('pui-daemon v1 remote server', () => {
       });
       assert.equal(rmGit.status, 200);
 
+      // Sync project catalog and confirm /v1/info & /v1/admin/status advertise it cleanly.
+      const projSync = await fetch(`${base}/v1/admin/sync-projects`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projects: [
+            { name: 'pui', git_remote: 'git@github.com:RebliNk17/pui.git' },
+            { name: 'demo-app', git_remote: 'RebliNk17/demo-app' },
+          ],
+        }),
+      });
+      assert.equal(projSync.status, 200);
+      const infoJson = (await (
+        await fetch(`${base}/v1/info`, { headers: authHeaders })
+      ).json()) as { catalog_projects: { name: string; git_remote: string; cloned: boolean }[] };
+      assert.equal(infoJson.catalog_projects.length, 2);
+      const demoCat = infoJson.catalog_projects.find((p) => p.name === 'demo-app');
+      assert.ok(demoCat);
+      assert.equal(demoCat.cloned, true);
+      assert.equal(demoCat.git_remote, 'git@github.com:RebliNk17/demo-app.git');
+
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
         'git@github.com:RebliNk17/pui.git',

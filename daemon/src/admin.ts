@@ -3,7 +3,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { piAgentDir, type DaemonConfig } from './config.ts';
+import { daemonHomeDir, piAgentDir, type DaemonConfig } from './config.ts';
+
+export interface CatalogProject {
+  name: string;
+  git_remote: string;
+  cloned: boolean;
+  path: string | null;
+}
+
+export interface IncomingCatalogProject {
+  name: string;
+  git_remote: string;
+}
 
 export interface CloudAdminStatus {
   has_pi_auth: boolean;
@@ -18,6 +30,69 @@ export interface CloudAdminStatus {
   skills: string[];
   mcp_servers: string[];
   service_creds: string[];
+  catalog_projects: CatalogProject[];
+}
+
+function knownProjectsPath(): string {
+  return path.join(daemonHomeDir(), 'known_projects.json');
+}
+
+export function listCatalogProjects(workspacesDir?: string): CatalogProject[] {
+  const file = knownProjectsPath();
+  if (!fs.existsSync(file)) return [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (!Array.isArray(raw)) return [];
+    const out: CatalogProject[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+      const git_remote = typeof rec.git_remote === 'string' ? rec.git_remote.trim() : '';
+      if (!name || !git_remote || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      const candidate = workspacesDir ? path.join(workspacesDir, name) : null;
+      const cloned = Boolean(
+        candidate && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory(),
+      );
+      out.push({
+        name,
+        git_remote,
+        cloned,
+        path: cloned && candidate ? fs.realpathSync(candidate) : null,
+      });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
+export function writeCatalogProjects(
+  items: IncomingCatalogProject[],
+  workspacesDir?: string,
+): { catalog_projects: CatalogProject[] } {
+  const dir = daemonHomeDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const clean: IncomingCatalogProject[] = [];
+  const seen = new Set<string>();
+  for (const item of items.slice(0, 64)) {
+    const normalized =
+      typeof item.git_remote === 'string' ? normalizeGitRemote(item.git_remote) : null;
+    if (!normalized) continue;
+    const rawName =
+      typeof item.name === 'string' && item.name.trim()
+        ? item.name.trim()
+        : inferRepoDirName(normalized);
+    const safeName = rawName.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^\.+/, '');
+    if (!safeName || safeName === '.' || safeName === '..') continue;
+    if (seen.has(safeName.toLowerCase())) continue;
+    seen.add(safeName.toLowerCase());
+    clean.push({ name: safeName, git_remote: normalized });
+  }
+  fs.writeFileSync(knownProjectsPath(), JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
+  return { catalog_projects: listCatalogProjects(workspacesDir) };
 }
 
 export interface IncomingServiceCred {
@@ -138,7 +213,7 @@ export function invalidateGithubSshCheck(): void {
   githubCheckCache = null;
 }
 
-export function getAdminStatus(): CloudAdminStatus {
+export function getAdminStatus(workspacesDir?: string): CloudAdminStatus {
   const authPath = path.join(piAgentDir(), 'auth.json');
   let has_pi_auth = false;
   let pi_auth_providers: string[] = [];
@@ -216,6 +291,7 @@ export function getAdminStatus(): CloudAdminStatus {
     skills,
     mcp_servers,
     service_creds: detectCloudServiceCreds(),
+    catalog_projects: listCatalogProjects(workspacesDir),
   };
 }
 

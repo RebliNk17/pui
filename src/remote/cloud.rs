@@ -24,6 +24,15 @@ pub struct CloudHostConfig {
 
 pub const PLAYWRIGHT_RESEARCH_MCP: &str = "playwright-research";
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CloudCatalogProject {
+    pub name: String,
+    pub git_remote: String,
+    pub cloned: bool,
+    pub path: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CloudAdminStatus {
@@ -39,6 +48,7 @@ pub struct CloudAdminStatus {
     pub skills: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub service_creds: Vec<String>,
+    pub catalog_projects: Vec<CloudCatalogProject>,
     pub projects: Vec<String>,
     pub workspaces_dir: String,
 }
@@ -95,6 +105,7 @@ pub struct LocalSyncInventory {
     pub skills: Vec<String>,
     pub service_creds: Vec<LocalServiceCred>,
     pub mac_ssh_key: Option<LocalSshKeyInfo>,
+    pub local_projects: Vec<CloudCatalogProject>,
     pub git_remote: Option<String>,
     pub project_name: String,
 }
@@ -108,6 +119,7 @@ pub struct CloudSyncPlan {
     pub mcps: BTreeSet<String>,
     pub skills: BTreeSet<String>,
     pub service_creds: BTreeSet<String>,
+    pub sync_projects: bool,
     pub clone_current_repo: bool,
 }
 
@@ -119,12 +131,13 @@ impl CloudSyncPlan {
             && self.mcps.is_empty()
             && self.skills.is_empty()
             && self.service_creds.is_empty()
+            && !self.sync_projects
             && !self.clone_current_repo
     }
 
     /// Builds a plan reflecting what is currently shared on the cloud host.
     /// On a fresh unconfigured host (`status == None`), suggests sensible defaults
-    /// (local providers + dedicated Git SSH) while keeping services/skills opt-in.
+    /// (local providers + dedicated Git SSH + project catalog) while keeping services/skills opt-in.
     pub fn from_live_state(inv: &LocalSyncInventory, status: Option<&CloudAdminStatus>) -> Self {
         let mut plan = Self::default();
         let Some(st) = status else {
@@ -132,6 +145,7 @@ impl CloudSyncPlan {
                 plan.providers.insert(p.clone());
             }
             plan.setup_git_ssh = true;
+            plan.sync_projects = !inv.local_projects.is_empty();
             return plan;
         };
 
@@ -171,6 +185,7 @@ impl CloudSyncPlan {
                 plan.skills.insert(s.clone());
             }
         }
+        plan.sync_projects = !st.catalog_projects.is_empty();
 
         plan
     }
@@ -572,7 +587,62 @@ fn discover_local_ssh_key() -> Option<LocalSshKeyInfo> {
     None
 }
 
-pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
+pub fn discover_local_git_projects(known_paths: &[PathBuf]) -> Vec<CloudCatalogProject> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for dir in known_paths {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(remote) = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let name = dir
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "repo".into());
+        if seen.insert(name.to_ascii_lowercase()) {
+            out.push(CloudCatalogProject {
+                name,
+                git_remote: remote,
+                cloned: false,
+                path: None,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn sync_catalog_projects(
+    cfg: &CloudHostConfig,
+    projects: &[CloudCatalogProject],
+) -> Result<Vec<CloudCatalogProject>, String> {
+    let payload: Vec<Value> = projects
+        .iter()
+        .map(|p| json!({ "name": p.name, "git_remote": p.git_remote }))
+        .collect();
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-projects",
+        Some(&json!({ "projects": payload })),
+    )?;
+    let synced: Vec<CloudCatalogProject> =
+        serde_json::from_value(res["catalog_projects"].clone()).unwrap_or_default();
+    Ok(synced)
+}
+
+pub fn discover_local_inventory(cwd: &Path, known_projects: &[PathBuf]) -> LocalSyncInventory {
     let mut providers = Vec::new();
     if let Some(auth_path) = local_pi_file("auth.json") {
         if let Ok(raw) = std::fs::read_to_string(&auth_path) {
@@ -625,12 +695,20 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "project".into());
 
+    let mut all_paths = vec![cwd.to_path_buf()];
+    for p in known_projects {
+        if !all_paths.contains(p) {
+            all_paths.push(p.clone());
+        }
+    }
+
     LocalSyncInventory {
         providers,
         mcps,
         skills,
         service_creds: discover_local_service_creds(),
         mac_ssh_key: discover_local_ssh_key(),
+        local_projects: discover_local_git_projects(&all_paths),
         git_remote,
         project_name,
     }
@@ -894,6 +972,7 @@ pub fn copy_mac_ssh_key_to_cloud(cfg: &CloudHostConfig) -> Result<(), String> {
 pub fn execute_selective_sync(
     cfg: &CloudHostConfig,
     cwd: &Path,
+    known_projects: &[PathBuf],
     initial: &CloudSyncPlan,
     plan: &CloudSyncPlan,
     force_resync: bool,
@@ -1005,6 +1084,24 @@ pub fn execute_selective_sync(
         }
         if !rm_skills.is_empty() {
             removed_parts.push(format!("{} skill(s)", rm_skills.len()));
+        }
+    }
+
+    // 5b. Project catalog (lightweight repo list for auto-cloning on demand)
+    if force_resync || plan.sync_projects != initial.sync_projects {
+        if !plan.sync_projects && initial.sync_projects {
+            sync_catalog_projects(cfg, &[])?;
+            removed_parts.push("project list".into());
+        } else if plan.sync_projects {
+            let mut all_paths = vec![cwd.to_path_buf()];
+            for p in known_projects {
+                if !all_paths.contains(p) {
+                    all_paths.push(p.clone());
+                }
+            }
+            let local_projs = discover_local_git_projects(&all_paths);
+            let synced = sync_catalog_projects(cfg, &local_projs)?;
+            added_parts.push(format!("{} project(s)", synced.len()));
         }
     }
 

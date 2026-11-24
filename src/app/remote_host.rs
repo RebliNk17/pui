@@ -1218,21 +1218,23 @@ impl Pui {
             .clone()
         });
 
-        let open_sync_picker = |shared: &Arc<Mutex<CloudUiState>>, cwd: &std::path::Path| {
-            let inv = cloud::discover_local_inventory(cwd);
-            if let Ok(mut st) = shared.lock() {
-                let has_status = st.status.is_some();
-                let plan = cloud::CloudSyncPlan::from_live_state(&inv, st.status.as_ref());
-                st.initial_plan = if has_status {
-                    plan.clone()
-                } else {
-                    cloud::CloudSyncPlan::default()
-                };
-                st.inventory = Some(inv);
-                st.plan = plan;
-                st.sync_modal_open = true;
-            }
-        };
+        let known_projects = self.chat_projects();
+        let open_sync_picker =
+            |shared: &Arc<Mutex<CloudUiState>>, cwd: &std::path::Path, known: &[PathBuf]| {
+                let inv = cloud::discover_local_inventory(cwd, known);
+                if let Ok(mut st) = shared.lock() {
+                    let has_status = st.status.is_some();
+                    let plan = cloud::CloudSyncPlan::from_live_state(&inv, st.status.as_ref());
+                    st.initial_plan = if has_status {
+                        plan.clone()
+                    } else {
+                        cloud::CloudSyncPlan::default()
+                    };
+                    st.inventory = Some(inv);
+                    st.plan = plan;
+                    st.sync_modal_open = true;
+                }
+            };
 
         let colors = crate::theme::palette(ui.ctx());
         settings::page_section(ui, "Cloud host", "");
@@ -1256,7 +1258,12 @@ impl Pui {
             if should_fetch {
                 let s_clone = shared.clone();
                 let ctx = ui.ctx().clone();
+                let sync_paths = known_projects.clone();
                 std::thread::spawn(move || {
+                    let local_projs = cloud::discover_local_git_projects(&sync_paths);
+                    if !local_projs.is_empty() {
+                        let _ = cloud::sync_catalog_projects(&cfg, &local_projs);
+                    }
                     let res = cloud::fetch_status(&cfg);
                     if let Ok(mut st) = s_clone.lock() {
                         st.busy = false;
@@ -1710,7 +1717,12 @@ impl Pui {
                                     .iter()
                                     .filter(|p| p.as_str() != st.workspaces_dir.as_str())
                                     .count();
-                                let ws_text = if repo_count > 0 {
+                                let cat_count = st.catalog_projects.len();
+                                let ws_text = if cat_count > 0 {
+                                    format!(
+                                        "{ws_label} · {cat_count} project(s) ({repo_count} cloned)"
+                                    )
+                                } else if repo_count > 0 {
                                     format!("{ws_label} · {repo_count} repo(s)")
                                 } else {
                                     format!("{ws_label} · auto-clones repos")
@@ -1722,7 +1734,7 @@ impl Pui {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 ui.add_enabled_ui(!busy, |ui| {
                                     if accent_button(ui, "Sync from Mac…").clicked() {
-                                        open_sync_picker(&shared, &self.prefs.cwd);
+                                        open_sync_picker(&shared, &self.prefs.cwd, &known_projects);
                                     }
                                     if secondary_button(ui, "Copy pair link").clicked() {
                                         let uri = cloud::pairing_uri(&cfg);
@@ -1774,7 +1786,7 @@ impl Pui {
                                             st.error = None;
                                             st.auto_fetched = false;
                                         }
-                                        open_sync_picker(&shared, &self.prefs.cwd);
+                                        open_sync_picker(&shared, &self.prefs.cwd, &known_projects);
                                     }
                                     Err(e) => {
                                         if let Ok(mut st) = shared.lock() {
@@ -1963,6 +1975,46 @@ impl Pui {
                                                         });
                                                     });
                                                 });
+                                        }
+
+                                        // Local project list catalog row
+                                        if !inv.local_projects.is_empty() {
+                                            settings::page_separator(ui);
+                                            let proj_names: Vec<&str> = inv
+                                                .local_projects
+                                                .iter()
+                                                .take(4)
+                                                .map(|p| p.name.as_str())
+                                                .collect();
+                                            let more = inv.local_projects.len().saturating_sub(4);
+                                            let proj_sub = if more > 0 {
+                                                format!(
+                                                    "{} (+{more}) · available on cloud & mobile, auto-cloned on demand",
+                                                    proj_names.join(", ")
+                                                )
+                                            } else {
+                                                format!(
+                                                    "{} · available on cloud & mobile, auto-cloned on demand",
+                                                    proj_names.join(", ")
+                                                )
+                                            };
+                                            let cat_count = cloud_st
+                                                .as_ref()
+                                                .map(|s| s.catalog_projects.len())
+                                                .unwrap_or(0);
+                                            let cat_badge = (cat_count > 0).then(|| {
+                                                (format!("{cat_count} synced"), colors.green)
+                                            });
+                                            sync_toggle_row(
+                                                ui,
+                                                row_w,
+                                                "Local project list",
+                                                &proj_sub,
+                                                cat_badge.as_ref().map(|(s, c)| (s.as_str(), *c)),
+                                                &mut st.plan.sync_projects,
+                                                true,
+                                                None,
+                                            );
                                         }
 
                                         // Detected opt-in CLI Service credentials (gh, Railway, Render, etc.)
@@ -2231,6 +2283,13 @@ impl Pui {
                             if sk_rm > 0 {
                                 rm_parts.push(format!("{sk_rm} skill(s)"));
                             }
+                            if st.plan.sync_projects != st.initial_plan.sync_projects {
+                                if st.plan.sync_projects {
+                                    add_parts.push("project list".into());
+                                } else {
+                                    rm_parts.push("project list".into());
+                                }
+                            }
                             if st.plan.clone_current_repo {
                                 add_parts.push("pre-clone repo".into());
                             }
@@ -2316,12 +2375,14 @@ impl Pui {
                         .unwrap_or_default();
                     let cfg_c = cfg.clone();
                     let cwd = self.prefs.cwd.clone();
+                    let sync_projects = known_projects.clone();
                     let s_clone = shared.clone();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
                         let sync_res = cloud::execute_selective_sync(
                             &cfg_c,
                             &cwd,
+                            &sync_projects,
                             &initial_plan,
                             &plan,
                             force_resync,

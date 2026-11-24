@@ -68,14 +68,57 @@ export default function NewChatScreen() {
     refreshSessions,
   } = usePui();
 
-  const projects = useMemo(() => hostInfo?.projects ?? [], [hostInfo?.projects]);
+  const projectChoices = useMemo(() => {
+    const rawDirs = hostInfo?.projects ?? [];
+    const catalog = hostInfo?.catalog_projects ?? [];
+    const entries: {
+      key: string;
+      label: string;
+      cwd: string;
+      gitRemote?: string;
+      cloned: boolean;
+    }[] = [];
+    const seen = new Set<string>();
+
+    // First include all synced catalog projects (all Mac repos available on cloud!).
+    for (const c of catalog) {
+      const k = c.name.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      entries.push({
+        key: `cat:${c.name}`,
+        label: c.name,
+        cwd: c.cloned && c.path ? c.path : c.name,
+        gitRemote: c.cloned ? undefined : c.git_remote,
+        cloned: c.cloned,
+      });
+    }
+
+    // Then include any local/cloned workspace folders not already in catalog.
+    for (const p of rawDirs) {
+      const short = p.split('/').filter(Boolean).pop() ?? p;
+      // Hide the bare `workspaces` root folder when real projects exist.
+      if (short === 'workspaces' && (entries.length > 0 || rawDirs.length > 1)) continue;
+      const k = short.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      entries.push({
+        key: `dir:${p}`,
+        label: short,
+        cwd: p,
+        cloned: true,
+      });
+    }
+    return entries;
+  }, [hostInfo?.projects, hostInfo?.catalog_projects]);
+
   const permissionModes = useMemo(
     () =>
       hostInfo?.permission_modes?.length ? hostInfo.permission_modes : DEFAULT_PERMISSION_MODES,
     [hostInfo?.permission_modes],
   );
 
-  const [selectedCwd, setSelectedCwd] = useState(projects[0] ?? '');
+  const [selectedKey, setSelectedKey] = useState(projectChoices[0]?.key ?? '');
   const [customRepoOrPath, setCustomRepoOrPath] = useState('');
   const [permissionMode, setPermissionMode] = useState(permissionModes[0]?.key ?? 'auto');
   const [models, setModels] = useState<ModelItem[]>([]);
@@ -107,12 +150,12 @@ export default function NewChatScreen() {
 
   // Keep selected project synced whenever the user switches host.
   useEffect(() => {
-    if (projects.length > 0 && !projects.includes(selectedCwd)) {
-      setSelectedCwd(projects[0]);
-    } else if (projects.length === 0) {
-      setSelectedCwd('');
+    if (projectChoices.length > 0 && !projectChoices.some((p) => p.key === selectedKey)) {
+      setSelectedKey(projectChoices[0].key);
+    } else if (projectChoices.length === 0) {
+      setSelectedKey('');
     }
-  }, [projects, selectedCwd]);
+  }, [projectChoices, selectedKey]);
 
   // Load models/effort options for the active host (fallback to any cached session detail).
   useEffect(() => {
@@ -153,7 +196,16 @@ export default function NewChatScreen() {
     };
   }, [transport, activeHost?.id]);
 
-  const effectiveCwd = customRepoOrPath.trim() || selectedCwd || projects[0] || '';
+  const selectedChoice = useMemo(
+    () => projectChoices.find((p) => p.key === selectedKey) ?? projectChoices[0] ?? null,
+    [projectChoices, selectedKey],
+  );
+  const effectiveCwd = customRepoOrPath.trim() || selectedChoice?.cwd || '';
+  const effectiveGitRemote = customRepoOrPath.trim()
+    ? looksLikeGitRepo(customRepoOrPath.trim())
+      ? customRepoOrPath.trim()
+      : undefined
+    : selectedChoice?.gitRemote;
   const isCloudHost = Boolean(
     activeHost?.name.toLowerCase().includes('cloud') ||
       hostInfo?.pui_version?.includes('cloud'),
@@ -172,13 +224,13 @@ export default function NewChatScreen() {
 
   const headerSubtitle = useMemo(() => {
     const hostLabel = activeHost?.name ?? 'Host';
-    const projShort = effectiveCwd
-      ? looksLikeGitRepo(effectiveCwd)
-        ? effectiveCwd
-        : effectiveCwd.split('/').filter(Boolean).pop() ?? effectiveCwd
-      : 'Choose project';
+    const projShort = customRepoOrPath.trim()
+      ? looksLikeGitRepo(customRepoOrPath.trim())
+        ? customRepoOrPath.trim()
+        : customRepoOrPath.trim().split('/').filter(Boolean).pop() ?? customRepoOrPath.trim()
+      : selectedChoice?.label ?? 'Choose project';
     return `${hostLabel} · ${projShort}`;
-  }, [activeHost?.name, effectiveCwd]);
+  }, [activeHost?.name, customRepoOrPath, selectedChoice?.label]);
 
   const handleSend = async (
     text: string,
@@ -192,12 +244,10 @@ export default function NewChatScreen() {
     setCreating(true);
     setCreateError(null);
     try {
-      const custom = customRepoOrPath.trim();
-      const gitRemote = custom && looksLikeGitRepo(custom) ? custom : undefined;
       const origin = clientOrigin();
       const res = await transport.createSession({
         cwd: effectiveCwd,
-        git_remote: gitRemote,
+        git_remote: effectiveGitRemote,
         permission_mode: isCloudHost ? 'auto' : permissionMode,
         model: modelId || undefined,
         provider: provider || undefined,
@@ -353,16 +403,15 @@ export default function NewChatScreen() {
             <Text style={[styles.sectionLabel, { color: colors.muted }]}>
               {isCloudHost ? 'PROJECT OR GIT REPO (AUTO-CLONES)' : 'PROJECT FOLDER'}
             </Text>
-            {projects.length > 0 ? (
+            {projectChoices.length > 0 ? (
               <View style={styles.projectGrid}>
-                {projects.map((p) => {
-                  const active = effectiveCwd === p && !customRepoOrPath.trim();
-                  const short = p.split('/').filter(Boolean).pop() ?? p;
+                {projectChoices.map((p) => {
+                  const active = selectedChoice?.key === p.key && !customRepoOrPath.trim();
                   return (
                     <Pressable
-                      key={p}
+                      key={p.key}
                       onPress={() => {
-                        setSelectedCwd(p);
+                        setSelectedKey(p.key);
                         setCustomRepoOrPath('');
                         setCreateError(null);
                       }}
@@ -375,7 +424,7 @@ export default function NewChatScreen() {
                       ]}
                     >
                       <Ionicons
-                        name="folder-outline"
+                        name={p.cloned ? 'folder-outline' : 'cloud-download-outline'}
                         size={14}
                         color={active ? colors.accent : colors.muted}
                       />
@@ -388,7 +437,7 @@ export default function NewChatScreen() {
                           flexShrink: 1,
                         }}
                       >
-                        {short}
+                        {p.label}
                       </Text>
                     </Pressable>
                   );
@@ -456,8 +505,8 @@ export default function NewChatScreen() {
             <View style={styles.creatingRow}>
               <ActivityIndicator size="small" color={colors.accent} />
               <Text style={{ color: colors.muted, fontSize: 12.5 }}>
-                {looksLikeGitRepo(customRepoOrPath)
-                  ? `Cloning ${customRepoOrPath.trim()} on ${activeHost?.name ?? 'cloud'}…`
+                {effectiveGitRemote
+                  ? `Cloning ${selectedChoice?.label || customRepoOrPath.trim()} on ${activeHost?.name ?? 'cloud'}…`
                   : `Starting session on ${activeHost?.name ?? 'host'}…`}
               </Text>
             </View>

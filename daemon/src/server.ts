@@ -8,13 +8,16 @@ import {
   createCloudWorktree,
   getAdminStatus,
   invalidateGithubSshCheck,
+  listCatalogProjects,
   normalizeGitRemote,
   removeCloudGitKey,
   setupCloudGit,
+  writeCatalogProjects,
   writeCloudMcps,
   writeCloudServiceCreds,
   writeCloudSkills,
   writePiAuth,
+  type IncomingCatalogProject,
   type IncomingServiceCred,
   type IncomingSkillBundle,
 } from './admin.ts';
@@ -451,6 +454,7 @@ export class PuiDaemonServer {
           tailscale_ip: this.tailscaleIp,
           active_path: null,
           projects: this.projects(),
+          catalog_projects: listCatalogProjects(this.config.workspaces_dir),
           permission_modes: PERMISSION_MODES,
           connected_devices: Array.from(this.clients).map((c) => ({
             id: c.id,
@@ -464,10 +468,23 @@ export class PuiDaemonServer {
       if (method === 'GET' && url.pathname === '/v1/admin/status') {
         if (url.searchParams.get('refresh') === '1') invalidateGithubSshCheck();
         sendJson(res, 200, {
-          ...getAdminStatus(),
+          ...getAdminStatus(this.config.workspaces_dir),
           projects: this.projects(),
           workspaces_dir: this.config.workspaces_dir,
         });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/admin/sync-projects') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const items = Array.isArray(body.projects)
+          ? (body.projects as IncomingCatalogProject[])
+          : [];
+        const result = writeCatalogProjects(items, this.config.workspaces_dir);
+        sendJson(res, 200, { ok: true, ...result });
         return;
       }
 
@@ -643,16 +660,26 @@ export class PuiDaemonServer {
           unknown
         >;
         let cwd: string | null = null;
+        const catalog = listCatalogProjects(this.config.workspaces_dir);
+        const catalogMatch =
+          typeof body.cwd === 'string' && body.cwd.trim()
+            ? catalog.find(
+                (p) =>
+                  p.name.toLowerCase() === body.cwd!.toString().trim().toLowerCase() ||
+                  p.git_remote === body.cwd!.toString().trim(),
+              )
+            : undefined;
         const explicitRemote =
           typeof body.git_remote === 'string' && body.git_remote.trim()
             ? body.git_remote.trim()
-            : typeof body.cwd === 'string' && !fs.existsSync(body.cwd) && normalizeGitRemote(body.cwd)
-              ? body.cwd.trim()
-              : null;
+            : catalogMatch?.git_remote ??
+              (typeof body.cwd === 'string' && !fs.existsSync(body.cwd) && normalizeGitRemote(body.cwd)
+                ? body.cwd.trim()
+                : null);
 
         if (explicitRemote) {
           const cloned = cloneRepoIntoWorkspace(this.config, explicitRemote, {
-            name: typeof body.repo_name === 'string' ? body.repo_name : undefined,
+            name: typeof body.repo_name === 'string' ? body.repo_name : catalogMatch?.name,
             branch: typeof body.branch === 'string' ? body.branch : undefined,
           });
           cwd = cloned.path;
