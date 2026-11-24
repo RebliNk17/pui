@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
+mod error;
 mod inline_cards;
 mod new_messages;
 mod progress;
@@ -21,6 +22,7 @@ pub use progress::Progress;
 pub enum TranscriptAction {
     Open(String),
     ViewSource(String),
+    Continue(usize),
     OpenVisual {
         id: String,
         title: String,
@@ -75,6 +77,7 @@ pub struct Transcript {
     pub progress: Option<Progress>,
     pub message_action: Option<(usize, MessageAction)>,
     pub message_actions_enabled: bool,
+    pub continue_enabled: bool,
     pub task_output: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     pub find: Option<FindTarget>,
@@ -397,6 +400,7 @@ impl Transcript {
                     }
                 }
                 self.message_actions_enabled.hash(&mut hasher);
+                (self.continue_enabled, index == messages.len()).hash(&mut hasher);
                 (busy && index == messages.len()).hash(&mut hasher);
                 let signature = hasher.finish();
                 let cached = self
@@ -455,6 +459,7 @@ impl Transcript {
                                             view,
                                         ),
                                         task_output,
+                                        (index == messages.len()).then_some(self.continue_enabled),
                                         gallery,
                                         Some(visuals),
                                         cwd,
@@ -948,6 +953,7 @@ fn assistant(
         thinking,
         flags,
         task_output,
+        Some(flags.2),
         gallery,
         None,
         None,
@@ -966,6 +972,7 @@ fn assistant_with_media(
     thinking: &str,
     flags: (bool, bool, bool, View),
     task_output: bool,
+    continue_enabled: Option<bool>,
     gallery: &mut crate::media::Gallery,
     mut visuals: Option<&mut crate::inline_visual::InlineVisualHost>,
     cwd: Option<&std::path::Path>,
@@ -1193,7 +1200,9 @@ fn assistant_with_media(
     // supersedes them. While Pi is still working it may retry or compact first.
     if !running {
         if let Some(error) = messages.last().and_then(|message| message.error.as_ref()) {
-            ui.colored_label(colors.red, error);
+            if error::row(ui, error, continue_enabled) {
+                *action = Some(TranscriptAction::Continue(start + messages.len() - 1));
+            }
         }
     }
     let images: Vec<_> = messages
