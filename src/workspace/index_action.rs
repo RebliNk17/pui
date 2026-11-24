@@ -117,10 +117,28 @@ fn prepare_at(
         return Err("Unsupported index action. Renames, conflicts, type changes and submodules are not supported.".into());
     }
     read_only::filters_disabled(root, cancel, deadline)?;
-    let actual = run(root, &["rev-parse", "--show-toplevel"], cancel, deadline)?;
-    let actual = line(&actual, 8192, "root")?;
-    if Path::new(&actual) != root {
+    let meta = run(
+        root,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+            "--shared-index-path",
+        ],
+        cancel,
+        deadline,
+    )?;
+    let meta_str = std::str::from_utf8(&meta).map_err(|_| "Invalid index metadata.")?;
+    let mut meta_lines = meta_str.lines();
+    let actual = meta_lines.next().ok_or("Repository root unavailable.")?;
+    if Path::new(actual) != root {
         return Err("Repository root changed.".into());
+    }
+    let index_line = meta_lines.next().ok_or("Invalid index path.")?;
+    if meta_lines.next().is_some_and(|s| !s.is_empty()) || meta_lines.next().is_some() {
+        return Err("Split index is unsupported for index actions.".into());
     }
     let (branch, head) = super::commit::branch_head(root, cancel, deadline)?;
     let initial = head.bytes().all(|b| b == b'0');
@@ -128,12 +146,7 @@ fn prepare_at(
         return Err("Discard before first commit is unsupported.".into());
     }
     let index_path = PathBuf::from(line(
-        &run(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            cancel,
-            deadline,
-        )?,
+        format!("{index_line}\n").as_bytes(),
         8192,
         "index path",
     )?);
@@ -143,15 +156,6 @@ fn prepare_at(
     let index = inspect_index(&index_path, initial && action == Action::Stage)?;
     if !index.is_empty() && !index.starts_with(b"DIRC") {
         return Err("Invalid index header.".into());
-    }
-    let shared = run(
-        root,
-        &["rev-parse", "--shared-index-path"],
-        cancel,
-        deadline,
-    )?;
-    if !shared.is_empty() {
-        return Err("Split index is unsupported for index actions.".into());
     }
     let mut cmd = read_only::command(root);
     literal(&mut cmd);

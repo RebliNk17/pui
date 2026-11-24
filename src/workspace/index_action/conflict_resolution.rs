@@ -136,16 +136,25 @@ fn inspect_at(
 ) -> Result<Review, String> {
     let full = input_path(root, path)?;
     read_only::filters_disabled(root, cancel, deadline)?;
-    let index_path = PathBuf::from(line(
-        &run(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            cancel,
-            deadline,
-        )?,
-        8192,
-        "index",
-    )?);
+    let meta = run(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+            "--shared-index-path",
+        ],
+        cancel,
+        deadline,
+    )?;
+    let meta_str = std::str::from_utf8(&meta).map_err(|_| "Invalid index metadata")?;
+    let mut meta_lines = meta_str.lines();
+    let index_line = meta_lines.next().ok_or("Invalid index path")?;
+    if meta_lines.next().is_some_and(|s| !s.is_empty()) || meta_lines.next().is_some() {
+        return Err("Split index resolution unsupported.".into());
+    }
+    let index_path = PathBuf::from(line(format!("{index_line}\n").as_bytes(), 8192, "index")?);
     let index = bytes(&index_path, MAX_INDEX)?;
     let conflict = super::super::conflict::inspect_at(root, path, cancel, deadline)?;
     let mode = mode(&full)?;
@@ -198,16 +207,6 @@ fn inspect_at(
     )?;
     if status.code() != Some(1) || !out.is_empty() {
         return Err("Line-ending/sparse-checkout configuration refuses resolution writes.".into());
-    }
-    if !run(
-        root,
-        &["rev-parse", "--shared-index-path"],
-        cancel,
-        deadline,
-    )?
-    .is_empty()
-    {
-        return Err("Split index resolution unsupported.".into());
     }
     let (branch, head) = super::super::commit::branch_head(root, cancel, deadline)?;
     let text = String::from_utf8(bytes(&full, MAX_TEXT)?)

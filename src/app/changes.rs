@@ -14,10 +14,13 @@ mod index_actions;
 mod initialize;
 mod inline_review;
 pub(super) mod lines;
+mod operation;
 mod push;
 mod read_state;
+mod recovery_manager;
 pub(super) mod review_comments;
 mod review_files;
+mod stash;
 mod worktrees;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -40,6 +43,8 @@ pub(super) enum RepoSheet {
     CreateBranch,
     Push,
     Fetch,
+    Stash,
+    Recovery,
 }
 
 #[derive(Default)]
@@ -61,6 +66,9 @@ pub(super) struct Changes {
     clone: clone::Clone,
     fetch: fetch::Fetch,
     identity_setup: identity_setup::Setup,
+    operation: operation::Operation,
+    stash: stash::Stash,
+    recovery_manager: recovery_manager::RecoveryManager,
     push: push::Push,
     branch_create: branch_create::Create,
     pub(super) index_writable: bool,
@@ -132,6 +140,9 @@ impl Changes {
         self.clone_inputs(ctx, visible);
         self.fetch_inputs(ctx, visible);
         self.identity_setup_inputs(ctx, visible);
+        self.operation_inputs(ctx, visible);
+        self.stash_inputs(ctx, visible);
+        self.recovery_manager_inputs(ctx, visible);
         self.push_inputs(ctx, visible);
         self.create_branch_inputs(ctx, visible);
         self.branch_inputs(ctx, visible, workspace);
@@ -186,6 +197,9 @@ impl Changes {
             self.clone = Default::default();
             self.fetch = Default::default();
             self.identity_setup = Default::default();
+            self.operation = Default::default();
+            self.stash = Default::default();
+            self.recovery_manager = Default::default();
             self.push = Default::default();
             self.branch_create = Default::default();
             self.identity = (cwd.to_path_buf(), session.to_owned());
@@ -301,6 +315,9 @@ impl Changes {
         self.clone_dialog(ctx);
         self.fetch_dialog(ctx);
         self.identity_setup_dialog(ctx);
+        self.operation_dialog(ctx);
+        self.stash_dialog(ctx);
+        self.recovery_manager_dialog(ctx);
         self.push_dialog(ctx);
         self.create_branch_dialog(ctx);
         expanded
@@ -1137,6 +1154,46 @@ impl Changes {
                         self.repo_sheet = Some(RepoSheet::CreateBranch);
                         egui::Popup::close_id(ui.ctx(), setup_id);
                     }
+                    if workspace.is_git {
+                        if Self::dropdown_item(
+                            ui,
+                            setup_id.with("stash"),
+                            inner_w,
+                            "Stashes…",
+                            None,
+                        )
+                        .clicked()
+                        {
+                            self.stash.loaded = false;
+                            self.repo_sheet = Some(RepoSheet::Stash);
+                            egui::Popup::close_id(ui.ctx(), setup_id);
+                        }
+                        if Self::dropdown_item(
+                            ui,
+                            setup_id.with("recovery"),
+                            inner_w,
+                            "Recovery copies…",
+                            None,
+                        )
+                        .clicked()
+                        {
+                            self.recovery_manager.loaded = false;
+                            self.repo_sheet = Some(RepoSheet::Recovery);
+                            egui::Popup::close_id(ui.ctx(), setup_id);
+                        }
+                        if Self::dropdown_item(
+                            ui,
+                            setup_id.with("abort-operation"),
+                            inner_w,
+                            "Abort merge / rebase / cherry-pick…",
+                            None,
+                        )
+                        .clicked()
+                        {
+                            self.trigger_operation_abort_review(ui.ctx(), workspace);
+                            egui::Popup::close_id(ui.ctx(), setup_id);
+                        }
+                    }
                 });
 
             let fetch_id = egui::Id::new("changes-fetch-popup");
@@ -1329,6 +1386,16 @@ impl Changes {
                 "Updates only the tracking ref; working tree is unchanged.",
                 false,
             ),
+            RepoSheet::Stash => (
+                "Git stashes",
+                "Review and stash tracked changes, or apply/drop saved stashes by exact commit ID.",
+                false,
+            ),
+            RepoSheet::Recovery => (
+                "Recovery copies",
+                "Inspect, restore, or delete retained discard and conflict backup copies.",
+                false,
+            ),
         };
         let mut close = false;
         let response = prompt_ui::modal(ctx, egui::Id::new("changes-repo-sheet"), 440.0, |ui| {
@@ -1342,6 +1409,8 @@ impl Changes {
                 RepoSheet::CreateBranch => self.create_branch_ui(ui, workspace),
                 RepoSheet::Push => self.push_review(ui, workspace, loading),
                 RepoSheet::Fetch => self.fetch_ui(ui, workspace),
+                RepoSheet::Stash => self.stash_ui(ui, workspace),
+                RepoSheet::Recovery => self.recovery_manager_ui(ui, workspace),
             }
             if !custom_footer {
                 prompt_ui::footer(ui, |ui| {
@@ -1358,6 +1427,13 @@ impl Changes {
     }
 
     fn active_git_notices(&mut self, ui: &mut egui::Ui, workspace: &Workspace, loading: bool) {
+        if self.operation_has_status(workspace) {
+            egui::TopBottomPanel::top("changes-operation-status")
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)))
+                .show_inside(ui, |ui| {
+                    self.operation_bar(ui, workspace, loading);
+                });
+        }
         if self.commit_has_status() {
             egui::TopBottomPanel::top("changes-commit-status")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)))

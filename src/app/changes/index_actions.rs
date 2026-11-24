@@ -233,6 +233,9 @@ impl Changes {
         self.clone = Default::default();
         self.fetch = Default::default();
         self.identity_setup = Default::default();
+        self.operation = Default::default();
+        self.stash = Default::default();
+        self.recovery_manager = Default::default();
         self.push = Default::default();
         self.branch_create = Default::default();
         self.index_actions.pending = None;
