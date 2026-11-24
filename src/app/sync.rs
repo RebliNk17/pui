@@ -2475,6 +2475,13 @@ mod tests {
             a.waiting[&path].is_empty() && b.draft == "queued by second window"
         });
         assert!(owner.draft.is_empty());
+        // Let the mirror finish fetching the owner's post-edit revision while the
+        // owner is still polled. Otherwise teardown waits out the owner's 8s ack
+        // deadline for a fetch issued after the assertions were already satisfied.
+        spin(&mut owner, &mut mirror, |a, b| {
+            b.sync.pending.is_empty()
+                && b.sync.revisions.get(&path) == Some(&a.sync.owned[&path].revision)
+        });
     }
     #[test]
     fn owner_switching_chats_still_serves_original_without_changing_visible_chat() {

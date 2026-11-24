@@ -60,13 +60,48 @@ done
             self.assertNotIn("fake-secret", calls)
 
     def test_complete_rust_runner_keeps_all_contention_groups_and_restart_test(self):
-        runner = (ROOT / "scripts/test-rust.sh").read_text()
-        self.assertIn('--skip "$lock_test"', runner)
-        self.assertIn('"$lock_test" -- --exact --test-threads=1', runner)
-        for group in ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::",
-                      "app::tasks::save_conflict_tests::"):
-            self.assertIn("--skip " + group, runner)
-            self.assertIn(group + " -- --test-threads=1", runner)
+        lock_test = "app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery"
+        orphan_test = ("app::automation::delete::tests::"
+                       "cross_window_orphan_delete_uses_real_transport_without_creator_and_handles_owner_exit")
+        required = ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::",
+                    "app::tasks::save_conflict_tests::", "app::tasks::recovery::tests::",
+                    "app::tasks::store_safety_tests::", "tasks::apply::tests::", "tasks::apply::tests::additional::",
+                    "workspace::commit::tests::", "file_watch::", "sessions::watch::")
+        for lanes in ("", "1"):
+            with self.subTest(lanes=lanes or "parallel"), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                log = root / "commands"
+                for name, body in (("cargo", 'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'), ("git", "exit 0\n")):
+                    path = root / name
+                    path.write_text("#!/bin/bash\n" + body)
+                    path.chmod(0o755)
+                env = {"PATH": f"{root}:/usr/bin:/bin", "COMMAND_LOG": str(log), "PUI_SERIAL_LANES": lanes}
+                result = subprocess.run(["/bin/bash", str(ROOT / "scripts/test-rust.sh")], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [line.split() for line in log.read_text().splitlines()]
+                bulk = [c for c in calls if "--bin" not in c]
+                self.assertEqual(len(bulk), 1)
+                self.assertEqual(bulk[0][:5], ["test", "--offline", "--locked", "--", "--test-threads=4"])
+                skips = {bulk[0][i + 1] for i, arg in enumerate(bulk[0]) if arg == "--skip"}
+                serial = [c for c in calls if "--bin" in c]
+                filters = [c[5] for c in serial]
+                # Every serial group runs exactly once, single-threaded, and is skipped in bulk.
+                self.assertEqual(len(filters), len(set(filters)))
+                for call in serial:
+                    self.assertEqual(call[:5], ["test", "--offline", "--locked", "--bin", "pui"])
+                    self.assertEqual(call[6], "--")
+                    self.assertIn("--test-threads=1", call[7:])
+                    self.assertTrue(any(skip in call[5] for skip in skips), call)
+                for group in required:
+                    self.assertIn(group, filters)
+                    self.assertIn(group, skips)
+                apply = next(c for c in serial if c[5] == "tasks::apply::tests::")
+                self.assertEqual(apply[8:], ["--skip", "tasks::apply::tests::additional::"])
+                # OS-lock tests run last, alone and exact.
+                self.assertEqual(serial[-2:], [["test", "--offline", "--locked", "--bin", "pui", test, "--",
+                                                "--exact", "--test-threads=1"] for test in (lock_test, orphan_test)])
+                self.assertTrue({lock_test, orphan_test} <= skips)
 
     def test_setup_skips_homebrew_rustup_postinstall_and_selects_exact_toolchain(self):
         with tempfile.TemporaryDirectory() as temp:
