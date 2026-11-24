@@ -46,6 +46,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pull requests run only the suites whose inputs changed; pushes and
+      # tags (empty base) run everything, including the app bundle.
+      - name: Select affected suites
+        id: affected
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        run: /usr/bin/python3 scripts/ci/affected.py "$BASE_SHA" | tee -a "$GITHUB_OUTPUT"
+
       - name: Compute cache fingerprints
         run: /usr/bin/python3 scripts/ci/cache-key.py
 
@@ -58,6 +66,7 @@ jobs:
 
       - name: Restore Rust toolchain
         id: restore-toolchain
+        if: steps.affected.outputs.toolchain == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
@@ -80,6 +89,7 @@ jobs:
 
       - name: Restore compiled Rust and CEF outputs
         id: restore-compiled
+        if: steps.affected.outputs.toolchain == 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -92,18 +102,24 @@ jobs:
 
       # No secret context: cached executables stay in this ad-hoc build job.
       # Publication runs separately without these caches or Apple credentials.
-      - name: Validate and package Apple Silicon app
+      - name: Validate affected suites (and package on push/tag)
+        env:
+          PUI_CI_RUST: ${{ steps.affected.outputs.rust }}
+          PUI_CI_NODE: ${{ steps.affected.outputs.node }}
+          PUI_CI_PYTHON: ${{ steps.affected.outputs.python }}
+          PUI_CI_PACKAGE: ${{ steps.affected.outputs.package }}
         run: bash scripts/ci/github-macos.sh
 
       - name: Save Rust toolchain even if checks fail
-        if: always() && steps.restore-toolchain.outputs.cache-hit != 'true'
+        if: always() && steps.affected.outputs.toolchain == 'true' && steps.restore-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
           key: rust-toolchain-v1-arm64-${{ steps.cache-keys.outputs.toolchain }}
 
+      # Skipped for Python/Node-only runs so a cache without CEF is never saved.
       - name: Save downloads even if checks fail
-        if: always() && steps.restore-downloads.outputs.cache-hit != 'true'
+        if: always() && steps.affected.outputs.toolchain == 'true' && steps.restore-downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -115,7 +131,7 @@ jobs:
           key: downloads-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}
 
       - name: Save compiled outputs (at most one snapshot per day)
-        if: always() && steps.restore-compiled.outputs.cache-hit != 'true'
+        if: always() && steps.affected.outputs.toolchain == 'true' && steps.restore-compiled.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -124,6 +140,7 @@ jobs:
           key: compiled-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
 
       - name: Upload macOS release artifacts
+        if: steps.affected.outputs.package == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
