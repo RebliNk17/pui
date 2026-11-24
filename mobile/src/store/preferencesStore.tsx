@@ -42,7 +42,7 @@ const DEFAULT_PREFS: MobilePreferences = {
   notifyFinished: true,
   notifyApprovals: true,
   notifyQuestions: true,
-  keepAliveInBackground: true,
+  keepAliveInBackground: false,
 };
 
 async function readPrefs(): Promise<MobilePreferences> {

@@ -29,20 +29,29 @@ class PuiKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val host = intent?.getStringExtra(EXTRA_HOST)?.takeIf { it.isNotBlank() } ?: "Pui Desktop"
-        ensureChannel()
-        val notification = buildNotification(host)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIF_ID, notification)
+        return try {
+            val host = intent?.getStringExtra(EXTRA_HOST)?.takeIf { it.isNotBlank() } ?: "Pui Desktop"
+            ensureChannel()
+            val notification = buildNotification(host)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+            START_NOT_STICKY
+        } catch (_: Throwable) {
+            stopSelf()
+            START_NOT_STICKY
         }
-        return START_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopSelf()
     }
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val mgr = getSystemService(NotificationManager::class.java)
+            val mgr = getSystemService(NotificationManager::class.java) ?: return
             if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
                 val ch = NotificationChannel(
                     CHANNEL_ID,
@@ -57,6 +66,12 @@ class PuiKeepAliveService : Service() {
         }
     }
 
+    private fun resolveSmallIcon(): Int {
+        val custom = resources.getIdentifier("notification_icon", "drawable", packageName)
+        if (custom != 0) return custom
+        return android.R.drawable.stat_notify_sync
+    }
+
     private fun buildNotification(host: String): Notification {
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -68,7 +83,7 @@ class PuiKeepAliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Connected to $host")
             .setContentText("Listening for Pui agent notifications")
-            .setSmallIcon(applicationInfo.icon)
+            .setSmallIcon(resolveSmallIcon())
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -81,8 +96,11 @@ class PuiKeepAliveService : Service() {
 
 const MODULE_KT = (pkg) => `package ${pkg}
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
@@ -96,6 +114,13 @@ class PuiKeepAliveModule(private val ctx: ReactApplicationContext) : ReactContex
     @ReactMethod
     fun start(hostName: String) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val granted = ContextCompat.checkSelfPermission(
+                    ctx,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!granted) return
+            }
             val intent = Intent(ctx, PuiKeepAliveService::class.java).apply {
                 putExtra(PuiKeepAliveService.EXTRA_HOST, hostName)
             }
@@ -128,7 +153,6 @@ class PuiKeepAlivePackage : ReactPackage {
 `;
 
 module.exports = function withKeepAliveService(config) {
-  // 1. Register PuiKeepAliveService in AndroidManifest.xml with dataSync type.
   config = withAndroidManifest(config, (cfg) => {
     const app = cfg.modResults.manifest.application?.[0];
     if (!app) return cfg;
@@ -148,7 +172,6 @@ module.exports = function withKeepAliveService(config) {
     return cfg;
   });
 
-  // 2. Write Kotlin service & ReactPackage into the generated Android package folder.
   config = withDangerousMod(config, [
     'android',
     async (cfg) => {
@@ -165,7 +188,6 @@ module.exports = function withKeepAliveService(config) {
     },
   ]);
 
-  // 3. Register PuiKeepAlivePackage in MainApplication.kt.
   config = withMainApplication(config, (cfg) => {
     if (!cfg.modResults.contents.includes('PuiKeepAlivePackage()')) {
       cfg.modResults.contents = cfg.modResults.contents.replace(

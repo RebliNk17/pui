@@ -11,7 +11,7 @@ import type {
   WsServerEvent,
 } from '../protocol/types';
 import { startBackgroundKeepAlive, stopBackgroundKeepAlive } from '../services/keepAlive';
-import { presentAgentNotification } from '../services/notifications';
+import { getNotificationPermissionStatus, presentAgentNotification } from '../services/notifications';
 import type { SharedPayload } from '../services/shareIntent';
 import {
   CloudRelayTransport,
@@ -219,17 +219,23 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
 
   // Keep Android background foreground-service in sync with active host & user preference.
   useEffect(() => {
+    let cancelled = false;
     if (
       activeHost &&
       prefs.notificationsEnabled &&
       prefs.keepAliveInBackground &&
       connectionState === 'connected'
     ) {
-      startBackgroundKeepAlive(hostInfo?.host_name || activeHost.name);
+      void getNotificationPermissionStatus().then((status) => {
+        if (!cancelled && status === 'granted') {
+          startBackgroundKeepAlive(hostInfo?.host_name || activeHost.name);
+        }
+      });
     } else {
       stopBackgroundKeepAlive();
     }
     return () => {
+      cancelled = true;
       if (!activeHost) stopBackgroundKeepAlive();
     };
   }, [
