@@ -941,9 +941,7 @@ pub(crate) enum Segment<'a> {
 pub(crate) fn context_segments(text: &str) -> Vec<Segment<'_>> {
     let mut out = Vec::new();
     let mut rest = text;
-    let mut offset_ok = true;
-    while offset_ok {
-        offset_ok = false;
+    loop {
         let start = if rest.starts_with("[Context: ") {
             Some(0)
         } else {
@@ -990,7 +988,6 @@ pub(crate) fn context_segments(text: &str) -> Vec<Segment<'_>> {
             body: &after[body_start..close.max(body_start)],
         });
         rest = &after[block_end..];
-        offset_ok = true;
     }
     if !rest.is_empty() {
         out.push(Segment::Text(rest));
