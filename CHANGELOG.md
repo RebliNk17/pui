@@ -5,6 +5,12 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-24
+
+### Changed
+
+- **Pui Mobile:** updated `react` and `react-dom` to 19.3.1.
+
 ## [1.1.0] - 2026-11-24
 
 ### Added
