@@ -828,7 +828,7 @@ impl Pui {
         }
         let id = request.expected.id.clone();
         let execution = uuid::Uuid::new_v4().to_string();
-        let hash = format!("{:x}", Sha256::digest(request.record.as_bytes()));
+        let hash = crate::hex::lower(Sha256::digest(request.record.as_bytes()));
         let task = self.tasks.records.iter_mut().find(|t| t.id == id).unwrap();
         if !request.initial_resume {
             task.recoveries.push(RecoveryExecution {

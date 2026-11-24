@@ -6,6 +6,7 @@ mod app;
 mod chromium;
 mod context;
 mod file_watch;
+mod hex;
 mod history;
 mod icons;
 mod inline_visual;

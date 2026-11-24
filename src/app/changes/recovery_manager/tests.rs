@@ -29,7 +29,10 @@ fn repo_with_backup() -> (PathBuf, PathBuf) {
     let mut digest = Sha256::new();
     digest.update(b"file.txt");
     digest.update(Sha256::digest(content));
-    let name = format!("pui-discard-recovery-{:x}", digest.finalize());
+    let name = format!(
+        "pui-discard-recovery-{}",
+        crate::hex::lower(digest.finalize())
+    );
     let backup = root.join(".git").join(name);
     fs::write(&backup, content).unwrap();
     (root, backup)

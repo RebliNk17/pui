@@ -300,9 +300,10 @@ pub(crate) fn save(review: Review, draft: String, cancel: &AtomicBool) -> Result
     let mut digest = Sha256::new();
     digest.update(review.path.as_bytes());
     digest.update(Sha256::digest(review.text.as_bytes()));
-    let backup = review
-        .index_path
-        .with_file_name(format!("pui-discard-recovery-{:x}", digest.finalize()));
+    let backup = review.index_path.with_file_name(format!(
+        "pui-discard-recovery-{}",
+        crate::hex::lower(digest.finalize())
+    ));
     if backup.try_exists().map_err(|_| "Recovery unavailable")? {
         if bytes(&backup, MAX_TEXT)? != review.text.as_bytes() {
             return Err("Recovery collision; nothing saved.".into());

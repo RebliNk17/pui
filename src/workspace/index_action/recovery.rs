@@ -15,7 +15,10 @@ fn recovery_name(path: &str, content: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(path.as_bytes());
     digest.update(Sha256::digest(content));
-    format!("pui-discard-recovery-{:x}", digest.finalize())
+    format!(
+        "pui-discard-recovery-{}",
+        crate::hex::lower(digest.finalize())
+    )
 }
 fn mode(path: &Path) -> Result<u32, String> {
     let meta = fs::symlink_metadata(path).map_err(|_| "File unavailable")?;

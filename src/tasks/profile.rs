@@ -75,7 +75,7 @@ pub fn load(root: &Path) -> Result<Option<Receipt>, String> {
         serde_json::from_slice(&bytes).map_err(|_| "Invalid workflow profile JSON.")?;
     profile.validate()?;
     Ok(Some(Receipt {
-        digest: format!("{:x}", Sha256::digest(&bytes)),
+        digest: crate::hex::lower(Sha256::digest(&bytes)),
         profile,
     }))
 }

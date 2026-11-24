@@ -46,8 +46,10 @@ impl Snapshot {
         if let Some(file) = self.file {
             digest.update(file);
         }
-        self.index_path
-            .with_file_name(format!("pui-discard-recovery-{:x}", digest.finalize()))
+        self.index_path.with_file_name(format!(
+            "pui-discard-recovery-{}",
+            crate::hex::lower(digest.finalize())
+        ))
     }
 }
 fn bytes(path: &Path, max: usize) -> Result<Vec<u8>, String> {

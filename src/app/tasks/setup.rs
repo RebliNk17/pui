@@ -68,7 +68,7 @@ fn eligible(task: &Task) -> Result<(), String> {
 }
 fn task_digest(task: &Task) -> Result<String, String> {
     let bytes = serde_json::to_vec(task).map_err(|_| "Cannot bind workflow setup evidence.")?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(crate::hex::lower(Sha256::digest(bytes)))
 }
 fn binding(task: &Task) -> Result<SetupBinding, String> {
     eligible(task)?;
@@ -147,7 +147,7 @@ fn manifests_digest(root: &Path) -> Result<String, String> {
             None => hash.update([0]),
         }
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex::lower(hash.finalize()))
 }
 fn npm_suggestion(root: &Path) -> Result<Option<String>, String> {
     if bounded(root, "npm-shrinkwrap.json", 2 * 1024 * 1024)?.is_some() {

@@ -56,7 +56,7 @@ impl Task {
             run: run.into(),
             role,
             method: method.into(),
-            input_hash: format!("{:x}", Sha256::digest(input)),
+            input_hash: crate::hex::lower(Sha256::digest(input)),
             candidate: self.latest().and_then(|a| a.fingerprint.clone()),
             state: State::Dispatching,
             created: super::now(),
