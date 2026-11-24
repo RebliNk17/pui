@@ -299,6 +299,7 @@ mod macos {
     );
     pub(super) struct Native {
         center: Retained<UNUserNotificationCenter>,
+        bundle_id: String,
         _delegate: Retained<CompletionDelegate>,
         tx: mpsc::Sender<Event>,
         pub results: Receiver<Event>,
@@ -306,9 +307,10 @@ mod macos {
     }
     impl Native {
         pub fn new(ctx: &egui::Context) -> Result<Self, String> {
-            if NSBundle::mainBundle().bundleIdentifier().is_none() {
-                return Err("OS notifications need the bundled Pui.app. Open dist/Pui.app, not the standalone binary.".into());
-            }
+            let Some(bundle_id) = NSBundle::mainBundle().bundleIdentifier() else {
+                return Err("OS notifications need a bundled app. Open Pui or Pui Dev, not the standalone binary.".into());
+            };
+            let bundle_id = bundle_id.to_string();
             let center = UNUserNotificationCenter::currentNotificationCenter();
             let (tx, results) = mpsc::channel();
             let this = CompletionDelegate::alloc().set_ivars(Ivars {
@@ -320,6 +322,7 @@ mod macos {
             center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             Ok(Self {
                 center,
+                bundle_id,
                 _delegate: delegate,
                 tx,
                 results,
@@ -327,15 +330,16 @@ mod macos {
             })
         }
         pub fn request(&self, notification: Option<(String, Option<ChatTarget>)>) {
+            let bundle_id = self.bundle_id.clone();
             let tx = self.tx.clone();
             let ctx = self.ctx.clone();
             let callback = RcBlock::new(move |granted: Bool, error: *mut NSError| {
                 if !granted.as_bool() || !error.is_null() {
-                    let _ = tx.send(Event::Status("OS notifications are blocked. Enable Pui in System Settings → Notifications. Focus modes may also silence banners.".into()));
+                    let _ = tx.send(Event::Status(format!("OS notifications are blocked ({bundle_id}). Enable this app in System Settings → Notifications. Focus modes may also silence banners.")));
                     ctx.request_repaint();
                     return;
                 }
-                let _ = tx.send(Event::Status("OS notifications allowed. Banner delivery follows macOS notification and Focus settings.".into()));
+                let _ = tx.send(Event::Status(format!("OS notifications allowed ({bundle_id}). Banner delivery follows macOS notification and Focus settings.")));
                 ctx.request_repaint();
                 if let Some((name, target)) = &notification {
                     let content = UNMutableNotificationContent::new();
@@ -360,9 +364,10 @@ mod macos {
                     );
                     let tx = tx.clone();
                     let ctx = ctx.clone();
+                    let bundle_id = bundle_id.clone();
                     let delivered = RcBlock::new(move |error: *mut NSError| {
                         if !error.is_null() {
-                            let _ = tx.send(Event::Status("macOS could not deliver the notification. Check System Settings → Notifications → Pui.".into()));
+                            let _ = tx.send(Event::Status(format!("macOS could not deliver the notification ({bundle_id}). Check this app in System Settings → Notifications.")));
                             ctx.request_repaint();
                         }
                     });

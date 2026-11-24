@@ -66,6 +66,10 @@ export function parseDecision(text: string) {
   const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   return JSON.parse(body);
 }
+// OpenAI-compatible gateways can enable reasoning by default; those tokens
+// share the output ceiling with the decision JSON. Keep a bounded budget that
+// leaves room for both, without exceeding the selected model's output limit.
+const CLASSIFIER_MAX_TOKENS = 2048;
 const CLASSIFIER_ATTEMPTS = 3;
 const CLASSIFIER_COOLDOWN_MS = 5 * 60_000;
 
@@ -448,7 +452,7 @@ export function installPermissions(pi: any, initial: any = {}) {
           result = await ctx.modelRegistry.streamSimple(model, {
             systemPrompt: CLASSIFIER_PROMPT,
             messages: [{ role: "user", content: JSON.stringify({ RECENT_USER_REQUESTS: requestsContext, ...(automated.length ? { RECENT_AUTOMATED_PROMPTS: automated } : {}), WORKSPACE: ctx.cwd, ...(risky ? { BUILT_IN_SAFETY_RULE: sensitiveRead || (["write", "edit"].includes(name) && await sensitivePath(ctx.cwd, args.path)) ? "credentials" : "destructive_or_external" } : {}), ACTION: { tool: name, description: pi.getAllTools?.().find((t: any) => t.name === name)?.description?.slice(0, 2000), arguments: args } }), timestamp: Date.now() }],
-          }, { maxTokens: 256, signal, cacheRetention: "none" }).result();
+          }, { maxTokens: Math.min(CLASSIFIER_MAX_TOKENS, model.maxTokens), signal, cacheRetention: "none" }).result();
           if (revision !== version || ctx.signal?.aborted || controller.signal.aborted) return block("Permission check cancelled; retry under the current settings.");
           if (deadline.aborted) throw new Error("Classifier deadline exceeded");
           spent += result.usage?.cost?.total || 0;

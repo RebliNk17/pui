@@ -65,7 +65,7 @@ fn token(text: &str, cursor: usize) -> Option<Token> {
     })
 }
 fn cursor(ctx: &egui::Context, text: &str) -> Option<usize> {
-    let state = TextEditState::load(ctx, egui::Id::new("composer"))?;
+    let state = TextEditState::load(ctx, composer_text::widget_id(ctx, "composer"))?;
     let range = state.cursor.char_range()?;
     range.single().map(|c| c.index.min(text.chars().count()))
 }
@@ -188,7 +188,7 @@ impl View {
 impl Pui {
     pub(super) fn completion_active(&self, ctx: &egui::Context) -> bool {
         !self.completions.dismissed
-            && ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+            && ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer")))
             && cursor(ctx, &self.draft)
                 .and_then(|c| token(&self.draft, c))
                 .is_some()
@@ -229,10 +229,11 @@ impl Pui {
         let popup_pointer = self.completions.popup_rect.is_some_and(|rect| {
             ctx.input(|i| i.pointer.interact_pos().is_some_and(|p| rect.contains(p)))
         });
-        if !ctx.memory(|m| m.has_focus(egui::Id::new("composer"))) && popup_pointer {
+        if !ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer"))) && popup_pointer
+        {
             return;
         }
-        let current = if ctx.memory(|m| m.has_focus(egui::Id::new("composer"))) {
+        let current = if ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer"))) {
             cursor(ctx, &self.draft).and_then(|c| token(&self.draft, c))
         } else {
             None
@@ -330,7 +331,7 @@ impl Pui {
         let end = self.draft[..t.start].chars().count() + insert.chars().count();
         self.context_chips.clear();
         self.draft.replace_range(t.start..t.end, &insert);
-        let id = egui::Id::new("composer");
+        let id = composer_text::widget_id(ctx, "composer");
         let mut state = TextEditState::load(ctx, id).unwrap_or_default();
         state
             .cursor
@@ -354,7 +355,7 @@ impl Pui {
         }
         ctx.memory_mut(|m| {
             m.set_focus_lock_filter(
-                egui::Id::new("composer"),
+                composer_text::widget_id(ctx, "composer"),
                 egui::EventFilter {
                     tab: true,
                     escape: true,
@@ -372,7 +373,7 @@ impl Pui {
         let mut reload = false;
         let mut open = true;
         let popup = egui::Popup::new(
-            egui::Id::new("composer-completions"),
+            composer_text::widget_id(ctx, "composer-completions"),
             ctx.clone(),
             anchor,
             layer,
@@ -476,6 +477,10 @@ impl Pui {
             return false;
         }
         let args = args.trim().to_owned();
+        if self.side_chat.rendering && matches!(name, "new" | "main" | "btw" | "reload") {
+            self.state.notice = Some("Expand this side chat before starting/navigating conversations or reloading resources. Your draft was kept.".into());
+            return true;
+        }
         if name == "reload" {
             if !args.is_empty() {
                 self.state.error =
@@ -510,7 +515,7 @@ impl Pui {
             return true;
         }
         if name == "btw" {
-            self.start_side_chat(&args);
+            self.start_docked_side_chat(&args);
             return true;
         }
         if name != "compact" && !args.is_empty() {

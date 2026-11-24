@@ -311,6 +311,35 @@ fn bundle_from_executable(exe: &Path) -> Option<PathBuf> {
     Some(app.to_path_buf())
 }
 
+const DISTRIBUTION_BUNDLE_ID: &str = "dev.pi.pui";
+
+fn bundle_identifier(app: &Path) -> Option<String> {
+    let output = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleIdentifier"])
+        .arg(app.join("Contents/Info.plist"))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+        .map(|id| id.trim().to_owned())
+}
+
+fn stable_update_target(app: PathBuf, identifier: Option<&str>) -> Option<PathBuf> {
+    (identifier == Some(DISTRIBUTION_BUNDLE_ID)).then_some(app)
+}
+
+fn require_distribution_bundle(app: &Path) -> Result<(), String> {
+    if bundle_identifier(app).as_deref() != Some(DISTRIBUTION_BUNDLE_ID) {
+        return Err("Automatic installation requires the Pui distribution bundle identity. Development or unrecognized bundles cannot be replaced by a stable update.".into());
+    }
+    Ok(())
+}
+
 fn parse_expected_sha256(sums_text: &str, filename: &str) -> Option<String> {
     for line in sums_text.lines() {
         let line = line.trim();
@@ -465,6 +494,7 @@ fn download_and_stage(
         if !staged_app.join("Contents/MacOS/pui").is_file() {
             return Err("Extracted update does not contain a valid Pui.app bundle.".into());
         }
+        require_distribution_bundle(&staged_app)?;
         step(Phase::CheckingSignature)?;
         let verify = std::process::Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
@@ -480,7 +510,11 @@ fn download_and_stage(
         if progress.cancelled() {
             return Err(CANCELLED.into());
         }
-        Ok((staging.clone(), staged_app, current_app_bundle()))
+        let target_app = current_app_bundle().and_then(|app| {
+            let identifier = bundle_identifier(&app);
+            stable_update_target(app, identifier.as_deref())
+        });
+        Ok((staging.clone(), staged_app, target_app))
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -510,6 +544,9 @@ fn spawn_installer_and_relaunch(
     staged_app: &Path,
     target_app: &Path,
 ) -> Result<(), String> {
+    // Recheck at the installation boundary, not just when the download finished.
+    require_distribution_bundle(target_app)?;
+    require_distribution_bundle(staged_app)?;
     let pid = std::process::id().to_string();
     // Background helper waits for the current Pui process to exit completely,
     // replaces the .app bundle atomically inside target's directory, removes
@@ -729,7 +766,7 @@ impl Updates {
                     )
                 } else {
                     format!(
-                        "Pui {version} is downloaded and verified. Because this instance isn’t running from a packaged .app bundle, you can reveal the unpacked app in Finder."
+                        "Pui {version} is downloaded and verified. Because this instance isn’t running from a Pui distribution bundle (it may be Pui Dev or an unpackaged build), automatic replacement is disabled. You can reveal the unpacked app in Finder."
                     )
                 };
                 return ("Update ready to install", detail);
@@ -1157,6 +1194,44 @@ mod tests {
     }
 
     #[test]
+    fn stable_updates_only_replace_distribution_identity_regardless_of_bundle_path() {
+        for path in ["/Applications/Pui.app", "/work/dist/Pui.app"] {
+            let app = PathBuf::from(path);
+            assert_eq!(
+                stable_update_target(app.clone(), Some("dev.pi.pui")),
+                Some(app.clone())
+            );
+            for id in [None, Some(""), Some("dev.pi.pui.dev"), Some("other.app")] {
+                assert_eq!(stable_update_target(app.clone(), id), None);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installer_rejects_dev_and_unreadable_bundle_identities_before_launching() {
+        let root = std::env::temp_dir().join(format!("pui-bundle-id-{}", uuid::Uuid::new_v4()));
+        let stable = root.join("stable/Pui.app");
+        let dev = root.join("dev/Pui.app");
+        for (app, id) in [(&stable, "dev.pi.pui"), (&dev, "dev.pi.pui.dev")] {
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(
+                app.join("Contents/Info.plist"),
+                format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string></dict></plist>"),
+            )
+            .unwrap();
+        }
+        assert!(require_distribution_bundle(&stable).is_ok());
+        assert!(require_distribution_bundle(&dev).is_err());
+        assert!(spawn_installer_and_relaunch(&root, &stable, &dev).is_err());
+        assert!(spawn_installer_and_relaunch(&root, &dev, &stable).is_err());
+        assert!(spawn_installer_and_relaunch(&root, &stable, &root.join("missing.app")).is_err());
+        std::fs::write(dev.join("Contents/Info.plist"), "not a plist").unwrap();
+        assert!(require_distribution_bundle(&dev).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn all_update_states_have_honest_copy_without_starting_work() {
         let mut updates = Updates::default();
         assert_eq!(updates.status(false).0, "Updates aren’t configured");
@@ -1208,6 +1283,13 @@ mod tests {
             target_app: Some(PathBuf::from("/Applications/Pui.app")),
         };
         assert_eq!(updates.status(true).0, "Update ready to install");
+        if let InstallState::Ready { target_app, .. } = &mut updates.install {
+            *target_app = None;
+        }
+        let detail = updates.status(true).1;
+        assert!(detail.contains("Pui Dev"));
+        assert!(detail.contains("automatic replacement is disabled"));
+        assert!(detail.contains("Finder"));
         updates.install = InstallState::Failed("Checksum mismatch".into());
         assert_eq!(
             updates.status(true),

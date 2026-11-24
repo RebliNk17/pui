@@ -109,8 +109,14 @@ You need Rust 1.88+, CMake and Ninja (`brew install cmake ninja`).
 ```sh
 cargo run -- --demo              # a populated design preview; never starts Pi
 cargo run -- --cwd /path/to/repo # open a real project
-./scripts/bundle-macos.sh        # build dist/Pui.app
+./scripts/bundle-macos.sh        # optimized Pui Dev bundle at dist/Pui.app
 ```
+
+Local bundles use `dev.pi.pui.dev` / **Pui Dev** (also with `--debug`), separate
+from installed **Pui** so macOS notification clicks route to the right app.
+Release packaging requires an explicit `./scripts/bundle-macos.sh --distribution`;
+see [releases](docs/releases.md#local-bundle-identity-and-notification-routing) for
+existing local copies and notification permissions.
 
 Tests: `scripts/test-rust.sh` and `node --test tests/*.test.mjs`. See [test execution](docs/test-execution.md).
 

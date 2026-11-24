@@ -8,6 +8,7 @@ mod bidi_tests;
 mod fonts;
 pub(crate) mod status;
 mod styles;
+pub(crate) mod text_direction;
 pub(crate) use status::indicator as status_indicator;
 #[cfg(test)]
 mod tooltip_tests;

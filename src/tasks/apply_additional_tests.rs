@@ -31,7 +31,8 @@ fn normal_apply_adds_no_untracked_recovery_artifacts_and_second_workflow_can_pre
     assert!(capture_receipt(f.original(), &candidate, &head, &id, &f.home).is_ok());
 }
 #[test]
-fn unchanged_binary_baseline_is_allowed_and_binary_builder_edits_are_not() {
+fn binary_edits_executable_modes_and_utf8_paths_apply_and_roll_back() {
+    use std::os::unix::fs::PermissionsExt;
     let mut f = Fixture::new();
     fs::write(f.original().join("image.png"), [0, 255, 10, 123]).unwrap();
     fs::write(f.candidate().join("image.png"), [0, 255, 10, 123]).unwrap();
@@ -45,32 +46,68 @@ fn unchanged_binary_baseline_is_allowed_and_binary_builder_edits_are_not() {
         )
         .unwrap(),
     );
-    fs::write(f.candidate().join("main.txt"), "text builder\n").unwrap();
-    f.review();
-    let plan = prepare(&f.task).unwrap();
-    assert!(plan.blockers.is_empty());
-    assert_eq!(
-        apply(&f.home, &f.task, &plan).unwrap().status,
-        TransactionStatus::Applied
-    );
-}
-#[test]
-fn executable_mode_change_is_explicitly_blocked() {
-    use std::os::unix::fs::PermissionsExt;
-    let mut f = Fixture::new();
+    fs::write(f.candidate().join("image.png"), [0, 1, 2, 3, 255]).unwrap();
     fs::set_permissions(
         f.candidate().join("main.txt"),
         fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+    fs::create_dir_all(f.candidate().join("שלום")).unwrap();
+    let script = f.candidate().join("שלום/run-日本語.sh");
+    fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     f.review();
-    assert!(
-        prepare(&f.task)
-            .unwrap()
-            .blockers
-            .iter()
-            .any(|b| b.contains("Mode changes"))
+    let plan = prepare(&f.task).unwrap();
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    let outcome = apply(&f.home, &f.task, &plan).unwrap();
+    assert_eq!(outcome.status, TransactionStatus::Applied);
+    assert_eq!(
+        fs::read(f.original().join("image.png")).unwrap(),
+        vec![0, 1, 2, 3, 255]
     );
+    assert_eq!(
+        fs::metadata(f.original().join("main.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(f.original().join("שלום/run-日本語.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    let claim = crate::tasks::store::lock(&f.home, &f.task.id).unwrap();
+    let rolled = recover_owned(
+        &f.home,
+        &claim,
+        &f.task,
+        &outcome.transaction_id,
+        RecoveryAction::RollBack,
+    )
+    .unwrap();
+    assert_eq!(rolled.status, TransactionStatus::RolledBack);
+    assert_eq!(
+        fs::read(f.original().join("image.png")).unwrap(),
+        vec![0, 255, 10, 123]
+    );
+    assert_eq!(
+        fs::metadata(f.original().join("main.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert!(!f.original().join("שלום").exists());
+
+    // Ambiguous combining marks and bidi controls remain rejected.
+    assert!(name("cafe\u{0301}.txt".as_bytes()).is_err());
+    assert!(name("spoof\u{202E}txt.sh".as_bytes()).is_err());
 }
 #[test]
 fn candidate_head_drift_and_wrong_worktree_identity_block() {

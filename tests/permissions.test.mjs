@@ -157,6 +157,24 @@ test('Auto unavailable models, no context and oversized actions fail closed with
   const large=host('auto');assert.match((await large.gate('bash',{command:'x'.repeat(24001)})).reason,/too large/);
   for(const h of [unavailable,noContext,large]){assert.equal(h.calls.length,0);assert.equal(h.prompts.length,0);}
 });
+test('Auto leaves a bounded reasoning budget for complete decision JSON',async()=>{
+  for(const capacity of [512, 4096]){
+    const h=host('auto',{scope:{permissionClassifier:'current/cheap'}});
+    h.ctx.modelRegistry.getAvailable=()=>[{...model('cheap','current',0.1,0.5),reasoning:true,maxTokens:capacity}];
+    const seen=[];
+    h.ctx.modelRegistry.streamSimple=(_m,_c,o)=>({result:async()=>{
+      seen.push(o);
+      return o.maxTokens<=256
+        ?{content:[{type:'thinking',thinking:'Reviewing actual effects…'}],stopReason:'length'}
+        :{content:[{type:'text',text:'{"decision":"allow"}'}],stopReason:'stop'};
+    }});
+    assert.equal(await h.gate('bash',{command:'npm test'}),undefined);
+    assert.equal(seen.length,1);
+    assert.equal(seen[0].maxTokens,Math.min(2048,capacity));
+    assert.equal(seen[0].reasoning,undefined,'do not assume provider-specific thinking controls');
+    assert.equal(h.prompts.length,0);
+  }
+});
 test('Auto rejects invalid JSON and incomplete responses without leaking provider errors',async()=>{
   for(const response of [
     {content:[{type:'text',text:'not json'}],stopReason:'stop'},
@@ -366,6 +384,7 @@ test('Auto retains original task context across short followups and checks codem
   assert.deepEqual(payload.RECENT_USER_REQUESTS,['Update src/file to fix the requested bug','done']);
   assert.match(h.calls[0].c.systemPrompt,/DANGEROUS EFFECTS/);
   assert.equal(h.calls[0].o.reasoning,undefined);
+  assert.equal(h.calls[0].o.maxTokens,2048);
 });
 test('Auto flags dangerous commands and external mutations for strict classification, never asking',async()=>{
   const h=host('auto',{decision:'deny'});

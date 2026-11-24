@@ -347,11 +347,25 @@ fn legacy_baseline_tampering_binary_modes_and_staged_only_are_blocked() {
     fs::write(receipt.directory.join("baseline.json"), "tampered").unwrap();
     assert!(prepare(&f.task).is_err());
     let mut f = Fixture::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            f.candidate().join("main.txt"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        f.review();
+        let plan = prepare(&f.task).unwrap();
+        assert!(!plan.blockers.is_empty());
+        assert!(apply(&f.home, &f.task, &plan).is_err());
+        fs::set_permissions(
+            f.candidate().join("main.txt"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
     fs::write(f.candidate().join("main.txt"), [0, 255]).unwrap();
-    f.review();
-    let plan = prepare(&f.task).unwrap();
-    assert!(!plan.blockers.is_empty());
-    assert!(apply(&f.home, &f.task, &plan).is_err());
     git_ok(f.candidate(), &["add", "main.txt"]);
     fs::write(f.candidate().join("main.txt"), "baseline\n").unwrap();
     f.review();

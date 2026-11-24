@@ -52,6 +52,7 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
         "src/app/confirmations.rs",
         "src/app/context_capture/file_blocks.rs",
         "src/app/resource_reload.rs",
+        "src/app/resource_reload/connector.rs",
         "src/app/about.rs",
         "src/app/attention.rs",
         "src/app/attention/ui.rs",

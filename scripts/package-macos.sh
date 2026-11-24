@@ -3,6 +3,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]] || { echo "Release packaging requires native Apple Silicon macOS." >&2; exit 1; }
 version=$(python3 scripts/release.py check)
+app="$PWD/dist/Pui.app"
+[[ "$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb")).get("CFBundleIdentifier", ""))' "$app/Contents/Info.plist")" == dev.pi.pui ]] || { echo "Release packaging requires the distribution bundle identity. Rebuild with scripts/bundle-macos.sh --distribution." >&2; exit 1; }
 status=${PUI_SIGNING_STATUS:-ad-hoc}
 suffix=-adhoc
 case "$status" in
@@ -15,7 +17,6 @@ case "$status" in
     ;;
   *) echo "Unknown signing status." >&2; exit 1 ;;
 esac
-app="$PWD/dist/Pui.app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" == "$version" ]] || { echo "Bundle version mismatch." >&2; exit 1; }
 [[ "$(lipo -archs "$app/Contents/MacOS/pui")" == arm64 ]] || { echo "Expected an arm64 app." >&2; exit 1; }
 codesign --verify --deep --strict "$app"

@@ -1,5 +1,7 @@
 use super::*;
 
+mod rtl;
+
 const SOURCE: &str = "Intro **bold**, *italic*, [guide](https://example.test/guide), and `/tmp/demo/report.md`.\n\n3. **First** item with `src/demo.rs`, *emphasis*, and [linked `code`](https://example.test/code). A comfortable wrapping sentence keeps every word.\n\n   A second paragraph repeats `src/demo.rs` unchanged.\n\n   - Nested **child** and `src/demo.rs` with enough words to wrap in a narrow view.\n\n     8. Deep *ordered* child.\n     9. Another deep child.\n   - Second nested sibling.\n\n4. Second top-level item with digest `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`.\n\nAfter.\n\n- Plain bullet one.\n- Plain bullet two.\n\n| Key | Value |\n| --- | --- |\n| **Public** | [table link](https://example.test/table) |\n\n```rust\nlet demo = \"unchanged\";\n```\n\n> [!NOTE]\n> Keep **callout** and `code`.";
 
 fn collect(

@@ -2,64 +2,24 @@
 use super::*;
 use serde::Deserialize;
 
+mod capture;
+mod scope;
+mod selectors;
 mod transport;
-pub(super) use transport::State;
+pub(super) use scope::{FrameChoice, Scope};
 #[cfg(target_os = "macos")]
-pub(super) use transport::{Command, command, event, message_id, pick, receive};
+pub(super) use transport::{Command, command_scoped, event, inventory, pick_scoped, receive};
+pub(super) use transport::{State, message_id};
 
-const SELECTOR_LIMIT: usize = 256;
+const SELECTOR_LIMIT: usize = 1024;
 const TEXT_LIMIT: usize = 512;
 const TRANSPORT_LIMIT: usize = 16 * 1024;
 
 /// Deliberately excludes attributes, pseudos, escapes, lists and universal queries.
 /// This is a selector supplied by the user, not a promise of stable identity.
 fn selector(value: &str) -> Result<&str, &'static str> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > SELECTOR_LIMIT {
-        return Err("Enter a selector of 1–256 ASCII characters.");
-    }
-    let mut count = 0;
-    let mut need_part = true;
-    for part in value.split_ascii_whitespace() {
-        if part == ">" {
-            if need_part {
-                return Err("Put spaces around a child combinator ( > ).");
-            }
-            need_part = true;
-            continue;
-        }
-        count += 1;
-        if count > 6 {
-            return Err("Use at most six selector components.");
-        }
-        let mut start = true;
-        for (index, c) in part.bytes().enumerate() {
-            if c == b'.' || c == b'#' {
-                if start && index > 0 {
-                    return Err("An ID or class needs a name.");
-                }
-                start = true;
-            } else if (start && (c.is_ascii_alphabetic() || c == b'_'))
-                || (!start && (c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
-            {
-                start = false;
-            } else {
-                return Err(
-                    "Use tags, #ids, .classes, spaces or spaced > only; no attributes, pseudos or scripts.",
-                );
-            }
-        }
-        if start {
-            return Err("An ID or class needs a name.");
-        }
-        need_part = false;
-    }
-    if need_part {
-        return Err("The selector must end with a tag, ID or class.");
-    }
-    Ok(value)
+    selectors::selector(value)
 }
-
 /// Keep directional/control characters inspectable instead of allowing page
 /// text to visually spoof native field labels. Ordinary RTL text stays literal.
 fn visible_data(value: &str) -> String {
@@ -89,8 +49,14 @@ pub(super) struct Facts {
     position: String,
     color: String,
     font_size: String,
+    generated_selector: Option<String>,
+    selector_note: String,
 }
 impl Facts {
+    #[cfg(debug_assertions)]
+    pub(in crate::app::webview) fn smoke_selector(&self) -> Option<&str> {
+        self.generated_selector.as_deref()
+    }
     fn valid(&self) -> bool {
         !self.tag.is_empty()
             && self.tag.len() <= 64
@@ -99,6 +65,11 @@ impl Facts {
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
             && self.text.chars().count() <= TEXT_LIMIT
+            && self
+                .generated_selector
+                .as_deref()
+                .is_none_or(selectors::generated_selector_valid)
+            && self.selector_note.len() <= 160
             && [
                 &self.text_note,
                 &self.display,
@@ -120,6 +91,12 @@ pub(super) struct Editor {
     epoch: u64,
     query: String,
     focus: bool,
+    scope: Scope,
+    capture: Option<capture::Review>,
+    notice: Option<String>,
+    pub(super) page: String,
+    pub(super) page_title: String,
+    pub(super) document: u64,
 }
 impl Editor {
     pub(super) fn new(key: &str, epoch: u64) -> Self {
@@ -128,6 +105,12 @@ impl Editor {
             epoch,
             query: String::new(),
             focus: true,
+            scope: Scope::default(),
+            capture: None,
+            notice: None,
+            page: key.into(),
+            page_title: String::new(),
+            document: 0,
         }
     }
 }
@@ -138,6 +121,8 @@ pub(super) struct Decision {
     pub(super) close: bool,
     pub(super) pick: bool,
     pub(super) cancel_pick: bool,
+    pub(super) inventory: bool,
+    pub(super) scope: Scope,
 }
 
 pub(super) fn show(
@@ -150,7 +135,7 @@ pub(super) fn show(
     let field_id = egui::Id::new(("inspection-selector", &editor.key));
     let mut owns_keys = ui.memory(|m| m.focused()).is_none_or(|id| {
         id == field_id
-            || ["Inspect", "Close", "Picker"].iter().any(|name| {
+            || ["Inspect", "Close", "Picker", "Review"].iter().any(|name| {
                 ui.ctx()
                     .data(|d| d.get_temp::<egui::Id>(egui::Id::new(("inspection-action", *name))))
                     == Some(id)
@@ -158,6 +143,9 @@ pub(super) fn show(
     });
     owns_keys |= editor.focus;
     let keyboard = prompt_ui::keyboard_available(ui);
+    if keyboard {
+        super::privacy::guard_keys(ui.ctx());
+    }
     let mut enter = false;
     let focused = ui.memory(|memory| memory.focused());
     if owns_keys && keyboard {
@@ -192,15 +180,70 @@ pub(super) fn show(
     let epoch_changed = editor.epoch != state.epoch;
     if epoch_changed {
         editor.epoch = state.epoch;
+        editor.capture = None;
+        editor.scope = Scope::default();
         // Navigation never executes a new query. The next query needs a fresh click.
         enter = false;
     }
     prompt_ui::heading(
         ui,
         "Element inspection",
-        "Read-only facts · current top document · no form values",
+        "Read-only facts · explicit scope · no form values",
     );
-    ui.add(egui::Label::new(theme::small(ui, "Choose one element by tag, #id, .class, descendant or spaced > selector. Frames, shadow roots, attributes and pseudos are unsupported.")).wrap());
+    ui.add(egui::Label::new(theme::small(ui, "Choose an element by selector or pick on page. Frame inventory is read only on explicit refresh; unavailable/cross-origin scopes refuse.")).wrap());
+    let old_scope = editor.scope.clone();
+    egui::CollapsingHeader::new("Frame / shadow scope")
+        .id_salt(("browser-scope", &editor.key))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                decision.inventory = prompt_ui::button(
+                    ui,
+                    "Refresh frames",
+                    prompt_ui::Button::Secondary,
+                    enabled && !state.pending(),
+                )
+                .clicked();
+                egui::ComboBox::from_id_salt(("inspection-frame", &editor.key))
+                    .selected_text(if editor.scope.frame_id.is_some() {
+                        "Selected frame"
+                    } else {
+                        "Top document"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut editor.scope.frame_id, None, "Top document");
+                        for frame in &state.frames {
+                            ui.selectable_value(
+                                &mut editor.scope.frame_id,
+                                Some(frame.id.clone()),
+                                &frame.label,
+                            );
+                        }
+                    });
+            });
+            ui.label(theme::small(
+                ui,
+                "Optional open-shadow host selector (in selected frame)",
+            ));
+            let mut host = editor.scope.shadow_host.clone().unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut host)
+                        .id_salt(("shadow-host", &editor.key))
+                        .char_limit(1024)
+                        .desired_width(ui.available_width())
+                        .hint_text("Leave empty for document root"),
+                )
+                .changed()
+            {
+                editor.scope.shadow_host =
+                    (!host.trim().is_empty()).then(|| host.trim().to_owned());
+                editor.capture = None;
+            }
+        });
+    if editor.scope != old_scope {
+        editor.capture = None;
+    }
+    decision.scope = editor.scope.clone();
     let field = ui.add(
         egui::TextEdit::singleline(&mut editor.query)
             .id(field_id)
@@ -299,12 +342,42 @@ pub(super) fn show(
             decision.inspect = Some(query.to_owned());
         }
     }
-    ui.add(egui::Label::new(theme::small(ui, "Local, untrusted page data · never sent to a chat. Results are a snapshot; selectors may stop matching after page changes.")).wrap());
-    if let Some((query, facts)) = &state.facts {
+    ui.add(egui::Label::new(theme::small(ui, "Local, untrusted page data. Only an explicit reviewed Add copies it to the draft; nothing is sent. Selectors may stop matching after page changes.")).wrap());
+    if let Some((query, facts)) = &state.facts
+        && editor.scope == state.scope
+    {
+        let review = prompt_ui::button(
+            ui,
+            "Review for chat…",
+            prompt_ui::Button::Secondary,
+            enabled && !state.pending(),
+        );
+        crate::app::context_capture::browser::register(&review);
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(("inspection-action", "Review")), review.id));
+        if review.clicked() || (enter && review.has_focus() && review.enabled()) {
+            match capture::Review::new(ui.ctx(), state.epoch, editor, query, facts) {
+                Ok(value) => {
+                    editor.capture = Some(value);
+                    editor.notice = None;
+                }
+                Err(e) => editor.notice = Some(e.into()),
+            }
+        }
+        if let Some(selector) = &facts.generated_selector {
+            ui.add(
+                egui::Label::new(theme::small(
+                    ui,
+                    format!("Selector: {}", visible_data(selector)),
+                ))
+                .wrap(),
+            );
+        }
+        ui.add(egui::Label::new(theme::small(ui, &facts.selector_note)).wrap());
         for (name, value) in [
             ("Target", query.clone()),
             ("Tag", facts.tag.clone()),
-            ("Direct text", facts.text.clone()),
+            ("Descendant text", facts.text.clone()),
             ("Text limits", facts.text_note.clone()),
             (
                 "Viewport CSS px",
@@ -330,6 +403,25 @@ pub(super) fn show(
             );
         }
     }
+    if editor.scope != state.scope
+        || decision.close
+        || decision.inspect.is_some()
+        || decision.pick
+        || decision.inventory
+        || decision.cancel_pick
+    {
+        editor.capture = None;
+    }
+    capture::show(
+        ui,
+        &mut editor.capture,
+        state,
+        editor.document,
+        enabled && editor.scope == state.scope && !state.pending(),
+    );
+    if let Some(message) = &editor.notice {
+        ui.add(egui::Label::new(theme::small(ui, message)).wrap());
+    }
     if let Some(message) = &state.message {
         ui.add(egui::Label::new(theme::small(ui, message)).wrap());
     }
@@ -342,5 +434,7 @@ pub(super) fn show(
     decision
 }
 
+#[cfg(test)]
+mod capture_tests;
 #[cfg(test)]
 mod tests;

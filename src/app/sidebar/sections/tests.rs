@@ -649,6 +649,24 @@ fn legacy_names_migrate_to_stable_bounded_sections_and_roundtrip() {
 }
 
 #[test]
+fn aliased_saved_section_membership_partitions_without_losing_the_assignment() {
+    let (mut app, id, path) = fixture();
+    let alias = path.parent().unwrap().join("configured-alias");
+    let root = path.parent().unwrap().to_path_buf();
+    let aliased_path = alias.join(path.file_name().unwrap());
+    let meta = app.prefs.chats.remove(&path).unwrap();
+    app.prefs.chats.insert(aliased_path.clone(), meta);
+    crate::runtime::with_session_path_alias(&root, &alias, || {
+        let (_, branches) = sidebar_tree::listing(&app);
+        let mut visible: Vec<_> = (0..branches.len()).collect();
+        let groups = partition(&app, &branches, &mut visible);
+        assert_eq!(groups[&id].len(), 1);
+        assert_eq!(branches[groups[&id][0]].path.as_ref(), Some(&path));
+        assert_eq!(app.chat_prefs_path(&path), aliased_path);
+    });
+}
+
+#[test]
 fn partition_moves_only_roots_and_preserves_sort_and_pinned_ancestry() {
     let ctx = egui::Context::default();
     let mut app = crate::app::files::tests::app(&ctx);

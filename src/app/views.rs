@@ -191,8 +191,13 @@ impl Pui {
                         bottom: 12,
                     }),
             )
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
+            .show(ctx, |ui| self.inspector_contents(ui));
+    }
+
+    pub(super) fn inspector_contents(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let colors = theme::palette(&ctx);
+        egui::ScrollArea::vertical()
                     .id_salt("floating-cards")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -457,7 +462,7 @@ impl Pui {
                                         && !self.resume_agent()
                                     {
                                         self.connect(
-                                            ctx,
+                                            &ctx,
                                             self.state.session_file.as_ref().map(PathBuf::from),
                                         );
                                     }
@@ -529,7 +534,7 @@ impl Pui {
                                     }
                                     if let Some(path) = selected_preview {
                                         if let Err(err) =
-                                            self.files.open_target(ctx, &self.prefs.cwd, &path)
+                                            self.files.open_target(&ctx, &self.prefs.cwd, &path)
                                         {
                                             self.state.notice = Some(err);
                                         } else {
@@ -579,7 +584,6 @@ impl Pui {
                             self.settings_open = true;
                         }
                     });
-            });
     }
 
     fn working_tree(&mut self, ui: &mut egui::Ui) {
@@ -695,56 +699,56 @@ impl Pui {
         if connectors.is_empty() {
             ui.label(theme::small(ui, "No MCP connectors configured."));
         } else {
-            let mut reconnect = false;
+            let blocked = self.connector_reconnect_blocked();
+            let mut reconnect = None;
             for conn in connectors {
                 ui.push_id(&conn.name, |ui| {
-                    ui.horizontal(|ui| {
-                        dot(
-                            ui,
-                            if conn.error.is_some() {
-                                colors.amber
-                            } else if self.connected {
-                                colors.green
-                            } else {
-                                colors.dim
-                            },
-                        );
-                        let label =
-                            ui.label(RichText::new(&conn.name).size(11.5).color(colors.text));
-                        if let Some(err) = &conn.error {
-                            label.on_hover_text(err);
-                        }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let action_label = if conn.error.is_some() {
-                                "Reconnect"
-                            } else {
-                                "Reload"
-                            };
-                            if ui
-                                .add_enabled(
-                                    !self.demo && self.connected,
-                                    egui::Button::new(
-                                        RichText::new(action_label).size(10.5).color(
-                                            if conn.error.is_some() {
-                                                colors.amber
-                                            } else {
-                                                colors.muted
-                                            },
-                                        ),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                reconnect = true;
-                            }
-                        });
+                    // Allocate the action first, from the shared right edge. A
+                    // long connector name may elide but can never move Reconnect.
+                    let width = ui.available_width();
+                    let height = ui.spacing().interact_size.y.max(28.0);
+                    let (row, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+                    let action_width = 66.0_f32.min(width * 0.45);
+                    let action_rect = egui::Rect::from_min_max(
+                        egui::pos2(row.right() - action_width, row.top()), row.max);
+                    let reconnected = self.resource_reload.connector_reconnected(&conn.name);
+                    let pending = self.resource_reload.connector_connecting(&conn.name);
+                    let action_label = if pending { "Connecting…" } else { "Reconnect" };
+                    let action = ui.scope_builder(egui::UiBuilder::new().max_rect(action_rect).layout(Layout::right_to_left(Align::Center)), |ui| {
+                        ui.add_enabled(blocked.is_none(),
+                            egui::Button::new(RichText::new(action_label).size(10.5)
+                                .color(if conn.error.is_some() && !reconnected { colors.amber } else { colors.muted }))
+                                .frame(false))
+                    }).inner.on_hover_text(blocked.unwrap_or("Reconnect only this connector without restarting the chat. Active requests using it may fail; configuration is not reloaded."))
+                        .on_disabled_hover_text(blocked.unwrap_or("Reconnect unavailable."));
+                    if action.clicked() { reconnect = Some(conn.name.clone()); }
+                    let dot_center = row.left_center() + egui::vec2(4.0, 0.0);
+                    ui.painter().circle_filled(dot_center, 3.0,
+                        if pending || (conn.error.is_some() && !reconnected) { colors.amber } else if self.connected { colors.green } else { colors.dim });
+                    let name_rect = egui::Rect::from_min_max(
+                        egui::pos2(row.left() + 16.0, row.top()),
+                        egui::pos2((action_rect.left() - 8.0).max(row.left() + 16.0), row.bottom()));
+                    let mut job = egui::text::LayoutJob::simple_singleline(conn.name.clone(), FontId::proportional(11.5), colors.text);
+                    job.wrap.max_width = name_rect.width();
+                    job.wrap.max_rows = 1;
+                    job.wrap.break_anywhere = true;
+                    let galley = ui.painter().layout_job(job);
+                    let elided = galley.elided;
+                    ui.painter().with_clip_rect(name_rect).galley(
+                        name_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0), galley, colors.text);
+                    let label = ui.interact(name_rect, ui.id().with("connector-name"), Sense::hover());
+                    if let Some(error) = &conn.error && !reconnected { label.on_hover_text(error); }
+                    else if elided { label.on_hover_text(&conn.name); }
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(egui::Id::new(("connector-row", conn.name.as_str())), (row, name_rect, action.rect, elided));
                     });
                 });
             }
-            if reconnect {
-                self.request_resource_reload();
+            if let Some(name) = reconnect {
+                self.request_connector_reconnect(&name);
             }
+            ui.label(theme::small(ui, "Reconnect affects one connector, not the chat. Use /reload when idle to load configuration changes."));
         }
     }
 
@@ -1147,6 +1151,7 @@ impl Pui {
                 self.transcript.view = self.prefs.transcript_view;
                 self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
+                self.transcript.continue_enabled = self.can_continue_after_error();
                 self.transcript.progress = self.transcript_progress();
                 self.transcript.cwd =
                     (!self.prefs.cwd.as_os_str().is_empty()).then(|| self.prefs.cwd.clone());
@@ -1212,6 +1217,9 @@ impl Pui {
                 self.attention_rendered(ui);
                 if let Some(action) = self.transcript.action.take() {
                     match action {
+                        crate::transcript::TranscriptAction::Continue(index) => {
+                            self.continue_after_error(index);
+                        }
                         crate::transcript::TranscriptAction::Open(target) => {
                             if let Err(error) =
                                 self.files.open_target(ctx, &self.prefs.cwd, &target)
@@ -1344,39 +1352,50 @@ fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
+    let added_galley = (!added.is_empty() && added != "0").then(|| {
+        ui.painter().layout_no_wrap(
+            format!("+{added}"),
+            FontId::proportional(10.0),
+            colors.green,
+        )
+    });
+    let removed_galley = (!removed.is_empty() && removed != "0").then(|| {
+        ui.painter().layout_no_wrap(
+            format!("−{removed}"),
+            FontId::proportional(10.0),
+            colors.red,
+        )
+    });
+    let counts_width: f32 = [&added_galley, &removed_galley]
+        .into_iter()
+        .flatten()
+        .map(|galley| galley.size().x + 8.0)
+        .sum();
     let mut job = egui::text::LayoutJob::simple_singleline(
         name.into_owned(),
         FontId::proportional(11.0),
         colors.text,
     );
-    job.wrap.max_width = (rect.width() - 100.0).max(40.0);
+    job.wrap.max_width = (rect.width() - 26.0 - 15.0 - counts_width).max(1.0);
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = ui.painter().layout_job(job);
+    let elided = galley.elided;
     ui.painter().galley(
         rect.left_center() + egui::vec2(26.0, -galley.size().y / 2.0),
         galley,
         colors.text,
     );
     let mut x = rect.right() - 15.0;
-    if !removed.is_empty() && removed != "0" {
-        ui.painter().text(
-            egui::pos2(x, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            format!("−{removed}"),
-            FontId::proportional(10.0),
-            colors.red,
-        );
-        x -= 30.0;
-    }
-    if !added.is_empty() && added != "0" {
-        ui.painter().text(
-            egui::pos2(x, rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            format!("+{added}"),
-            FontId::proportional(10.0),
-            colors.green,
-        );
+    for (galley, color) in [(removed_galley, colors.red), (added_galley, colors.green)] {
+        if let Some(galley) = galley {
+            ui.painter().galley(
+                egui::pos2(x - galley.size().x, rect.center().y - galley.size().y / 2.0),
+                galley.clone(),
+                color,
+            );
+            x -= galley.size().x + 8.0;
+        }
     }
     icons::chevron(
         ui,
@@ -1387,10 +1406,17 @@ fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui
         false,
         colors.dim,
     );
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(path)
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if elided {
+        response.on_hover_text(path)
+    } else {
+        response
+    }
 }
+
+#[cfg(test)]
+#[path = "inspector_layout_tests.rs"]
+mod inspector_layout_tests;
 
 #[cfg(test)]
 mod tests {

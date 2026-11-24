@@ -63,32 +63,33 @@ pub(crate) fn inspect_action(
         if !status.success() || !out.is_empty() {
             return Err("Branch switching requires a clean index/worktree with no untracked or ignored files. Nothing switched.".into());
         }
-        for marker in [
-            "MERGE_HEAD",
-            "CHERRY_PICK_HEAD",
-            "REVERT_HEAD",
-            "rebase-merge",
-            "rebase-apply",
-        ] {
-            let (out, status) = read_only::run(
-                read_only::command(root).args([
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-path",
-                    marker,
-                ]),
-                cancel,
-                deadline,
-                8193,
-                "Git operation state",
-                "State path exceeds limit",
-            )?;
-            let path = std::str::from_utf8(&out)
-                .map_err(|_| "Invalid operation path")?
-                .trim_end_matches('\n');
-            if !status.success() || Path::new(path).exists() {
-                return Err("Finish the active Git operation first.".into());
-            }
+        let (out, status) = read_only::run(
+            read_only::command(root).args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "MERGE_HEAD",
+                "--git-path",
+                "CHERRY_PICK_HEAD",
+                "--git-path",
+                "REVERT_HEAD",
+                "--git-path",
+                "rebase-merge",
+                "--git-path",
+                "rebase-apply",
+            ]),
+            cancel,
+            deadline,
+            8193,
+            "Git operation state",
+            "State path exceeds limit",
+        )?;
+        let paths = std::str::from_utf8(&out)
+            .map_err(|_| "Invalid operation path")?
+            .lines()
+            .collect::<Vec<_>>();
+        if !status.success() || paths.len() != 5 || paths.iter().any(|p| Path::new(p).exists()) {
+            return Err("Finish the active Git operation first.".into());
         }
         let reference = format!("refs/heads/{name}^{{commit}}");
         let (out, status) = read_only::run(

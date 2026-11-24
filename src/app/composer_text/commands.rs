@@ -27,7 +27,7 @@ fn change(
     text: &mut String,
     edit: impl FnOnce(&mut String, &mut CCursorRange),
 ) {
-    let id = egui::Id::new("composer");
+    let id = composer_text::widget_id(ctx, "composer");
     let Some(mut state) = TextEditState::load(ctx, id) else {
         return;
     };
@@ -108,7 +108,7 @@ pub(in crate::app) fn format(ctx: &egui::Context, text: &mut String, format: For
 }
 
 pub(in crate::app) fn keys(ctx: &egui::Context, text: &mut String) {
-    if !ctx.memory(|m| m.has_focus(egui::Id::new("composer"))) {
+    if !ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer"))) {
         return;
     }
     // Never reinterpret an in-progress IME composition.
@@ -137,7 +137,7 @@ pub(in crate::app) fn keys(ctx: &egui::Context, text: &mut String) {
         });
         ctx.memory_mut(|m| {
             m.request_focus_with_filter(
-                egui::Id::new("composer"),
+                composer_text::widget_id(ctx, "composer"),
                 egui::EventFilter {
                     tab: true,
                     horizontal_arrows: true,
@@ -150,7 +150,7 @@ pub(in crate::app) fn keys(ctx: &egui::Context, text: &mut String) {
 }
 
 fn indent(ctx: &egui::Context, text: &mut String, outdent: bool) -> bool {
-    let Some(state) = TextEditState::load(ctx, egui::Id::new("composer")) else {
+    let Some(state) = TextEditState::load(ctx, composer_text::widget_id(ctx, "composer")) else {
         return false;
     };
     let Some(range) = state.cursor.char_range() else {

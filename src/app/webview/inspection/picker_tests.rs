@@ -64,13 +64,15 @@ fn native_picker_one_shot_resolves_in_top_world_disables_overlay_and_keeps_facts
     )
     .unwrap();
     assert_eq!(read.method, "Runtime.callFunctionOn");
-    assert_eq!(read.params["objectId"], "picked-node");
+    assert_eq!(read.params["arguments"][0]["objectId"], "picked-node");
+    assert_eq!(read.params["executionContextId"], 4);
+    assert!(read.params.get("objectId").is_none());
     assert_eq!(read.params["returnByValue"], true);
     assert!(
         read.params["functionDeclaration"]
             .as_str()
             .unwrap()
-            .contains("ownerDocument !== document")
+            .contains("\"ownerDocument\", selected) !== document")
     );
     receive(
         &mut state,

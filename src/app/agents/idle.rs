@@ -81,6 +81,7 @@ impl Pui {
                     || self.preview_rx.is_some()
                     || self.history_pending.is_some()
                     || self.resource_reload.pending()
+                    || self.resource_reload.connector_pending()
                     || self.resource_reload.confirming()
                     || self.interrupt.is_some()
                     || !self.deliveries.is_empty()

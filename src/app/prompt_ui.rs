@@ -101,7 +101,16 @@ pub(super) fn compact_toggle_row(
 }
 
 pub(super) fn keyboard_available(ui: &egui::Ui) -> bool {
-    ui.memory(|memory| memory.is_above_modal_layer(ui.layer_id()))
+    let ctx = ui.ctx();
+    let allowed = ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new("side-chat-prompt-keyboard"))
+            .unwrap_or_else(|| {
+                !data
+                    .get_temp::<bool>(egui::Id::new("side-chat-main-keyboard-blocked"))
+                    .unwrap_or(false)
+            })
+    });
+    ui.is_enabled() && allowed && ui.memory(|memory| memory.is_above_modal_layer(ui.layer_id()))
 }
 
 pub(super) fn style(ui: &mut egui::Ui) {

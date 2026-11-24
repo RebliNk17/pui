@@ -50,7 +50,9 @@ impl Pui {
                 .unwrap()
                 .permission = Some(mode);
             self.prefs.agent_tree = self.agent_records();
-            self.task_apply_settings();
+            if !self.side_chat.rendering {
+                self.task_apply_settings();
+            }
             if self.client.is_some() {
                 self.send(json!({"type":"prompt","message":format!("/pui-settings {}",self.agent_settings(&self.agents.active).payload())}));
             }
@@ -68,6 +70,9 @@ impl Pui {
             && !self.readonly_worker()
             && !self.is_mirror();
         self.set_permission(mode);
+        if self.side_chat.rendering {
+            return;
+        }
         if writable_local && self.active_permission() == mode {
             self.remember_default_permission(mode);
             self.prefs.agent_tree = self.agent_records();

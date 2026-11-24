@@ -8,6 +8,8 @@ import shutil
 import sys
 
 app, target, profile = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+with (app / "Contents/Info.plist").open("rb") as source:
+    bundle_id = plistlib.load(source)["CFBundleIdentifier"]
 outputs = sorted(
     list((target / profile / "build").glob("cef-dll-sys-*/output"))
     + list((target / profile / "build").glob("cef-dll-sys/*/output")),
@@ -49,7 +51,7 @@ for suffix in ["", " (GPU)", " (Renderer)", " (Plugin)", " (Alerts)"]:
     binary.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(target / profile / "pui-browser-helper", binary)
     with (contents / "Info.plist").open("wb") as out:
-        plistlib.dump({"CFBundleExecutable": name, "CFBundleIdentifier": "dev.pi.pui.browser-helper" + suffix.replace(" (", ".").replace(")", "").lower(), "CFBundleName": name, "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "LSUIElement": True, "LSMinimumSystemVersion": "12.0"}, out)
+        plistlib.dump({"CFBundleExecutable": name, "CFBundleIdentifier": bundle_id + ".browser-helper" + suffix.replace(" (", ".").replace(")", "").lower(), "CFBundleName": name, "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "LSUIElement": True, "LSMinimumSystemVersion": "12.0"}, out)
 resources = app / "Contents/Resources"
 shutil.copy2(cef / "LICENSE.txt", resources / "CEF-LICENSE.txt")
 shutil.copy2(cef / "CREDITS.html", resources / "CEF-CREDITS.html")

@@ -236,17 +236,21 @@ impl Pui {
         }
         self.task_board_cards(&mut cards);
         for live in self.sync.live_sessions() {
-            if let Some(card) = cards
-                .iter_mut()
-                .find(|c| c.path.as_ref() == Some(&live.path))
-            {
+            if let Some(card) = cards.iter_mut().find(|c| {
+                c.path
+                    .as_deref()
+                    .is_some_and(|p| sidebar_tree::same_path(p, &live.path))
+            }) {
                 // Parked mirrors do not receive full snapshots; registry status
                 // is authoritative until their session is opened again.
                 card.status = Status::from_label(&live.label);
                 card.activity = format!("{} · another Pui window", live.label);
                 continue;
             }
-            let saved = self.sessions.iter().find(|s| s.path == live.path);
+            let saved = self
+                .sessions
+                .iter()
+                .find(|s| sidebar_tree::same_path(&s.path, &live.path));
             let project = if live.cwd.as_os_str().is_empty() {
                 saved.map(|s| s.cwd.clone()).unwrap_or_default()
             } else {

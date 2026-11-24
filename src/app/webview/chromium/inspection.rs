@@ -94,6 +94,7 @@ pub(super) fn register(tab: &Tab) -> Option<Registration> {
             ctx: tab.ctx.clone(),
             key: String::new(),
             snapshots: None,
+            history: None,
         },
         tab.browser.identifier(),
     );
@@ -111,15 +112,27 @@ wrap_task! {
     }
 }
 
+#[cfg(debug_assertions)]
 pub(super) fn inspect(tab: &Tab, epoch: u64, query: Option<&str>) {
+    inspect_scoped(tab, epoch, query, &inspection::Scope::default(), false);
+}
+pub(super) fn inspect_scoped(
+    tab: &Tab,
+    epoch: u64,
+    query: Option<&str>,
+    scope: &inspection::Scope,
+    inventory: bool,
+) {
     let next = tab.state.lock().ok().and_then(|mut state| {
         if state.loading {
             return None;
         }
-        if let Some(query) = query {
-            inspection::command(&mut state.inspection, epoch, query)
+        if inventory {
+            inspection::inventory(&mut state.inspection, epoch)
+        } else if let Some(query) = query {
+            inspection::command_scoped(&mut state.inspection, epoch, query, scope)
         } else {
-            inspection::pick(&mut state.inspection, epoch)
+            inspection::pick_scoped(&mut state.inspection, epoch, scope)
         }
     });
     if let Some(command) = next {
@@ -130,6 +143,7 @@ pub(super) fn inspect(tab: &Tab, epoch: u64, query: Option<&str>) {
                     ctx: tab.ctx.clone(),
                     key: String::new(),
                     snapshots: None,
+                    history: None,
                 },
                 state.inspection.operation,
                 tab.browser.clone(),
@@ -137,7 +151,11 @@ pub(super) fn inspect(tab: &Tab, epoch: u64, query: Option<&str>) {
             if cef::post_delayed_task(
                 ThreadId::UI,
                 Some(&mut task),
-                if query.is_some() { 2000 } else { 30_000 },
+                if query.is_some() || inventory {
+                    2000
+                } else {
+                    30_000
+                },
             ) != 1
             {
                 drop(state);
@@ -156,6 +174,7 @@ pub(super) fn inspect(tab: &Tab, epoch: u64, query: Option<&str>) {
                 ctx: tab.ctx.clone(),
                 key: String::new(),
                 snapshots: None,
+                history: None,
             },
             command,
         );

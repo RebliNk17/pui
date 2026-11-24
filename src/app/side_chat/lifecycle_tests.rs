@@ -9,7 +9,12 @@ fn presentation_fixture_is_static_independent_and_has_no_clients_or_model_run() 
     assert!(app.agents.parked.values().all(|chat| chat.client.is_none()));
     assert!(!app.state.busy);
     assert_eq!(app.side_chat.pairs.len(), 1);
-    assert!(app.state.messages[0].text.contains("Static design preview"));
+    let side = app.docked_side_chat_target().unwrap();
+    assert!(
+        app.agents.parked[&side].state.messages[0]
+            .text
+            .contains("Static design preview")
+    );
     assert!(app.agents.nodes[&app.agents.active].parent.is_none());
 }
 

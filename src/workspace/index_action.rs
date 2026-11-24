@@ -117,9 +117,35 @@ fn prepare_at(
         return Err("Unsupported index action. Renames, conflicts, type changes and submodules are not supported.".into());
     }
     read_only::filters_disabled(root, cancel, deadline)?;
-    let actual = run(root, &["rev-parse", "--show-toplevel"], cancel, deadline)?;
-    let actual = line(&actual, 8192, "root")?;
-    if Path::new(&actual) != root {
+    let paths = String::from_utf8(run(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-path",
+            "index",
+            "--shared-index-path",
+        ],
+        cancel,
+        deadline,
+    )?)
+    .map_err(|_| "Invalid Git paths.")?;
+    let mut path_lines = paths.lines();
+    let actual = path_lines.next().ok_or("Missing repository root.")?;
+    let index_raw = path_lines.next().ok_or("Missing index path.")?;
+    let shared_raw = path_lines.next();
+    if path_lines.next().is_some()
+        || actual.is_empty()
+        || actual.len() > 8192
+        || actual.chars().any(char::is_control)
+        || index_raw.is_empty()
+        || index_raw.len() > 8192
+        || index_raw.chars().any(char::is_control)
+    {
+        return Err("Invalid Git path inventory.".into());
+    }
+    if Path::new(actual) != root {
         return Err("Repository root changed.".into());
     }
     let (branch, head) = super::commit::branch_head(root, cancel, deadline)?;
@@ -127,16 +153,7 @@ fn prepare_at(
     if initial && action == Action::Discard {
         return Err("Discard before first commit is unsupported.".into());
     }
-    let index_path = PathBuf::from(line(
-        &run(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            cancel,
-            deadline,
-        )?,
-        8192,
-        "index path",
-    )?);
+    let index_path = PathBuf::from(index_raw);
     if !index_path.is_absolute() {
         return Err("Invalid index path.".into());
     }
@@ -144,13 +161,7 @@ fn prepare_at(
     if !index.is_empty() && !index.starts_with(b"DIRC") {
         return Err("Invalid index header.".into());
     }
-    let shared = run(
-        root,
-        &["rev-parse", "--shared-index-path"],
-        cancel,
-        deadline,
-    )?;
-    if !shared.is_empty() {
+    if shared_raw.is_some_and(|s| !s.is_empty()) {
         return Err("Split index is unsupported for index actions.".into());
     }
     let mut cmd = read_only::command(root);
@@ -323,16 +334,6 @@ impl Drop for OwnedPath {
 }
 pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), String> {
     let deadline = Instant::now() + DEADLINE;
-    let mut fresh = prepare_at(
-        &snapshot.root,
-        &snapshot.path,
-        &snapshot.status,
-        snapshot.action,
-        cancel,
-        deadline,
-    )?;
-    fresh.hunk = snapshot.hunk;
-    fresh.lines = snapshot.lines.clone();
     if snapshot.lines.active && (snapshot.hunk.0.is_some() || !snapshot.lines.any()) {
         return Err("Select at least one valid changed line; empty line intent never stages the whole file.".into());
     }
@@ -346,11 +347,6 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
     } else {
         None
     };
-    if fresh != snapshot {
-        return Err(
-            "File, HEAD or index changed since confirmation. Nothing staged; inspect again.".into(),
-        );
-    }
     if snapshot.action == Action::Discard {
         return discard::apply(snapshot, cancel, deadline);
     }
@@ -364,6 +360,21 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
     let lock_guard = OwnedPath(lock_path.clone());
     if inspect_index(&snapshot.index_path, snapshot.index.is_empty())? != snapshot.index {
         return Err("Index changed before lock acquisition.".into());
+    }
+    let mut fresh = prepare_at(
+        &snapshot.root,
+        &snapshot.path,
+        &snapshot.status,
+        snapshot.action,
+        cancel,
+        deadline,
+    )?;
+    fresh.hunk = snapshot.hunk;
+    fresh.lines = snapshot.lines.clone();
+    if fresh != snapshot {
+        return Err(
+            "File, HEAD or index changed since confirmation. Nothing staged; inspect again.".into(),
+        );
     }
     let temp = snapshot
         .index_path
@@ -489,17 +500,17 @@ pub(crate) fn apply(snapshot: Snapshot, cancel: &AtomicBool) -> Result<(), Strin
         return Err("Private index update failed. Original index unchanged.".into());
     }
     drop(patch_guard);
-    let mut after = prepare_at(
-        &snapshot.root,
-        &snapshot.path,
-        &snapshot.status,
-        snapshot.action,
-        cancel,
-        deadline,
-    )?;
-    after.hunk = snapshot.hunk;
-    after.lines = snapshot.lines.clone();
-    if after != snapshot {
+    let full = snapshot.root.join(&snapshot.path);
+    let current_file: Option<[u8; 32]> = match fs::symlink_metadata(&full) {
+        Ok(_) => Some(Sha256::digest(bytes(&full, MAX_FILE)?).into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("Cannot inspect working file.".into()),
+    };
+    if current_file != snapshot.file
+        || inspect_index(&snapshot.index_path, snapshot.index.is_empty())? != snapshot.index
+        || super::commit::branch_head(&snapshot.root, cancel, deadline)?
+            != (snapshot.branch, snapshot.head)
+    {
         return Err(
             "File, HEAD or index changed during preparation. Original index unchanged.".into(),
         );

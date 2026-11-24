@@ -11,7 +11,7 @@ mod chat_find;
 mod completions;
 mod composer_hints;
 mod composer_history;
-mod composer_text;
+pub(crate) mod composer_text;
 mod composer_toolbar;
 mod confirmations;
 pub(crate) mod context_capture;
@@ -1084,6 +1084,7 @@ impl Pui {
     fn retain_chat_on_switch(&self) -> bool {
         self.has_tree()
             || self.resource_reload.pending()
+            || self.resource_reload.connector_pending()
             || !self.draft.is_empty()
             || !self.draft_images.is_empty()
             || self.sync_live_owner()
@@ -1309,7 +1310,11 @@ impl Pui {
             .unwrap_or_default();
         if !events.is_empty() {
             had_activity = true;
-        } else if !had_activity && !self.resource_reload.pending() && self.agents.background {
+        } else if !had_activity
+            && !self.resource_reload.pending()
+            && !self.resource_reload.connector_pending()
+            && self.agents.background
+        {
             return false;
         }
         for event in events {
@@ -1335,6 +1340,9 @@ impl Pui {
                 }
                 rpc::Event::Record(record) => {
                     title_dirty |= session_titles::title_event(&record);
+                    if self.connector_reconnect_record(&record) {
+                        continue;
+                    }
                     self.resource_reload_record(&record);
                     self.completion_event(&record);
                     self.agent_event(&record);
@@ -2003,7 +2011,7 @@ impl Pui {
         }
         // Optional extension/MCP diagnostics live in a fixed top-bar popover.
         // Inserting multiline notifications here moves the viewport and composer.
-        if self.demo {
+        if self.demo && !self.side_chat.rendering {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Spark, colors.accent);
                 ui.label(theme::small(ui, "Design preview · example conversation"));
@@ -2063,7 +2071,7 @@ impl Pui {
                     "composer-last-cursor",
                     self.state.session_file.as_deref(),
                 ));
-                let cursor_before = egui::TextEdit::load_state(ctx, egui::Id::new("composer"))
+                let cursor_before = egui::TextEdit::load_state(ctx, composer_text::widget_id(ctx, "composer"))
                     .and_then(|s| s.cursor.char_range());
                 let reveal_cursor = self.focus_composer
                     || ctx.data(|d| {
@@ -2073,7 +2081,7 @@ impl Pui {
                 let mut layouter = composer_text::layout;
                 // Only the editor scrolls: delivery/model controls stay below it.
                 // Bound growth on short windows and at higher UI zoom as well.
-                let max_height = (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0);
+                let max_height = if self.side_chat.rendering { 72.0 } else { (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0) };
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt(("composer-text-scroll", self.state.session_file.as_deref()))
                     .max_height(max_height)
@@ -2089,7 +2097,7 @@ impl Pui {
                             smart_newline,
                         };
                         let output = egui::TextEdit::multiline(&mut buffer)
-                            .id(egui::Id::new("composer"))
+                            .id(composer_text::widget_id(ctx, "composer"))
                             .font(FontId::proportional(14.0))
                             .layouter(&mut layouter)
                             .frame(false)
@@ -2124,7 +2132,7 @@ impl Pui {
                                 .pos_from_cursor(range.primary)
                                 .translate(output.galley_pos.to_vec2());
                             ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new("composer-caret-rect"), caret)
+                                d.insert_temp(composer_text::widget_id(ctx, "composer-caret-rect"), caret)
                             });
                         }
                         output.response
@@ -2141,7 +2149,7 @@ impl Pui {
                 #[cfg(test)]
                 ctx.data_mut(|d| {
                     d.insert_temp(
-                        egui::Id::new("composer-scroll-metrics"),
+                        composer_text::widget_id(ctx, "composer-scroll-metrics"),
                         (editor_rect, scroll.content_size, scroll.state.offset.y),
                     )
                 });
@@ -2209,7 +2217,7 @@ impl Pui {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
                         #[cfg(test)]
-                        ctx.data_mut(|d| d.insert_temp(egui::Id::new("composer-send-rect"), rect));
+                        ctx.data_mut(|d| d.insert_temp(composer_text::widget_id(ctx, "composer-send-rect"), rect));
                         let response = if enabled {
                             response.on_hover_cursor(egui::CursorIcon::PointingHand)
                         } else {
@@ -2747,6 +2755,13 @@ impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::chromium::Runtime::pump(ctx);
         self.files.begin_frame();
+        let side_keyboard = self.side_chat_owns_keyboard(ctx);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("side-chat-main-keyboard-blocked"),
+                side_keyboard,
+            )
+        });
         self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
         self.remember_navigation();
@@ -2839,10 +2854,14 @@ impl eframe::App for Pui {
             && !self.tasks.open
             && !self.automation.open
             && !terminal_input
+            && !self.side_chat_image_inputs(ctx)
         {
             self.image_inputs(ctx);
         }
-        let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
+        let side_theater = self.side_chat_gallery_viewer(ctx);
+        let theater = side_theater
+            || self.transcript.gallery.is_open()
+            || self.draft_images.gallery.is_open();
         if theater {
             self.close_model_popovers();
             self.transcript.gallery.viewer(ctx);
@@ -2864,7 +2883,8 @@ impl eframe::App for Pui {
             self.settings_open = !self.settings_open;
             self.close_model_popovers();
         }
-        let composer_formatting = self.composer_formatting_available(ctx);
+        let composer_formatting =
+            self.composer_formatting_available(ctx) || self.side_chat_owns_keyboard(ctx);
         if !self.attention.open
             && !self.settings_open
             && !composer_formatting
@@ -2912,6 +2932,7 @@ impl eframe::App for Pui {
             && !self.kanban.open
             && !confirming
             && !terminal_input
+            && !self.side_chat_owns_keyboard(ctx)
             && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
@@ -2953,7 +2974,18 @@ impl eframe::App for Pui {
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if self.automation.open {
+            if self.files.is_open() {
+                context_capture::browser::invalidate_changed(self);
+                self.prepare_file_block_capture(ctx);
+                let capture_owner = self.review_comment_owner();
+                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
+                self.files
+                    .bind_browser_owner(&self.prefs.cwd, &capture_owner);
+            }
+            let side_chat_workspace = self.side_chat_workspace(ctx);
+            let central = if side_chat_workspace {
+                false
+            } else if self.automation.open {
                 self.automation_panel(ctx);
                 true
             } else if self.kanban.open {
@@ -2962,9 +2994,6 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
-                self.prepare_file_block_capture(ctx);
-                let capture_owner = self.review_comment_owner();
-                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {

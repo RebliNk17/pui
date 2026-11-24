@@ -10,14 +10,21 @@ fn snapshot(root: &Path) -> Snapshot {
     .unwrap()
 }
 fn initial_fixture() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root =
+            std::env::temp_dir().join(format!("pui-first-stage-seed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        super::super::tests::git(&root, &["init", "--template=", "--initial-branch=main"]);
+        super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+        super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
+        fs::write(root.join("first.txt"), "first\n").unwrap();
+        root
+    });
     let root = std::env::temp_dir().join(format!("pui-first-stage-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let root = fs::canonicalize(root).unwrap();
-    super::super::tests::git(&root, &["init", "--initial-branch=main"]);
-    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
-    super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
-    fs::write(root.join("first.txt"), "first\n").unwrap();
-    root
+    super::super::tests::copy_tree(seed, &root);
+    fs::canonicalize(root).unwrap()
 }
 #[test]
 fn no_index_stage_unstage_restage_and_initial_commit_preserve_working_file() {

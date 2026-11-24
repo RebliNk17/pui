@@ -1,4 +1,5 @@
 //! Compact activity summaries shared by the transcript and recorded outputs.
+mod git;
 mod turn;
 use crate::protocol::{Message, Tool};
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ pub struct Summary {
     pub writes: usize,
     pub other: usize,
     pub failed: usize,
+    git: git::Summary,
 }
 impl Summary {
     pub fn add(&mut self, tool: &Tool) {
@@ -32,15 +34,22 @@ impl Summary {
         }
         match tool.name.as_str() {
             "read" => self.reads += 1,
-            "bash" | "powershell" => self.commands += 1,
+            "bash" | "powershell" => {
+                if !self.git.add(tool) {
+                    self.commands += 1;
+                }
+            }
             "edit" => self.edits += 1,
             "write" => self.writes += 1,
-            _ => self.other += 1,
+            _ => {
+                self.git.barrier();
+                self.other += 1;
+            }
         }
         self.failed += usize::from(tool.failed);
     }
     pub fn label(&self) -> String {
-        let mut parts = Vec::new();
+        let mut parts: Vec<_> = self.git.label().into_iter().collect();
         for (count, verb, noun) in [
             (self.reads, "read", "file"),
             (self.commands, "ran", "command"),

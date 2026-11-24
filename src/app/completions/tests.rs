@@ -127,10 +127,12 @@ fn btw_and_main_execute_via_composer_completion_without_forwarding_commands() {
     assert_eq!(app.draft, "/btw ");
     assert_eq!(app.agents.active, main);
     frame(&ctx, &mut app, vec![key(egui::Key::Enter)]);
-    let side = app.agents.active.clone();
+    assert_eq!(app.agents.active, main);
+    let side = app.docked_side_chat_target().unwrap();
     assert_ne!(side, main);
     assert!(app.draft.is_empty());
-    assert!(app.agents.parked[&main].client.is_some());
+    assert!(app.agents.parked[&side].client.is_some());
+    app.view_agent(&side);
     app.loading_chat = false;
     app.connected = true;
     app.ultracode_ready = true;

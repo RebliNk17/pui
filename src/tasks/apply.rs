@@ -27,6 +27,7 @@ pub use transaction::apply;
 
 const MAX_FILES: usize = 10_000;
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_BINARY_FILE_BYTES: usize = 4 * 1024 * 1024;
 // Kept for older read-only preview callers while their UI migrates.
 pub const TRANSACTIONAL_BLOCKER: &str = "Preview is not apply permission. Applying requires a separate explicit confirmation of this exact reviewed plan. No commit, merge, stash or index update is performed.";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,11 +54,47 @@ pub struct Change {
     pub conflict: bool,
     pub before: Option<String>,
     pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_bytes: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_bytes: Option<Vec<u8>>,
     pub unsupported: Option<String>,
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub before_mode: Option<u32>,
     pub after_mode: Option<u32>,
+}
+impl Change {
+    fn before_state(&self) -> Result<Option<FileState>, String> {
+        state_from_parts(
+            &self.path,
+            &self.before,
+            &self.before_bytes,
+            self.before_mode,
+        )
+    }
+    fn after_state(&self) -> Result<Option<FileState>, String> {
+        state_from_parts(&self.path, &self.after, &self.after_bytes, self.after_mode)
+    }
+}
+fn state_from_parts(
+    path: &str,
+    text: &Option<String>,
+    raw: &Option<Vec<u8>>,
+    mode: Option<u32>,
+) -> Result<Option<FileState>, String> {
+    match (text, raw, mode) {
+        (Some(s), None, Some(mode)) => Ok(Some(FileState {
+            bytes: s.as_bytes().into(),
+            mode,
+        })),
+        (None, Some(bytes), Some(mode)) => Ok(Some(FileState {
+            bytes: bytes.clone(),
+            mode,
+        })),
+        (None, None, None) => Ok(None),
+        _ => Err(format!("Malformed apply change state for {path}.")),
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
@@ -118,6 +155,8 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
             "core.hooksPath=/dev/null",
             "-c",
             "core.untrackedCache=false",
+            "-c",
+            "core.precomposeUnicode=true",
         ])
         .args(args)
         .current_dir(root)
@@ -183,12 +222,29 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 fn text(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Non-UTF-8 Git metadata is unsupported.".into())
 }
+fn is_ambiguous_unicode(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1100}'..='\u{11FF}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FE20}'..='\u{FE2F}'
+            | '\u{FEFF}'
+    )
+}
 fn name(raw: &[u8]) -> Result<String, String> {
     let name = std::str::from_utf8(raw).map_err(|_| "Non-UTF-8 apply path is unsupported.")?;
-    if !name.is_ascii() {
+    if name.chars().any(is_ambiguous_unicode) {
         return Err("Unicode-normalization ambiguity is unsupported for apply paths.".into());
     }
     if name.is_empty()
+        || name.len() > 4096
         || name.contains(['\\', '\0'])
         || name.chars().any(char::is_control)
         || Path::new(name)
@@ -198,7 +254,7 @@ fn name(raw: &[u8]) -> Result<String, String> {
         return Err("Ambiguous or external apply path is unsupported.".into());
     }
     for part in name.split('/') {
-        let lower = part.to_ascii_lowercase();
+        let lower = part.to_lowercase();
         if matches!(
             lower.as_str(),
             ".git"
@@ -494,17 +550,22 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
         };
         let old = as_text(before);
         let new = as_text(after);
+        let old_binary = before.filter(|_| old.is_none()).map(|f| &f.bytes);
+        let new_binary = after.filter(|_| new.is_none()).map(|f| &f.bytes);
         let mut unsupported = Vec::new();
-        if before.zip(after).is_some_and(|(a, b)| a.mode != b.mode)
-            || before
-                .into_iter()
-                .chain(after)
-                .any(|f| !matches!(f.mode, 0o644 | 0o755))
+        if before
+            .into_iter()
+            .chain(after)
+            .any(|f| !matches!(f.mode, 0o644 | 0o755))
         {
-            unsupported.push("Mode changes and special permission modes are unsupported.");
+            unsupported.push("Special permission modes outside 0644/0755 are unsupported.");
         }
-        if before.is_some() && old.is_none() || after.is_some() && new.is_none() {
-            unsupported.push("Binary/non-UTF-8 content is unsupported.");
+        let binary_oversize = old_binary
+            .into_iter()
+            .chain(new_binary)
+            .any(|b| b.len() > MAX_BINARY_FILE_BYTES);
+        if binary_oversize {
+            unsupported.push("Binary file exceeds the 4 MiB per-file apply limit.");
         }
         if transaction::missing_directories(&identity.original, path).is_err() {
             unsupported.push("Target parents must be ordinary directories or safely creatable missing directories.");
@@ -524,6 +585,8 @@ pub fn prepare(task: &Task) -> Result<Plan, String> {
             conflict,
             before: old,
             after: new,
+            before_bytes: (!binary_oversize).then(|| old_binary.cloned()).flatten(),
+            after_bytes: (!binary_oversize).then(|| new_binary.cloned()).flatten(),
             unsupported,
             before_hash: before.map(|f| digest(&f.bytes)),
             after_hash: after.map(|f| digest(&f.bytes)),
