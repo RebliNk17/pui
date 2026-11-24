@@ -69,6 +69,18 @@ The initial main-checkout build also encountered concurrent unfinished side-chat
 edits referencing a missing module. Those edits were preserved; this branch was
 created from the clean base for independent validation.
 
+## Integration requested by user
+
+Feature commit: `6755e399`. Integrated remote master `39a9a81b` and the existing
+local master chat-error continuation commit `11057c3d` in the isolated worktree;
+Git merged both without conflicts. After integration, all requested focused Rust
+invocations passed: 4 alias, 8 managed-session, 34 synchronization, 11 notification,
+9 updater, and 22 sidebar-tree tests (filters overlap). All 44 Python tests,
+`cargo fmt --check`, and whitespace checks passed again. The full Rust suite was
+not retried; its earlier 16 failures and native acceptance limit still apply.
+The user's request authorizes publishing with these results, not an all-green
+suite claim. Concurrent uncommitted main-checkout work is excluded from commits.
+
 ## Native acceptance still required
 
 No installed bundle was rebuilt, installed, launched, or re-signed. Native macOS
