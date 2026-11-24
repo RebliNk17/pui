@@ -363,11 +363,7 @@ impl Pui {
         if self.dismissed_auth_error.as_deref() == Some(prompt.key.as_str()) {
             return;
         }
-        let active_cloud = self
-            .agents
-            .nodes
-            .get(&self.agents.active)
-            .and_then(|n| n.cloud_host.clone());
+        let active_cloud = self.active_cloud_host();
         let colors = theme::palette(ui.ctx());
         let (title, detail, primary_label): (String, String, String) = match &prompt.kind {
             CredentialKind::Subscription => {

@@ -73,6 +73,7 @@ export interface SessionSummary {
   project: string;
   project_name: string;
   cwd: string;
+  branch?: string | null;
   status: string;
   busy: boolean;
   unread: boolean;

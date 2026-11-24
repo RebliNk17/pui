@@ -163,6 +163,9 @@ pub(super) struct CloudSessionMeta {
     pub(super) status: String,
     pub(super) busy: bool,
     pub(super) has_pending_dialog: bool,
+    pub(super) cwd: String,
+    pub(super) repo_name: String,
+    pub(super) branch: Option<String>,
 }
 
 pub struct Pui {
@@ -1569,6 +1572,29 @@ impl Pui {
         }
         had_activity
     }
+    pub(super) fn active_cloud_host(&self) -> Option<crate::remote::CloudHostConfig> {
+        if let Some(cfg) = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .and_then(|n| n.cloud_host.clone())
+        {
+            return Some(cfg);
+        }
+        self.state
+            .session_file
+            .as_deref()
+            .and_then(|p| self.cloud_session_meta.get(std::path::Path::new(p)))
+            .map(|m| m.host.clone())
+    }
+
+    pub(super) fn active_cloud_meta(&self) -> Option<&CloudSessionMeta> {
+        self.state
+            .session_file
+            .as_deref()
+            .and_then(|p| self.cloud_session_meta.get(std::path::Path::new(p)))
+    }
+
     fn merge_sessions(&mut self) {
         let mut combined = self.local_sessions.clone();
         let mut seen: std::collections::HashSet<PathBuf> =
@@ -1622,6 +1648,11 @@ impl Pui {
                         &item.project_name,
                         &item.cwd,
                     );
+                    let repo_name = if !item.project_name.trim().is_empty() {
+                        item.project_name.clone()
+                    } else {
+                        sessions::project_name(&project)
+                    };
                     let modified =
                         std::time::UNIX_EPOCH + Duration::from_millis(item.modified_ms.max(1));
                     let created = item
@@ -1634,6 +1665,9 @@ impl Pui {
                             status: item.status,
                             busy: item.busy,
                             has_pending_dialog: item.has_pending_dialog,
+                            cwd: item.cwd.clone(),
+                            repo_name,
+                            branch: item.branch,
                         },
                     );
                     sessions_out.push(Session {

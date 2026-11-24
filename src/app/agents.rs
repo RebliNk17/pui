@@ -471,6 +471,11 @@ impl Pui {
         let id = format!("agent-{}", self.agents.next);
         self.bind_navigation_agent(&id);
         self.agents.active = id.clone();
+        let initial_path = self.state.session_file.as_ref().map(PathBuf::from);
+        let initial_cloud = initial_path
+            .as_ref()
+            .and_then(|p| self.cloud_session_meta.get(p))
+            .cloned();
         self.agents.nodes.insert(
             id.clone(),
             Node {
@@ -480,10 +485,15 @@ impl Pui {
                     .state
                     .chat_title()
                     .unwrap_or_else(|| "New conversation".into()),
-                cwd: self.prefs.cwd.clone(),
-                path: self.state.session_file.as_ref().map(PathBuf::from),
+                cwd: initial_cloud
+                    .as_ref()
+                    .map(|m| PathBuf::from(&m.cwd))
+                    .unwrap_or_else(|| self.prefs.cwd.clone()),
+                path: initial_path,
                 access: "workspace".into(),
-                permission: None,
+                permission: initial_cloud
+                    .as_ref()
+                    .map(|_| settings::PermissionMode::Auto),
                 status: "Connecting".into(),
                 last_activity: None,
                 // Opening saved history must not make it look newly created.
@@ -499,8 +509,8 @@ impl Pui {
                 task: String::new(),
                 depends: Vec::new(),
                 setup: None,
-                worktree: None,
-                cloud_host: None,
+                worktree: initial_cloud.as_ref().map(|m| PathBuf::from(&m.cwd)),
+                cloud_host: initial_cloud.map(|m| m.host),
                 cloud_repo: None,
             },
         );

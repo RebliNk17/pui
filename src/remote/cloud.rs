@@ -1416,12 +1416,40 @@ pub struct CloudSessionSummary {
     pub project: String,
     pub project_name: String,
     pub cwd: String,
+    pub branch: Option<String>,
     pub status: String,
     pub busy: bool,
     pub has_pending_dialog: bool,
     pub modified_ms: u64,
     pub created_ms: Option<u64>,
     pub origin: Option<crate::remote::SessionOrigin>,
+}
+
+/// Extracts the cloud worktree branch (e.g. `pui_agent/hello-132e5b`) from a worktree path
+/// like `/home/ubuntu/workspaces/.worktrees/pui/pui_agent/hello-132e5b`.
+pub fn extract_cloud_branch(explicit: Option<&str>, cwd: &str) -> Option<String> {
+    if let Some(b) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(b.to_owned());
+    }
+    if let Some(rest) = cwd.split("/.worktrees/").nth(1) {
+        if let Some((_, branch)) = rest.split_once('/') {
+            let trimmed = branch.trim_matches('/');
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Shortens `/home/<user>/...` cloud paths to `~/...` for compact display.
+pub fn compact_cloud_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/home/") {
+        if let Some((_, tail)) = rest.split_once('/') {
+            return format!("~/{tail}");
+        }
+    }
+    path.to_owned()
 }
 
 /// Maps a cloud worktree path like `/home/ubuntu/workspaces/.worktrees/pui/pui_agent/foo-123456`
@@ -1454,6 +1482,7 @@ pub fn fetch_cloud_sessions(cfg: &CloudHostConfig) -> Result<Vec<CloudSessionSum
         let cwd = item["cwd"].as_str().unwrap_or("").to_owned();
         let project = item["project"].as_str().unwrap_or(&cwd).to_owned();
         let project_name = item["project_name"].as_str().unwrap_or("").to_owned();
+        let branch = extract_cloud_branch(item["branch"].as_str(), &cwd);
         let status = item["status"].as_str().unwrap_or("Saved").to_owned();
         let busy = item["busy"].as_bool().unwrap_or(false);
         let has_pending_dialog = item["has_pending_dialog"].as_bool().unwrap_or(false);
@@ -1467,6 +1496,7 @@ pub fn fetch_cloud_sessions(cfg: &CloudHostConfig) -> Result<Vec<CloudSessionSum
             project,
             project_name,
             cwd,
+            branch,
             status,
             busy,
             has_pending_dialog,

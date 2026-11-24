@@ -183,6 +183,7 @@ export class PuiDaemonServer {
         project: m?.repo_dir || cwd,
         project_name: projectNameForCwd(cwd, m),
         cwd,
+        branch: m?.branch || live?.branch || null,
         status: live
           ? live.dialogs.length > 0
             ? 'Needs approval'
@@ -213,6 +214,7 @@ export class PuiDaemonServer {
         project: m?.repo_dir || live.cwd,
         project_name: projectNameForCwd(live.cwd, m),
         cwd: live.cwd,
+        branch: m?.branch || live.branch || null,
         status: live.dialogs.length > 0 ? 'Needs approval' : live.busy ? 'Working…' : 'Idle',
         busy: live.busy,
         unread: false,

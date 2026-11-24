@@ -319,31 +319,40 @@ impl Pui {
                                         ));
                                         return;
                                     }
-                                    let active_cloud = self
-                                        .agents
-                                        .nodes
-                                        .get(&self.agents.active)
-                                        .and_then(|n| n.cloud_host.as_ref());
+                                    let active_cloud = self.active_cloud_host();
+                                    let cloud_meta = self.active_cloud_meta().cloned();
                                     ui.horizontal(|ui| {
-                                        dot(
-                                            ui,
-                                            if self.connected || self.demo {
-                                                colors.green
-                                            } else if active_cloud.is_some() && self.loading_chat {
-                                                colors.amber
-                                            } else {
-                                                colors.dim
-                                            },
-                                        );
+                                        if active_cloud.is_some() {
+                                            icons::inline(
+                                                ui,
+                                                Icon::Cloud,
+                                                if self.connected || self.demo {
+                                                    colors.accent
+                                                } else if self.loading_chat {
+                                                    colors.amber
+                                                } else {
+                                                    colors.dim
+                                                },
+                                            );
+                                        } else {
+                                            dot(
+                                                ui,
+                                                if self.connected || self.demo {
+                                                    colors.green
+                                                } else {
+                                                    colors.dim
+                                                },
+                                            );
+                                        }
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 2.0;
-                                            let env_title = match active_cloud {
+                                            let env_title = match active_cloud.as_ref() {
                                                 Some(cfg) => format!("Cloud · {}", cfg.name),
                                                 None => "Local computer".to_owned(),
                                             };
                                             let env_sub = if self.demo {
                                                 "Design preview · no agent connected".to_owned()
-                                            } else if let Some(cfg) = active_cloud {
+                                            } else if let Some(cfg) = active_cloud.as_ref() {
                                                 if self.connected {
                                                     format!(
                                                         "{}:{} · Cloud RPC connected",
@@ -359,7 +368,16 @@ impl Pui {
                                             } else {
                                                 "Not connected".to_owned()
                                             };
-                                            ui.label(RichText::new(env_title).size(12.0));
+                                            ui.label(
+                                                RichText::new(env_title)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(if active_cloud.is_some() {
+                                                        colors.text
+                                                    } else {
+                                                        colors.text
+                                                    }),
+                                            );
                                             ui.label(
                                                 RichText::new(env_sub)
                                                     .size(10.0)
@@ -374,10 +392,45 @@ impl Pui {
                                         .get(&self.agents.active)
                                         .and_then(|n| n.cloud_repo.as_ref())
                                         .map(|r| r.full_name.clone())
+                                        .or_else(|| {
+                                            cloud_meta
+                                                .as_ref()
+                                                .map(|m| m.repo_name.clone())
+                                                .filter(|s| !s.is_empty())
+                                        })
                                         .unwrap_or_else(|| sessions::project_name(&self.prefs.cwd));
                                     inspector::detail(ui, "Status", status);
+                                    if active_cloud.is_some() {
+                                        inspector::detail(ui, "Mode", "Auto · Isolated worktree");
+                                    }
                                     inspector::detail(ui, "Repository", &repo_label);
-                                    if !self.workspace.branch.is_empty() {
+                                    if active_cloud.is_some() {
+                                        let cloud_branch = cloud_meta
+                                            .as_ref()
+                                            .and_then(|m| m.branch.clone())
+                                            .or_else(|| {
+                                                self.state.session_file.as_deref().and_then(|p| {
+                                                    // Fallback: extract `pui_agent/<slug>` from session folder name if metadata not yet polled.
+                                                    p.split("pui_agent-").nth(1).and_then(|tail| {
+                                                        let slug = tail.split("--").next()?;
+                                                        (!slug.is_empty())
+                                                            .then(|| format!("pui_agent/{slug}"))
+                                                    })
+                                                })
+                                            });
+                                        if let Some(branch) = cloud_branch {
+                                            inspector::detail(ui, "Branch", &branch);
+                                        }
+                                        if let Some(cwd) = cloud_meta
+                                            .as_ref()
+                                            .map(|m| m.cwd.as_str())
+                                            .filter(|s| !s.is_empty())
+                                        {
+                                            let short_wt =
+                                                crate::remote::cloud::compact_cloud_path(cwd);
+                                            inspector::detail(ui, "Worktree", &short_wt);
+                                        }
+                                    } else if !self.workspace.branch.is_empty() {
                                         inspector::detail(ui, "Branch", &self.workspace.branch);
                                     }
                                     if let Some(timestamp) = self
@@ -617,6 +670,28 @@ impl Pui {
 
     fn connectors_card(&mut self, ui: &mut egui::Ui, connectors: &[McpConnector]) {
         let colors = crate::theme::palette(ui.ctx());
+        if let Some(cfg) = self.active_cloud_host() {
+            ui.horizontal(|ui| {
+                icons::inline(ui, Icon::Cloud, colors.accent);
+                ui.label(
+                    RichText::new(format!("Managed on {}", cfg.name))
+                        .size(11.5)
+                        .color(colors.text),
+                );
+            });
+            ui.add_space(3.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Cloud agents use synced MCP servers (such as playwright-research) instead of local Mac connectors.",
+                    )
+                    .size(10.5)
+                    .color(colors.muted),
+                )
+                .wrap(),
+            );
+            return;
+        }
         if connectors.is_empty() {
             ui.label(theme::small(ui, "No MCP connectors configured."));
         } else {
@@ -954,6 +1029,86 @@ impl Pui {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.bg))
             .show(ctx, |ui| {
+                if let Some(cloud_cfg) = self.active_cloud_host() {
+                    let cloud_meta = self.active_cloud_meta().cloned();
+                    let repo_label = self
+                        .agents
+                        .nodes
+                        .get(&self.agents.active)
+                        .and_then(|n| n.cloud_repo.as_ref())
+                        .map(|r| r.full_name.clone())
+                        .or_else(|| {
+                            cloud_meta
+                                .as_ref()
+                                .map(|m| m.repo_name.clone())
+                                .filter(|s| !s.is_empty())
+                        })
+                        .unwrap_or_else(|| "workspace".to_owned());
+                    let branch_label =
+                        cloud_meta
+                            .as_ref()
+                            .and_then(|m| m.branch.clone())
+                            .or_else(|| {
+                                self.state.session_file.as_deref().and_then(|p| {
+                                    p.split("pui_agent-").nth(1).and_then(|tail| {
+                                        let slug = tail.split("--").next()?;
+                                        (!slug.is_empty()).then(|| format!("pui_agent/{slug}"))
+                                    })
+                                })
+                            });
+                    egui::TopBottomPanel::top("cloud-chat-banner")
+                        .show_separator_line(false)
+                        .frame(
+                            egui::Frame::new()
+                                .fill(colors.surface)
+                                .stroke(Stroke::new(1.0_f32, colors.border.gamma_multiply(0.6)))
+                                .inner_margin(egui::Margin::symmetric(16, 6)),
+                        )
+                        .show_inside(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                icons::inline(ui, Icon::Cloud, colors.accent);
+                                ui.label(
+                                    RichText::new(format!("Cloud · {}", cloud_cfg.name))
+                                        .size(11.5)
+                                        .strong()
+                                        .color(colors.text),
+                                );
+                                ui.label(RichText::new("·").size(11.5).color(colors.dim));
+                                ui.label(RichText::new(&repo_label).size(11.5).color(colors.muted));
+                                if let Some(ref br) = branch_label {
+                                    ui.label(RichText::new("·").size(11.5).color(colors.dim));
+                                    icons::inline(ui, Icon::Branch, colors.muted);
+                                    let br_resp = ui.label(
+                                        RichText::new(br).size(11.0).monospace().color(colors.text),
+                                    );
+                                    if let Some(wt) = cloud_meta
+                                        .as_ref()
+                                        .map(|m| m.cwd.as_str())
+                                        .filter(|s| !s.is_empty())
+                                    {
+                                        br_resp.on_hover_text(format!(
+                                            "Isolated cloud worktree: {}",
+                                            crate::remote::cloud::compact_cloud_path(wt)
+                                        ));
+                                    }
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    egui::Frame::new()
+                                        .fill(colors.accent.gamma_multiply(0.14))
+                                        .corner_radius(99)
+                                        .inner_margin(egui::Margin::symmetric(8, 2))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new("Auto · Worktree")
+                                                    .size(10.0)
+                                                    .color(colors.accent),
+                                            );
+                                        });
+                                });
+                            });
+                        });
+                }
                 egui::TopBottomPanel::bottom("composer-v2")
                     .show_separator_line(false)
                     .frame(
