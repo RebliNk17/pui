@@ -6,7 +6,14 @@ pub(super) struct SideChat {
     // Runtime-only presentation links. Saved chats remain ordinary root conversations.
     pairs: Vec<(String, String)>,
     preview_open: bool,
+    docked: bool,
+    focus: bool,
 }
+mod dock;
+#[cfg(test)]
+mod dock_safety_tests;
+#[cfg(test)]
+mod dock_tests;
 impl Pui {
     /// Static presentation fixture: never connects, sends, or claims real model activity.
     pub(super) fn demo_side_chat(&mut self) {
@@ -18,57 +25,102 @@ impl Pui {
         self.state=State{session_name:"Side chat · design preview".into(),messages:vec![Message{role:"assistant".into(),text:"## A little room for a tangent\n\nThis is an **independent conversation**. The main chat keeps its own context and model run.\n\nUse **Back to main** to return. Nothing here is sent or merged into the main conversation automatically.\n\n*Static design preview — no model was launched.*".into(),..Default::default()}],..Default::default()};
         self.draft = "What are the tradeoffs of this approach?".into();
         let side = self.ensure_agent();
+        let side_chat = self.take_chat();
+        self.agents.parked.insert(side.clone(), side_chat);
+        let main_chat = self.agents.parked.remove(&main).unwrap();
+        self.put_chat(main_chat);
+        self.agents.active = main.clone();
         self.side_chat.pairs.push((main, side));
         self.side_chat.preview_open = true;
-        self.prefs.hide_inspector = true;
+        self.side_chat.docked = true;
+        self.focus_composer = false;
+        self.prefs.hide_inspector = false;
     }
-    pub(super) fn start_side_chat(&mut self, question: &str) -> bool {
-        self.side_chat.pairs.retain(|(a, b)| {
-            self.agents.nodes.contains_key(a) && self.agents.nodes.contains_key(b)
-        });
-        if self.demo
-            || self.loading_chat
-            || self.history_pending.is_some()
-            || self.restoring_code()
-            || self
+    pub(super) fn is_side_chat_companion(&self, id: &str) -> bool {
+        self.side_chat
+            .pairs
+            .iter()
+            .any(|(main, side)| main == id || side == id)
+    }
+    fn live_side_chat_connections(&self) -> usize {
+        usize::from(self.client.is_some())
+            + self
+                .agents
+                .parked
+                .values()
+                .filter(|chat| chat.client.is_some())
+                .count()
+            + self
                 .agents
                 .nodes
-                .get(&self.agents.active)
-                .is_some_and(|node| node.access != "workspace" || node.parent.is_some())
-            || self.is_mirror()
-            || self.deletion.in_progress()
-            || self.agents.exiting
-            || self
-                .agents
-                .permission_changes
-                .contains_key(&self.agents.active)
-            || self.agents.nodes.len() >= 128
-            || self.side_chat.pairs.len() >= 16
-            || !self.prefs.cwd.is_dir()
-            || !self.draft_images.is_empty()
-        {
-            self.state.error=Some("Side chat unavailable: connect to a local writable chat, finish access/deletion changes, remove attachments, or keep within 16 side chats / 128 sessions. Your draft was kept.".into());
+                .values()
+                .filter(|node| node.setup_pending())
+                .count()
+    }
+    pub(super) fn start_docked_side_chat(&mut self, question: &str) -> bool {
+        // Creating the independent RPC chat must not navigate the workspace:
+        // keep the selected files/browser, main transcript, and main run in place.
+        if !self.side_chat_creation_allowed() {
             return false;
         }
         let origin = self.ensure_agent();
-        let permission = self.active_permission();
+        let permission = match self.active_permission() {
+            settings::PermissionMode::Bypass => match self.prefs.settings.permission {
+                settings::PermissionMode::Bypass => settings::PermissionMode::Auto,
+                mode => mode,
+            },
+            mode => mode,
+        };
         let cwd = self.prefs.cwd.clone();
-        // The command itself is not part of either model context.
         self.draft.clear();
         self.context_chips.clear();
         self.completions = Default::default();
-        // Make even a pathless empty origin retainable for the explicit return action.
+        self.state.error = None;
         self.new_chat = false;
-        self.start_chat_with_permission(cwd, Some(permission));
+        let main = self.take_chat();
+        self.agents.active.clear();
+        let background = self.agents.background;
+        self.agents.background = true;
         let side = self.ensure_agent();
-        if side == origin {
-            return false;
+        self.agents.background = background;
+        self.agents.nodes.get_mut(&side).unwrap().permission = Some(permission);
+        self.new_chat = true;
+        self.loading_chat = true;
+        self.seed_model_catalog();
+        #[cfg(not(test))]
+        {
+            self.client = Some(rpc::Client::start_with(
+                &cwd,
+                None,
+                self.ctx.clone(),
+                rpc::Launch {
+                    settings: self.agent_settings(&side).payload(),
+                    ..Default::default()
+                },
+            ));
         }
-        let node = self.agents.nodes.get_mut(&side).unwrap();
-        node.name = "Side chat".into();
-        node.permission = Some(permission);
+        #[cfg(test)]
+        {
+            self.client = Some(rpc::Client::stub());
+        }
+        for kind in [
+            "get_state",
+            "get_available_models",
+            "get_available_thinking_levels",
+            "get_entries",
+            "get_commands",
+            "get_session_stats",
+        ] {
+            self.send(protocol::command(kind));
+        }
         self.state.session_name = "Side chat".into();
+        self.agents.nodes.get_mut(&side).unwrap().name = "Side chat".into();
         self.draft = question.into();
+        let chat = self.take_chat();
+        self.agents.parked.insert(side.clone(), chat);
+        self.agents.active = origin.clone();
+        self.prefs.cwd = cwd;
+        self.put_chat(main);
         let origin = self
             .side_chat
             .pairs
@@ -78,9 +130,68 @@ impl Pui {
             .map(|(main, _)| main.clone())
             .unwrap_or(origin);
         self.side_chat.pairs.push((origin, side));
+        self.side_chat.docked = true;
         self.side_chat.preview_open = true;
-        self.state.notice=Some("Independent side chat · no main-chat context copied. Review and send your question when connected. Nothing is merged back automatically.".into());
-        self.focus_composer = true;
+        self.side_chat.focus = true;
+        self.focus_composer = false;
+        true
+    }
+    fn side_chat_creation_allowed(&mut self) -> bool {
+        self.side_chat.pairs.retain(|(a, b)| {
+            self.agents.nodes.contains_key(a) && self.agents.nodes.contains_key(b)
+        });
+        let reason = if self.demo || self.is_mirror() {
+            Some("select a local writable conversation")
+        } else if self.loading_chat || self.history_pending.is_some() || self.restoring_code() {
+            Some("wait for the current chat operation to finish")
+        } else if self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .is_some_and(|node| node.access != "workspace" || node.parent.is_some())
+        {
+            Some("select a writable main conversation, not a delegated worker")
+        } else if self.deletion.in_progress()
+            || self.deletion.confirming()
+            || self.agents.exiting
+            || self
+                .agents
+                .permission_changes
+                .contains_key(&self.agents.active)
+        {
+            Some("finish the current access, deletion, or exit request")
+        } else if self.live_side_chat_connections() >= 128 {
+            Some(
+                "128 live connections reached; close an unused connection (saved history does not count)",
+            )
+        } else if self.side_chat.pairs.len() >= 16 {
+            Some("16 side chats reached; dismiss an unused companion")
+        } else if !self.prefs.cwd.is_dir() {
+            Some("choose an available project folder")
+        } else if !self.draft_images.is_empty() {
+            Some("remove attachments before opening a side chat")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.state.error = Some(format!(
+                "Side chat unavailable: {reason}. Your draft was kept."
+            ));
+            false
+        } else {
+            true
+        }
+    }
+    // Full-size fixture also exercises the explicit open/return navigation path.
+    #[cfg(test)]
+    pub(super) fn start_side_chat(&mut self, question: &str) -> bool {
+        if !self.start_docked_side_chat(question) {
+            return false;
+        }
+        let side = self.side_chat.pairs.last().unwrap().1.clone();
+        self.side_chat.docked = false;
+        self.new_chat = false;
+        self.view_agent(&side);
         true
     }
     pub(super) fn return_side_chat(&mut self) -> bool {
@@ -126,6 +237,9 @@ impl Pui {
         true
     }
     pub(super) fn side_chat_bar(&mut self, ctx: &egui::Context) {
+        if self.docked_side_chat_target().is_some() {
+            return;
+        }
         let active = self.agents.active.clone();
         let Some((origin, side)) = self
             .side_chat

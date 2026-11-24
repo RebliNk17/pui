@@ -510,7 +510,7 @@ impl Pui {
             return true;
         }
         if name == "btw" {
-            self.start_side_chat(&args);
+            self.start_docked_side_chat(&args);
             return true;
         }
         if name != "compact" && !args.is_empty() {

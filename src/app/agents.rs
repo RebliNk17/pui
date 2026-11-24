@@ -774,7 +774,8 @@ impl Pui {
         else {
             return false;
         };
-        if node.parent.is_some()
+        if self.is_side_chat_companion(id)
+            || node.parent.is_some()
             || !node.children.is_empty()
             || node.setup_pending()
             || node.needs_report

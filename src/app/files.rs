@@ -949,6 +949,23 @@ impl Browser {
         expanded
     }
 
+    pub(super) fn show_inside(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        tables: &mut TableHeaders,
+    ) {
+        if self.root == root {
+            self.activate_restored_tabs(ui.ctx());
+        }
+        self.workspace(ui.ctx(), root);
+        self.poll();
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::new("btw-workspace-rect"), ui.max_rect()));
+        self.contents(ui, tables);
+    }
+
     fn contents(&mut self, ui: &mut egui::Ui, tables: &mut TableHeaders) {
         let rect = ui.max_rect();
         self.pane_rect = Some(rect);

@@ -2665,6 +2665,13 @@ impl eframe::App for Pui {
         {
             self.new_session();
         }
+        if self.side_chat_owns_keyboard(ctx) {
+            // egui releases editor focus before update when Escape arrives.
+            // Previous-frame ownership must still fence main Stop/approval keys.
+            ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+        }
         let searching = self.search_open;
         let leaving_board = !searching
             && !confirming
@@ -2685,6 +2692,7 @@ impl eframe::App for Pui {
             && !self.kanban.open
             && !confirming
             && !terminal_input
+            && !self.side_chat_owns_keyboard(ctx)
             && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
@@ -2726,7 +2734,10 @@ impl eframe::App for Pui {
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if self.automation.open {
+            let side_chat_workspace = self.side_chat_workspace(ctx);
+            let central = if side_chat_workspace {
+                false
+            } else if self.automation.open {
                 self.automation_panel(ctx);
                 true
             } else if self.kanban.open {

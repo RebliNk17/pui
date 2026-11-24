@@ -149,7 +149,8 @@ pub fn stack(
                     let button_width = 46.0;
                     let gear_width = 22.0;
                     let label_width = (ui.available_width()
-                        - 36.0
+                        - 20.0
+                        - ui.spacing().item_spacing.x
                         - if button.is_some() {
                             button_width + ui.spacing().item_spacing.x
                         } else if gear {
@@ -162,13 +163,7 @@ pub fn stack(
                         Vec2::new(label_width, crate::theme::COMPACT_HEIGHT),
                         Sense::click(),
                     );
-                    let response = response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .on_hover_text(if collapsed {
-                            "Expand card"
-                        } else {
-                            "Collapse card"
-                        });
+                    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::CollapsingHeader,
@@ -180,11 +175,18 @@ pub fn stack(
                     if response.hovered() || response.has_focus() {
                         ui.painter().rect_filled(rect, 6, colors.surface);
                     }
-                    let title = ui.painter().layout_no_wrap(
+                    let mut title_job = egui::text::LayoutJob::simple_singleline(
                         card.label().into(),
                         egui::FontId::proportional(12.0),
                         colors.text,
                     );
+                    title_job.wrap.max_width = (rect.width() - 20.0).max(1.0);
+                    title_job.wrap.max_rows = 1;
+                    title_job.wrap.break_anywhere = true;
+                    let title = ui.painter().layout_job(title_job);
+                    if title.elided {
+                        response.clone().on_hover_text(card.label());
+                    }
                     let title_pos = rect.left_center() + egui::vec2(20.0, -title.size().y / 2.0);
                     let summary_left = title_pos.x + title.size().x + 8.0;
                     ui.painter().galley(title_pos, title, colors.text);
@@ -200,7 +202,9 @@ pub fn stack(
                     if collapsed && button.is_none() {
                         let text = summary(card);
                         if let Some(fraction) = context_fraction.filter(|_| card == Card::Context) {
-                            context_ring(ui, rect, fraction, &text);
+                            let mut summary_rect = rect;
+                            summary_rect.max.x = ui.max_rect().right();
+                            context_ring(ui, summary_rect, fraction, &text);
                         } else {
                             let right = rect.right();
                             let mut job = egui::text::LayoutJob::simple_singleline(
@@ -331,7 +335,9 @@ pub fn stack(
                         .min_scrolled_height(max_height)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            let inner_width = (width - 6.0).max(40.0);
+                            // Nested auto-hiding scrollbars must not change the
+                            // body/action right edge relative to section dividers.
+                            let inner_width = width.max(40.0);
                             ui.set_width(inner_width);
                             ui.set_max_width(inner_width);
                             contents(ui, card);
