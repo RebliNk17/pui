@@ -188,7 +188,7 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         config = json.loads(parsed)
         triggers = config.get("on") or config.get("true")
         self.assertEqual(triggers["push"]["branches"], ["master"])
-        job = config["jobs"]["macos-build"]
+        job = config["jobs"]["macos-tests"]
         checkout = job["steps"][0]
         self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
@@ -229,7 +229,7 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         gate = config["jobs"]["ci-result"]
         self.assertEqual(gate["name"], "CI result")
         self.assertEqual(gate["if"], "always()")
-        self.assertEqual(set(gate["needs"]), {"changes", "macos-build", "mobile-validate", "daemon-validate"})
+        self.assertEqual(set(gate["needs"]), {"changes", "macos-tests", "mobile-validate", "daemon-validate"})
 
     def test_affected_selects_only_changed_suites_and_fails_safe(self):
         spec = importlib.util.spec_from_file_location("affected", ROOT / "scripts/ci/affected.py")

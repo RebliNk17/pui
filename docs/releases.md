@@ -189,7 +189,7 @@ command tests do not certify Gatekeeper behavior or future CEF entitlement needs
 4. Review/commit/push through your normal process. After the default-branch checks
    pass, an authorized maintainer creates and pushes the matching protected
    `vX.Y.Z` tag. **No tag, commit, push or upload is performed by local scripts.**
-5. Inspect the GitHub Actions tag workflow (`macos-build` → `github-release`) and GitHub Release. Verify `SHA256SUMS`, download/mount
+5. Inspect the GitHub Actions tag workflow (`macos-tests`, which also builds the app for tags, → `github-release`) and GitHub Release. Verify `SHA256SUMS`, download/mount
    the DMG, and launch from a clean Mac, including Browser and DevTools.
 
 Manual local packaging (ad-hoc, no publication):
