@@ -4,6 +4,7 @@ import * as Device from 'expo-device';
 import * as SecureStore from 'expo-secure-store';
 import type {
   HostInfo,
+  LinkedHostInfo,
   SavedHost,
   SessionDetail,
   SessionOrigin,
@@ -112,6 +113,8 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const [hosts, setHosts] = useState<SavedHost[]>([]);
   const hostsRef = useRef<SavedHost[]>([]);
   const [activeHostId, setActiveHostId] = useState<string | null>(null);
+  const activeHostIdRef = useRef<string | null>(null);
+  activeHostIdRef.current = activeHostId;
   const [deviceName, setDeviceNameState] = useState<string>(
     Device.deviceName ?? Device.modelName ?? (Platform.OS === 'ios' ? 'iPhone' : 'Android Phone'),
   );
@@ -336,6 +339,53 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     },
     [persistHosts],
   );
+
+  /**
+   * Adds (or refreshes the token of) hosts advertised by the connected host — e.g. the Mac's
+   * paired cloud host — without switching the active host, so they appear as environments.
+   */
+  const adoptLinkedHosts = useCallback(
+    async (linked: LinkedHostInfo[] | undefined) => {
+      if (!linked?.length) return;
+      let next = hostsRef.current;
+      let changed = false;
+      for (const l of linked) {
+        if (!l?.host || !l.port || !l.token) continue;
+        const existing = next.find((h) => h.host === l.host && h.port === l.port);
+        if (existing) {
+          if (existing.token !== l.token || existing.tls !== Boolean(l.tls)) {
+            const updated: SavedHost = { ...existing, token: l.token, tls: Boolean(l.tls) };
+            await storageSet(tokenKey(existing.id), updated.token);
+            next = next.map((h) => (h.id === existing.id ? updated : h));
+            changed = true;
+          }
+          continue;
+        }
+        const id = `host_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const entry: SavedHost = {
+          id,
+          name: l.name || 'Cloud',
+          host: l.host,
+          port: l.port,
+          tls: Boolean(l.tls),
+          token: l.token,
+          transport: 'direct',
+        };
+        await storageSet(tokenKey(id), entry.token);
+        next = [...next, entry];
+        changed = true;
+      }
+      if (!changed) return;
+      hostsRef.current = next;
+      setHosts(next);
+      await persistHosts(next, activeHostIdRef.current);
+    },
+    [persistHosts],
+  );
+
+  useEffect(() => {
+    void adoptLinkedHosts(hostInfo?.linked_hosts).catch(() => {});
+  }, [hostInfo, adoptLinkedHosts]);
 
   const removeHost = useCallback(
     async (id: string) => {

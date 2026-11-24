@@ -32,6 +32,8 @@ pub struct CloudAdminStatus {
     pub has_git_ssh_key: bool,
     pub git_key_mode: Option<String>,
     pub git_public_key: Option<String>,
+    /// `Some(false)` when the cloud key exists but GitHub rejects it (not registered).
+    pub github_ssh_ok: Option<bool>,
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
     pub skills: Vec<String>,
@@ -139,7 +141,9 @@ impl CloudSyncPlan {
                 plan.providers.insert(p.clone());
             }
         }
-        plan.setup_git_ssh = st.has_git_ssh_key;
+        // A key GitHub rejects is not "in sync": leave it unchecked so selecting it re-runs
+        // registration (and surfaces the copy-key notice when `gh` cannot register it).
+        plan.setup_git_ssh = st.has_git_ssh_key && st.github_ssh_ok != Some(false);
         plan.git_auth_choice = if st.git_key_mode.as_deref() == Some("copied") {
             GitAuthChoice::CopyMacKey
         } else {
@@ -346,10 +350,10 @@ fn http_request_json(
         serde_json::from_str(trimmed)
             .map_err(|e| format!("Invalid JSON response from cloud host (HTTP {status}): {e}"))?
     };
-    if status >= 400 {
+    if !(200..300).contains(&status) {
         let msg = parsed["error"]
             .as_str()
-            .unwrap_or("Cloud host returned an error.");
+            .unwrap_or("Cloud host returned an unexpected response.");
         return Err(format!("HTTP {status}: {msg}"));
     }
     Ok((status, parsed))
@@ -357,6 +361,12 @@ fn http_request_json(
 
 pub fn fetch_status(cfg: &CloudHostConfig) -> Result<CloudAdminStatus, String> {
     let (_, val) = http_request_json(cfg, "GET", "/v1/admin/status", None)?;
+    serde_json::from_value(val).map_err(|e| format!("Invalid cloud status payload: {e}"))
+}
+
+/// Like [`fetch_status`] but asks the daemon to re-probe GitHub SSH access immediately.
+pub fn fetch_status_fresh(cfg: &CloudHostConfig) -> Result<CloudAdminStatus, String> {
+    let (_, val) = http_request_json(cfg, "GET", "/v1/admin/status?refresh=1", None)?;
     serde_json::from_value(val).map_err(|e| format!("Invalid cloud status payload: {e}"))
 }
 

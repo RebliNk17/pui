@@ -1175,7 +1175,12 @@ impl Pui {
         }
 
         ui.add_space(18.0);
+        let before_cloud = self.prefs.remote.cloud_host.clone();
         self.cloud_host_settings_ui(ui);
+        if self.prefs.remote.cloud_host != before_cloud && !self.demo {
+            // Keep the cloud host advertised to paired phones in sync (`/v1/info` linked_hosts).
+            self.remote.apply_config(self.prefs.remote.clone());
+        }
     }
 
     fn cloud_host_settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -1330,7 +1335,7 @@ impl Pui {
                                         let s_clone = shared.clone();
                                         let ctx = ui.ctx().clone();
                                         std::thread::spawn(move || {
-                                            let res = cloud::fetch_status(&cfg_c);
+                                            let res = cloud::fetch_status_fresh(&cfg_c);
                                             if let Ok(mut st) = s_clone.lock() {
                                                 st.busy = false;
                                                 match res {
@@ -1363,10 +1368,21 @@ impl Pui {
                                     st.pi_auth_providers.len() - 2
                                 )
                             };
-                            let git_summary = if st.has_git_ssh_key {
-                                "Dedicated SSH key · clones any repo".to_owned()
-                            } else {
+                            let git_summary = if !st.has_git_ssh_key {
                                 "Not configured — click Sync from Mac…".to_owned()
+                            } else if st.github_ssh_ok == Some(false) {
+                                "Key not added to GitHub — auto-clone will fail".to_owned()
+                            } else if st.git_key_mode.as_deref() == Some("copied") {
+                                "Mac SSH key · clones any repo".to_owned()
+                            } else {
+                                "Dedicated SSH key · clones any repo".to_owned()
+                            };
+                            let git_dot = if !st.has_git_ssh_key {
+                                colors.dim
+                            } else if st.github_ssh_ok == Some(false) {
+                                colors.amber
+                            } else {
+                                colors.green
                             };
                             let svc_summary = {
                                 let mut parts = Vec::new();
@@ -1477,16 +1493,7 @@ impl Pui {
                                             colors.amber
                                         },
                                     );
-                                    draw_tile(
-                                        ui,
-                                        "Git & Auto-clone",
-                                        &git_summary,
-                                        if st.has_git_ssh_key {
-                                            colors.green
-                                        } else {
-                                            colors.dim
-                                        },
-                                    );
+                                    draw_tile(ui, "Git & Auto-clone", &git_summary, git_dot);
                                 });
                                 ui.add_space(gap);
                                 ui.horizontal(|ui| {
@@ -1524,16 +1531,7 @@ impl Pui {
                                     },
                                 );
                                 ui.add_space(gap);
-                                draw_tile(
-                                    ui,
-                                    "Git & Auto-clone",
-                                    &git_summary,
-                                    if st.has_git_ssh_key {
-                                        colors.green
-                                    } else {
-                                        colors.dim
-                                    },
-                                );
+                                draw_tile(ui, "Git & Auto-clone", &git_summary, git_dot);
                                 ui.add_space(gap);
                                 draw_tile(
                                     ui,

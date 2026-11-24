@@ -6,6 +6,7 @@ import { LiveAgent, type NotificationEvent, type SessionDetail } from './agent.t
 import {
   cloneRepoIntoWorkspace,
   getAdminStatus,
+  invalidateGithubSshCheck,
   normalizeGitRemote,
   removeCloudGitKey,
   setupCloudGit,
@@ -458,6 +459,7 @@ export class PuiDaemonServer {
       }
 
       if (method === 'GET' && url.pathname === '/v1/admin/status') {
+        if (url.searchParams.get('refresh') === '1') invalidateGithubSshCheck();
         sendJson(res, 200, {
           ...getAdminStatus(),
           projects: this.projects(),
@@ -533,6 +535,7 @@ export class PuiDaemonServer {
           string,
           unknown
         >;
+        invalidateGithubSshCheck();
         if (body.remove === true) {
           const result = removeCloudGitKey();
           sendJson(res, 200, { ok: true, ...result });
@@ -962,10 +965,9 @@ export class PuiDaemonServer {
 
       sendJson(res, 404, { error: 'Unknown endpoint.' });
     } catch (err: unknown) {
-      const status =
-        typeof (err as { status?: unknown })?.status === 'number'
-          ? (err as { status: number }).status
-          : 500;
+      // Only honour explicit HTTP error codes; child-process errors carry exit codes (e.g. 128) in `status`.
+      const raw = (err as { status?: unknown })?.status;
+      const status = typeof raw === 'number' && raw >= 400 && raw <= 599 ? raw : 500;
       sendJson(res, status, {
         error: err instanceof Error ? err.message : 'Internal server error',
       });

@@ -35,6 +35,17 @@ export interface HostInfo {
   active_path: string | null;
   projects: string[];
   permission_modes: PermissionModeOption[];
+  /** Other hosts linked to this one (e.g. the Mac's paired cloud host), advertised to paired phones. */
+  linked_hosts?: LinkedHostInfo[];
+}
+
+export interface LinkedHostInfo {
+  kind: 'cloud';
+  name: string;
+  host: string;
+  port: number;
+  tls: boolean;
+  token: string;
 }
 
 export interface SessionSummary {

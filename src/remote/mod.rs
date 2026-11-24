@@ -345,6 +345,9 @@ struct WsClient {
 
 struct Shared {
     token: RwLock<String>,
+    /// Cloud host paired with this Mac; advertised to authenticated phones so they can
+    /// start chats on it without scanning a second QR code.
+    linked_cloud: RwLock<Option<cloud::CloudHostConfig>>,
     snapshot: RwLock<RemoteSnapshot>,
     clients: Mutex<Vec<WsClient>>,
     cmd_tx: Sender<RemoteCommand>,
@@ -405,6 +408,7 @@ impl RemoteServer {
         let tailscale_ip = tailscale::detect_tailscale_ip().map(|ip| ip.to_string());
         let shared = Arc::new(Shared {
             token: RwLock::new(config.token.clone()),
+            linked_cloud: RwLock::new(config.cloud_host.clone()),
             snapshot: RwLock::new(RemoteSnapshot {
                 host_name: config.host_name.clone(),
                 tailscale_ip: tailscale_ip.clone(),
@@ -449,6 +453,9 @@ impl RemoteServer {
             || next.port != self.config.port;
         if let Ok(mut token) = self.shared.token.write() {
             *token = next.token.clone();
+        }
+        if let Ok(mut linked) = self.shared.linked_cloud.write() {
+            *linked = next.cloud_host.clone();
         }
         if let Ok(mut snap) = self.shared.snapshot.write() {
             snap.host_name = next.host_name.clone();
@@ -1031,6 +1038,24 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            let linked_hosts: Vec<Value> = shared
+                .linked_cloud
+                .read()
+                .ok()
+                .and_then(|c| c.clone())
+                .filter(|c| !c.host.trim().is_empty() && !c.token.trim().is_empty())
+                .map(|c| {
+                    json!({
+                        "kind": "cloud",
+                        "name": c.name,
+                        "host": c.host,
+                        "port": c.port,
+                        "tls": c.tls,
+                        "token": c.token,
+                    })
+                })
+                .into_iter()
+                .collect();
             let _ = http::write_json(
                 stream,
                 200,
@@ -1038,6 +1063,7 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 &json!({
                     "protocol_version": PROTOCOL_VERSION,
                     "pui_version": env!("CARGO_PKG_VERSION"),
+                    "linked_hosts": linked_hosts,
                     "host_name": snap.host_name,
                     "tailscale_ip": snap.tailscale_ip,
                     "active_path": snap.active_path,

@@ -10,6 +10,8 @@ export interface CloudAdminStatus {
   has_git_ssh_key: boolean;
   git_key_mode: 'dedicated' | 'copied' | null;
   git_public_key: string | null;
+  /** Whether the cloud key can authenticate to GitHub over SSH (null = unknown / no key). */
+  github_ssh_ok: boolean | null;
   git_user_name: string | null;
   git_user_email: string | null;
   skills: string[];
@@ -106,6 +108,35 @@ function gitConfigGet(key: string): string | null {
   }
 }
 
+let githubCheckCache: { at: number; key: string; ok: boolean } | null = null;
+
+/** Probes `ssh -T git@github.com` (exit 1 + "successfully authenticated" = OK). Cached for 2 min. */
+export function checkGithubSsh(publicKey: string | null, force = false): boolean | null {
+  if (!publicKey) return null;
+  const now = Date.now();
+  if (!force && githubCheckCache && githubCheckCache.key === publicKey && now - githubCheckCache.at < 120_000) {
+    return githubCheckCache.ok;
+  }
+  let output = '';
+  try {
+    output = execFileSync(
+      'ssh',
+      ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'StrictHostKeyChecking=accept-new', 'git@github.com'],
+      { encoding: 'utf8', timeout: 10_000, stdio: 'pipe' },
+    );
+  } catch (err: unknown) {
+    const e = err as { stdout?: string | Buffer; stderr?: string | Buffer };
+    output = `${e.stdout?.toString() ?? ''}${e.stderr?.toString() ?? ''}`;
+  }
+  const ok = /successfully authenticated/i.test(output);
+  githubCheckCache = { at: now, key: publicKey, ok };
+  return ok;
+}
+
+export function invalidateGithubSshCheck(): void {
+  githubCheckCache = null;
+}
+
 export function getAdminStatus(): CloudAdminStatus {
   const authPath = path.join(piAgentDir(), 'auth.json');
   let has_pi_auth = false;
@@ -178,6 +209,7 @@ export function getAdminStatus(): CloudAdminStatus {
     has_git_ssh_key: hasKey,
     git_key_mode,
     git_public_key,
+    github_ssh_ok: hasKey ? checkGithubSsh(git_public_key) : null,
     git_user_name: gitConfigGet('user.name'),
     git_user_email: gitConfigGet('user.email'),
     skills,
@@ -450,6 +482,25 @@ export function inferRepoDirName(url: string, explicitName?: string): string {
   return safe;
 }
 
+/** Converts a failed `git clone` into an HTTP-safe error with an actionable message. */
+function describeCloneError(err: unknown, url: string): Error & { status: number } {
+  const e = err as { stderr?: string | Buffer; message?: string };
+  const stderr = (e.stderr?.toString() ?? '').trim();
+  let message: string;
+  if (/permission denied \(publickey\)|could not read from remote repository/i.test(stderr)) {
+    message =
+      `Could not clone ${url}: the cloud host's SSH key is not authorized on GitHub. ` +
+      'Add it in Settings → Cloud host → Sync from Mac… (or paste the key at github.com/settings/ssh/new).';
+  } else if (/repository not found|not found/i.test(stderr)) {
+    message = `Could not clone ${url}: repository not found or not accessible with the cloud key.`;
+  } else {
+    const lastLine = stderr.split('\n').filter(Boolean).pop() || e.message || 'unknown error';
+    message = `Could not clone ${url}: ${lastLine}`;
+  }
+  invalidateGithubSshCheck();
+  return Object.assign(new Error(message), { status: 502 });
+}
+
 export function cloneRepoIntoWorkspace(
   config: DaemonConfig,
   url: string,
@@ -470,11 +521,16 @@ export function cloneRepoIntoWorkspace(
   }
   args.push('--', safeUrl, target);
 
-  execFileSync('git', args, {
-    cwd: config.workspaces_dir,
-    timeout: 120_000,
-    stdio: 'pipe',
-  });
+  try {
+    execFileSync('git', args, {
+      cwd: config.workspaces_dir,
+      timeout: 120_000,
+      stdio: 'pipe',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  } catch (err: unknown) {
+    throw describeCloneError(err, safeUrl);
+  }
 
   return { path: fs.realpathSync(target), already_exists: false };
 }

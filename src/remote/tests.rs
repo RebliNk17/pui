@@ -181,7 +181,13 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
             host_name: "Test Mac".into(),
             use_tls_in_qr: false,
             public_host: String::new(),
-            cloud_host: None,
+            cloud_host: Some(crate::remote::CloudHostConfig {
+                name: "pui-cloud".into(),
+                host: "100.64.0.9".into(),
+                port: 4817,
+                token: "cloud-token".into(),
+                tls: false,
+            }),
         },
         || {},
     );
@@ -305,6 +311,18 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
     assert_eq!(code, 200);
     assert!(body.contains("\"platform\":\"android\""));
     assert!(body.contains("Pixel 9"));
+
+    // 2a. Authenticated /v1/info advertises the linked cloud host to paired phones.
+    let (code, body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/info HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(body.contains("\"linked_hosts\""));
+    assert!(body.contains("\"host\":\"100.64.0.9\""));
+    assert!(body.contains("\"token\":\"cloud-token\""));
 
     // 2b. Authenticated /v1/usage returns per-provider rate limits.
     let (code, body) = send_http(
