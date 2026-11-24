@@ -24,6 +24,42 @@ pub(super) struct ChatPrefs {
     pub(super) parent_session: Option<PathBuf>,
     pub(super) origin: Option<crate::remote::SessionOrigin>,
 }
+impl Pui {
+    pub(super) fn chat_prefs_path(&self, path: &std::path::Path) -> PathBuf {
+        let alias = crate::runtime::session_path_alias(path);
+        // A newly cached automatic title must not shadow the existing user
+        // settings under the other spelling. Keep user-owned metadata together
+        // so unhide/unpin/rename updates that same record instead of a copy.
+        let customized = |meta: &ChatPrefs| {
+            meta.title.is_some()
+                || meta.project.is_some()
+                || meta.pinned
+                || meta.archived
+                || meta.hidden
+                || meta.section.is_some()
+                || meta.parent_session.is_some()
+                || meta.origin.is_some()
+        };
+        let exact = self.prefs.chats.get(path);
+        if exact.is_some_and(customized) {
+            return path.to_path_buf();
+        }
+        if let Some(alias) = alias.as_ref() {
+            if self
+                .prefs
+                .chats
+                .get(alias)
+                .is_some_and(|meta| customized(meta) || exact.is_none())
+            {
+                return alias.clone();
+            }
+        }
+        path.to_path_buf()
+    }
+    pub(super) fn chat_prefs(&self, path: &std::path::Path) -> Option<&ChatPrefs> {
+        self.prefs.chats.get(&self.chat_prefs_path(path))
+    }
+}
 impl ChatPrefs {
     pub(super) fn is_empty(&self) -> bool {
         self.title.is_none()
@@ -453,6 +489,7 @@ impl Pui {
                         .set_title("Organize under project (does not change working directory)")
                         .pick_folder()
                     {
+                        let path = self.chat_prefs_path(&path);
                         self.prefs.chats.entry(path).or_default().project = Some(folder);
                     }
                 }
@@ -470,9 +507,11 @@ impl Pui {
                     }
                 }
                 Action::Hide(path) => {
+                    let path = self.chat_prefs_path(&path);
                     self.prefs.chats.entry(path).or_default().hidden = true;
                 }
                 Action::Restore(path) => {
+                    let path = self.chat_prefs_path(&path);
                     self.prefs.chats.entry(path).or_default().hidden = false;
                 }
                 _ => {}
@@ -499,9 +538,7 @@ impl Pui {
 
     fn begin_rename(&mut self, path: PathBuf) {
         self.rename_text = self
-            .prefs
-            .chats
-            .get(&path)
+            .chat_prefs(&path)
             .and_then(|m| m.title.clone())
             .or_else(|| {
                 self.sessions
@@ -799,7 +836,8 @@ impl Pui {
                             let mut contents = |ui: &mut egui::Ui| {
                                 theme::menu_controls(ui);
                                 if let Some(path) = &branch.path {
-                                    let meta = self.prefs.chats.entry(path.clone()).or_default();
+                                    let prefs_path = self.chat_prefs_path(path);
+                                    let meta = self.prefs.chats.entry(prefs_path).or_default();
                                     if ui
                                         .button(if meta.pinned { "Unpin" } else { "Pin" })
                                         .clicked()
@@ -1006,9 +1044,7 @@ impl Pui {
                     .and_then(|chat| chat.state.chat_title())
             }
         };
-        self.prefs
-            .chats
-            .get(&session.path)
+        self.chat_prefs(&session.path)
             .and_then(|meta| meta.title.clone().or_else(|| meta.initial_title.clone()))
             .or_else(live_title)
             .unwrap_or_else(|| session.title.clone())
@@ -1061,12 +1097,11 @@ impl Pui {
         };
         let title = self.session_title(s);
         let row_origin = self
-            .prefs
-            .chats
-            .get(&path)
+            .chat_prefs(&path)
             .and_then(|m| m.origin.clone())
             .or_else(|| sessions::origin_for(&path));
-        let meta = self.prefs.chats.entry(path.clone()).or_default();
+        let prefs_path = self.chat_prefs_path(&path);
+        let meta = self.prefs.chats.entry(prefs_path).or_default();
         let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
         let mut renamed = None;
         let compact = !self.prefs.sidebar_view.metadata || self.projects;

@@ -7,12 +7,15 @@ if [[ "$(uname -s)" != Darwin ]]; then
 fi
 profile=release
 cargo_flags=(--release --locked)
-case "${1:-}" in
-  '') ;;
-  --debug) profile=debug; cargo_flags=(--locked) ;;
-  *) echo "Usage: $0 [--debug]" >&2; exit 1 ;;
-esac
-[[ $# -le 1 ]] || { echo "Usage: $0 [--debug]" >&2; exit 1; }
+bundle_id=dev.pi.pui.dev
+display_name='Pui Dev'
+for arg in "$@"; do
+  case "$arg" in
+    --debug) profile=debug; cargo_flags=(--locked) ;;
+    --distribution) bundle_id=dev.pi.pui; display_name=Pui ;;
+    *) echo "Usage: $0 [--debug] [--distribution]" >&2; exit 1 ;;
+  esac
+done
 [[ -z "${CARGO_BUILD_TARGET:-}" ]] || { echo "Use a native build without CARGO_BUILD_TARGET." >&2; exit 1; }
 # CEF's build requires CMake/Ninja. Download only the pinned, hash-checked
 # runtime before Cargo so custom TLS roots can use the system curl stack.
@@ -44,14 +47,25 @@ cp -R assets/pui-engineering "$resources/pui-engineering"
 # Retain the new renderer's original notices in distributed local/CI bundles.
 mkdir -p "$resources/ThirdParty"
 cp -R assets/third-party/svg "$resources/ThirdParty/svg"
-python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
-python3 scripts/bundle-runtime-macos.py "$app" "${CARGO_TARGET_DIR:-target}"
+# Configure the parent identity before Chromium derives the helper bundle IDs.
+# Release optimization is independent from distribution/LaunchServices identity.
 cp packaging/Info.plist "$app/Contents/Info.plist"
 # Cargo is the release-version source of truth.
 version=$(cargo pkgid --offline | awk -F# '{print $NF}' | awk -F@ '{print $NF}')
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${CI_PIPELINE_IID:-1}" "$app/Contents/Info.plist"
+python3 - "$app/Contents/Info.plist" "$bundle_id" "$display_name" "$version" "${CI_PIPELINE_IID:-1}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+info = plistlib.loads(path.read_bytes())
+info.update(CFBundleIdentifier=sys.argv[2], CFBundleName=sys.argv[3],
+            CFBundleDisplayName=sys.argv[3], CFBundleShortVersionString=sys.argv[4],
+            CFBundleVersion=sys.argv[5])
+path.write_bytes(plistlib.dumps(info))
+PY
 plutil -lint "$app/Contents/Info.plist"
+python3 scripts/bundle-chromium-macos.py "$app" "${CARGO_TARGET_DIR:-target}" "$profile"
+python3 scripts/bundle-runtime-macos.py "$app" "${CARGO_TARGET_DIR:-target}"
 python3 scripts/sign-macos.py "$app"
 if [[ -e dist/Pui.app ]]; then
   previous=$(mktemp -d "$PWD/dist/Pui.previous.XXXXXXXX")
@@ -59,7 +73,7 @@ if [[ -e dist/Pui.app ]]; then
   echo "Previous bundle retained at $previous/Pui.app"
 fi
 mv "$app" dist/Pui.app
-echo "Built $PWD/dist/Pui.app ($profile, $(uname -m))."
+echo "Built $PWD/dist/Pui.app ($display_name, $bundle_id, $profile, $(uname -m))."
 echo "Open with: open dist/Pui.app"
 if [[ "${PUI_SIGN_IDENTITY:--}" == - ]]; then
   echo "Local ad-hoc signed build; not Developer ID signed or notarized."

@@ -142,7 +142,7 @@ pub(in crate::app) fn partition(
         let section = branch
             .path
             .as_ref()
-            .and_then(|path| app.prefs.chats.get(path))
+            .and_then(|path| app.chat_prefs(path))
             .and_then(|prefs| prefs.section.as_ref())
             .or(pathless_root)
             .filter(|section| ids.contains(section.as_str()));
@@ -233,6 +233,7 @@ impl Pui {
                 .iter()
                 .any(|candidate| candidate.id == section)
         {
+            let path = self.chat_prefs_path(&path);
             self.prefs
                 .chats
                 .entry(path)

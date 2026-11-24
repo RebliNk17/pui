@@ -183,6 +183,70 @@ fn explicit_release_assigns_saved_chat_without_opening_or_stopping() {
     assert!(app.state.busy);
 }
 #[test]
+fn aliased_saved_chat_release_updates_existing_metadata_record() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    let section = Section::new("Later".into());
+    let target = section.id.clone();
+    app.prefs.sidebar_view.sections.push(section);
+    let path = app.sessions[0].path.clone();
+    let root = path.parent().unwrap().to_path_buf();
+    let alias = root.join("configured-alias");
+    let saved = alias.join(path.file_name().unwrap());
+    app.prefs.chats.remove(&path);
+    app.prefs.chats.insert(
+        saved.clone(),
+        sidebar::ChatPrefs {
+            title: Some("Keep saved title".into()),
+            ..Default::default()
+        },
+    );
+    crate::runtime::with_session_path_alias(&root, &alias, || {
+        app.section_view.chat_drag = Some(Drag {
+            source: Source::Saved(path.clone()),
+            root: app.prefs.cwd.clone(),
+            owner: app.agents.active.clone(),
+            widget: egui::Id::new("alias-chat"),
+            sections: app
+                .prefs
+                .sidebar_view
+                .sections
+                .iter()
+                .map(|section| section.id.clone())
+                .collect(),
+            membership: None,
+            active: true,
+        });
+        app.section_view.chat_drop = Some(target.clone());
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::PointerButton {
+                    pos: egui::pos2(20.0, 20.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                app.section_view.chat_drag_seen =
+                    Some((egui::Id::new("alias-chat"), ctx.cumulative_pass_nr()));
+                app.finish_chat_section_drag(ctx);
+            },
+        );
+        assert_eq!(
+            app.prefs.chats[&saved].section.as_deref(),
+            Some(target.as_str())
+        );
+        assert_eq!(
+            app.prefs.chats[&saved].title.as_deref(),
+            Some("Keep saved title")
+        );
+        assert!(!app.prefs.chats.contains_key(&path));
+    });
+}
+
+#[test]
 fn release_without_same_pass_source_render_never_commits() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

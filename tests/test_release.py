@@ -334,7 +334,7 @@ esac
             result, log = self.run_build({**self.credentials(), **env})
             self.assertEqual(result.returncode, 17, result.stderr)
             self.assertNotIn("security ", log)
-            self.assertIn("bundle-macos.sh", log)
+            self.assertIn("bash scripts/bundle-macos.sh --distribution", log)
 
     def test_partial_credentials_fail_closed(self):
         result, log = self.run_build({"CI_COMMIT_TAG": "v1.2.3", "CI_COMMIT_REF_PROTECTED": "true"})

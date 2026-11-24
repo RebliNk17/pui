@@ -274,6 +274,180 @@ fn agent_sessions_are_deduplicated_and_nested_even_when_child_is_more_recent() {
     assert!(!forest[0].matches("missing result"));
 }
 #[test]
+fn managed_root_aliases_reuse_one_row_and_the_existing_agent() {
+    let mut app = fixture();
+    crate::runtime::with_session_path_alias(
+        std::path::Path::new("/fixture"),
+        std::path::Path::new("/Fixture"),
+        || {
+            // Discovery retains Pi's configured root; runtime state can return
+            // the canonical on-disk spelling. Neither represents a new chat.
+            let child = app.agents.nodes[&app.agents.active].children[0].clone();
+            let canonical = PathBuf::from("/Fixture/child-0.jsonl");
+            app.agents.nodes.get_mut(&child).unwrap().path = Some(canonical.clone());
+            app.agents
+                .parked
+                .get_mut(&child)
+                .unwrap()
+                .state
+                .session_file = Some(canonical.display().to_string());
+            assert_eq!(
+                app.agent_for_path(std::path::Path::new("/fixture/child-0.jsonl")),
+                Some(child.clone())
+            );
+            let rows = forest(&app);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].children.len(),
+                2,
+                "one row per child, no alias duplicates"
+            );
+            app.view_agent(&child);
+            let rows = forest(&app);
+            let row = rows[0]
+                .children
+                .iter()
+                .find(|row| row.target == Target::Agent(child.clone()))
+                .unwrap();
+            assert!(row.active(&app));
+            // A real fork and a case-distinct filename must remain independent.
+            app.sessions
+                .push(session("/fixture/fork.jsonl", "Inspect model capabilities"));
+            app.sessions.push(session(
+                "/fixture/Child-0.jsonl",
+                "Inspect model capabilities",
+            ));
+            assert_eq!(forest(&app).len(), 3);
+        },
+    );
+}
+
+#[test]
+fn managed_root_alias_preserves_hidden_pinned_title_project_and_parent_metadata() {
+    crate::runtime::with_session_path_alias(
+        std::path::Path::new("/fixture"),
+        std::path::Path::new("/Fixture"),
+        || {
+            let mut app = app();
+            app.agents = Default::default();
+            app.state = State::default();
+            app.sessions = vec![
+                session("/fixture/parent.jsonl", "Parent"),
+                session("/fixture/child.jsonl", "Discovered title"),
+            ];
+            app.prefs.chats.clear();
+            let saved = PathBuf::from("/Fixture/child.jsonl");
+            app.prefs.chats.insert(
+                saved.clone(),
+                sidebar::ChatPrefs {
+                    title: Some("My saved name".into()),
+                    project: Some("/organized".into()),
+                    pinned: true,
+                    archived: true,
+                    hidden: true,
+                    parent_session: Some("/Fixture/parent.jsonl".into()),
+                    ..Default::default()
+                },
+            );
+            // Metadata refresh can cache the other spelling's automatic title.
+            app.refresh_session_titles();
+            let rows = forest(&app);
+            assert_eq!(rows.len(), 1);
+            let child = &rows[0].children[0];
+            assert_eq!(child.title, "My saved name");
+            assert_eq!(child.project, PathBuf::from("/organized"));
+            assert!(child.hidden && child.pinned && child.archived);
+            assert_eq!(app.session_title(&app.sessions[1]), "My saved name");
+            assert_eq!(app.chat_prefs_path(&app.sessions[1].path), saved);
+            // Changes target the saved record, not a shadow copy. A hidden,
+            // unpinned chat stays absent from the ordinary listing.
+            let path = app.chat_prefs_path(&app.sessions[1].path);
+            app.prefs.chats.get_mut(&path).unwrap().pinned = false;
+            let (pinned, visible) = listing(&app);
+            assert!(pinned.is_empty());
+            assert!(visible[0].children.is_empty());
+            app.prefs.chats.get_mut(&path).unwrap().hidden = false;
+            let (_, visible) = listing(&app);
+            assert_eq!(visible[0].children.len(), 1);
+            // Case-distinct suffix metadata must not attach to another file.
+            assert!(
+                app.chat_prefs(std::path::Path::new("/fixture/Child.jsonl"))
+                    .is_none()
+            );
+        },
+    );
+}
+
+#[test]
+fn aliased_agent_menu_unpins_saved_record_without_masking_hidden_or_title() {
+    crate::runtime::with_session_path_alias(
+        std::path::Path::new("/fixture"),
+        std::path::Path::new("/Fixture"),
+        || {
+            let mut app = fixture();
+            let saved = PathBuf::from("/Fixture/child-0.jsonl");
+            app.prefs.chats.insert(
+                saved.clone(),
+                sidebar::ChatPrefs {
+                    title: Some("Saved aliased child".into()),
+                    pinned: true,
+                    hidden: true,
+                    ..Default::default()
+                },
+            );
+            for _ in 0..3 {
+                render(&mut app, vec![]);
+            }
+            let mut text = Vec::new();
+            for shape in render(&mut app, vec![]).shapes {
+                labels(&shape.shape, &mut text);
+            }
+            let pos = text
+                .iter()
+                .find(|(text, _)| text == "Saved aliased child")
+                .unwrap()
+                .1
+                .center();
+            for pressed in [true, false] {
+                render(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Secondary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            text.clear();
+            for shape in render(&mut app, vec![]).shapes {
+                labels(&shape.shape, &mut text);
+            }
+            let unpin = text
+                .iter()
+                .find(|(text, _)| text == "Unpin")
+                .unwrap()
+                .1
+                .center();
+            click(&mut app, unpin);
+            assert!(!app.prefs.chats[&saved].pinned);
+            assert!(app.prefs.chats[&saved].hidden);
+            assert_eq!(
+                app.prefs.chats[&saved].title.as_deref(),
+                Some("Saved aliased child")
+            );
+            assert_eq!(
+                app.chat_prefs_path(std::path::Path::new("/fixture/child-0.jsonl")),
+                saved
+            );
+        },
+    );
+}
+
+#[test]
 fn agent_tree_is_in_the_project_list_once_and_child_click_keeps_parent_draft() {
     for projects in [false, true] {
         let mut app = fixture();

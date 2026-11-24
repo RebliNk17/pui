@@ -13,7 +13,7 @@ pub(super) struct ListingCache {
 }
 
 pub(super) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    a.as_os_str() == b.as_os_str() || (a.file_name() == b.file_name() && a == b)
+    path_key_eq(a, b)
 }
 
 fn path_key_eq(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -210,13 +210,9 @@ pub(super) fn listing(app: &Pui) -> (Vec<Branch>, Vec<Branch>) {
     (pinned, rows)
 }
 
-// These are the same macOS directory, without canonicalizing on every frame.
+// Shared, filesystem-free managed-root identity for discovery and navigation.
 fn path_key(path: &std::path::Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    if let Ok(suffix) = path.strip_prefix("/private/var") {
-        return PathBuf::from("/var").join(suffix);
-    }
-    path.to_path_buf()
+    crate::runtime::session_path_key(path)
 }
 fn session_key(path: &std::path::Path) -> String {
     format!("session:{}", path_key(path).display())
@@ -256,7 +252,7 @@ fn empty(
     }
 }
 fn preferences(app: &Pui, branch: &mut Branch) {
-    if let Some(meta) = branch.path.as_ref().and_then(|p| app.prefs.chats.get(p)) {
+    if let Some(meta) = branch.path.as_ref().and_then(|p| app.chat_prefs(p)) {
         if let Some(title) = &meta.title {
             branch.title = title.clone();
         }
@@ -286,7 +282,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
         if rows.contains_key(&key) {
             continue;
         }
-        let meta = app.prefs.chats.get(&s.path);
+        let meta = app.chat_prefs(&s.path);
         let title = meta
             .and_then(|m| m.title.clone().or_else(|| m.initial_title.clone()))
             .or_else(|| live_titles.get(s.path.as_path()).cloned().flatten())
@@ -312,12 +308,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
         }
         order.push(key.clone());
         rows.insert(key.clone(), row);
-        if let Some(parent_path) = app
-            .prefs
-            .chats
-            .get(&s.path)
-            .and_then(|meta| meta.parent_session.as_ref())
-        {
+        if let Some(parent_path) = meta.and_then(|meta| meta.parent_session.as_ref()) {
             let parent_key = session_key(parent_path);
             if parent_key != key {
                 parents.insert(key, parent_key);
@@ -371,7 +362,7 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
             if row
                 .path
                 .as_ref()
-                .and_then(|path| app.prefs.chats.get(path))
+                .and_then(|path| app.chat_prefs(path))
                 .is_none_or(|meta| meta.title.is_none())
             {
                 row.title = node.name.clone();

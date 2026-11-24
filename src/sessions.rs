@@ -81,10 +81,12 @@ fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
     files.sort_by_key(|(_, time, _)| std::cmp::Reverse(*time));
     // Pinned/hidden chats must remain reachable even after leaving the recent 150.
     files.truncate(150);
-    let mut seen: std::collections::HashSet<_> =
-        files.iter().map(|(path, _, _)| path.clone()).collect();
+    let mut seen: std::collections::HashSet<_> = files
+        .iter()
+        .map(|(path, _, _)| crate::runtime::session_path_key(path))
+        .collect();
     for path in retained {
-        if seen.insert(path.clone()) {
+        if seen.insert(crate::runtime::session_path_key(path)) {
             if let Ok(meta) = fs::metadata(path) {
                 if meta.is_file() {
                     files.push((
@@ -101,7 +103,7 @@ fn discover_in(root: &Path, retained: &[PathBuf]) -> Vec<Session> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if cache.len() > 512 {
-        cache.retain(|path, _| seen.contains(path));
+        cache.retain(|path, _| seen.contains(&crate::runtime::session_path_key(path)));
     }
     files
         .into_iter()
@@ -641,6 +643,27 @@ mod tests {
         }
         fs::remove_dir(root).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn retained_managed_root_alias_does_not_duplicate_discovered_session() {
+        let root = std::env::temp_dir().join(format!("pui-session-alias-{}", uuid::Uuid::new_v4()));
+        let canonical = root.join("Pui");
+        let raw = root.join("pui-alias");
+        fs::create_dir_all(&canonical).unwrap();
+        std::os::unix::fs::symlink(&canonical, &raw).unwrap();
+        let path = canonical.join("chat.jsonl");
+        fs::write(&path, "{\"type\":\"session\",\"cwd\":\"/fixture\"}\n").unwrap();
+        crate::runtime::with_session_path_alias(&raw, &canonical, || {
+            let sessions = discover_in(&canonical, &[raw.join("chat.jsonl")]);
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].path, path);
+        });
+        fs::remove_file(raw).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(canonical).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
     #[test]
     fn creation_time_comes_from_session_header_not_last_activity() {
         let session = fixture(&[serde_json::json!({
