@@ -288,9 +288,8 @@ impl Pui {
                     .entry(path)
                     .or_default()
                     .insert(0, delivery.message);
-            } else if self.draft.is_empty() {
-                self.context_chips.clear();
-                self.draft = delivery.message.text;
+            } else if self.draft.is_empty() && !self.context_chips.has_quotes() {
+                self.restore_draft_text(&delivery.message.text);
                 self.draft_images.set_images(delivery.message.images);
             }
         } else if let Some(receipt) = self
@@ -386,7 +385,7 @@ impl Pui {
         if self.loading_chat
             || self.demo
             || (!self.draft_images.is_empty() && !self.draft_images.ready())
-            || (self.draft.trim().is_empty() && self.draft_images.is_empty())
+            || (self.outgoing_text().trim().is_empty() && self.draft_images.is_empty())
         {
             return;
         }
@@ -394,7 +393,7 @@ impl Pui {
             return;
         };
         let message = WaitingMessage {
-            text: self.draft.clone(),
+            text: self.outgoing_text(),
             images: self.draft_images.images(),
             mode,
         };
@@ -403,6 +402,7 @@ impl Pui {
         }
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.recall = Default::default();
         self.draft_images.clear();
         self.focus_composer = true;
@@ -540,8 +540,7 @@ impl Pui {
             if self.draft.is_empty() && self.draft_images.is_empty() {
                 if !self.remote_action(sync::Action::Edit(index)) {
                     let message = self.waiting.get_mut(&path).unwrap().remove(index);
-                    self.context_chips.clear();
-                    self.draft = message.text;
+                    self.restore_draft_text(&message.text);
                     self.draft_images.set_images(message.images);
                     self.focus_composer = true;
                 }

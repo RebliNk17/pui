@@ -63,9 +63,12 @@ fn pointer_single_note_appends_once_without_rpc_or_note_mutation() {
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
     }
-    assert_eq!(app.draft.matches("first committed note").count(), 1);
-    assert!(!app.draft.contains("other note"));
-    assert!(app.draft.starts_with("Kept draft"));
+    assert_eq!(
+        app.outgoing_text().matches("first committed note").count(),
+        1
+    );
+    assert!(!app.outgoing_text().contains("other note"));
+    assert!(app.outgoing_text().starts_with("Kept draft"));
     assert!(commands.try_recv().is_err());
     assert!(app.state.busy);
     assert_eq!(app.changes.review_comments.items.len(), 2);
@@ -84,9 +87,9 @@ fn native_single_note_activation_with_new_question_and_stale_deleted_control_is_
         }
         frame(&ctx, &mut app, events);
         frame(&ctx, &mut app, vec![]);
-        assert!(app.draft.contains("first committed note"));
+        assert!(app.outgoing_text().contains("first committed note"));
         assert_eq!(app.state.dialogs.len(), 1);
-        let draft = app.draft.clone();
+        let draft = app.outgoing_text().clone();
         app.changes.review_comments.items.remove(0);
         ctx.memory_mut(|memory| memory.request_focus(target));
         frame(
@@ -94,7 +97,7 @@ fn native_single_note_activation_with_new_question_and_stale_deleted_control_is_
             &mut app,
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         );
-        assert_eq!(app.draft, draft);
+        assert_eq!(app.outgoing_text(), draft);
     }
 }
 #[test]
@@ -132,7 +135,7 @@ fn native_tab_from_resolve_then_reverse_escape_and_foreign_modal_preserve_draft(
         &mut app,
         vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     app.changes.review_comments.expanded = true;
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
@@ -149,7 +152,7 @@ fn native_tab_from_resolve_then_reverse_escape_and_foreign_modal_preserve_draft(
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     assert!(!app.changes.review_comments.storage_dirty);
 }
 #[test]

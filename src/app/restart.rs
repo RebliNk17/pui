@@ -78,7 +78,7 @@ impl Pui {
             }),
             self.prefs.cwd.clone(),
             &self.state,
-            &self.draft,
+            &self.outgoing_text(),
             !self.is_mirror(),
         )];
         for (id, chat) in &self.agents.parked {
@@ -91,6 +91,7 @@ impl Pui {
                 if chat.client.is_none()
                     && chat.state.messages.is_empty()
                     && chat.draft.is_empty()
+                    && !chat.context_chips.has_quotes()
                     && chat.state.restart_notice.is_empty()
                 {
                     continue;
@@ -105,7 +106,7 @@ impl Pui {
                     }),
                     node.cwd.clone(),
                     &chat.state,
-                    &chat.draft,
+                    &chat.context_chips.compose(&chat.draft),
                     !mirror,
                 ));
             }
@@ -153,10 +154,13 @@ impl Pui {
             .position(|c| c.path == path && (path.is_some() || c.cwd == self.prefs.cwd))
         {
             let checkpoint = self.restart_pending.remove(index);
-            if self.draft.is_empty() {
-                self.context_chips.clear();
-            }
+            let adopt = self.draft.is_empty() && !self.context_chips.has_quotes();
             checkpoint.apply(&mut self.state, &mut self.draft);
+            if adopt {
+                // Captured context was checkpointed as blocks; show it as cards again.
+                let text = std::mem::take(&mut self.draft);
+                self.draft = self.context_chips.adopt_quotes(&text);
+            }
         }
     }
 

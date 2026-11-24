@@ -303,10 +303,12 @@ impl Pui {
         let request = pending.request;
         let saved_draft = if request.operation != MessageAction::Fork
             && request.mode != Mode::Code
-            && (!self.draft.is_empty() || !self.draft_images.is_empty())
+            && (!self.draft.is_empty()
+                || !self.draft_images.is_empty()
+                || self.context_chips.has_quotes())
         {
             Some(run_status::WaitingMessage {
-                text: self.draft.clone(),
+                text: self.outgoing_text(),
                 images: self.draft_images.images(),
                 mode: self.prefs.settings.delivery,
             })
@@ -357,8 +359,8 @@ impl Pui {
             if let Some(saved) = saved_draft {
                 self.history_drafts.push(saved);
             }
-            self.context_chips.clear();
-            self.draft = crate::transcript::user_display_text(&request.message).into();
+            let text = crate::transcript::user_display_text(&request.message).to_owned();
+            self.restore_draft_text(&text);
             self.draft_images.set_images(request.message.images);
             self.recall = Default::default();
             self.focus_composer = true;
@@ -418,8 +420,7 @@ impl Pui {
             if ui.small_button("Restore saved draft").clicked() {
                 if self.draft.is_empty() && self.draft_images.is_empty() {
                     let draft = self.history_drafts.remove(0);
-                    self.context_chips.clear();
-                    self.draft = draft.text;
+                    self.restore_draft_text(&draft.text);
                     self.draft_images.set_images(draft.images);
                     self.focus_composer = true;
                 } else {

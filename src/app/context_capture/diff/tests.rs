@@ -143,7 +143,7 @@ fn missing_or_bad_hunk_coordinates_are_truthfully_unknown_and_bounded() {
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
     assert_eq!(
-        app.draft
+        app.outgoing_text()
             .matches("Context excerpt limited to 24 KiB")
             .count(),
         1
@@ -235,8 +235,8 @@ fn frozen_diff_snapshot_is_not_replaced_when_same_widget_updates() {
     }
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
-    assert!(app.draft.contains("-old\n+new selected"));
-    assert!(!app.draft.contains("replacement"));
+    assert!(app.outgoing_text().contains("-old\n+new selected"));
+    assert!(!app.outgoing_text().contains("replacement"));
 }
 
 #[test]
@@ -287,16 +287,17 @@ fn actual_numbered_diff_selection_adds_exact_text_once_and_never_includes_gutter
             }
             let mut app = crate::app::files::tests::app(&ctx);
             app.draft = "Keep draft".into();
+            app.context_chips.clear_quotes();
             app.state.busy = true;
             let count = app.state.messages.len();
             app.collect_context_capture();
             assert_eq!(
-                app.draft,
+                app.outgoing_text(),
                 "Keep draft\n\n[Context: src/one.rs · Recorded edits (not net Git) · diff rows 2–7 · 2 hunks · original hunk headers included · discontinuous file ranges]\n-old\n+new selected\n context\n@@ -50 +50 @@\n-next\n+last\n[/Context]"
             );
-            let draft = app.draft.clone();
+            let draft = app.outgoing_text().clone();
             app.collect_context_capture();
-            assert_eq!(app.draft, draft);
+            assert_eq!(app.outgoing_text(), draft);
             assert!(app.state.busy);
             assert_eq!(app.state.messages.len(), count);
         }

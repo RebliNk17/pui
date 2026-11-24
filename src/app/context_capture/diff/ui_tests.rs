@@ -10,6 +10,7 @@ fn setup() -> (egui::Context, Pui) {
     app.prefs.hide_inspector = true;
     app.open_diff_review(("src/selected.rs".into(), DIFF.into()).into(), false);
     app.draft = "Kept draft".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     for _ in 0..4 {
         frame(&ctx, &mut app, vec![]);
@@ -60,7 +61,7 @@ fn utility_diff_menu_keyboard_add_preserves_live_approval_run_draft_and_source()
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     assert!(app.pending_dialog.is_none());
     frame(
         &ctx,
@@ -68,10 +69,13 @@ fn utility_diff_menu_keyboard_add_preserves_live_approval_run_draft_and_source()
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
     assert!(
-        app.draft
+        app.outgoing_text()
             .starts_with("Kept draft\n\n[Context: src/selected.rs · Working tree vs HEAD")
     );
-    assert!(app.draft.ends_with("\n-old\n+new selected\n[/Context]"));
+    assert!(
+        app.outgoing_text()
+            .ends_with("\n-old\n+new selected\n[/Context]")
+    );
     assert!(app.state.busy);
     assert_eq!(app.state.messages.len(), count);
     assert!(commands.try_recv().is_err());
@@ -92,7 +96,7 @@ fn hunk_shortcuts_leave_real_frozen_selection_menu_and_draft_untouched() {
     );
     assert!(egui::Popup::is_any_open(&ctx));
     assert_eq!(app.changes.review.as_ref().unwrap().1, source);
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     frame(
         &ctx,
         &mut app,
@@ -146,7 +150,7 @@ fn utility_diff_escape_dismisses_menu_before_window_without_stopping_chat() {
         "focus after dismiss: {:?}",
         ctx.memory(|m| m.focused())
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     frame(
         &ctx,
         &mut app,
@@ -164,7 +168,7 @@ fn closing_diff_or_switching_source_never_applies_an_unconfirmed_snapshot() {
     app.changes.review = None;
     frame(&ctx, &mut app, vec![]);
     assert!(!egui::Popup::is_any_open(&ctx));
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     app.open_diff_review(("src/selected.rs".into(), DIFF.into()).into(), false);
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
@@ -172,7 +176,7 @@ fn closing_diff_or_switching_source_never_applies_an_unconfirmed_snapshot() {
     select_menu(&ctx, &mut app);
     app.leave_session_layout();
     assert!(!egui::Popup::is_any_open(&ctx));
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     assert!(!egui::text_selection::LabelSelectionState::load(&ctx).has_selection());
 }
 
@@ -242,6 +246,7 @@ fn inline_recorded_and_working_diff_use_actual_source_and_session_identity() {
         app.inspector_panel = true;
         app.state.busy = true;
         app.draft = "Kept".into();
+        app.context_chips.clear_quotes();
         app.state.messages = vec![Message {
             tools: vec![protocol::Tool {
                 name: "edit".into(),
@@ -328,8 +333,15 @@ fn inline_recorded_and_working_diff_use_actual_source_and_session_identity() {
         } else {
             "Working tree vs HEAD"
         };
-        assert!(app.draft.contains(kind), "{}", app.draft);
-        assert!(app.draft.ends_with("\n-old\n+new selected\n[/Context]"));
+        assert!(
+            app.outgoing_text().contains(kind),
+            "{}",
+            app.outgoing_text()
+        );
+        assert!(
+            app.outgoing_text()
+                .ends_with("\n-old\n+new selected\n[/Context]")
+        );
         assert!(app.changes.review.is_none());
         assert!(app.state.busy);
     }

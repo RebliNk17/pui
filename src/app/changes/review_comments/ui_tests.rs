@@ -35,6 +35,7 @@ pub(super) fn setup() -> (egui::Context, Pui) {
     app.prefs.hide_sidebar = true;
     app.prefs.hide_inspector = true;
     app.draft = "Kept draft".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     app.open_diff_review(("src/local-review.rs".into(), DIFF.into()).into(), true);
     for _ in 0..4 {
@@ -92,7 +93,7 @@ fn actual_range_comment_resolve_reopen_batch_is_local_and_never_approves_or_send
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     assert!(app.pending_dialog.is_none());
     click(&ctx, &mut app, "review-comment-save");
     frame(&ctx, &mut app, vec![]);
@@ -115,13 +116,13 @@ fn actual_range_comment_resolve_reopen_batch_is_local_and_never_approves_or_send
     assert!(!app.changes.review_comments.items[0].resolved);
     click(&ctx, &mut app, "review-comment-batch");
     assert!(
-        app.draft
+        app.outgoing_text()
             .starts_with("Kept draft\n\n[Context: Local review comments")
     );
-    assert!(app.draft.contains("Please clarify this branch"));
-    assert!(app.draft.contains("SHA-256:"));
+    assert!(app.outgoing_text().contains("Please clarify this branch"));
+    assert!(app.outgoing_text().contains("SHA-256:"));
     assert!(
-        !app.draft.contains("+chosen"),
+        !app.outgoing_text().contains("+chosen"),
         "No duplicate source body in notes"
     );
     assert_eq!(app.state.messages.len(), messages);
@@ -158,7 +159,7 @@ fn chord_entry_first_tab_escape_and_disabled_modal_preserve_review_and_draft() {
     );
     assert!(app.changes.review_comments.editor.is_none());
     assert!(app.changes.review.is_some());
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     // A modal owns the chord; it cannot create a review comment underneath it.
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
         prompt_ui::modal(ctx, egui::Id::new("test-review-blocker"), 200.0, |ui| {
@@ -216,7 +217,7 @@ fn clear_requires_confirmation_escape_cancels_and_explicit_confirm_clears_all_ow
     }
     assert!(app.changes.review_comments.items.is_empty());
     assert!(!app.changes.review_comments.clear_requested);
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
 }
 #[test]
 fn narrow_theme_zoom_review_form_is_inline_bounded_and_does_not_duplicate_filename() {

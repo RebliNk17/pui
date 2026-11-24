@@ -1252,8 +1252,7 @@ impl Pui {
                             && self.draft_images.is_empty()
                         {
                             let edited = self.sync.unsent.pop().unwrap();
-                            self.context_chips.clear();
-                            self.draft = edited.text;
+                            self.restore_draft_text(&edited.text);
                             self.draft_images.set_images(edited.images);
                             self.focus_composer = true;
                         }

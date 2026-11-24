@@ -801,12 +801,8 @@ fn user_actions(
     gallery: &mut crate::media::Gallery,
     enabled: bool,
 ) -> Option<MessageAction> {
-    let footer_width = footer_text_width(ui, &time_label(message.timestamp))
-        + ["Copy", "Edit", "Rewind", "Fork"]
-            .into_iter()
-            .map(|label| footer_action_width(ui, label))
-            .sum::<f32>()
-        + 40.0;
+    // Timestamp + four 24px icon actions with 2px spacing.
+    let footer_width = footer_text_width(ui, &time_label(message.timestamp)) + 4.0 * 26.0 + 16.0;
     user_bubble(ui, message, gallery, footer_width);
     user_footer(ui, user_display_text(message), message.timestamp, enabled)
 }
@@ -839,8 +835,25 @@ fn user_bubble(
         .max(footer_width.min(available))
         .max(140.0)
         .min(available);
-    let galley = crate::app::composer_text::message_galley(ui.ctx(), text, (max - 34.0).max(1.0));
+    let segments = context_segments(text);
+    let has_quotes = segments
+        .iter()
+        .any(|s| matches!(s, Segment::Context { .. }));
+    let plain: String = segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Text(t) => Some(*t),
+            Segment::Context { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let galley = crate::app::composer_text::message_galley(
+        ui.ctx(),
+        if has_quotes { plain.trim() } else { text },
+        (max - 34.0).max(1.0),
+    );
     let width = (galley.size().x + 34.0)
+        .max(if has_quotes { max.min(420.0) } else { 0.0 })
         .max(footer_width.min(max))
         .max(if message.images.is_empty() {
             0.0
@@ -875,12 +888,207 @@ fn user_bubble(
                         if !message.images.is_empty() && !text.is_empty() {
                             ui.add_space(6.0);
                         }
-                        if !text.is_empty() {
+                        if has_quotes {
+                            let mut first = true;
+                            // Captured context reads first (quote above the question),
+                            // whatever order the blocks were composed in.
+                            let ordered = segments
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, s)| matches!(s, Segment::Context { .. }))
+                                .chain(
+                                    segments
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, s)| matches!(s, Segment::Text(_))),
+                                );
+                            for (index, segment) in ordered {
+                                match segment {
+                                    Segment::Text(t) if t.trim().is_empty() => {}
+                                    Segment::Text(t) => {
+                                        if !first {
+                                            ui.add_space(4.0);
+                                        }
+                                        crate::app::composer_text::show_message(ui, t.trim());
+                                        first = false;
+                                    }
+                                    Segment::Context { label, body } => {
+                                        if !first {
+                                            ui.add_space(6.0);
+                                        }
+                                        quote_block(ui, (message.timestamp, index), label, body);
+                                        first = false;
+                                    }
+                                }
+                            }
+                        } else if !text.is_empty() {
                             crate::app::composer_text::show_message(ui, text);
                         }
                     });
             });
         },
+    );
+}
+
+/// A user message split into plain text and captured `[Context: …]` quote blocks.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Segment<'a> {
+    Text(&'a str),
+    Context { label: &'a str, body: &'a str },
+}
+
+/// Split only well-formed `[Context: label]` … `[/Context]` blocks (each marker on its own line).
+pub(crate) fn context_segments(text: &str) -> Vec<Segment<'_>> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    let mut offset_ok = true;
+    while offset_ok {
+        offset_ok = false;
+        let start = if rest.starts_with("[Context: ") {
+            Some(0)
+        } else {
+            rest.find("\n[Context: ").map(|i| i + 1)
+        };
+        let Some(start) = start else { break };
+        let after = &rest[start..];
+        let Some(header_end) = after.find('\n') else {
+            break;
+        };
+        let header = &after[..header_end];
+        let Some(label) = header
+            .strip_prefix("[Context: ")
+            .and_then(|h| h.strip_suffix(']'))
+        else {
+            break;
+        };
+        let body_start = header_end + 1;
+        let Some(close) = after[body_start..]
+            .find("\n[/Context]")
+            .map(|i| body_start + i)
+            .or_else(|| {
+                after[body_start..]
+                    .starts_with("[/Context]")
+                    .then_some(body_start)
+            })
+        else {
+            break;
+        };
+        let end_marker = if after[close..].starts_with('\n') {
+            close + 1
+        } else {
+            close
+        };
+        let block_end = end_marker + "[/Context]".len();
+        if !after[block_end..].is_empty() && !after[block_end..].starts_with('\n') {
+            break;
+        }
+        if start > 0 {
+            out.push(Segment::Text(&rest[..start]));
+        }
+        out.push(Segment::Context {
+            label,
+            body: &after[body_start..close.max(body_start)],
+        });
+        rest = &after[block_end..];
+        offset_ok = true;
+    }
+    if !rest.is_empty() {
+        out.push(Segment::Text(rest));
+    }
+    out
+}
+
+fn quote_source_label(label: &str) -> (String, bool) {
+    let reply = label.starts_with("Assistant reply") || label.starts_with("Quoted assistant reply");
+    if reply {
+        ("Pi reply".to_owned(), true)
+    } else {
+        (label.split(" · ").next().unwrap_or(label).to_owned(), false)
+    }
+}
+
+/// Request ID read by the app to scroll to the quoted reply.
+pub const QUOTE_JUMP_ID: &str = "pui-quote-jump";
+
+/// Compact accent quote block inside a sent user bubble, with Jump ↑ for reply quotes.
+fn quote_block(ui: &mut egui::Ui, identity: impl Hash, label: &str, body: &str) {
+    let colors = crate::theme::palette(ui.ctx());
+    let id = egui::Id::new(("sent-quote", identity));
+    let expanded = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let (source, reply) = quote_source_label(label);
+    let frame = egui::Frame::new()
+        .fill(colors.accent_bg.gamma_multiply(0.55))
+        .corner_radius(8)
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 8,
+            top: 6,
+            bottom: 6,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                icons::draw(ui, rect, Icon::Quote, colors.accent);
+                ui.add(
+                    egui::Label::new(RichText::new(&source).size(10.5).color(colors.muted))
+                        .truncate(),
+                )
+                .on_hover_text(label);
+                if reply {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let jump = ui
+                            .add(
+                                egui::Label::new(
+                                    RichText::new("Jump ↑").size(10.5).color(colors.accent),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Scroll to the quoted reply");
+                        if jump.clicked() {
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(egui::Id::new(QUOTE_JUMP_ID), body.to_owned())
+                            });
+                        }
+                    });
+                }
+            });
+            let mut job = egui::text::LayoutJob::simple(
+                body.to_owned(),
+                FontId::proportional(12.0),
+                colors.text.gamma_multiply(0.82),
+                ui.available_width(),
+            );
+            if !expanded {
+                job.wrap.max_rows = 3;
+            }
+            let long = body.lines().count() > 3 || body.chars().count() > 240;
+            let response = ui.add(egui::Label::new(job).sense(if long {
+                Sense::click()
+            } else {
+                Sense::hover()
+            }));
+            if long
+                && response
+                    .on_hover_text(if expanded { "Collapse" } else { "Expand" })
+                    .clicked()
+            {
+                ui.ctx().data_mut(|d| d.insert_temp(id, !expanded));
+            }
+        });
+    let rect = frame.response.rect;
+    ui.painter().rect_filled(
+        Rect::from_min_size(rect.left_top(), Vec2::new(3.0, rect.height())),
+        egui::CornerRadius {
+            nw: 8,
+            sw: 8,
+            ne: 0,
+            se: 0,
+        },
+        colors.accent,
     );
 }
 
@@ -894,30 +1102,58 @@ fn user_footer(
     let colors = crate::theme::palette(ui.ctx());
     let unavailable = "Finish or stop the run, or use the owning window to change history.";
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
         // Reverse construction keeps the visible order timestamp, Copy, Edit,
         // Rewind, Fork while anchoring the whole footer to the user's right edge.
         for (label, icon, kind, hint) in [
-            ("Fork", Icon::Branch, MessageAction::Fork, "Start a separate conversation branched from this message. Original chat and files stay unchanged."),
+            ("Fork from here", Icon::Branch, MessageAction::Fork, "Starts a new session from this point. This one stays as it is."),
             ("Rewind", Icon::Rewind, MessageAction::Rewind, "Return to before this message. Choose file restore only when available; nothing is resent."),
             ("Edit", Icon::Edit, MessageAction::Edit, "Bring this message back to the composer. Your current draft is saved; nothing is sent automatically."),
         ] {
-            if icons::labeled_button(ui, icon, label, enabled)
-                .on_hover_text(hint)
+            if icons::action(ui, icon, label, hint, enabled)
                 .on_disabled_hover_text(unavailable)
                 .clicked()
             {
                 action = Some(kind);
             }
         }
-        if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-            .clicked()
-        {
-            ui.ctx().copy_text(text.to_owned());
-        }
+        copy_action(ui, ("user-copy", timestamp, text.len()), "Copies this message.", || text.to_owned());
+        ui.add_space(6.0);
         ui.label(RichText::new(time_label(timestamp)).size(10.0).color(colors.dim));
     });
     action
+}
+
+/// Copy icon that briefly turns into a check after copying.
+fn copy_action(
+    ui: &mut egui::Ui,
+    identity: impl Hash,
+    detail: &str,
+    text: impl FnOnce() -> String,
+) {
+    let id = egui::Id::new(("copy-action", identity));
+    let now = ui.input(|i| i.time);
+    let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(id));
+    let copied = copied_at.is_some_and(|t| now - t < 1.2);
+    let response = icons::action_with_state(
+        ui,
+        if copied { Icon::Check } else { Icon::Copy },
+        if copied { "Copied" } else { "Copy" },
+        detail,
+        true,
+        copied,
+    );
+    if response.clicked() {
+        ui.ctx().copy_text(text());
+        ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(1250));
+    } else if copied {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    } else if copied_at.is_some() {
+        ui.ctx().data_mut(|d| d.remove::<f64>(id));
+    }
 }
 
 #[cfg(test)]
@@ -1277,26 +1513,49 @@ fn assistant_with_media(
                 )
                 .on_hover_text(usage.cache_tooltip());
             }
-            if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-                .clicked()
-            {
-                ui.ctx().copy_text(
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            copy_action(
+                ui,
+                ("assistant-copy", start, last.timestamp),
+                "Copies this reply as Markdown.",
+                || {
                     messages
                         .iter()
                         .map(|m| m.text.as_str())
                         .collect::<Vec<_>>()
-                        .join("\n\n"),
+                        .join("\n\n")
+                },
+            );
+            if icons::action(
+                ui,
+                Icon::Quote,
+                "Quote reply",
+                "Adds this whole reply to your draft. Select text to quote just part of it.",
+                true,
+            )
+            .clicked()
+            {
+                crate::app::context_capture::queue_parts(
+                    ui.ctx(),
+                    "Quoted assistant reply",
+                    messages.iter().map(|message| message.text.as_str()),
                 );
             }
-            if icons::labeled_button(ui, Icon::Copy, "Quote", true)
-                .on_hover_text("Append a reply excerpt to the draft without sending it")
+            if last.role == "assistant"
+                && last.error.is_none()
+                && last.tools.is_empty()
+                && icons::action(
+                    ui,
+                    Icon::Branch,
+                    "Fork from here",
+                    "Starts a new session including this reply. This one stays as it is.",
+                    actions_enabled,
+                )
                 .clicked()
             {
-                crate::app::context_capture::queue_parts(ui.ctx(), "Quoted assistant reply", messages.iter().map(|message| message.text.as_str()));
+                fork = true;
             }
-            if last.role == "assistant" && last.error.is_none() && last.tools.is_empty()
-                && icons::labeled_button(ui, Icon::Branch, "Fork", actions_enabled)
-                    .on_hover_text("Start a separate chat including this response. The original chat and files stay unchanged.").clicked() { fork = true; }
         });
     }
     (changed, fork)
@@ -2170,7 +2429,8 @@ mod tests {
                             .find(|(s, _)| s == &time_label(message.timestamp))
                             .unwrap()
                             .1;
-                        let rewind = labels.iter().find(|(s, _)| s == "Rewind").unwrap().1;
+                        let _ = &labels;
+                        let rewind = crate::icons::action_rect(&ctx, "Fork from here").unwrap();
                         assert!(
                             bubbles.iter().any(|r| r.left() <= timestamp.left() + 1.0
                                 && r.right() >= rewind.right() - 1.0
@@ -2241,19 +2501,25 @@ mod tests {
                     .unwrap()
                     .1;
                 let mut previous = timestamp;
+                // Icon-only actions: no text labels, ordered after the timestamp.
                 for label in ["Copy", "Edit", "Rewind", "Fork"] {
-                    let rect = text.iter().find(|(t, _)| t == label).expect(label).1;
+                    assert!(
+                        !text.iter().any(|(t, _)| t == label),
+                        "actions are icon-only"
+                    );
+                }
+                for label in ["Copy", "Edit", "Rewind", "Fork from here"] {
+                    let rect = crate::icons::action_rect(&ctx, label).expect(label);
                     assert!(
                         rect.left() > previous.right(),
                         "footer order must match assistant actions: {text:?}"
                     );
-                    assert!((rect.center().y - timestamp.center().y).abs() < 0.5);
-                    assert!((rect.height() - timestamp.height()).abs() < 0.5);
+                    assert!((rect.center().y - timestamp.center().y).abs() < 1.0);
                     assert!(rect.right() < 340.0);
                     previous = rect;
                 }
                 for label in ["Copy", "Edit", "Rewind"] {
-                    let pos = text.iter().find(|(t, _)| t == label).unwrap().1.center();
+                    let pos = crate::icons::action_rect(&ctx, label).unwrap().center();
                     let mut copied = false;
                     for pressed in [true, false] {
                         let output = frame(vec![
@@ -2284,6 +2550,88 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn context_segments_split_only_well_formed_blocks() {
+        let text = "[Context: Assistant reply · selected rendered text (not Markdown source)]\nit comes back\n[/Context]\n\nCan I hide it?";
+        let segs = context_segments(text);
+        assert_eq!(
+            segs,
+            vec![
+                Segment::Context {
+                    label: "Assistant reply · selected rendered text (not Markdown source)",
+                    body: "it comes back"
+                },
+                Segment::Text("\n\nCan I hide it?"),
+            ]
+        );
+        let two = "Look:\n[Context: a.rs:1–2 · selected source]\nfn a() {}\n[/Context]\n[Context: b]\nB\n[/Context]";
+        let segs: Vec<_> = context_segments(two)
+            .into_iter()
+            .filter(|s| !matches!(s, Segment::Text(t) if t.trim().is_empty()))
+            .collect();
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], Segment::Text("Look:\n"));
+        // Unterminated or inline markers stay plain text.
+        assert_eq!(
+            context_segments("[Context: x]\nno end"),
+            vec![Segment::Text("[Context: x]\nno end")]
+        );
+        assert_eq!(
+            context_segments("say [Context: x] inline"),
+            vec![Segment::Text("say [Context: x] inline")]
+        );
+    }
+
+    #[test]
+    fn sent_quote_renders_as_block_with_jump_not_raw_markers() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let message = Message {
+            role: "user".into(),
+            text: "[Context: Assistant reply · selected rendered text (not Markdown source)]\nit comes back\n[/Context]\n\nCan I hide it?".into(),
+            timestamp: 60000,
+            ..Default::default()
+        };
+        let mut gallery = crate::media::Gallery::default();
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(700.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        user_actions(ui, &message, &mut gallery, true);
+                    });
+                },
+            );
+            texts.clear();
+            fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                    _ => {}
+                }
+            }
+            for s in &out.shapes {
+                collect(&s.shape, &mut texts);
+            }
+        }
+        assert!(texts.iter().any(|t| t == "Pi reply"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Jump ↑"));
+        assert!(texts.iter().any(|t| t == "it comes back"));
+        assert!(texts.iter().any(|t| t.contains("Can I hide it?")));
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("[Context:") || t.contains("[/Context]"))
+        );
+    }
+
     #[test]
     fn native_user_bubble_omits_metadata_text_and_its_extra_height() {
         let ctx = egui::Context::default();

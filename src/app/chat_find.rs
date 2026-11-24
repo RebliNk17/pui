@@ -238,7 +238,64 @@ fn messages_revision(messages: &[Message]) -> u64 {
     h.finish()
 }
 
+/// Lowercased text with Markdown punctuation removed and whitespace collapsed,
+/// so rendered-text quotes can be matched against Markdown sources.
+fn quote_normalize(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' | '_' | '`' | '~' | '#' | '>' | '[' => {}
+            ']' => {
+                // Drop a following "(url)" of a Markdown link.
+                if chars.peek() == Some(&'(') {
+                    for next in chars.by_ref() {
+                        if next == ')' {
+                            break;
+                        }
+                    }
+                }
+            }
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c => out.extend(c.to_lowercase()),
+        }
+    }
+    out.trim().to_owned()
+}
+
+/// Index of the latest assistant message containing the quote's opening words.
+pub(super) fn quote_source_index(messages: &[Message], quote: &str) -> Option<usize> {
+    let needle: String = quote_normalize(quote).chars().take(48).collect();
+    if needle.is_empty() {
+        return None;
+    }
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.role == "assistant")
+        .find(|(_, m)| quote_normalize(&m.text).contains(&needle))
+        .map(|(i, _)| i)
+}
+
 impl Pui {
+    /// Consume a "Jump ↑" request from a sent quote block.
+    pub(super) fn take_quote_jump(&mut self, ctx: &egui::Context) -> Option<usize> {
+        let quote = ctx.data_mut(|d| {
+            d.remove_temp::<String>(egui::Id::new(crate::transcript::QUOTE_JUMP_ID))
+        })?;
+        let index = quote_source_index(&self.state.messages, &quote);
+        if index.is_none() {
+            self.state.notice =
+                Some("The quoted reply is no longer in this chat (rewound or compacted).".into());
+        }
+        index
+    }
+
     pub(super) fn open_chat_find(&mut self) {
         self.chat_find.open();
         self.close_model_popovers();
@@ -552,5 +609,35 @@ mod tests {
         assert_eq!(find.suggestions(), vec!["beta"]);
         find.query = "beta".into();
         assert!(find.suggestions().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod quote_jump_tests {
+    use super::*;
+    #[test]
+    fn rendered_quote_finds_markdown_source_reply() {
+        let msg = |role: &str, text: &str| Message {
+            role: role.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        let messages = vec![
+            msg("user", "hi"),
+            msg(
+                "assistant",
+                "Prefix **chosen** [link](https://x.test) `literal` suffix.",
+            ),
+            msg("assistant", "Something else entirely."),
+            msg(
+                "user",
+                "[Context: Assistant reply]\nchosen link literal\n[/Context]",
+            ),
+        ];
+        assert_eq!(
+            quote_source_index(&messages, "chosen link  literal"),
+            Some(1)
+        );
+        assert_eq!(quote_source_index(&messages, "not present"), None);
     }
 }

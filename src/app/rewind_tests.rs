@@ -424,34 +424,30 @@ fn footer_actions_match_metadata_size_color_and_alignment_in_both_themes() {
                 .iter()
                 .find(|(t, _, _)| t.contains("99% cached"))
                 .unwrap();
-            for label in ["Copy", "Fork"] {
-                let action = labels
-                    .iter()
-                    .find(|(t, r, _)| {
-                        t == label && (r.center().y - metadata.1.center().y).abs() < 1.0
-                    })
-                    .unwrap();
+            for label in ["Copy", "Quote reply", "Fork from here"] {
                 assert!(
-                    (action.1.center().y - metadata.1.center().y).abs() <= 0.5,
+                    !labels
+                        .iter()
+                        .any(|(t, r, _)| t == label.split(' ').next().unwrap()
+                            && (r.center().y - metadata.1.center().y).abs() < 1.0),
+                    "{label} footer action is icon-only"
+                );
+                let action = crate::icons::action_rects(&ctx, label)
+                    .into_iter()
+                    .find(|r| (r.center().y - metadata.1.center().y).abs() < 2.0)
+                    .unwrap_or_else(|| panic!("{label} icon in metadata row"));
+                assert!(
+                    (action.center().y - metadata.1.center().y).abs() <= 1.0,
                     "{label} is not centered with metadata: {action:?} / {metadata:?}"
-                );
-                assert!(
-                    (action.1.height() - metadata.1.height()).abs() <= 0.5,
-                    "{label} has different font metrics"
-                );
-                assert_eq!(action.2, metadata.2, "resting footer color must match");
-                let icon_area = egui::Rect::from_min_max(
-                    egui::pos2(action.1.left() - 16.0, action.1.center().y - 6.5),
-                    egui::pos2(action.1.left() - 4.0, action.1.center().y + 6.5),
                 );
                 let geometry: Vec<_> = shapes
                     .iter()
-                    .filter(|r| icon_area.contains(r.center()))
+                    .filter(|r| action.contains(r.center()))
                     .collect();
                 assert!(!geometry.is_empty(), "{label} needs a vector icon");
                 for bounds in geometry {
                     assert!(
-                        icon_area.expand(0.5).contains_rect(*bounds),
+                        action.expand(0.5).contains_rect(*bounds),
                         "{label} icon is oversized: {bounds:?}"
                     );
                 }
@@ -489,17 +485,15 @@ fn response_footer_copy_and_fork_remain_distinct_from_user_inline_actions() {
         .find(|(t, _)| t == "Completed response")
         .unwrap()
         .1;
-    let fork = labels
-        .iter()
-        .find(|(t, r)| t == "Fork" && r.top() > response.bottom())
-        .expect("Fork after assistant response")
-        .1;
+    let fork = crate::icons::action_rects(&ctx, "Fork from here")
+        .into_iter()
+        .find(|r| r.top() > response.bottom())
+        .expect("Fork after assistant response");
     assert!(fork.top() > response.bottom());
-    let copy = labels
-        .iter()
-        .find(|(t, r)| t == "Copy" && r.top() > response.bottom())
-        .expect("assistant Copy label with a vector icon")
-        .1;
+    let copy = crate::icons::action_rects(&ctx, "Copy")
+        .into_iter()
+        .find(|r| r.top() > response.bottom())
+        .expect("assistant Copy icon");
     assert!(!labels.iter().any(|(t, _)| t.contains('⧉')));
     let mut copied = false;
     for pressed in [true, false] {
