@@ -30,6 +30,27 @@ pub(super) fn inputs(ctx: &egui::Context) {
     source::inputs(ctx);
 }
 
+pub(in crate::app) struct ParkedCapture {
+    snippet: Option<Snippet>,
+    owner: Option<(PathBuf, String)>,
+}
+pub(in crate::app) fn park_capture(ctx: &egui::Context) -> ParkedCapture {
+    ctx.data_mut(|data| ParkedCapture {
+        snippet: data.remove_temp(egui::Id::new("pui-context-capture")),
+        owner: data.remove_temp(egui::Id::new("pui-review-capture-owner")),
+    })
+}
+pub(in crate::app) fn restore_capture(ctx: &egui::Context, capture: ParkedCapture) {
+    ctx.data_mut(|data| {
+        if let Some(snippet) = capture.snippet {
+            data.insert_temp(egui::Id::new("pui-context-capture"), snippet);
+        }
+        if let Some(owner) = capture.owner {
+            data.insert_temp(egui::Id::new("pui-review-capture-owner"), owner);
+        }
+    });
+}
+
 #[derive(Clone, Default)]
 struct Snippet {
     label: String,
@@ -143,6 +164,11 @@ impl Pui {
         file_blocks::collect(self);
         browser::collect(self);
         source::finish(&self.ctx);
+        self.collect_queued_context_capture();
+    }
+    /// Drain only this transcript's queued excerpt; global file/selection
+    /// lifecycle collection runs once after every pane has rendered.
+    pub(in crate::app) fn collect_queued_context_capture(&mut self) {
         let snippet = self
             .ctx
             .data_mut(|data| data.remove_temp::<Snippet>(egui::Id::new("pui-context-capture")));

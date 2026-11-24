@@ -99,6 +99,12 @@ impl Pui {
     }
 
     pub(super) fn request_resource_reload(&mut self) {
+        if self.side_chat.rendering {
+            self.state.notice = Some(
+                "Expand this side chat before reloading its resources. Your draft was kept.".into(),
+            );
+            return;
+        }
         if let Some(reason) = self.resource_reload_blocked() {
             self.state.error = Some(reason.into());
             return;

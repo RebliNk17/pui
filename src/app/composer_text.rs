@@ -252,11 +252,29 @@ impl Presentation {
     }
 }
 
+// Explicit IDs shared by the regular composer and its embedded instance.
+// Only the dock renderer installs this scope; outside it, existing IDs stay stable.
+thread_local! {
+    // UI-thread scope rather than Context storage: widget IDs are also resolved
+    // inside egui memory/data closures, where re-locking Context would deadlock.
+    static OWNER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn set_owner(owner: Option<String>) -> Option<String> {
+    OWNER.with(|value| value.replace(owner))
+}
+pub(super) fn widget_id(_ctx: &egui::Context, label: &str) -> egui::Id {
+    OWNER.with(|value| match value.borrow().as_deref() {
+        Some(owner) if label == "composer" => egui::Id::new(("btw-editor", owner)),
+        Some(owner) => egui::Id::new(("side-chat", owner, label)),
+        None => egui::Id::new(label),
+    })
+}
+
 fn selection(ctx: &egui::Context, source: &str) -> Option<Range<usize>> {
-    if !ctx.memory(|m| m.has_focus(egui::Id::new("composer"))) {
+    if !ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer"))) {
         return None;
     }
-    let state = egui::TextEdit::load_state(ctx, egui::Id::new("composer"))?;
+    let state = egui::TextEdit::load_state(ctx, composer_text::widget_id(ctx, "composer"))?;
     let range = state.cursor.char_range()?.as_sorted_char_range();
     Some(byte_index(source, range.start)..byte_index(source, range.end))
 }
@@ -540,7 +558,7 @@ pub(crate) fn show_message(ui: &mut egui::Ui, source: &str) {
 
 impl Pui {
     pub(super) fn composer_formatting_available(&self, ctx: &egui::Context) -> bool {
-        ctx.memory(|m| m.has_focus(egui::Id::new("composer")))
+        ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer")))
             && !self.settings_open
             && !self.kanban.open
             && !self.automation.open

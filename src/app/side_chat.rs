@@ -8,12 +8,28 @@ pub(super) struct SideChat {
     preview_open: bool,
     docked: bool,
     focus: bool,
+    pub(super) rendering: bool,
+    ui: ui_state::ChatUi,
+    ui_owner: String,
+    keyboard_focus: Option<egui::Id>,
 }
+mod actions;
+#[cfg(test)]
+mod control_tests;
 mod dock;
 #[cfg(test)]
 mod dock_safety_tests;
 #[cfg(test)]
 mod dock_tests;
+#[cfg(test)]
+mod interaction_tests;
+#[cfg(test)]
+mod ownership_tests;
+#[cfg(test)]
+mod redesign_tests;
+#[cfg(test)]
+mod routing_tests;
+mod ui_state;
 impl Pui {
     /// Static presentation fixture: never connects, sends, or claims real model activity.
     pub(super) fn demo_side_chat(&mut self) {
@@ -22,7 +38,11 @@ impl Pui {
         let chat = self.take_chat();
         self.agents.parked.insert(main.clone(), chat);
         self.agents.active.clear();
-        self.state=State{session_name:"Side chat · design preview".into(),messages:vec![Message{role:"assistant".into(),text:"## A little room for a tangent\n\nThis is an **independent conversation**. The main chat keeps its own context and model run.\n\nUse **Back to main** to return. Nothing here is sent or merged into the main conversation automatically.\n\n*Static design preview — no model was launched.*".into(),..Default::default()}],..Default::default()};
+        self.state=State{session_name:"Side chat · design preview".into(),messages:vec![Message{role:"assistant".into(),text:"## A little room for a tangent\n\nThis is an **independent conversation**. The main chat keeps its own context and model run.\n\nUse **Expand** for full-size history controls. Nothing here is sent or merged into the main conversation automatically.\n\n*Static design preview — no model was launched.*".into(),..Default::default()}],..Default::default()};
+        self.state.model = "gpt-6.1-sol".into();
+        self.state.model_name = "GPT-6.1 Sol".into();
+        self.state.provider = "litellm".into();
+        self.state.thinking = "high".into();
         self.draft = "What are the tradeoffs of this approach?".into();
         let side = self.ensure_agent();
         let side_chat = self.take_chat();

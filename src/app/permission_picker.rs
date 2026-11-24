@@ -57,6 +57,16 @@ impl Pui {
         }
     }
     pub(super) fn propagate_settings(&mut self, before: &Settings) {
+        if self.side_chat.rendering {
+            if *before != self.prefs.settings
+                && !self.demo
+                && before.payload() != self.prefs.settings.payload()
+            {
+                let settings = self.agent_settings(&self.agents.active).payload();
+                self.send(json!({"type":"prompt", "message":format!("/pui-settings {settings}")}));
+            }
+            return;
+        }
         if *before != self.prefs.settings
             && !self.demo
             && !self.remote_action(sync::Action::Settings(
@@ -205,7 +215,7 @@ impl Pui {
                         choice = Some(confirmations::Choice::Confirm);
                     }
                     let cancel = prompt_ui::button(ui, "Cancel", prompt_ui::Button::Secondary, true);
-                    if first {
+                    if first && prompt_ui::keyboard_available(ui) {
                         cancel.request_focus();
                     }
                     if cancel.clicked() {

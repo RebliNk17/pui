@@ -133,7 +133,9 @@ impl Pui {
                     .tasks
                     .current()
                     .is_some_and(|task| self.task_in_chat(task)))
-            && ctx.read_response(egui::Id::new("composer")).is_some()
+            && ctx
+                .read_response(composer_text::widget_id(ctx, "composer"))
+                .is_some()
             && self.terminals.layout() != (true, true)
             && self.question_designs.is_none()
             && !self.transcript.gallery.is_open()
@@ -149,7 +151,7 @@ impl Pui {
             return;
         }
         let focused = ctx.memory(|m| m.focused());
-        if focused == Some(egui::Id::new("composer"))
+        if focused == Some(composer_text::widget_id(ctx, "composer"))
             && ctx.input(|i| {
                 i.events.iter().any(|event| matches!(event,
                 egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. }
@@ -220,7 +222,7 @@ impl Pui {
         }
         if remove || cancel {
             self.focus_composer = true;
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("composer")));
+            ctx.memory_mut(|m| m.request_focus(composer_text::widget_id(ctx, "composer")));
         }
     }
     fn remove_context_chip(&mut self, id: u64) {
