@@ -116,7 +116,7 @@ Tests: `scripts/test-rust.sh` and `node --test tests/*.test.mjs`. See [test exec
 
 ## Learn more
 
-- [Mobile companion guide](mobile/README.md) and [remote protocol spec](docs/mobile-remote-protocol.md)
+- [Mobile companion guide](mobile/README.md), [Oracle Cloud always-free host guide](docs/cloud-host-oracle.md), and [remote protocol spec](docs/mobile-remote-protocol.md)
 - [Full reference](docs/reference.md): every feature and design decision in detail
 - [Bundled runtime](docs/bundled-runtime.md): what ships inside the app and how providers are set up
 - [Releases and CI](docs/releases.md): how builds are signed and published
