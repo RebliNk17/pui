@@ -80,8 +80,12 @@ fn sorted_pointer_quote_retains_actual_original_record_and_literal_value() {
     let out = file_tests::frame(&ctx, &mut app, vec![]);
     let count = app.state.messages.len();
     file_tests::click(&ctx, &mut app, point(&out, "Add cell to chat"));
-    assert!(app.draft.contains("record 2, column 2"), "{}", app.draft);
-    assert!(app.draft.contains("=1+2"));
+    assert!(
+        app.outgoing_text().contains("record 2, column 2"),
+        "{}",
+        app.outgoing_text()
+    );
+    assert!(app.outgoing_text().contains("=1+2"));
     assert_eq!(app.state.messages.len(), count);
     assert_eq!(
         fs::read_to_string(app.prefs.cwd.join("projected.csv")).unwrap(),
@@ -128,7 +132,7 @@ fn projection_install_closes_frozen_menu_and_old_same_path_result_cannot_retarge
         std::thread::yield_now();
     }
     assert!(!egui::Popup::is_any_open(&ctx));
-    assert!(app.draft.is_empty());
+    assert!(app.outgoing_text().is_empty());
     assert_eq!(
         preview(&mut app).projection.rows(3, true).record(1),
         Some(2)
@@ -153,7 +157,7 @@ fn projection_install_closes_frozen_menu_and_old_same_path_result_cannot_retarge
     }
     assert!(preview(&mut app).projection.map.is_none());
     assert_eq!(preview(&mut app).source.as_str(), "New,Content\nOnly,new\n");
-    assert!(app.draft.is_empty());
+    assert!(app.outgoing_text().is_empty());
 }
 #[test]
 fn native_tab_entry_and_pointer_press_release_own_toolbar_shortcuts_before_render() {
@@ -161,6 +165,7 @@ fn native_tab_entry_and_pointer_press_release_own_toolbar_shortcuts_before_rende
     let mut app = app(&ctx);
     app.state.busy = true;
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     let (client, _, commands) = rpc::Client::stub_with_records();
     app.client = Some(client);
     ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer")));
@@ -183,7 +188,7 @@ fn native_tab_entry_and_pointer_press_release_own_toolbar_shortcuts_before_rende
         ]);
         file_tests::frame(&ctx, &mut app, events);
         assert!(app.state.busy);
-        assert_eq!(app.draft, "Kept");
+        assert_eq!(app.outgoing_text(), "Kept");
         assert!(commands.try_recv().is_err());
     }
     assert!(preview(&mut app).projection.expanded);
@@ -215,7 +220,7 @@ fn native_tab_entry_and_pointer_press_release_own_toolbar_shortcuts_before_rende
     );
     assert_ne!(ctx.memory(|memory| memory.focused()), entered);
     assert!(app.state.busy);
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     assert!(commands.try_recv().is_err());
 }
 #[test]
@@ -230,6 +235,7 @@ fn full_app_toolbar_shortcuts_and_arriving_structured_questions_do_not_send_appr
         }
         app.state.busy = true;
         app.draft = "Kept draft".into();
+        app.context_chips.clear_quotes();
         let count = app.state.messages.len();
         let (client, _, commands) = rpc::Client::stub_with_records();
         app.client = Some(client);
@@ -263,7 +269,7 @@ fn full_app_toolbar_shortcuts_and_arriving_structured_questions_do_not_send_appr
             assert_eq!(app.state.dialogs.len(), 1);
             assert!(commands.try_recv().is_err());
             assert!(app.state.busy);
-            assert_eq!(app.draft, "Kept draft");
+            assert_eq!(app.outgoing_text(), "Kept draft");
             assert_eq!(app.state.messages.len(), count);
             app.state.dialogs.clear();
             app.current_dialog.clear();

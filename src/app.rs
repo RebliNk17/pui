@@ -553,6 +553,10 @@ impl Pui {
                 app.prefs.hide_inspector = true;
                 for (label, text) in [
                     (
+                        "Assistant reply · selected rendered text (not Markdown source)",
+                        "It comes back the next time the phone connects to the Mac.",
+                    ),
+                    (
                         "src/main.rs:4–5 · selected source",
                         "let chosen = \"frozen literal\";",
                     ),
@@ -1179,6 +1183,7 @@ impl Pui {
         self.workspace_rx = None;
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.draft_images.clear();
         self.state.restart_notice.clear();
         if reuse {
@@ -1839,7 +1844,7 @@ impl Pui {
             self.queue_draft_mode(mode);
             return;
         }
-        if (self.draft.trim().is_empty() && self.draft_images.is_empty())
+        if (self.outgoing_text().trim().is_empty() && self.draft_images.is_empty())
             || (!self.draft_images.is_empty() && !self.draft_images.ready())
             || !self.state.ready()
             || self.demo
@@ -1870,7 +1875,7 @@ impl Pui {
             return;
         }
         let message = run_status::WaitingMessage {
-            text: self.draft.trim().to_owned(),
+            text: self.outgoing_text().trim().to_owned(),
             images: self.draft_images.images(),
             mode,
         };
@@ -1882,6 +1887,7 @@ impl Pui {
         self.draft_images.clear();
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.recall = Default::default();
         self.focus_composer = true;
     }
@@ -2212,7 +2218,9 @@ impl Pui {
                         let enabled = !self.loading_chat
                             && self.history_pending.is_none()
                             && !self.restoring_code()
-                            && (!self.draft.trim().is_empty() || self.draft_images.ready())
+                            && (!self.draft.trim().is_empty()
+                                || self.context_chips.has_quotes()
+                                || self.draft_images.ready())
                             && (self.draft_images.is_empty() || self.draft_images.ready())
                             && !self.demo;
                         let (rect, response) =

@@ -69,7 +69,7 @@ fn inline_git_recorded_actual_wrapped_capture_is_exact_one_hunk_and_copy_survive
             &mut app,
             vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
         );
-        assert_eq!(app.draft, "Kept draft");
+        assert_eq!(app.outgoing_text(), "Kept draft");
         frame(
             &ctx,
             &mut app,
@@ -81,16 +81,17 @@ fn inline_git_recorded_actual_wrapped_capture_is_exact_one_hunk_and_copy_survive
             "Recorded edits (not net Git)"
         };
         assert!(
-            app.draft.starts_with(&format!(
+            app.outgoing_text().starts_with(&format!(
                 "Kept draft\n\n[Context: {PATH} · {source} · diff rows 3–3 · new 10–10]"
             )),
             "{}",
-            app.draft
+            app.outgoing_text()
         );
         assert!(
-            app.draft.ends_with(&format!("\n{chosen}\n[/Context]")),
+            app.outgoing_text()
+                .ends_with(&format!("\n{chosen}\n[/Context]")),
             "{}",
-            app.draft
+            app.outgoing_text()
         );
         assert!(app.changes.review.is_none());
         assert_eq!(app.outputs[0].diff, diff);

@@ -19,6 +19,7 @@ fn setup() -> (egui::Context, Pui, PathBuf, &'static str) {
     }
     app.state.busy = true;
     app.draft = "Keep this draft".into();
+    app.context_chips.clear_quotes();
     (ctx, app, path, source)
 }
 fn drag(ctx: &egui::Context, app: &mut Pui, source: &str, range: Range<usize>) -> egui::Pos2 {
@@ -83,10 +84,10 @@ fn file_viewer_exact_multiline_selection_is_read_only_scoped_and_draft_only() {
             pointer(target, egui::PointerButton::Primary, pressed),
         );
     }
-    assert!(app.draft.starts_with("Keep this draft\n\n"));
-    assert!(app.draft.contains("selected source\nsecond lin"));
-    assert!(!app.draft.contains("prefix"));
-    assert!(!app.draft.contains("suffix"));
+    assert!(app.outgoing_text().starts_with("Keep this draft\n\n"));
+    assert!(app.outgoing_text().contains("selected source\nsecond lin"));
+    assert!(!app.outgoing_text().contains("prefix"));
+    assert!(!app.outgoing_text().contains("suffix"));
     assert_eq!(app.state.messages.len(), count);
     assert!(app.state.busy);
     assert!(commands.try_recv().is_err());
@@ -108,7 +109,7 @@ fn full_app_source_menu_shortcuts_cannot_stop_send_or_approve_and_close_releases
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
     );
-    assert_eq!(app.draft, "Keep this draft");
+    assert_eq!(app.outgoing_text(), "Keep this draft");
     assert!(app.pending_dialog.is_none());
     frame(
         &ctx,
@@ -141,5 +142,5 @@ fn opening_another_source_file_does_not_reuse_the_previous_selection() {
     for _ in 0..5 {
         frame(&ctx, &mut app, vec![]);
     }
-    assert_eq!(app.draft, "Keep this draft");
+    assert_eq!(app.outgoing_text(), "Keep this draft");
 }

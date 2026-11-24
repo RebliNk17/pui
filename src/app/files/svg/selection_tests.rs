@@ -103,18 +103,19 @@ fn svg_source_real_unicode_drag_copy_and_frozen_capture_is_exact_draft_only() {
     }
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept draft".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     let (client, _, commands) = rpc::Client::stub_with_records();
     app.client = Some(client);
     app.collect_context_capture();
     assert_eq!(
-        app.draft,
+        app.outgoing_text(),
         format!(
             "Kept draft\n\n[Context: selection.svg:2–2 · selected source]\n{chosen}\n[/Context]"
         )
     );
     app.collect_context_capture();
-    assert_eq!(app.draft.matches("[Context:").count(), 1);
+    assert_eq!(app.outgoing_text().matches("[Context:").count(), 1);
     assert!(commands.try_recv().is_err());
     assert!(app.state.busy);
     assert_eq!(preview.source, source);

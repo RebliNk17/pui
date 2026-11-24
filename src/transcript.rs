@@ -890,7 +890,19 @@ fn user_bubble(
                         }
                         if has_quotes {
                             let mut first = true;
-                            for (index, segment) in segments.iter().enumerate() {
+                            // Captured context reads first (quote above the question),
+                            // whatever order the blocks were composed in.
+                            let ordered = segments
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, s)| matches!(s, Segment::Context { .. }))
+                                .chain(
+                                    segments
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, s)| matches!(s, Segment::Text(_))),
+                                );
+                            for (index, segment) in ordered {
                                 match segment {
                                     Segment::Text(t) if t.trim().is_empty() => {}
                                     Segment::Text(t) => {

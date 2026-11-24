@@ -41,6 +41,7 @@ impl Fixture {
         let ctx = egui::Context::default();
         let mut app = crate::app::files::tests::app(&ctx);
         app.draft = "Keep draft".into();
+        app.context_chips.clear_quotes();
         let path = app.prefs.cwd.join("blocks-世界.md");
         Self {
             ctx,
@@ -75,6 +76,7 @@ impl Fixture {
                         .is_some()
                 {
                     self.app.draft = "Edited later in opening pass".into();
+                    self.app.context_chips.clear_quotes();
                 }
                 if self.bound {
                     bind_file_owner(ctx, &self.app.prefs.cwd, &owner);
@@ -179,19 +181,19 @@ fn actual_modal_projects_all_blocks_reviews_discontinuous_unicode_and_appends_ex
     assert!(!reviewed.text.contains("Fourth"));
     assert!(!reviewed.text.contains("```"));
     assert!(!reviewed.text.contains("**"));
-    assert_eq!(f.app.draft, "Keep draft", "Review is not capture");
+    assert_eq!(f.app.outgoing_text(), "Keep draft", "Review is not capture");
     f.action();
     assert!(!f.exists());
     assert!(
         f.app
-            .draft
+            .outgoing_text()
             .ends_with(&format!("{}\n[/Context]", reviewed.text))
     );
-    assert_eq!(f.app.draft.matches("[Context:").count(), 1);
-    let captured = f.app.draft.clone();
+    assert_eq!(f.app.outgoing_text().matches("[Context:").count(), 1);
+    let captured = f.app.outgoing_text().clone();
     f.settle();
     collect(&mut f.app);
-    assert_eq!(f.app.draft, captured);
+    assert_eq!(f.app.outgoing_text(), captured);
     assert_eq!(f.app.state.messages.len(), messages);
     assert_eq!(f.app.state.dialogs, dialogs);
     assert!(
@@ -252,7 +254,7 @@ fn empty_oversized_projection_and_selection_never_fallback_or_truncate() {
     empty.open();
     empty.action();
     assert!(state(&empty.ctx).reviewed.is_none());
-    assert_eq!(empty.app.draft, "Keep draft");
+    assert_eq!(empty.app.outgoing_text(), "Keep draft");
     assert!(selected(&state(&empty.ctx)).is_err());
     let huge = format!("{}\n\nTail.", "世".repeat(MAX_BYTES / 3 + 1));
     let mut f = Fixture::new(&huge);
@@ -261,7 +263,7 @@ fn empty_oversized_projection_and_selection_never_fallback_or_truncate() {
     f.action();
     assert!(state(&f.ctx).reviewed.is_none());
     assert!(state(&f.ctx).notice.unwrap().contains("24 KiB"));
-    assert_eq!(f.app.draft, "Keep draft");
+    assert_eq!(f.app.outgoing_text(), "Keep draft");
     f.choose(0);
     f.choose(1);
     f.action();
@@ -290,7 +292,7 @@ fn empty_oversized_projection_and_selection_never_fallback_or_truncate() {
     f.open();
     assert!(state(&f.ctx).error.unwrap().contains("256 blocks"));
     assert!(state(&f.ctx).blocks.is_empty());
-    assert_eq!(f.app.draft, "Keep draft");
+    assert_eq!(f.app.outgoing_text(), "Keep draft");
     let mut f = Fixture::new(&"a".repeat(MAX_PROJECTION + 1));
     f.open();
     assert!(state(&f.ctx).error.is_some());
@@ -320,13 +322,17 @@ fn owner_document_and_draft_changes_cannot_rebase_frozen_selection() {
                 "unbound" => f.bound = false,
                 _ => unreachable!(),
             }
-            let expected = f.app.draft.clone();
+            let expected = f.app.outgoing_text().clone();
             if ["source", "draft"].contains(&change) {
                 f.action();
             } else {
                 f.frame(vec![]);
             }
-            assert_eq!(f.app.draft, expected, "stage={stage} change={change}");
+            assert_eq!(
+                f.app.outgoing_text(),
+                expected,
+                "stage={stage} change={change}"
+            );
             if ["source", "draft"].contains(&change) {
                 assert!(state(&f.ctx).error.unwrap().contains("changed"));
             } else {
@@ -370,7 +376,7 @@ fn cancel_escape_backdrop_and_foreign_modal_do_not_append_or_leak_keyboard() {
             _ => unreachable!(),
         }
         assert!(!f.exists(), "{method}");
-        assert_eq!(f.app.draft, "Keep draft", "{method}");
+        assert_eq!(f.app.outgoing_text(), "Keep draft", "{method}");
     }
     let mut f = Fixture::new("First.\n\nSecond.");
     f.open();
@@ -382,7 +388,7 @@ fn cancel_escape_backdrop_and_foreign_modal_do_not_append_or_leak_keyboard() {
         modifiers: egui::Modifiers::COMMAND,
     }]);
     assert!(!f.ctx.input(|input| input.key_pressed(egui::Key::Enter)));
-    assert_eq!(f.app.draft, "Keep draft");
+    assert_eq!(f.app.outgoing_text(), "Keep draft");
 }
 
 #[test]
@@ -394,7 +400,7 @@ fn whole_or_reject_chip_and_draft_limits_apply_and_preview_is_draft_only_in_demo
                 f.app
                     .context_chips
                     .append(
-                        &mut f.app.draft,
+                        &mut f.app.outgoing_text(),
                         Snippet {
                             label: "old".into(),
                             text: "keep".into(),
@@ -405,14 +411,15 @@ fn whole_or_reject_chip_and_draft_limits_apply_and_preview_is_draft_only_in_demo
             }
         } else {
             f.app.draft = "x".repeat(chips::MAX_DRAFT_BYTES - 1);
+            f.app.context_chips.clear_quotes();
         }
-        let expected = f.app.draft.clone();
+        let expected = f.app.outgoing_text().clone();
         f.open();
         f.choose(0);
         f.action();
         f.action();
         assert!(!f.exists());
-        assert_eq!(f.app.draft, expected);
+        assert_eq!(f.app.outgoing_text(), expected);
         assert!(f.app.state.error.is_some());
     }
     // Fixture is demo=true, as are existing capture UI fixtures. Capturing only
@@ -426,7 +433,7 @@ fn whole_or_reject_chip_and_draft_limits_apply_and_preview_is_draft_only_in_demo
     f.choose(0);
     f.action();
     f.action();
-    assert!(f.app.draft.contains("rm -rf /"));
+    assert!(f.app.outgoing_text().contains("rm -rf /"));
 }
 
 #[test]
@@ -463,6 +470,6 @@ fn modal_respects_narrow_light_dark_zoom_and_disabled_activation() {
         f.settle();
         f.click(rect(&f.ctx, "launch").center());
         assert!(!f.exists(), "{blocked}");
-        assert_eq!(f.app.draft, "Keep draft");
+        assert_eq!(f.app.outgoing_text(), "Keep draft");
     }
 }

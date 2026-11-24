@@ -57,13 +57,14 @@ fn native_batch_pointer_appends_all_errors_once_without_send() {
     }
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Keep".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     app.collect_context_capture();
-    assert!(app.draft.contains("first retained error"));
-    assert!(app.draft.contains("second retained error"));
-    let draft = app.draft.clone();
+    assert!(app.outgoing_text().contains("first retained error"));
+    assert!(app.outgoing_text().contains("second retained error"));
+    let draft = app.outgoing_text().clone();
     app.collect_context_capture();
-    assert_eq!(draft, app.draft);
+    assert_eq!(draft, app.outgoing_text());
     assert!(app.state.busy);
 }
 #[test]
@@ -91,8 +92,9 @@ fn batch_control_narrow_themes_zoom_does_not_queue_without_activation() {
             assert!(output.platform_output.commands.is_empty());
             let mut app = crate::app::files::tests::app(&ctx);
             app.draft = "Keep".into();
+            app.context_chips.clear_quotes();
             app.collect_context_capture();
-            assert_eq!(app.draft, "Keep");
+            assert_eq!(app.outgoing_text(), "Keep");
         }
     }
 }

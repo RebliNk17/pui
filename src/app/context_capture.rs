@@ -181,6 +181,16 @@ pub(crate) fn queue_parts<'a>(
     });
 }
 impl Pui {
+    /// The message that would be sent: quote cards composed before the typed draft.
+    pub(in crate::app) fn outgoing_text(&self) -> String {
+        self.context_chips.compose(&self.draft)
+    }
+    /// Replace the draft with an earlier message, turning its reply quotes back into cards.
+    pub(in crate::app) fn restore_draft_text(&mut self, text: &str) {
+        self.context_chips.clear();
+        self.context_chips.clear_quotes();
+        self.draft = self.context_chips.adopt_quotes(text);
+    }
     pub(super) fn prepare_file_block_capture(&mut self, ctx: &egui::Context) {
         file_blocks::prepare(self, ctx);
         browser::prepare(self, ctx);
@@ -217,7 +227,9 @@ impl Pui {
             return;
         }
         let ask = snippet.ask.clone();
-        let draft_was_empty = self.draft.trim().is_empty() && self.draft_images.is_empty();
+        let draft_was_empty = self.draft.trim().is_empty()
+            && self.draft_images.is_empty()
+            && !self.context_chips.has_quotes();
         if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
             self.state.error = Some(error.into());
             return;
@@ -265,18 +277,21 @@ mod tests {
         let messages = app.state.messages.len();
         queue(&ctx, "src/file.rs:4–8", "Selected text");
         app.collect_context_capture();
-        assert!(app.draft.starts_with("Keep this draft\n\n"));
-        assert!(app.draft.contains("src/file.rs:4–8"));
-        assert!(app.draft.contains("Selected text"));
+        assert_eq!(app.draft, "Keep this draft", "typed text is untouched");
+        let out = app.outgoing_text();
+        assert!(out.starts_with("Keep this draft\n\n"));
+        assert!(out.contains("src/file.rs:4–8"));
+        assert!(out.contains("Selected text"));
         assert_eq!(app.state.messages.len(), messages);
         assert!(app.state.busy);
-        let draft = app.draft.clone();
         app.collect_context_capture();
-        assert_eq!(app.draft, draft, "Context is consumed exactly once");
+        assert_eq!(app.outgoing_text(), out, "Context is consumed exactly once");
+        app.context_chips.clear_quotes();
         app.draft = "x".repeat(256 * 1024);
         queue(&ctx, "other", "text");
         app.collect_context_capture();
         assert_eq!(app.draft.len(), 256 * 1024);
+        assert!(!app.context_chips.has_quotes());
         assert!(app.state.error.as_deref().unwrap().contains("too large"));
     }
 }

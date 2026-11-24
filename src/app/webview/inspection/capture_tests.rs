@@ -14,6 +14,7 @@ impl Harness {
         let mut app = crate::app::files::tests::app(&ctx);
         theme::install(&ctx);
         app.draft = "Keep 世界".into();
+        app.context_chips.clear_quotes();
         let document = app.files.seed_browser_capture(PAGE);
         let facts:Facts=serde_json::from_value(serde_json::json!({"tag":"h1","text":"Literal <page> 世界","text_note":"bounded descendants","generated_selector":"h1","selector_note":"unique snapshot only","rect":[1,2,30,40],"display":"block","visibility":"visible","position":"static","color":"black","font_size":"16px"})).unwrap();
         let mut state = State::default();
@@ -117,20 +118,20 @@ fn actual_review_then_add_freezes_literal_provenance_once_without_send() {
     h.frame(vec![], false, false);
     h.click("Review for chat…", false);
     assert!(h.editor.capture.is_some());
-    assert_eq!(h.app.draft, "Keep 世界");
+    assert_eq!(h.app.outgoing_text(), "Keep 世界");
     h.click("Add to draft", false);
     assert!(h.editor.capture.is_none());
     assert!(
         h.app
-            .draft
+            .outgoing_text()
             .starts_with("Keep 世界\n\n[Context: Browser element snapshot]")
     );
-    assert!(h.app.draft.contains("Literal <page> 世界"));
-    assert!(h.app.draft.contains("Title: Example"));
-    assert!(h.app.draft.contains("unique snapshot only"));
-    let after = h.app.draft.clone();
+    assert!(h.app.outgoing_text().contains("Literal <page> 世界"));
+    assert!(h.app.outgoing_text().contains("Title: Example"));
+    assert!(h.app.outgoing_text().contains("unique snapshot only"));
+    let after = h.app.outgoing_text().clone();
     h.frame(vec![], false, false);
-    assert_eq!(h.app.draft, after);
+    assert_eq!(h.app.outgoing_text(), after);
     assert_eq!(h.app.state.messages.len(), count);
     assert!(commands.try_iter().next().is_none());
     assert!(browser::token(&h.ctx).is_none());
@@ -155,7 +156,7 @@ fn same_pass_draft_edit_and_new_document_or_scope_refuse_reviewed_add() {
             assert!(h.editor.capture.is_none());
         } else {
             h.click("Add to draft", mode == "add edit");
-            assert!(!h.app.draft.contains("Browser element snapshot"));
+            assert!(!h.app.outgoing_text().contains("Browser element snapshot"));
             assert!(browser::notice(&h.ctx).unwrap().contains("not added"));
         }
     }
@@ -181,7 +182,7 @@ fn foreign_modal_never_starts_a_review() {
         );
     }
     assert!(h.editor.capture.is_none());
-    assert_eq!(h.app.draft, "Keep 世界");
+    assert_eq!(h.app.outgoing_text(), "Keep 世界");
 }
 
 #[test]
@@ -200,7 +201,7 @@ fn keyboard_review_and_cancel_release_only_their_frozen_snapshot() {
             h.editor.capture.is_some(),
             "keyboard {key:?} must start review"
         );
-        assert_eq!(h.app.draft, "Keep 世界");
+        assert_eq!(h.app.outgoing_text(), "Keep 世界");
         assert!(browser::token(&h.ctx).is_some());
         h.click("Cancel review", false);
         assert!(h.editor.capture.is_none());
@@ -228,5 +229,5 @@ fn child_frame_navigation_between_review_and_add_invalidates_frozen_facts() {
     h.frame(vec![], false, false);
     assert!(h.editor.capture.is_none());
     assert!(browser::token(&h.ctx).is_none());
-    assert_eq!(h.app.draft, "Keep 世界");
+    assert_eq!(h.app.outgoing_text(), "Keep 世界");
 }

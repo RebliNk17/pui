@@ -75,9 +75,10 @@ fn delimited_source_selected_characters_keep_exact_line_origin_and_skip_row_numb
     }
     let mut app = tests::app(&ctx);
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
     assert_eq!(
-        app.draft,
+        app.outgoing_text(),
         "Kept\n\n[Context: selected.csv:2–2 · selected source]\nchosen\n[/Context]"
     );
     assert_eq!(

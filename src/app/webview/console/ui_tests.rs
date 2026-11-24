@@ -116,12 +116,13 @@ fn empty_hidden_and_cleared_consoles_offer_no_capture_and_stale_press_is_ignored
     );
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     browser.options.get_mut(key).unwrap().console = false;
     super::tests::frame(&ctx, &state, &mut browser, vec![], key);
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
 }
 
 #[test]
@@ -131,11 +132,12 @@ fn draft_limit_rejection_keeps_existing_text_and_console_capture_stays_local() {
     let line = ConsoleLine::new(true, "Literal error text", "a.js", 3);
     let (label, text) = line.snippet("http://localhost/");
     app.draft = "x".repeat(256 * 1024);
-    let draft = app.draft.clone();
+    app.context_chips.clear_quotes();
+    let draft = app.outgoing_text().clone();
     app.state.busy = true;
     context_capture::queue(&ctx, &label, &text);
     app.collect_context_capture();
-    assert_eq!(app.draft, draft);
+    assert_eq!(app.outgoing_text(), draft);
     assert!(app.state.busy);
     assert!(app.state.error.as_deref().unwrap().contains("too large"));
     assert!(line.text.contains("Literal"));
