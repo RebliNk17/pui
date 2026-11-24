@@ -37,22 +37,52 @@ export async function initNotifications(): Promise<void> {
   ]).catch(() => {});
 
   if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync('pui-agent-finished', {
-      name: 'Agent Replies',
-      description: 'Notifies when Pi finishes replying to a conversation.',
-      importance: Notifications.AndroidImportance.HIGH,
-      vibrationPattern: [0, 180, 90, 180],
-      lightColor: '#8B7AE8',
-      enableVibrate: true,
-    });
-    await Notifications.setNotificationChannelAsync('pui-agent-attention', {
-      name: 'Approvals & Questions',
-      description: 'Urgent alerts when Pi needs tool approval or asks a question.',
-      importance: Notifications.AndroidImportance.MAX,
-      vibrationPattern: [0, 250, 120, 250],
-      lightColor: '#E5A93B',
-      enableVibrate: true,
-    });
+    const ensureChannel = async (
+      id: string,
+      name: string,
+      description: string,
+      importance: Notifications.AndroidImportance,
+      vibrationPattern: number[],
+      lightColor: string,
+    ) => {
+      try {
+        await Notifications.setNotificationChannelAsync(id, {
+          name,
+          description,
+          importance,
+          vibrationPattern,
+          lightColor,
+          enableVibrate: true,
+        });
+      } catch {
+        // Fallback for Expo Go / Android runtimes that reject optional channel fields.
+        try {
+          await Notifications.setNotificationChannelAsync(id, {
+            name,
+            importance,
+          });
+        } catch {
+          // Ignore if running in an environment without channel manager support.
+        }
+      }
+    };
+
+    await ensureChannel(
+      'pui-agent-finished',
+      'Agent Replies',
+      'Notifies when Pi finishes replying to a conversation.',
+      Notifications.AndroidImportance.HIGH,
+      [0, 180, 90, 180],
+      '#8B7AE8',
+    );
+    await ensureChannel(
+      'pui-agent-attention',
+      'Approvals & Questions',
+      'Urgent alerts when Pi needs tool approval or asks a question.',
+      Notifications.AndroidImportance.MAX,
+      [0, 250, 120, 250],
+      '#E5A93B',
+    );
   }
 }
 
@@ -85,45 +115,53 @@ export async function requestNotificationPermission(): Promise<
 
 export async function presentAgentNotification(event: NotificationEvent): Promise<void> {
   if (Platform.OS === 'web') return;
-  await initNotifications();
-  const status = await getNotificationPermissionStatus();
-  if (status !== 'granted') return;
+  try {
+    await initNotifications();
+    const status = await getNotificationPermissionStatus();
+    if (status !== 'granted') return;
 
-  const formatted = formatNotificationContent(event);
-  const canQuickApprove = event.kind === 'approval' && Boolean(event.dialog_id);
+    const formatted = formatNotificationContent(event);
+    const canQuickApprove = event.kind === 'approval' && Boolean(event.dialog_id);
 
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: formatted.title,
-      body: formatted.body,
-      sound: 'default',
-      ...(canQuickApprove ? { categoryIdentifier: APPROVAL_CATEGORY_ID } : {}),
-      data: {
-        path: event.path,
-        kind: event.kind,
-        dialogId: event.dialog_id ?? null,
-        dialogMethod: event.dialog_method ?? null,
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: formatted.title,
+        body: formatted.body,
+        sound: 'default',
+        ...(canQuickApprove ? { categoryIdentifier: APPROVAL_CATEGORY_ID } : {}),
+        data: {
+          path: event.path,
+          kind: event.kind,
+          dialogId: event.dialog_id ?? null,
+          dialogMethod: event.dialog_method ?? null,
+        },
+        ...(Platform.OS === 'android' ? { channelId: formatted.channelId } : {}),
       },
-      ...(Platform.OS === 'android' ? { channelId: formatted.channelId } : {}),
-    },
-    trigger: null,
-  });
+      trigger: null,
+    });
+  } catch {
+    // Ignore native notification failures (e.g. Expo Go restrictions).
+  }
 }
 
 export async function sendTestNotification(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
-  const status = await requestNotificationPermission();
-  if (status !== 'granted') return false;
+  try {
+    const status = await requestNotificationPermission();
+    if (status !== 'granted') return false;
 
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: 'Pui Notifications Active',
-      body: 'You will be alerted when Pi finishes replying, asks a question, or needs tool approval.',
-      sound: 'default',
-      data: {},
-      ...(Platform.OS === 'android' ? { channelId: 'pui-agent-finished' } : {}),
-    },
-    trigger: null,
-  });
-  return true;
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Pui Notifications Active',
+        body: 'You will be alerted when Pi finishes replying, asks a question, or needs tool approval.',
+        sound: 'default',
+        data: {},
+        ...(Platform.OS === 'android' ? { channelId: 'pui-agent-finished' } : {}),
+      },
+      trigger: null,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
