@@ -65,5 +65,6 @@ config passed twice: 2,350 passed, 0 failed (2m31s including compile, then 1m17s
 that raced background thumbnail decodes now wait via `media::wait_decodes`. Developer builds
 are unchanged.
 
-Pull requests run only affected suites (`scripts/ci/affected.py`) and never bundle the app;
-the always-reporting **CI result** job is the single required check for `master`.
+Pull requests and `master` pushes run only affected suites (`scripts/ci/affected.py`, diffing
+against the PR base or the previous head). Only release tags and manual runs build the app bundle,
+together with every suite. The always-reporting **CI result** job is the single required check for `master`.

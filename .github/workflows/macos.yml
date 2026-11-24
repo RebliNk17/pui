@@ -15,6 +15,8 @@ on:
   # No path filter: the required "CI result" check must report on every PR.
   # Unaffected suites are skipped by the changes job instead.
   pull_request:
+  # Manual app build without tagging a release (Actions → CI → Run workflow).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,8 +26,9 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
-  # Pull requests run only the suites whose inputs changed; pushes and tags
-  # (empty base) run everything, including the app bundle.
+  # Pull requests (vs. their base) and master pushes (vs. the previous head) run
+  # only the suites whose inputs changed. Only release tags and manual runs
+  # build the app bundle, together with every suite.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -47,8 +50,8 @@ jobs:
       - name: Select affected suites
         id: affected
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
-        run: python3 scripts/ci/affected.py "$BASE_SHA" | tee -a "$GITHUB_OUTPUT"
+          BASE: ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && '--release' || (github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before) }}
+        run: python3 scripts/ci/affected.py "$BASE" | tee -a "$GITHUB_OUTPUT"
 
   macos-build:
     needs: changes
@@ -62,6 +65,8 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       PUI_GITHUB_REPOSITORY: ${{ github.repository }}
+      # Only master-scoped caches are readable by PRs, other branches and tags.
+      SAVE_CACHES: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
     steps:
       # Git integration fixtures perform offline local clones and pushes.
       # A shallow/blobless checkout can leave historical objects unavailable.
@@ -98,27 +103,38 @@ jobs:
             ~/.npm/_cacache
             target/cef-runtime
             target/agent-runtime-cache
-          key: downloads-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}
+          key: downloads-v3-arm64-${{ steps.cache-keys.outputs.dependencies }}
           restore-keys: |
-            downloads-v2-arm64-${{ github.ref_name }}-
-            downloads-v2-arm64-
+            downloads-v3-arm64-
 
-      - name: Restore compiled Rust and CEF outputs
+      - name: Restore compiled test outputs
         id: restore-compiled
         if: needs.changes.outputs.toolchain == 'true'
         uses: actions/cache/restore@v6
         with:
-          path: |
-            target/debug
-            target/release
-          key: compiled-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
+          path: target/debug
+          key: compiled-v3-arm64-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
+          # Any older snapshot beats a cold build: Cargo fingerprints rebuild only
+          # crates whose source, lock entry or flags changed.
           restore-keys: |
-            compiled-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}-
-            compiled-v2-arm64-master-${{ steps.cache-keys.outputs.dependencies }}-
+            compiled-v3-arm64-${{ steps.cache-keys.outputs.dependencies }}-
+            compiled-v3-arm64-
+
+      # The optimized bundle build is cached separately. Tag caches are tag-scoped,
+      # so a manual run on master (Run workflow) refreshes the shared release cache.
+      - name: Restore compiled release outputs
+        id: restore-release
+        if: needs.changes.outputs.package == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: target/release
+          key: release-v1-arm64-${{ steps.cache-keys.outputs.dependencies }}
+          restore-keys: |
+            release-v1-arm64-
 
       # No secret context: cached executables stay in this ad-hoc build job.
       # Publication runs separately without these caches or Apple credentials.
-      - name: Validate affected suites (and package on push/tag)
+      - name: Validate affected suites (and package for releases)
         env:
           PUI_CI_RUST: ${{ needs.changes.outputs.rust }}
           PUI_CI_NODE: ${{ needs.changes.outputs.node }}
@@ -126,8 +142,10 @@ jobs:
           PUI_CI_PACKAGE: ${{ needs.changes.outputs.package }}
         run: bash scripts/ci/github-macos.sh
 
+      # Caches are written only from master (pushes and manual runs); pull requests
+      # and tags restore them read-only, so they cannot evict master's within the 10 GB limit.
       - name: Save Rust toolchain even if checks fail
-        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-toolchain.outputs.cache-hit != 'true'
+        if: always() && env.SAVE_CACHES == 'true' && needs.changes.outputs.toolchain == 'true' && steps.restore-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
@@ -135,7 +153,7 @@ jobs:
 
       # Skipped for Python/Node-only runs so a cache without CEF is never saved.
       - name: Save downloads even if checks fail
-        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-downloads.outputs.cache-hit != 'true'
+        if: always() && env.SAVE_CACHES == 'true' && needs.changes.outputs.toolchain == 'true' && steps.restore-downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
@@ -144,16 +162,23 @@ jobs:
             ~/.npm/_cacache
             target/cef-runtime
             target/agent-runtime-cache
-          key: downloads-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}
+          key: downloads-v3-arm64-${{ steps.cache-keys.outputs.dependencies }}
 
-      - name: Save compiled outputs (at most one snapshot per day)
-        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-compiled.outputs.cache-hit != 'true'
+      # Only a fully successful run is a complete snapshot; a partial one would
+      # be reused all day as an exact hit and never improve.
+      - name: Save compiled test outputs (one complete snapshot per day)
+        if: success() && env.SAVE_CACHES == 'true' && needs.changes.outputs.rust == 'true' && steps.restore-compiled.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
-          path: |
-            target/debug
-            target/release
-          key: compiled-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
+          path: target/debug
+          key: compiled-v3-arm64-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
+
+      - name: Save compiled release outputs
+        if: success() && env.SAVE_CACHES == 'true' && needs.changes.outputs.package == 'true' && steps.restore-release.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/release
+          key: release-v1-arm64-${{ steps.cache-keys.outputs.dependencies }}
 
       - name: Upload macOS release artifacts
         if: needs.changes.outputs.package == 'true'

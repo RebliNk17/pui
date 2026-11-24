@@ -194,9 +194,19 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
         restores = [s for s in job["steps"] if s.get("uses", "").startswith("actions/cache/restore@")]
         saves = [s for s in job["steps"] if s.get("uses", "").startswith("actions/cache/save@")]
-        self.assertEqual(len(restores), 3)
-        self.assertEqual(len(saves), 3)
-        self.assertTrue(all("always()" in s["if"] for s in saves))
+        self.assertEqual(len(restores), 4)
+        self.assertEqual(len(saves), 4)
+        # Only master (pushes/manual runs) writes shared caches; PRs and tags are read-only.
+        self.assertEqual(job["env"]["SAVE_CACHES"],
+                         "${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}")
+        self.assertTrue(all("env.SAVE_CACHES == 'true'" in s["if"] for s in saves))
+        # Compiled snapshots are saved only after a fully successful run.
+        compiled = [s for s in saves if s["with"]["path"] in ("target/debug", "target/release")]
+        self.assertEqual(len(compiled), 2)
+        self.assertTrue(all(s["if"].startswith("success()") for s in compiled))
+        # Cache keys are shared, not per-branch, and fall back to any older snapshot.
+        for restore in restores:
+            self.assertNotIn("github.ref_name", restore["with"]["key"])
         paths = "\n".join(s["with"]["path"] for s in saves)
         for expected in ("target/debug", "target/release", "target/cef-runtime", "target/agent-runtime-cache", "~/.npm/_cacache"):
             self.assertIn(expected, paths)
@@ -205,11 +215,17 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         # Affected-suite selection gates the macOS job; partial runs never seed caches or upload.
         self.assertEqual(job["needs"], "changes")
         self.assertEqual(job["if"], "needs.changes.outputs.macos == 'true'")
-        self.assertTrue(all("needs.changes.outputs.toolchain == 'true'" in s["if"] for s in saves))
+        self.assertTrue(all(any(f"needs.changes.outputs.{k} == 'true'" in s["if"] for k in ("toolchain", "rust", "package"))
+                            for s in saves))
         upload = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
         self.assertEqual(upload["if"], "needs.changes.outputs.package == 'true'")
         # PRs are unfiltered so the required gate always reports; it depends on every validation job.
         self.assertIsNone(triggers["pull_request"])
+        self.assertIn("workflow_dispatch", triggers)
+        # Only release tags and manual runs build the bundle; pushes diff against the previous head.
+        base = config["jobs"]["changes"]["steps"][1]["env"]["BASE"]
+        for expected in ("refs/tags/v", "workflow_dispatch", "'--release'", "pull_request.base.sha", "github.event.before"):
+            self.assertIn(expected, base)
         gate = config["jobs"]["ci-result"]
         self.assertEqual(gate["name"], "CI result")
         self.assertEqual(gate["if"], "always()")
@@ -219,12 +235,13 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         spec = importlib.util.spec_from_file_location("affected", ROOT / "scripts/ci/affected.py")
         affected = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(affected)
-        everything = {**dict.fromkeys(affected.SUITES, True), "toolchain": True, "macos": True}
+        everything = {**dict.fromkeys(affected.SUITES, True), "package": False, "toolchain": True, "macos": True}
 
         def only(*suites):
             result = {suite: suite in suites for suite in affected.SUITES}
-            result["toolchain"] = result["rust"] or result["package"]
-            result["macos"] = any(result[s] for s in ("rust", "node", "python", "package"))
+            result["package"] = False
+            result["toolchain"] = result["rust"]
+            result["macos"] = any(result[s] for s in ("rust", "node", "python"))
             return result
 
         self.assertEqual(affected.select(["README.md", "docs/x.md", ".github/workflows/android.yml"]), only())
@@ -234,8 +251,9 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(affected.select(["src/app/views.rs"]), only("rust"))
         self.assertEqual(affected.select(["tests/prompt_design.rs", "vendor/egui/src/lib.rs"]), only("rust"))
         self.assertEqual(affected.select(["scripts/permissions.ts", "tests/permissions.test.mjs"]), only("node"))
-        self.assertEqual(affected.select(["scripts/release.py"]), only("python", "package"))
-        self.assertEqual(affected.select(["scripts/bundle-macos.sh"]), only("python", "package"))
+        # Packaging scripts run their unit tests; the bundle itself is built only for releases.
+        self.assertEqual(affected.select(["scripts/release.py"]), only("python"))
+        self.assertEqual(affected.select(["scripts/bundle-macos.sh"]), only("python"))
         self.assertEqual(affected.select(["CHANGELOG.md"]), only("python"))
         for shared in ("Cargo.lock", "Cargo.toml", ".github/workflows/macos.yml", "scripts/ci/affected.py",
                        "packaging/runtime/package-lock.json"):
@@ -244,10 +262,13 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
 
     def test_affected_cli_runs_everything_without_base_or_on_bad_base(self):
         script = str(ROOT / "scripts/ci/affected.py")
-        for args in ([], ["0000000000000000000000000000000000000000"]):
+        suites = ["rust=true", "node=true", "python=true", "mobile=true", "daemon=true"]
+        # Missing base, new-branch push (all zeros) and an unknown commit: every suite, no bundle.
+        for args in ([], ["0" * 40], ["1234567890123456789012345678901234567890"]):
             output = subprocess.run(["python3", script, *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
-            self.assertEqual(output.split(), ["rust=true", "node=true", "python=true", "package=true", "mobile=true",
-                                              "daemon=true", "toolchain=true", "macos=true"])
+            self.assertEqual(output.split(), suites + ["package=false", "toolchain=true", "macos=true"], args)
+        output = subprocess.run(["python3", script, "--release"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        self.assertEqual(output.split(), suites + ["package=true", "toolchain=true", "macos=true"])
 
     def test_pull_request_runs_only_selected_suites(self):
         with tempfile.TemporaryDirectory() as temp:
