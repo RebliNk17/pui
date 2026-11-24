@@ -14,6 +14,8 @@ use std::{
 
 mod error;
 mod inline_cards;
+#[cfg(test)]
+mod git_activity_tests;
 mod new_messages;
 mod progress;
 #[cfg(test)]
@@ -1518,7 +1520,8 @@ fn activity(
             );
             let toggle_left = ui
                 .interact(toggle_left_rect, id.with("header"), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(summary.label());
             let toggle_right = if shown_thumbs > 0 {
                 Some(
                     ui.interact(
