@@ -87,6 +87,7 @@ impl Draft {
     /// The typed draft was replaced or edited. Cards are independent of that text, so
     /// this intentionally keeps them; call [`Self::clear_quotes`] to discard captures.
     pub(in crate::app) fn clear(&mut self) {}
+    #[cfg(test)]
     pub(super) fn add_quote(&mut self, snippet: Snippet) -> Result<(), &'static str> {
         self.add_with_draft(0, snippet)
     }
