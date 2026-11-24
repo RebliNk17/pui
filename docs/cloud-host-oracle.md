@@ -81,32 +81,40 @@ By default `pui-daemon` binds **only** to the VM's Tailscale IPv4 address (`100.
 
 ---
 
-## Step 4: Configure Model Provider Credentials
+## Step 4: Get the Pairing Link
 
-Pi reads provider credentials from `~/.pi/agent/auth.json` (or standard environment variables like `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the systemd unit).
+`pui-daemon` generates a bearer token automatically on first launch (`~/.pui-daemon/config.json`) and prints its `pui://pair?...` link in the service logs. To print the link anytime on the VM:
 
-Either run Pi's interactive login on the VM:
 ```sh
-~/pui/daemon/node_modules/.bin/pi /login
+cd ~/pui/daemon && npm run --silent pair
 ```
-Or copy your existing Pi credentials securely from your Mac over SSH:
+
+Or fetch it from your Mac over SSH:
+
 ```sh
-ssh -i ~/.ssh/id_ed25519_oci_pui ubuntu@<TAILSCALE_IP> "mkdir -p ~/.pi/agent && chmod 700 ~/.pi/agent"
-scp -i ~/.ssh/id_ed25519_oci_pui ~/.pi/agent/auth.json ubuntu@<TAILSCALE_IP>:~/.pi/agent/auth.json
-ssh -i ~/.ssh/id_ed25519_oci_pui ubuntu@<TAILSCALE_IP> "chmod 600 ~/.pi/agent/auth.json"
+ssh -i ~/.ssh/id_ed25519_oci_pui ubuntu@<PUBLIC_IP> "cd ~/pui/daemon && npm run --silent pair"
 ```
 
 ---
 
-## Step 5: Pair with Pui Mobile
+## Step 5: Pair with Pui Desktop & Sync Credentials
 
-Print the pairing URI on the VM:
+1. Open **Pui Desktop** → **Settings → Remote & Mobile** → **Cloud host (24/7 headless daemon)**.
+2. Paste the `pui://pair?...` link and click **Connect**.
+3. Use the Desktop-only controls on the card to finish setup over your encrypted Tailscale connection:
+   - **Sync Provider Logins** — copies your Mac's `~/.pi/agent/auth.json` to `pui-cloud` (`chmod 600`) so all your AI providers and models work immediately.
+   - **Setup Git & GitHub Key** — generates a dedicated, revocable `ed25519` SSH key *on the cloud VM* (your Mac's personal private key never leaves your Mac), sets your Git author name/email, and registers the VM's public key on GitHub via `gh ssh-key add` (or copies it to your clipboard).
+   - **Clone Current Project** — clones the active Mac workspace's `origin` repository straight into `~/workspaces/` on `pui-cloud`.
 
-```sh
-cd ~/pui/daemon && npm run pair
-```
+*(Prefer manual setup? You can also run `~/pui/daemon/node_modules/.bin/pi /login` directly on the VM over SSH.)*
 
-Open **Pui** on your Android phone → tap the host chip → **Paste Link** → paste the `pui://pair?...` URI and tap **Connect**. You can now switch seamlessly between your Mac and **`pui-cloud`** from the top host pill!
+---
+
+## Step 6: Pair with Pui Mobile
+
+Open **Pui** on your Android phone → tap the top host chip → **Paste Link** → paste the same `pui://pair?...` link and tap **Connect**.
+
+You can now switch between your Mac and **`pui-cloud`** from the top host pill, or pick **Where to run** directly inside **+ New session**.
 
 ## Updating `pui-daemon`
 
