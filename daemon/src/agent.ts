@@ -83,6 +83,16 @@ function resolveAdapterPath(): string | null {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
+function resolvePermissionsPath(): string | null {
+  const candidate = path.resolve(import.meta.dirname, '../../scripts/permissions.ts');
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+function resolveCloudWorkflowPath(): string | null {
+  const candidate = path.resolve(import.meta.dirname, './cloud-workflow.ts');
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
 function truncateText(text: string, max = 140): string {
   const clean = text.replace(/\s+/g, ' ').trim();
   return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
@@ -91,6 +101,8 @@ function truncateText(text: string, max = 140): string {
 export class LiveAgent {
   readonly sessionPath: string;
   readonly cwd: string;
+  readonly branch: string | null;
+  readonly baseBranch: string | null;
   private proc: ChildProcessWithoutNullStreams | null = null;
   private reqSeq = 0;
   private onChange: (agent: LiveAgent) => void;
@@ -127,15 +139,20 @@ export class LiveAgent {
     cwd: string,
     title: string,
     origin: SessionOrigin,
-    permissionMode: string,
+    _permissionMode: string,
     onChange: (agent: LiveAgent) => void,
     onNotify: (event: NotificationEvent) => void,
+    branch: string | null = null,
+    baseBranch: string | null = null,
   ) {
     this.sessionPath = sessionPath;
     this.cwd = cwd;
     this.title = title;
     this.origin = origin;
-    this.permissionMode = permissionMode || 'auto';
+    // Cloud agents always run in Auto mode inside their isolated worktree.
+    this.permissionMode = 'auto';
+    this.branch = branch;
+    this.baseBranch = baseBranch;
     this.onChange = onChange;
     this.onNotify = onNotify;
 
@@ -160,19 +177,34 @@ export class LiveAgent {
     if (this.proc) return;
     const cli = resolvePiCliPath();
     const adapter = resolveAdapterPath();
+    const permsExt = resolvePermissionsPath();
+    const workflowExt = resolveCloudWorkflowPath();
     const args = [cli, '--mode', 'rpc', '--session', this.sessionPath];
     if (adapter) {
       args.push('--extension', adapter);
     }
+    if (permsExt) {
+      args.push('--extension', permsExt);
+    }
+    if (workflowExt && this.branch) {
+      args.push('--extension', workflowExt);
+    }
+
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      PI_SKIP_VERSION_CHECK: '1',
+      PUI_AGENT_ACCESS: 'worktree',
+      PUI_SETTINGS: JSON.stringify({ permission: 'auto' }),
+    };
+    if (this.branch) {
+      childEnv.PUI_CLOUD_BRANCH = this.branch;
+      childEnv.PUI_CLOUD_BASE_BRANCH = this.baseBranch || 'main';
+      childEnv.PUI_CLOUD_WORKTREE = this.cwd;
+    }
 
     const child = spawn(process.execPath, args, {
       cwd: this.cwd,
-      env: {
-        ...process.env,
-        PI_SKIP_VERSION_CHECK: '1',
-        PUI_AGENT_ACCESS: this.permissionMode === 'plan' ? 'read-only' : 'worktree',
-        PUI_SETTINGS: JSON.stringify({ permission: this.permissionMode }),
-      },
+      env: childEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.proc = child;
@@ -336,12 +368,9 @@ export class LiveAgent {
     provider?: string;
     thinking?: string;
   }): void {
+    // Cloud agents always stay in Auto mode.
     if (opts.permission_mode) {
-      this.permissionMode = opts.permission_mode;
-      this.sendRpc({
-        type: 'prompt',
-        message: `/pui-settings ${JSON.stringify({ permission: opts.permission_mode })}`,
-      });
+      this.permissionMode = 'auto';
     }
     if (opts.model) {
       const prov = opts.provider || this.provider;

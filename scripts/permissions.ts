@@ -97,6 +97,52 @@ export function safeShell(command: string) {
   // Git inspection without pagers/aliases/external diff drivers or -c overrides.
   return new RegExp(`^git (?:status(?: -s| --short| -sb| --porcelain)*|log(?: --oneline| -n ?\\d+| -\\d+| --stat)*|branch(?: -a| -v| -vv| --show-current)*|rev-parse(?: --abbrev-ref| --show-toplevel| HEAD)*|remote -v)$`).test(c);
 }
+
+/**
+ * Cloud worktree Auto-mode allowlist (active ONLY when `PUI_CLOUD_BRANCH` is set to a
+ * dedicated `pui_agent/...` branch). Pre-approves staging, committing, pushing strictly
+ * to the session's own `pui_agent/...` branch (never force, never main/master), and
+ * opening/viewing PRs via `gh pr create`/`view`/`list`, with zero shell chaining.
+ */
+export function isAllowedCloudWorktreeGitAction(command: string, cloudBranch: string): boolean {
+  if (!/^pui_agent\/[a-z0-9][a-z0-9-]*$/.test(cloudBranch)) return false;
+  const c = command.trim();
+  if (!c) return false;
+  // Reject any shell chaining, subshells, command substitution, pipes, or redirections.
+  if (/[;&|`$><\r\n]/.test(c)) return false;
+  // Never allow force push, history rewrite, hook bypass, or destructive deletes.
+  if (/\s(?:--force|-f|--force-with-lease|--delete|--mirror|--all|--no-verify|--amend)\b/.test(c)) {
+    return false;
+  }
+
+  // 1. Safe git staging & diff/status inside worktree
+  if (/^git\s+(?:add|diff|status|show|branch|rev-parse)\b/.test(c)) {
+    if (/\s-(?:D|d)\b/.test(c)) return false;
+    return true;
+  }
+
+  // 2. git commit (standard commit with message)
+  if (/^git\s+commit\b/.test(c)) {
+    return true;
+  }
+
+  // 3. git push strictly to origin + the exact cloud worktree branch
+  const pushMatch = c.match(/^git\s+push(?:\s+(?:-u|--set-upstream))?\s+origin\s+([^\s]+)$/);
+  if (pushMatch) {
+    const refspec = pushMatch[1];
+    if (refspec === cloudBranch || refspec === `HEAD:${cloudBranch}`) {
+      return true;
+    }
+    return false;
+  }
+
+  // 4. gh pr create / view / list (never gh pr merge / close / delete)
+  if (/^gh\s+pr\s+(?:create|view|list)\b/.test(c)) {
+    return true;
+  }
+
+  return false;
+}
 async function canonical(path: string): Promise<string> {
   try { return await realpath(path); } catch (error: any) {
     if (error.code !== "ENOENT") throw error;
@@ -237,6 +283,9 @@ export function installPermissions(pi: any, initial: any = {}) {
     let preapproved = false;
     if (["edit", "write"].includes(name)) preapproved = await localPath(ctx.cwd, args.path);
     if (shell) preapproved = await localMove(ctx.cwd, args.command);
+    if (!preapproved && mode === "auto" && shell && process.env.PUI_CLOUD_BRANCH) {
+      preapproved = isAllowedCloudWorktreeGitAction(args.command, process.env.PUI_CLOUD_BRANCH);
+    }
     if (revision !== version) return block("Permission mode changed; retry the action.");
     if ((mode === "acceptEdits" || mode === "dontAsk" || mode === "auto") && preapproved) return;
     if (mode === "dontAsk") return block("Don't ask: this action requires approval and was automatically denied.");

@@ -983,12 +983,12 @@ impl Pui {
         #[cfg(not(test))]
         {
             if let Some(cloud_cfg) = active_cloud_host {
-                let perm = self.active_permission().key().to_owned();
+                // Cloud agents always run in Auto mode inside an isolated pui_agent/… worktree.
                 self.client = Some(rpc::Client::start_cloud(
                     cloud_cfg,
                     &self.prefs.cwd,
                     session.as_deref(),
-                    perm,
+                    "auto".to_owned(),
                     ctx.clone(),
                 ));
             } else {

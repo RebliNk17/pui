@@ -5,6 +5,7 @@ import path from 'node:path';
 import { LiveAgent, type NotificationEvent, type SessionDetail } from './agent.ts';
 import {
   cloneRepoIntoWorkspace,
+  createCloudWorktree,
   getAdminStatus,
   invalidateGithubSshCheck,
   normalizeGitRemote,
@@ -273,9 +274,11 @@ export class PuiDaemonServer {
       cwd,
       title,
       origin,
-      permissionMode,
+      'auto',
       (changed) => this.broadcastSessionDetail(changed),
       (note) => this.broadcastNotification(note),
+      this.meta[sessionPath]?.branch ?? null,
+      this.meta[sessionPath]?.base_branch ?? null,
     );
     this.liveAgents.set(sessionPath, agent);
     agent.start();
@@ -658,16 +661,33 @@ export class PuiDaemonServer {
         } else {
           cwd = this.projects()[0] || this.config.workspaces_dir;
         }
+
+        // Isolate every remote cloud agent inside its own Git worktree & branch:
+        // `pui_agent/<session-name-lowercased-hyphenated>-<6-random-chars>`
+        const labelHint =
+          (typeof body.title === 'string' && body.title.trim()) ||
+          (typeof body.prompt === 'string' && body.prompt.trim()) ||
+          (typeof body.repo_name === 'string' && body.repo_name.trim()) ||
+          undefined;
+        const wt = createCloudWorktree(this.config, cwd, labelHint);
+        const sessionCwd = wt.cwd;
+
         const origin: SessionOrigin =
           body.origin && typeof body.origin === 'object'
             ? (body.origin as SessionOrigin)
             : { platform: 'android', device: 'Pui Mobile', client: 'pui-mobile', created_at: Date.now() };
-        const perm = typeof body.permission_mode === 'string' ? body.permission_mode : 'auto';
-        const sessionPath = createEmptySessionFile(cwd, origin);
-        this.meta[sessionPath] = { origin };
+        // Cloud agents always run in Auto mode.
+        const perm = 'auto';
+        const sessionPath = createEmptySessionFile(sessionCwd, origin);
+        this.meta[sessionPath] = {
+          origin,
+          branch: wt.branch ?? undefined,
+          base_branch: wt.baseBranch ?? undefined,
+          repo_dir: wt.repoDir,
+        };
         saveAllMeta(this.meta);
 
-        const agent = this.ensureLiveAgent(sessionPath, cwd, perm);
+        const agent = this.ensureLiveAgent(sessionPath, sessionCwd, perm);
         const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
         const provider =
           typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined;
@@ -683,7 +703,13 @@ export class PuiDaemonServer {
           agent.sendPrompt(body.prompt.trim(), 'steer', images);
         }
         this.broadcastSessions();
-        sendJson(res, 201, { ok: true, path: sessionPath, cwd });
+        sendJson(res, 201, {
+          ok: true,
+          path: sessionPath,
+          cwd: sessionCwd,
+          branch: wt.branch,
+          base_branch: wt.baseBranch,
+        });
         return;
       }
 

@@ -261,8 +261,8 @@ impl Pui {
                 ui.label(theme::small(
                     ui,
                     format!(
-                        "Runs 24/7 on {} ({}:{}) · auto-clones {repo}",
-                        cloud_cfg.name, cloud_cfg.host, cloud_cfg.port
+                        "Runs 24/7 on {} in Auto mode · isolated pui_agent/… worktree on {repo} · opens PR when done",
+                        cloud_cfg.name
                     ),
                 ));
             }
@@ -281,9 +281,14 @@ impl Pui {
             return;
         }
         let id = self.ensure_agent();
+        let is_cloud = cloud.is_some();
         if let Some(node) = self.agents.nodes.get_mut(&id) {
             node.cloud_host = cloud;
             node.path = None;
+            if is_cloud {
+                // Cloud agents always run in Auto mode inside an isolated pui_agent/… worktree.
+                node.permission = Some(settings::PermissionMode::Auto);
+            }
         }
         let ctx = self.ctx.clone();
         let draft = std::mem::take(&mut self.draft);

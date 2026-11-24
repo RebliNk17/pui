@@ -16,6 +16,9 @@ export interface ChatMeta {
   hidden?: boolean;
   origin?: SessionOrigin;
   parent_session?: string;
+  branch?: string;
+  base_branch?: string;
+  repo_dir?: string;
 }
 
 export interface ToolRecord {

@@ -158,6 +158,12 @@ export default function NewChatScreen() {
     activeHost?.name.toLowerCase().includes('cloud') ||
       hostInfo?.pui_version?.includes('cloud'),
   );
+  // Cloud agents always run in Auto mode inside an isolated pui_agent/… worktree.
+  useEffect(() => {
+    if (isCloudHost && permissionMode !== 'auto') {
+      setPermissionMode('auto');
+    }
+  }, [isCloudHost, permissionMode]);
   const currentModelLabel = useMemo(() => {
     if (!modelId) return 'Default model';
     const match = models.find((m) => m.id === modelId);
@@ -192,7 +198,7 @@ export default function NewChatScreen() {
       const res = await transport.createSession({
         cwd: effectiveCwd,
         git_remote: gitRemote,
-        permission_mode: permissionMode,
+        permission_mode: isCloudHost ? 'auto' : permissionMode,
         model: modelId || undefined,
         provider: provider || undefined,
         thinking: thinking || undefined,
@@ -501,7 +507,7 @@ export default function NewChatScreen() {
             onSend={handleSend}
             onAbort={async () => {}}
             onChangePermission={async (key) => {
-              setPermissionMode(key);
+              setPermissionMode(isCloudHost ? 'auto' : key);
             }}
             onChangeModel={async (prov, id) => {
               setProvider(prov);

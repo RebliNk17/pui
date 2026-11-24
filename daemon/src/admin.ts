@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -533,4 +534,119 @@ export function cloneRepoIntoWorkspace(
   }
 
   return { path: fs.realpathSync(target), already_exists: false };
+}
+
+/**
+ * Builds the exact branch & worktree identifier:
+ * `pui_agent/<session-name-lowercased-hyphenated>-<6-random-alnum>`
+ */
+export function makeCloudBranchName(label?: string): string {
+  const firstLine = (label || '').split('\n')[0] || '';
+  const slug =
+    firstLine
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40) || 'session';
+  const rand = crypto.randomBytes(6).toString('hex').slice(0, 6);
+  return `pui_agent/${slug}-${rand}`;
+}
+
+function isGitRepo(dir: string): boolean {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: dir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function detectBaseRef(repoDir: string): { startRef: string; baseBranch: string } {
+  try {
+    const sym = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (sym) {
+      return { startRef: sym, baseBranch: sym.replace(/^origin\//, '') };
+    }
+  } catch {
+    // fallback below
+  }
+  for (const candidate of ['origin/main', 'origin/master', 'main', 'master']) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', candidate], {
+        cwd: repoDir,
+        timeout: 3000,
+        stdio: 'ignore',
+      });
+      return { startRef: candidate, baseBranch: candidate.replace(/^origin\//, '') };
+    } catch {
+      // try next
+    }
+  }
+  try {
+    const headBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repoDir,
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return {
+      startRef: 'HEAD',
+      baseBranch: headBranch && headBranch !== 'HEAD' ? headBranch : 'main',
+    };
+  } catch {
+    return { startRef: 'HEAD', baseBranch: 'main' };
+  }
+}
+
+/**
+ * Creates an isolated Git worktree and matching branch (`pui_agent/<slug>-<rand6>`)
+ * inside `<workspaces_dir>/.worktrees/<repoName>/<branchName>`.
+ * Falls back cleanly to `repoDir` if `repoDir` is not a Git repository.
+ */
+export function createCloudWorktree(
+  config: DaemonConfig,
+  repoDir: string,
+  label?: string,
+): { cwd: string; repoDir: string; branch: string | null; baseBranch: string | null } {
+  if (!fs.existsSync(repoDir) || !isGitRepo(repoDir)) {
+    return { cwd: repoDir, repoDir, branch: null, baseBranch: null };
+  }
+
+  try {
+    execFileSync('git', ['fetch', 'origin', '--prune'], {
+      cwd: repoDir,
+      timeout: 15_000,
+      stdio: 'ignore',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    });
+  } catch {
+    // Offline or no origin remote — branch from local HEAD cleanly.
+  }
+
+  const { startRef, baseBranch } = detectBaseRef(repoDir);
+  const branch = makeCloudBranchName(label);
+  const repoName = path.basename(repoDir) || 'repo';
+  const worktreeDir = path.join(config.workspaces_dir, '.worktrees', repoName, branch);
+  fs.mkdirSync(path.dirname(worktreeDir), { recursive: true });
+
+  execFileSync('git', ['worktree', 'add', '-b', branch, worktreeDir, startRef], {
+    cwd: repoDir,
+    timeout: 30_000,
+    stdio: 'pipe',
+  });
+
+  return { cwd: worktreeDir, repoDir, branch, baseBranch };
 }

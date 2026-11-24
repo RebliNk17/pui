@@ -1,9 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { inferRepoDirName, validateGitCloneUrl } from '../src/admin.ts';
+import { isAllowedCloudWorktreeGitAction } from '../../scripts/permissions.ts';
+import {
+  createCloudWorktree,
+  inferRepoDirName,
+  makeCloudBranchName,
+  validateGitCloneUrl,
+} from '../src/admin.ts';
 import { buildPairingUri, isTailscaleIpv4, type DaemonConfig } from '../src/config.ts';
 import { PuiDaemonServer } from '../src/server.ts';
 import { createEmptySessionFile } from '../src/sessions.ts';
@@ -249,6 +256,36 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(inferRepoDirName('https://github.com/RebliNk17/pui.git'), 'pui');
       assert.throws(() => validateGitCloneUrl('--upload-pack=evil'));
       assert.throws(() => validateGitCloneUrl('file:///etc/passwd'));
+
+      // Cloud branch naming + isolated Git worktree creation + Auto-mode Git/PR allowlist.
+      const br = makeCloudBranchName('Add Dark Mode Toggle!');
+      assert.match(br, /^pui_agent\/add-dark-mode-toggle-[a-f0-9]{6}$/);
+
+      // Initialize a real temporary Git repo and verify worktree & branch match exactly.
+      execFileSync('git', ['init', '-b', 'main'], { cwd: proj, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: proj, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: proj, stdio: 'ignore' });
+      execFileSync('git', ['add', '.'], { cwd: proj, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: proj, stdio: 'ignore' });
+
+      const wt = createCloudWorktree(config, proj, 'Fix Login Bug');
+      assert.ok(wt.branch);
+      assert.match(wt.branch, /^pui_agent\/fix-login-bug-[a-f0-9]{6}$/);
+      assert.equal(wt.baseBranch, 'main');
+      assert.ok(wt.cwd.endsWith(path.join('.worktrees', 'demo-app', wt.branch)));
+      assert.equal(fs.existsSync(path.join(wt.cwd, 'README.md')), true);
+
+      // Auto-mode cloud worktree Git & PR permissions: allow safe branch actions, block dangerous ones.
+      assert.equal(isAllowedCloudWorktreeGitAction('git add -A', wt.branch), true);
+      assert.equal(isAllowedCloudWorktreeGitAction('git commit -m "feat: fix login"', wt.branch), true);
+      assert.equal(isAllowedCloudWorktreeGitAction(`git push -u origin ${wt.branch}`, wt.branch), true);
+      assert.equal(isAllowedCloudWorktreeGitAction(`git push origin HEAD:${wt.branch}`, wt.branch), true);
+      assert.equal(isAllowedCloudWorktreeGitAction('gh pr create --fill', wt.branch), true);
+      assert.equal(isAllowedCloudWorktreeGitAction('git push origin main', wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction(`git push --force origin ${wt.branch}`, wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction(`git push -u origin ${wt.branch} && rm -rf /`, wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction('gh pr merge 1', wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction('git push -u origin main', 'main'), false);
     } finally {
       await srv.close();
       fs.rmSync(tmp, { recursive: true, force: true });
