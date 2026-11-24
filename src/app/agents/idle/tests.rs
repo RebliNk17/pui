@@ -33,8 +33,14 @@ fn finished(ctx: &egui::Context) -> (Pui, String, String) {
 }
 
 fn finish_retirement(app: &mut Pui, id: &str) {
-    if let Some((_, done)) = app.agents.idle.retiring.get(id) {
-        done.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Poll like the app does. Consuming the completion message here would make
+    // `finish_idle_retirements` depend on the retiring thread having already
+    // dropped its sender (Disconnected), which races under CI load.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.agents.idle.retiring.contains_key(id) {
+        assert!(Instant::now() < deadline, "idle retirement did not finish");
+        app.finish_idle_retirements();
+        std::thread::sleep(Duration::from_millis(5));
     }
     app.finish_idle_retirements();
 }
