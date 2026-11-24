@@ -22,6 +22,8 @@ pub struct CloudHostConfig {
     pub tls: bool,
 }
 
+pub const PLAYWRIGHT_RESEARCH_MCP: &str = "playwright-research";
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CloudAdminStatus {
@@ -33,6 +35,7 @@ pub struct CloudAdminStatus {
     pub git_user_email: Option<String>,
     pub skills: Vec<String>,
     pub mcp_servers: Vec<String>,
+    pub service_creds: Vec<String>,
     pub projects: Vec<String>,
     pub workspaces_dir: String,
 }
@@ -40,8 +43,17 @@ pub struct CloudAdminStatus {
 #[derive(Clone, Debug)]
 pub struct LocalMcpItem {
     pub name: String,
+    pub blocked_on_cloud: bool,
     pub local_only: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalServiceCred {
+    pub id: String,
+    pub label: String,
+    pub scope: String,
+    pub path: PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -49,6 +61,7 @@ pub struct LocalSyncInventory {
     pub providers: Vec<String>,
     pub mcps: Vec<LocalMcpItem>,
     pub skills: Vec<String>,
+    pub service_creds: Vec<LocalServiceCred>,
     pub git_remote: Option<String>,
     pub project_name: String,
 }
@@ -57,8 +70,10 @@ pub struct LocalSyncInventory {
 pub struct CloudSyncPlan {
     pub providers: BTreeSet<String>,
     pub setup_git_ssh: bool,
+    pub add_playwright_research: bool,
     pub mcps: BTreeSet<String>,
     pub skills: BTreeSet<String>,
+    pub service_creds: BTreeSet<String>,
     pub clone_current_repo: bool,
 }
 
@@ -66,8 +81,10 @@ impl CloudSyncPlan {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
             && !self.setup_git_ssh
+            && !self.add_playwright_research
             && self.mcps.is_empty()
             && self.skills.is_empty()
+            && self.service_creds.is_empty()
             && !self.clone_current_repo
     }
 }
@@ -124,6 +141,29 @@ pub fn parse_pairing_uri(input: &str) -> Result<CloudHostConfig, String> {
         token,
         tls,
     })
+}
+
+fn decode_chunked_body(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some((size_line, after_size)) = rest.split_once("\r\n") {
+        let hex = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(len) = usize::from_str_radix(hex, 16) else {
+            break;
+        };
+        if len == 0 {
+            break;
+        }
+        if after_size.len() < len {
+            out.push_str(after_size);
+            break;
+        }
+        out.push_str(&after_size[..len]);
+        rest = after_size[len..]
+            .strip_prefix("\r\n")
+            .unwrap_or(&after_size[len..]);
+    }
+    out
 }
 
 fn http_request_json(
@@ -183,7 +223,22 @@ fn http_request_json(
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(500);
-    let parsed: Value = serde_json::from_str(body_str.trim()).unwrap_or(Value::Null);
+    let is_chunked = head.lines().any(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+    });
+    let decoded_body = if is_chunked {
+        decode_chunked_body(body_str)
+    } else {
+        body_str.to_owned()
+    };
+    let trimmed = decoded_body.trim();
+    let parsed: Value = if trimmed.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(trimmed)
+            .map_err(|e| format!("Invalid JSON response from cloud host (HTTP {status}): {e}"))?
+    };
     if status >= 400 {
         let msg = parsed["error"]
             .as_str()
@@ -267,19 +322,113 @@ fn read_local_mcp_map() -> serde_json::Map<String, Value> {
     }
 }
 
-fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, Option<String>) {
+fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, bool, Option<String>) {
     let lower = name.to_ascii_lowercase();
     let blob = cfg.to_string().to_ascii_lowercase();
     if lower.contains("browser") || blob.contains("browsermcp") || blob.contains("chrome") {
         return (
             true,
-            Some("Controls local desktop Chrome; usually skipped on cloud".into()),
+            true,
+            Some(
+                "Blocked on cloud — controls local desktop Chrome; use Headless Playwright instead"
+                    .into(),
+            ),
         );
     }
     if blob.contains("/users/") || blob.contains("/applications/") || blob.contains("osascript") {
-        return (true, Some("References a local macOS path".into()));
+        return (false, true, Some("References a local macOS path".into()));
     }
-    (false, None)
+    (false, false, None)
+}
+
+fn discover_local_service_creds() -> Vec<LocalServiceCred> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let candidates: Vec<(&str, &str, &str, Vec<PathBuf>)> = vec![
+        (
+            "gh",
+            "GitHub CLI (gh)",
+            "PRs, issues, CI checks & releases",
+            vec![home.join(".config").join("gh").join("hosts.yml")],
+        ),
+        (
+            "railway",
+            "Railway",
+            "Deploy & manage Railway projects/services",
+            vec![home.join(".railway").join("config.json")],
+        ),
+        (
+            "render",
+            "Render",
+            "Deploy & manage Render services",
+            vec![
+                home.join(".render").join("cli.yaml"),
+                home.join(".config").join("render").join("cli.yaml"),
+            ],
+        ),
+        (
+            "vercel",
+            "Vercel",
+            "Deploy & manage Vercel projects",
+            vec![
+                home.join("Library")
+                    .join("Application Support")
+                    .join("com.vercel.cli")
+                    .join("auth.json"),
+                home.join(".config").join("vercel").join("auth.json"),
+            ],
+        ),
+        (
+            "fly",
+            "Fly.io",
+            "Deploy & manage Fly apps",
+            vec![home.join(".fly").join("config.yml")],
+        ),
+        (
+            "wrangler",
+            "Cloudflare Wrangler",
+            "Deploy Cloudflare Workers/Pages",
+            vec![
+                home.join("Library")
+                    .join("Preferences")
+                    .join(".wrangler")
+                    .join("config")
+                    .join("default.toml"),
+                home.join(".config")
+                    .join(".wrangler")
+                    .join("config")
+                    .join("default.toml"),
+            ],
+        ),
+        (
+            "npm",
+            "npm registry",
+            "Publish or install private npm packages",
+            vec![home.join(".npmrc")],
+        ),
+    ];
+
+    let mut found = Vec::new();
+    for (id, label, scope, paths) in candidates {
+        if let Some(p) = paths.into_iter().find(|p| p.is_file()) {
+            if id == "npm" {
+                let has_token = std::fs::read_to_string(&p)
+                    .map(|s| s.contains("_authToken") || s.contains("_auth="))
+                    .unwrap_or(false);
+                if !has_token {
+                    continue;
+                }
+            }
+            found.push(LocalServiceCred {
+                id: id.into(),
+                label: label.into(),
+                scope: scope.into(),
+                path: p,
+            });
+        }
+    }
+    found
 }
 
 pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
@@ -296,9 +445,10 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
     let mut mcps: Vec<LocalMcpItem> = read_local_mcp_map()
         .into_iter()
         .map(|(name, cfg)| {
-            let (local_only, reason) = classify_local_only_mcp(&name, &cfg);
+            let (blocked_on_cloud, local_only, reason) = classify_local_only_mcp(&name, &cfg);
             LocalMcpItem {
                 name,
+                blocked_on_cloud,
                 local_only,
                 reason,
             }
@@ -339,6 +489,7 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
         providers,
         mcps,
         skills,
+        service_creds: discover_local_service_creds(),
         git_remote,
         project_name,
     }
@@ -390,16 +541,29 @@ pub fn sync_selected_pi_auth(
 pub fn sync_selected_mcps(
     cfg: &CloudHostConfig,
     selected: &BTreeSet<String>,
+    add_playwright_research: bool,
 ) -> Result<Vec<String>, String> {
-    if selected.is_empty() {
+    if selected.is_empty() && !add_playwright_research {
         return Ok(Vec::new());
     }
     let all = read_local_mcp_map();
     let mut filtered = serde_json::Map::new();
     for (k, v) in all {
         if selected.contains(&k) {
-            filtered.insert(k, v);
+            let (blocked, _, _) = classify_local_only_mcp(&k, &v);
+            if !blocked {
+                filtered.insert(k, v);
+            }
         }
+    }
+    if add_playwright_research {
+        filtered.insert(
+            PLAYWRIGHT_RESEARCH_MCP.to_owned(),
+            json!({
+                "command": "npx",
+                "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
+            }),
+        );
     }
     if filtered.is_empty() {
         return Ok(Vec::new());
@@ -420,6 +584,48 @@ pub fn sync_selected_mcps(
         })
         .unwrap_or_default();
     Ok(servers)
+}
+
+pub fn sync_selected_service_creds(
+    cfg: &CloudHostConfig,
+    selected: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let available = discover_local_service_creds();
+    let mut payload = Vec::new();
+    for cred in available {
+        if selected.contains(&cred.id) {
+            if let Ok(content) = std::fs::read_to_string(&cred.path) {
+                if !content.trim().is_empty() {
+                    payload.push(json!({
+                        "id": cred.id,
+                        "content": content,
+                    }));
+                }
+            }
+        }
+    }
+    if payload.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-service-creds",
+        Some(&json!({ "credentials": payload })),
+    )?;
+    let synced = res["service_creds"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(synced)
 }
 
 fn collect_skill_text_files(root: &Path, dir: &Path, out: &mut Vec<Value>) {
@@ -520,9 +726,13 @@ pub fn execute_selective_sync(
         }
         summary.push(git_res.detail);
     }
-    if !plan.mcps.is_empty() {
-        let mcps = sync_selected_mcps(cfg, &plan.mcps)?;
+    if !plan.mcps.is_empty() || plan.add_playwright_research {
+        let mcps = sync_selected_mcps(cfg, &plan.mcps, plan.add_playwright_research)?;
         summary.push(format!("{} MCP(s)", mcps.len()));
+    }
+    if !plan.service_creds.is_empty() {
+        let creds = sync_selected_service_creds(cfg, &plan.service_creds)?;
+        summary.push(format!("{} service cred(s)", creds.len()));
     }
     if !plan.skills.is_empty() {
         let skills = sync_selected_skills(cfg, &plan.skills)?;

@@ -6,10 +6,13 @@ import { LiveAgent, type NotificationEvent, type SessionDetail } from './agent.t
 import {
   cloneRepoIntoWorkspace,
   getAdminStatus,
+  normalizeGitRemote,
   setupCloudGit,
   writeCloudMcps,
+  writeCloudServiceCreds,
   writeCloudSkills,
   writePiAuth,
+  type IncomingServiceCred,
   type IncomingSkillBundle,
 } from './admin.ts';
 import { discoverProjects, type DaemonConfig } from './config.ts';
@@ -81,6 +84,7 @@ function sendJson(res: http.ServerResponse, status: number, payload: unknown): v
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': String(Buffer.byteLength(body, 'utf8')),
     'Cache-Control': 'no-store',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
@@ -472,6 +476,21 @@ export class PuiDaemonServer {
         return;
       }
 
+      if (method === 'POST' && url.pathname === '/v1/admin/sync-service-creds') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const credentials = body.credentials;
+        if (!Array.isArray(credentials)) {
+          sendJson(res, 400, { error: 'Missing credentials array.' });
+          return;
+        }
+        const result = writeCloudServiceCreds(credentials as IncomingServiceCred[]);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
       if (method === 'POST' && url.pathname === '/v1/admin/git-setup') {
         const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
           string,
@@ -551,10 +570,25 @@ export class PuiDaemonServer {
           string,
           unknown
         >;
-        const cwd =
-          typeof body.cwd === 'string' && fs.existsSync(body.cwd)
-            ? body.cwd
-            : this.projects()[0] || this.config.workspaces_dir;
+        let cwd: string | null = null;
+        const explicitRemote =
+          typeof body.git_remote === 'string' && body.git_remote.trim()
+            ? body.git_remote.trim()
+            : typeof body.cwd === 'string' && !fs.existsSync(body.cwd) && normalizeGitRemote(body.cwd)
+              ? body.cwd.trim()
+              : null;
+
+        if (explicitRemote) {
+          const cloned = cloneRepoIntoWorkspace(this.config, explicitRemote, {
+            name: typeof body.repo_name === 'string' ? body.repo_name : undefined,
+            branch: typeof body.branch === 'string' ? body.branch : undefined,
+          });
+          cwd = cloned.path;
+        } else if (typeof body.cwd === 'string' && fs.existsSync(body.cwd)) {
+          cwd = body.cwd;
+        } else {
+          cwd = this.projects()[0] || this.config.workspaces_dir;
+        }
         const origin: SessionOrigin =
           body.origin && typeof body.origin === 'object'
             ? (body.origin as SessionOrigin)

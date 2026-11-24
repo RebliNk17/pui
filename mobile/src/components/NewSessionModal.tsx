@@ -13,7 +13,12 @@ interface Props {
   permissionModes: PermissionModeOption[];
   deviceLabel: string;
   onClose: () => void;
-  onCreate: (input: { cwd: string; permissionMode: string; prompt?: string }) => Promise<void>;
+  onCreate: (input: {
+    cwd: string;
+    gitRemote?: string;
+    permissionMode: string;
+    prompt?: string;
+  }) => Promise<void>;
 }
 
 export function NewSessionModal({
@@ -41,13 +46,18 @@ export function NewSessionModal({
   }, [projects, selectedCwd]);
 
   const effectiveCwd = customCwd.trim() || selectedCwd || projects[0] || '';
+  const looksLikeGitRepo = (val: string) =>
+    /^(git@|https:\/\/|ssh:\/\/)/.test(val) || /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(val);
 
   const submit = async () => {
     if (!effectiveCwd || submitting) return;
     setSubmitting(true);
     try {
+      const custom = customCwd.trim();
+      const gitRemote = custom && looksLikeGitRepo(custom) ? custom : undefined;
       await onCreate({
         cwd: effectiveCwd,
+        gitRemote,
         permissionMode,
         prompt: prompt.trim() || undefined,
       });
@@ -152,8 +162,10 @@ export function NewSessionModal({
             <TextInput
               value={customCwd}
               onChangeText={setCustomCwd}
-              placeholder="Or enter another host folder path…"
+              placeholder="Or enter a host path or Git repo (e.g. owner/repo) to auto-clone…"
               placeholderTextColor={colors.dim}
+              autoCapitalize="none"
+              autoCorrect={false}
               style={[
                 styles.input,
                 { backgroundColor: colors.codeBg, color: colors.text, borderColor: colors.border },

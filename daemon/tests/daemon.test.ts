@@ -46,6 +46,7 @@ describe('pui-daemon v1 remote server', () => {
     process.env.PUI_DAEMON_HOME = daemonHome;
     process.env.PI_CODING_AGENT_DIR = piDir;
     process.env.PUI_DAEMON_SKILLS_DIR = skillsDir;
+    process.env.PUI_DAEMON_HOME_DIR = tmp;
 
     const sessionPath = createEmptySessionFile(proj, {
       platform: 'android',
@@ -162,14 +163,41 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(fs.existsSync(path.join(skillsDir, 'deploy', 'SKILL.md')), true);
       assert.equal(fs.existsSync(path.join(skillsDir, 'evil.txt')), false);
 
-      const st2 = (await (
-        await fetch(`${base}/v1/admin/status`, { headers: authHeaders })
-      ).json()) as { skills: string[]; mcp_servers: string[] };
+      const st2Res = await fetch(`${base}/v1/admin/status`, { headers: authHeaders });
+      assert.ok(Number(st2Res.headers.get('content-length')) > 0);
+      const st2 = (await st2Res.json()) as {
+        skills: string[];
+        mcp_servers: string[];
+        service_creds: string[];
+      };
       assert.deepEqual(st2.skills, ['deploy']);
       assert.deepEqual(st2.mcp_servers, ['linear']);
+      assert.deepEqual(st2.service_creds, []);
+
+      // Sync opt-in service credentials (allowlisted only; unknown IDs ignored).
+      const svcRes = await fetch(`${base}/v1/admin/sync-service-creds`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          credentials: [
+            { id: 'railway', content: '{"user":{"token":"rw-test"}}\n' },
+            { id: '../../etc/passwd', content: 'blocked' },
+          ],
+        }),
+      });
+      assert.equal(svcRes.status, 200);
+      const st3 = (await (
+        await fetch(`${base}/v1/admin/status`, { headers: authHeaders })
+      ).json()) as { service_creds: string[] };
+      assert.deepEqual(st3.service_creds, ['railway']);
+      assert.equal(fs.existsSync(path.join(tmp, '.railway', 'config.json')), true);
 
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
+        'git@github.com:RebliNk17/pui.git',
+      );
+      assert.equal(
+        validateGitCloneUrl('RebliNk17/pui'),
         'git@github.com:RebliNk17/pui.git',
       );
       assert.equal(inferRepoDirName('https://github.com/RebliNk17/pui.git'), 'pui');

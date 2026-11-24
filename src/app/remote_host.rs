@@ -1297,6 +1297,13 @@ impl Pui {
                                 colors.muted,
                             );
                         }
+                        if !st.service_creds.is_empty() {
+                            status_pill(
+                                ui,
+                                &format!("Services ({})", st.service_creds.len()),
+                                colors.muted,
+                            );
+                        }
                         if !st.skills.is_empty() {
                             status_pill(ui, &format!("Skills ({})", st.skills.len()), colors.muted);
                         }
@@ -1475,7 +1482,7 @@ impl Pui {
                                     }
 
                                     ui.add_space(10.0);
-                                    // 2. Dedicated Git SSH key
+                                    // 2. Dedicated Git SSH key + auto-clone note
                                     ui.label(
                                         RichText::new("Git & GitHub access")
                                             .size(12.5)
@@ -1491,23 +1498,89 @@ impl Pui {
                                         "Generate dedicated cloud SSH key & register on GitHub (keeps Mac private key local)"
                                     };
                                     ui.checkbox(&mut st.plan.setup_git_ssh, git_label);
+                                    ui.label(
+                                        RichText::new(
+                                            "Once enabled, cloud agents automatically clone any repo you start a chat from on demand.",
+                                        )
+                                        .size(11.0)
+                                        .color(colors.muted),
+                                    );
 
-                                    // 3. MCP servers
+                                    // 3. Opt-in Service & CLI credentials (Railway, GitHub CLI, Render, etc.)
                                     ui.add_space(10.0);
                                     ui.label(
-                                        RichText::new("MCP servers")
+                                        RichText::new("Service & CLI credentials (opt-in)")
                                             .size(12.5)
                                             .strong()
                                             .color(colors.text),
                                     );
-                                    if inv.mcps.is_empty() {
+                                    if inv.service_creds.is_empty() {
                                         ui.label(
-                                            RichText::new("No local MCP servers configured.")
-                                                .size(11.5)
-                                                .color(colors.muted),
+                                            RichText::new(
+                                                "No local CLI service logins detected (gh, Railway, Render, Vercel, Fly, Wrangler).",
+                                            )
+                                            .size(11.5)
+                                            .color(colors.muted),
                                         );
                                     } else {
-                                        for mcp in &inv.mcps {
+                                        for cred in &inv.service_creds {
+                                            let already = cloud_st
+                                                .as_ref()
+                                                .is_some_and(|s| s.service_creds.contains(&cred.id));
+                                            let mut checked =
+                                                st.plan.service_creds.contains(&cred.id);
+                                            let label = if already {
+                                                format!(
+                                                    "{} — {} (already on cloud)",
+                                                    cred.label, cred.scope
+                                                )
+                                            } else {
+                                                format!("{} — {}", cred.label, cred.scope)
+                                            };
+                                            if ui.checkbox(&mut checked, label).changed() {
+                                                if checked {
+                                                    st.plan.service_creds.insert(cred.id.clone());
+                                                } else {
+                                                    st.plan.service_creds.remove(&cred.id);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 4. Headless research browser & MCP servers
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        RichText::new("Research browser & MCP servers")
+                                            .size(12.5)
+                                            .strong()
+                                            .color(colors.text),
+                                    );
+                                    let pw_already = cloud_st.as_ref().is_some_and(|s| {
+                                        s.mcp_servers
+                                            .iter()
+                                            .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP)
+                                    });
+                                    let pw_label = if pw_already {
+                                        "Headless Playwright MCP — isolated research browser, no logins/cookies (already on cloud)"
+                                    } else {
+                                        "Add Headless Playwright MCP — isolated research browser, no logins/cookies"
+                                    };
+                                    ui.checkbox(&mut st.plan.add_playwright_research, pw_label);
+
+                                    for mcp in &inv.mcps {
+                                        if mcp.blocked_on_cloud {
+                                            ui.add_enabled_ui(false, |ui| {
+                                                let mut off = false;
+                                                let reason = mcp
+                                                    .reason
+                                                    .as_deref()
+                                                    .unwrap_or("Blocked on cloud");
+                                                ui.checkbox(
+                                                    &mut off,
+                                                    format!("{} — {reason}", mcp.name),
+                                                );
+                                            });
+                                        } else {
                                             let mut checked = st.plan.mcps.contains(&mcp.name);
                                             let label = if let Some(ref reason) = mcp.reason {
                                                 format!("{} — {}", mcp.name, reason)
@@ -1524,7 +1597,7 @@ impl Pui {
                                         }
                                     }
 
-                                    // 4. Skills
+                                    // 5. Skills
                                     ui.add_space(10.0);
                                     ui.horizontal(|ui| {
                                         ui.label(
@@ -1565,11 +1638,11 @@ impl Pui {
                                         });
                                     }
 
-                                    // 5. Current Git repository
+                                    // 6. Optional immediate pre-clone of current repo
                                     if let Some(ref remote_url) = inv.git_remote {
                                         ui.add_space(10.0);
                                         ui.label(
-                                            RichText::new("Repository")
+                                            RichText::new("Optional pre-clone")
                                                 .size(12.5)
                                                 .strong()
                                                 .color(colors.text),
@@ -1577,7 +1650,7 @@ impl Pui {
                                         ui.checkbox(
                                             &mut st.plan.clone_current_repo,
                                             format!(
-                                                "Clone {} ({remote_url}) into cloud workspaces",
+                                                "Pre-clone {} now ({remote_url})",
                                                 inv.project_name
                                             ),
                                         );

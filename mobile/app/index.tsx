@@ -695,10 +695,11 @@ export default function SessionsScreen() {
         permissionModes={defaultPermissionModes}
         deviceLabel={`${clientOrigin().platform === 'ios' ? 'iOS' : 'Android'} · ${deviceName}`}
         onClose={() => setNewOpen(false)}
-        onCreate={async ({ cwd, permissionMode, prompt }) => {
+        onCreate={async ({ cwd, gitRemote, permissionMode, prompt }) => {
           if (!transport) return;
           await transport.createSession({
             cwd,
+            git_remote: gitRemote,
             permission_mode: permissionMode,
             prompt,
             origin: clientOrigin(),

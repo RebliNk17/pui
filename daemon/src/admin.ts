@@ -13,6 +13,59 @@ export interface CloudAdminStatus {
   git_user_email: string | null;
   skills: string[];
   mcp_servers: string[];
+  service_creds: string[];
+}
+
+export interface IncomingServiceCred {
+  id: string;
+  content: string;
+}
+
+const SERVICE_CRED_RELATIVE_PATHS: Record<string, string> = {
+  gh: path.join('.config', 'gh', 'hosts.yml'),
+  railway: path.join('.railway', 'config.json'),
+  render: path.join('.render', 'cli.yaml'),
+  vercel: path.join('.config', 'vercel', 'auth.json'),
+  fly: path.join('.fly', 'config.yml'),
+  wrangler: path.join('.config', '.wrangler', 'config', 'default.toml'),
+  npm: '.npmrc',
+};
+
+function serviceCredHome(): string {
+  return process.env.PUI_DAEMON_HOME_DIR || os.homedir();
+}
+
+function detectCloudServiceCreds(): string[] {
+  const home = serviceCredHome();
+  const found: string[] = [];
+  for (const [id, rel] of Object.entries(SERVICE_CRED_RELATIVE_PATHS)) {
+    const full = path.join(home, rel);
+    if (fs.existsSync(full)) {
+      found.push(id);
+    }
+  }
+  return found.sort();
+}
+
+export function writeCloudServiceCreds(
+  items: IncomingServiceCred[],
+): { service_creds: string[] } {
+  const home = serviceCredHome();
+  for (const item of items.slice(0, 16)) {
+    const rel = SERVICE_CRED_RELATIVE_PATHS[item.id];
+    if (!rel) continue;
+    if (typeof item.content !== 'string' || !item.content.trim()) continue;
+    if (Buffer.byteLength(item.content, 'utf8') > 128 * 1024) continue;
+    const dest = path.join(home, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(dest, item.content, { mode: 0o600 });
+    try {
+      fs.chmodSync(dest, 0o600);
+    } catch {
+      // ignore
+    }
+  }
+  return { service_creds: detectCloudServiceCreds() };
 }
 
 function skillsDir(): string {
@@ -107,6 +160,7 @@ export function getAdminStatus(): CloudAdminStatus {
     git_user_email: gitConfigGet('user.email'),
     skills,
     mcp_servers,
+    service_creds: detectCloudServiceCreds(),
   };
 }
 
@@ -280,16 +334,25 @@ export function writeCloudSkills(bundles: IncomingSkillBundle[]): { skills: stri
   return { skills: written.sort() };
 }
 
-export function validateGitCloneUrl(url: string): string {
-  const trimmed = url.trim();
+export function normalizeGitRemote(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.includes('..') || trimmed.startsWith('-')) return null;
+  if (/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(trimmed)) {
+    return `git@github.com:${trimmed}.git`;
+  }
   const ok =
     /^https:\/\/[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._~:/?#[\]@!$&'()*+,;=%-]+)$/.test(trimmed) ||
     /^git@[a-zA-Z0-9._-]+:[a-zA-Z0-9._/-]+(?:\.git)?$/.test(trimmed) ||
     /^ssh:\/\/git@[a-zA-Z0-9._-]+(?::\d+)?\/[a-zA-Z0-9._/-]+(?:\.git)?$/.test(trimmed);
-  if (!ok || trimmed.includes('..') || trimmed.startsWith('-')) {
+  return ok ? trimmed : null;
+}
+
+export function validateGitCloneUrl(url: string): string {
+  const normalized = normalizeGitRemote(url);
+  if (!normalized) {
     throw Object.assign(new Error('Unsupported or unsafe Git clone URL.'), { status: 400 });
   }
-  return trimmed;
+  return normalized;
 }
 
 export function inferRepoDirName(url: string, explicitName?: string): string {
