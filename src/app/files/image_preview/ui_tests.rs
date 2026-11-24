@@ -44,6 +44,7 @@ fn real_oversized_header_is_visible_readonly_bounded_and_retry_is_explicit() {
             };
             for _ in 0..50 {
                 draw();
+                crate::media::wait_decodes(&ctx);
             }
             let output = draw();
             let (clip, text) = output

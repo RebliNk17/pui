@@ -258,7 +258,7 @@ impl Gallery {
         let ctx = ui.ctx().clone();
         let side =
             ((ui.available_width() * ui.ctx().pixels_per_point()).round() as u32).clamp(720, 1600);
-        thread::spawn(move || {
+        spawn_decode(ui.ctx(), move || {
             let result = decode(&attachment, side);
             let _ = tx.send(Decoded {
                 key: attachment.key,
@@ -311,7 +311,7 @@ impl Gallery {
         } else {
             480
         };
-        thread::spawn(move || {
+        spawn_decode(ui.ctx(), move || {
             let result = decode(&attachment, side);
             let _ = tx.send(Decoded {
                 key: attachment.key,
@@ -963,6 +963,73 @@ fn decode(image: &Attachment, side: u32) -> Result<ColorImage, String> {
         decoded.as_raw(),
     ))
 }
+/// Runs one detached attachment decode. Its final step sends the result and
+/// requests a repaint; tests can wait for that whole step via [`wait_decodes`].
+fn spawn_decode(ctx: &egui::Context, work: impl FnOnce() + Send + 'static) {
+    #[cfg(test)]
+    let in_flight = decode_tracking::InFlight::start(ctx);
+    thread::spawn(move || {
+        #[cfg(test)]
+        let _in_flight = in_flight;
+        work();
+    });
+}
+
+/// Blocks until every attachment decode started for `ctx` has delivered its
+/// result and repaint request, so frame-count settle assertions do not race
+/// background decode threads.
+#[cfg(test)]
+pub(crate) fn wait_decodes(ctx: &egui::Context) {
+    decode_tracking::wait(ctx);
+}
+
+#[cfg(test)]
+mod decode_tracking {
+    use super::egui;
+    use std::{
+        sync::{Arc, Condvar, Mutex},
+        time::Duration,
+    };
+
+    #[derive(Default)]
+    struct Decodes(Mutex<usize>, Condvar);
+
+    fn decodes(ctx: &egui::Context) -> Arc<Decodes> {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Arc<Decodes>>(egui::Id::new("media-decodes-in-flight"))
+                .clone()
+        })
+    }
+
+    pub(super) struct InFlight(Arc<Decodes>);
+    impl InFlight {
+        pub(super) fn start(ctx: &egui::Context) -> Self {
+            let decodes = decodes(ctx);
+            *decodes.0.lock().unwrap() += 1;
+            Self(decodes)
+        }
+    }
+    impl Drop for InFlight {
+        // Also runs on unwind, so a panicking decode never strands a waiter.
+        fn drop(&mut self) {
+            *self.0.0.lock().unwrap() -= 1;
+            self.0.1.notify_all();
+        }
+    }
+
+    pub(super) fn wait(ctx: &egui::Context) {
+        let decodes = decodes(ctx);
+        let (in_flight, timeout) = decodes
+            .1
+            .wait_timeout_while(decodes.0.lock().unwrap(), Duration::from_secs(8), |n| {
+                *n > 0
+            })
+            .unwrap();
+        drop(in_flight);
+        assert!(!timeout.timed_out(), "Attachment decodes did not finish");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

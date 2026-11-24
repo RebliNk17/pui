@@ -111,6 +111,7 @@ fn narrow_zoom_loading_failure_and_stale_labels_fit_and_settle_without_repeated_
             };
             for _ in 0..5 {
                 draw(&mut app);
+                crate::media::wait_decodes(&ctx);
             }
             let workspace = app.workspace.clone();
             let tx = super::tests::inject(&mut app.changes, &workspace, 1);
@@ -129,6 +130,7 @@ fn narrow_zoom_loading_failure_and_stale_labels_fit_and_settle_without_repeated_
             .unwrap();
             for _ in 0..40 {
                 draw(&mut app);
+                crate::media::wait_decodes(&ctx);
             }
             let out = draw(&mut app);
             file_tests::text(&out, "Git unavailable");

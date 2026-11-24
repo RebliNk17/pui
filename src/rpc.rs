@@ -38,6 +38,10 @@ pub struct Client {
     pub events: Receiver<Event>,
     next_id: u64,
     worker: Option<thread::JoinHandle<()>>,
+    /// Stub transport: records are delivered to the test receiver synchronously,
+    /// so a test observes every record its UI pass sent without racing a thread.
+    #[cfg(test)]
+    recorded: Option<Sender<Value>>,
 }
 
 pub fn pi_binary() -> PathBuf {
@@ -67,11 +71,8 @@ impl Client {
         let inject = events_tx.clone();
         let worker = thread::spawn(move || {
             while let Ok(request) = rx.recv() {
-                match request {
-                    Request::Shutdown => break,
-                    Request::Record(record) => {
-                        let _ = commands_tx.send(record);
-                    }
+                if let Request::Shutdown = request {
+                    break;
                 }
             }
             let _ = events_tx.send(Event::Exited);
@@ -83,6 +84,7 @@ impl Client {
                 events,
                 next_id: 0,
                 worker: Some(worker),
+                recorded: Some(commands_tx),
             },
             inject,
             commands,
@@ -206,6 +208,7 @@ impl Client {
             events,
             next_id: 0,
             worker: Some(worker),
+            recorded: None,
         }
     }
 
@@ -223,6 +226,12 @@ impl Client {
             record["id"] = format!("pui-{}", self.next_id).into();
         }
         let id = record["id"].as_str().unwrap_or_default().to_owned();
+        #[cfg(test)]
+        if let Some(recorded) = &self.recorded {
+            // Like the former forwarding worker, a dropped test receiver is ignored.
+            let _ = recorded.send(record);
+            return Ok(id);
+        }
         self.tx
             .send(Request::Record(record))
             .map_err(|_| "Pi is not connected. Reconnect to try again.".to_owned())?;
@@ -706,6 +715,7 @@ else:
             events,
             next_id: 0,
             worker: Some(worker),
+            recorded: None,
         };
         let Event::Record(ready) = client.events.recv_timeout(Duration::from_secs(5)).unwrap()
         else {
@@ -955,6 +965,7 @@ else:
             events: rx,
             next_id: 0,
             worker: Some(thread::spawn(|| thread::sleep(Duration::from_millis(250)))),
+            recorded: None,
         };
         let start = Instant::now();
         client.retire();

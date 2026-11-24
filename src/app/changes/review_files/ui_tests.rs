@@ -212,6 +212,7 @@ fn narrow_light_dark_zoom_file_controls_fit_and_settle_without_background_projec
             };
             for _ in 0..50 {
                 draw();
+                crate::media::wait_decodes(&ctx);
             }
             let out = draw();
             for name in ["review-previous-file", "review-next-file"] {
