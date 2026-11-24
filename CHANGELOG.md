@@ -5,6 +5,29 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-24
+
+### Fixed
+
+- **Android:** the app no longer crashes on Android 15 and newer when starting its background connection service (invalid notification icon and missing notification permission).
+- **Android:** notification channel setup no longer crashes in Expo Go.
+- The desktop app and Android app are published together again: macOS and Android files are now attached to the same release, which is only published once both are ready.
+
+### Pui Mobile (Android)
+
+- New official Pui app icon, including Android adaptive and themed (monochrome) icons.
+- **Notifications:** live alerts over Tailscale when Pi finishes replying, asks you a question, or waits for a tool approval. A background keep-alive keeps the connection open, and approvals can be answered with **Approve** / **Deny** right from the lock-screen notification. A Notifications section in settings shows the permission state and can send a test notification.
+- **Chats:** rename, pin, fork and delete sessions from the phone; find text inside a chat; copy messages; and a scroll-to-bottom button.
+- Drafts are kept when you go offline or leave a chat.
+- Share text or images from other apps to Pui with the Android Share sheet.
+- Subagents are shown as a tree under their parent chat.
+- **Changes:** **Ask Pi** shortcuts to review the uncommitted diff or create a clean commit.
+- Markdown files open in a rendered preview with a Preview/Source toggle.
+
+### Remote & Mobile (desktop)
+
+- The remote host supports the new mobile features: notifications, session rename/pin/fork/delete, and lock-screen approvals.
+
 ## [1.0.0] - 2026-11-23
 
 Pui 1.0: an Android companion app, remote access to your desktop chats, safer Auto mode, and a much more stable built-in browser.
