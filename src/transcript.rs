@@ -16,6 +16,8 @@ mod error;
 mod inline_cards;
 mod new_messages;
 mod progress;
+#[cfg(test)]
+mod rtl_tests;
 pub use progress::Progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -840,7 +842,7 @@ fn user_bubble(
         section.format.line_height = Some(23.0);
     }
     let active_find = markdown::highlight_job(ui, &mut job);
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let mut galley = ui.fonts(|f| f.layout_job(job));
     let width = (galley.size().x + 34.0)
         .max(footer_width.min(max))
         .max(if message.images.is_empty() {
@@ -849,6 +851,7 @@ fn user_bubble(
             max.min(274.0)
         })
         .min(available);
+    crate::theme::text_direction::align(&mut galley, (width - 34.0).max(0.0));
     let left = ui.max_rect().right() - width;
     let top = ui.cursor().top();
     ui.scope_builder(

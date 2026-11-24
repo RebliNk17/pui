@@ -432,7 +432,8 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     job.wrap.max_width = ui.available_width();
     job.align_baseline = true;
     let active = highlight_job(ui, job);
-    let galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
+    let mut galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
+    theme::text_direction::align(&mut galley, ui.available_width());
     show_galley_with_find(ui, galley, links, active);
     links.clear();
 }

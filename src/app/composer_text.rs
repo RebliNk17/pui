@@ -371,6 +371,14 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
     }
     galley_mut.rect.max.x += inset;
     galley_mut.mesh_bounds.max.x += inset;
+    theme::text_direction::align_where(&mut galley, (width - inset).max(24.0), |range| {
+        let start = byte_index(source, range.start);
+        let end = byte_index(source, range.end);
+        !presentation
+            .blocks
+            .iter()
+            .any(|block| block.start < end && start < block.end)
+    });
     galley
 }
 
