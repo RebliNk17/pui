@@ -7,7 +7,10 @@ import {
   cloneRepoIntoWorkspace,
   getAdminStatus,
   setupCloudGit,
+  writeCloudMcps,
+  writeCloudSkills,
   writePiAuth,
+  type IncomingSkillBundle,
 } from './admin.ts';
 import { discoverProjects, type DaemonConfig } from './config.ts';
 import {
@@ -434,6 +437,37 @@ export class PuiDaemonServer {
         }
         const merge = body.merge !== false;
         const result = writePiAuth(auth as Record<string, unknown>, merge);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/admin/sync-mcps') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const servers = body.mcpServers;
+        if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+          sendJson(res, 400, { error: 'Missing mcpServers object.' });
+          return;
+        }
+        const merge = body.merge !== false;
+        const result = writeCloudMcps(servers as Record<string, unknown>, merge);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/admin/sync-skills') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const skills = body.skills;
+        if (!Array.isArray(skills)) {
+          sendJson(res, 400, { error: 'Missing skills array.' });
+          return;
+        }
+        const result = writeCloudSkills(skills as IncomingSkillBundle[]);
         sendJson(res, 200, { ok: true, ...result });
         return;
       }

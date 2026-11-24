@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
@@ -30,8 +31,45 @@ pub struct CloudAdminStatus {
     pub git_public_key: Option<String>,
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
+    pub skills: Vec<String>,
+    pub mcp_servers: Vec<String>,
     pub projects: Vec<String>,
     pub workspaces_dir: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalMcpItem {
+    pub name: String,
+    pub local_only: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LocalSyncInventory {
+    pub providers: Vec<String>,
+    pub mcps: Vec<LocalMcpItem>,
+    pub skills: Vec<String>,
+    pub git_remote: Option<String>,
+    pub project_name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CloudSyncPlan {
+    pub providers: BTreeSet<String>,
+    pub setup_git_ssh: bool,
+    pub mcps: BTreeSet<String>,
+    pub skills: BTreeSet<String>,
+    pub clone_current_repo: bool,
+}
+
+impl CloudSyncPlan {
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+            && !self.setup_git_ssh
+            && self.mcps.is_empty()
+            && self.skills.is_empty()
+            && !self.clone_current_repo
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -160,33 +198,182 @@ pub fn fetch_status(cfg: &CloudHostConfig) -> Result<CloudAdminStatus, String> {
     serde_json::from_value(val).map_err(|e| format!("Invalid cloud status payload: {e}"))
 }
 
-fn local_pi_auth_path() -> Option<PathBuf> {
+fn candidate_pi_agent_dirs() -> Vec<PathBuf> {
+    let mut dirs_out = Vec::new();
     if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
-        let p = PathBuf::from(dir).join("auth.json");
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            dirs_out.push(p);
+        }
+    }
+    if let Some(data_dir) = dirs::data_local_dir() {
+        let managed = data_dir.join("pui").join("pi-agent");
+        if managed.is_dir() && !dirs_out.contains(&managed) {
+            dirs_out.push(managed);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let legacy = home.join(".pi").join("agent");
+        if legacy.is_dir() && !dirs_out.contains(&legacy) {
+            dirs_out.push(legacy);
+        }
+    }
+    dirs_out
+}
+
+fn local_pi_file(filename: &str) -> Option<PathBuf> {
+    for dir in candidate_pi_agent_dirs() {
+        let p = dir.join(filename);
         if p.is_file() {
             return Some(p);
         }
     }
-    let home = dirs::home_dir()?;
-    let p = home.join(".pi").join("agent").join("auth.json");
-    p.is_file().then_some(p)
+    None
 }
 
-pub fn sync_pi_auth(cfg: &CloudHostConfig) -> Result<Vec<String>, String> {
-    let auth_path = local_pi_auth_path()
-        .ok_or_else(|| "No local Pi provider logins found at ~/.pi/agent/auth.json.".to_owned())?;
+fn local_skills_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        let agents_skills = home.join(".agents").join("skills");
+        if agents_skills.is_dir() {
+            out.push(agents_skills);
+        }
+    }
+    for dir in candidate_pi_agent_dirs() {
+        let s = dir.join("skills");
+        if s.is_dir() && !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn read_local_mcp_map() -> serde_json::Map<String, Value> {
+    let Some(mcp_path) = local_pi_file("mcp.json") else {
+        return serde_json::Map::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(&mcp_path) else {
+        return serde_json::Map::new();
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return serde_json::Map::new();
+    };
+    if let Some(obj) = val.get("mcpServers").and_then(Value::as_object) {
+        obj.clone()
+    } else if let Some(obj) = val.as_object() {
+        obj.clone()
+    } else {
+        serde_json::Map::new()
+    }
+}
+
+fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, Option<String>) {
+    let lower = name.to_ascii_lowercase();
+    let blob = cfg.to_string().to_ascii_lowercase();
+    if lower.contains("browser") || blob.contains("browsermcp") || blob.contains("chrome") {
+        return (
+            true,
+            Some("Controls local desktop Chrome; usually skipped on cloud".into()),
+        );
+    }
+    if blob.contains("/users/") || blob.contains("/applications/") || blob.contains("osascript") {
+        return (true, Some("References a local macOS path".into()));
+    }
+    (false, None)
+}
+
+pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
+    let mut providers = Vec::new();
+    if let Some(auth_path) = local_pi_file("auth.json") {
+        if let Ok(raw) = std::fs::read_to_string(&auth_path) {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&raw) {
+                providers = map.keys().cloned().collect();
+                providers.sort();
+            }
+        }
+    }
+
+    let mut mcps: Vec<LocalMcpItem> = read_local_mcp_map()
+        .into_iter()
+        .map(|(name, cfg)| {
+            let (local_only, reason) = classify_local_only_mcp(&name, &cfg);
+            LocalMcpItem {
+                name,
+                local_only,
+                reason,
+            }
+        })
+        .collect();
+    mcps.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut skill_set = BTreeSet::new();
+    for dir in local_skills_dirs() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for ent in rd.flatten() {
+                if ent.file_type().is_ok_and(|t| t.is_dir()) {
+                    let name = ent.file_name().to_string_lossy().into_owned();
+                    if !name.starts_with('.') {
+                        skill_set.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    let skills: Vec<String> = skill_set.into_iter().collect();
+
+    let git_remote = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+
+    let project_name = cwd
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+
+    LocalSyncInventory {
+        providers,
+        mcps,
+        skills,
+        git_remote,
+        project_name,
+    }
+}
+
+pub fn sync_selected_pi_auth(
+    cfg: &CloudHostConfig,
+    selected: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let auth_path = local_pi_file("auth.json")
+        .ok_or_else(|| "No local Pi provider logins found.".to_owned())?;
     let raw = std::fs::read_to_string(&auth_path)
         .map_err(|e| format!("Could not read {}: {e}", auth_path.display()))?;
-    let auth: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Invalid JSON in {}: {e}", auth_path.display()))?;
-    if !auth.is_object() {
+    let Value::Object(all_map) = serde_json::from_str::<Value>(&raw)
+        .map_err(|e| format!("Invalid JSON in {}: {e}", auth_path.display()))?
+    else {
         return Err("Local auth.json is not a JSON object.".into());
+    };
+    let mut filtered = serde_json::Map::new();
+    for (k, v) in all_map {
+        if selected.contains(&k) {
+            filtered.insert(k, v);
+        }
+    }
+    if filtered.is_empty() {
+        return Ok(Vec::new());
     }
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-auth",
-        Some(&json!({ "auth": auth, "merge": true })),
+        Some(&json!({ "auth": Value::Object(filtered), "merge": true })),
     )?;
     let providers = res["providers"]
         .as_array()
@@ -198,6 +385,162 @@ pub fn sync_pi_auth(cfg: &CloudHostConfig) -> Result<Vec<String>, String> {
         })
         .unwrap_or_default();
     Ok(providers)
+}
+
+pub fn sync_selected_mcps(
+    cfg: &CloudHostConfig,
+    selected: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let all = read_local_mcp_map();
+    let mut filtered = serde_json::Map::new();
+    for (k, v) in all {
+        if selected.contains(&k) {
+            filtered.insert(k, v);
+        }
+    }
+    if filtered.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-mcps",
+        Some(&json!({ "mcpServers": Value::Object(filtered), "merge": true })),
+    )?;
+    let servers = res["mcp_servers"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(servers)
+}
+
+fn collect_skill_text_files(root: &Path, dir: &Path, out: &mut Vec<Value>) {
+    if out.len() >= 30 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        if out.len() >= 30 {
+            break;
+        }
+        let path = ent.path();
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if ent.file_type().is_ok_and(|t| t.is_dir()) {
+            collect_skill_text_files(root, &path, out);
+        } else if ent.file_type().is_ok_and(|t| t.is_file()) {
+            if let Ok(meta) = ent.metadata() {
+                if meta.len() > 200 * 1024 {
+                    continue;
+                }
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(json!({
+                        "path": rel.to_string_lossy().replace('\\', "/"),
+                        "content": content,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+pub fn sync_selected_skills(
+    cfg: &CloudHostConfig,
+    selected: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bundles = Vec::new();
+    let dirs = local_skills_dirs();
+    for skill_name in selected {
+        let Some(skill_dir) = dirs.iter().map(|d| d.join(skill_name)).find(|p| p.is_dir()) else {
+            continue;
+        };
+        let mut files = Vec::new();
+        collect_skill_text_files(&skill_dir, &skill_dir, &mut files);
+        if !files.is_empty() {
+            bundles.push(json!({
+                "name": skill_name,
+                "files": files,
+            }));
+        }
+    }
+    if bundles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-skills",
+        Some(&json!({ "skills": bundles })),
+    )?;
+    let synced = res["skills"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(synced)
+}
+
+pub fn execute_selective_sync(
+    cfg: &CloudHostConfig,
+    cwd: &Path,
+    plan: &CloudSyncPlan,
+) -> Result<(String, Option<String>), String> {
+    let mut summary = Vec::new();
+    let mut copy_pubkey: Option<String> = None;
+
+    if !plan.providers.is_empty() {
+        let provs = sync_selected_pi_auth(cfg, &plan.providers)?;
+        summary.push(format!("{} provider(s)", provs.len()));
+    }
+    if plan.setup_git_ssh {
+        let git_res = setup_git_and_register_github(cfg)?;
+        if !git_res.registered_on_github {
+            copy_pubkey = Some(git_res.public_key);
+        }
+        summary.push(git_res.detail);
+    }
+    if !plan.mcps.is_empty() {
+        let mcps = sync_selected_mcps(cfg, &plan.mcps)?;
+        summary.push(format!("{} MCP(s)", mcps.len()));
+    }
+    if !plan.skills.is_empty() {
+        let skills = sync_selected_skills(cfg, &plan.skills)?;
+        summary.push(format!("{} skill(s)", skills.len()));
+    }
+    if plan.clone_current_repo {
+        let msg = clone_current_repo_to_cloud(cfg, cwd)?;
+        summary.push(msg);
+    }
+
+    if summary.is_empty() {
+        Ok(("Nothing selected to sync.".into(), None))
+    } else {
+        Ok((
+            format!("Synced to {}: {}", cfg.name, summary.join(" · ")),
+            copy_pubkey,
+        ))
+    }
 }
 
 fn local_git_config(key: &str) -> Option<String> {

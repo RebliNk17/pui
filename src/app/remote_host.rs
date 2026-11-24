@@ -1152,6 +1152,9 @@ impl Pui {
             error: Option<String>,
             status: Option<cloud::CloudAdminStatus>,
             auto_fetched: bool,
+            sync_modal_open: bool,
+            inventory: Option<cloud::LocalSyncInventory>,
+            plan: cloud::CloudSyncPlan,
         }
 
         let state_id = egui::Id::new("pui_cloud_host_ui_state");
@@ -1161,6 +1164,32 @@ impl Pui {
             })
             .clone()
         });
+
+        let open_sync_picker = |shared: &Arc<Mutex<CloudUiState>>, cwd: &std::path::Path| {
+            let inv = cloud::discover_local_inventory(cwd);
+            if let Ok(mut st) = shared.lock() {
+                let mut plan = cloud::CloudSyncPlan::default();
+                let cloud_provs: BTreeSet<&str> = st
+                    .status
+                    .as_ref()
+                    .map(|s| s.pi_auth_providers.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                for p in &inv.providers {
+                    if !cloud_provs.contains(p.as_str()) {
+                        plan.providers.insert(p.clone());
+                    }
+                }
+                plan.setup_git_ssh = !st.status.as_ref().is_some_and(|s| s.has_git_ssh_key);
+                for mcp in &inv.mcps {
+                    if !mcp.local_only {
+                        plan.mcps.insert(mcp.name.clone());
+                    }
+                }
+                st.inventory = Some(inv);
+                st.plan = plan;
+                st.sync_modal_open = true;
+            }
+        };
 
         let colors = crate::theme::palette(ui.ctx());
         ui.label(
@@ -1172,7 +1201,7 @@ impl Pui {
         ui.add_space(3.0);
         ui.label(
             RichText::new(
-                "Connect Pui Desktop to a headless `pui-daemon` over Tailscale (for example on Oracle Cloud Always Free) to sync provider logins, provision a dedicated revocable GitHub SSH key, and clone repositories.",
+                "Connect Pui Desktop to a headless `pui-daemon` over Tailscale and choose exactly which provider logins, Git SSH access, MCP servers, skills, or repos to sync.",
             )
             .size(12.0)
             .color(colors.muted),
@@ -1216,7 +1245,7 @@ impl Pui {
         }
 
         settings::page_card(ui, |ui| {
-            if let Some(cfg) = existing {
+            if let Some(cfg) = existing.clone() {
                 let (busy, status_opt, notice, error) = shared
                     .lock()
                     .map(|s| (s.busy, s.status.clone(), s.notice.clone(), s.error.clone()))
@@ -1239,19 +1268,37 @@ impl Pui {
                         status_pill(ui, "Working…", colors.amber);
                     } else if let Some(ref st) = status_opt {
                         status_pill(ui, "Connected", colors.green);
-                        if st.has_pi_auth {
+                        status_pill(
+                            ui,
+                            &format!("Providers ({})", st.pi_auth_providers.len()),
+                            if st.has_pi_auth {
+                                colors.green
+                            } else {
+                                colors.amber
+                            },
+                        );
+                        status_pill(
+                            ui,
+                            if st.has_git_ssh_key {
+                                "Git SSH ready"
+                            } else {
+                                "Git SSH not set"
+                            },
+                            if st.has_git_ssh_key {
+                                colors.green
+                            } else {
+                                colors.muted
+                            },
+                        );
+                        if !st.mcp_servers.is_empty() {
                             status_pill(
                                 ui,
-                                &format!("Providers ({})", st.pi_auth_providers.len()),
-                                colors.green,
+                                &format!("MCPs ({})", st.mcp_servers.len()),
+                                colors.muted,
                             );
-                        } else {
-                            status_pill(ui, "No provider logins", colors.amber);
                         }
-                        if st.has_git_ssh_key {
-                            status_pill(ui, "Git SSH ready", colors.green);
-                        } else {
-                            status_pill(ui, "Git SSH not set", colors.muted);
+                        if !st.skills.is_empty() {
+                            status_pill(ui, &format!("Skills ({})", st.skills.len()), colors.muted);
                         }
                     } else if error.is_some() {
                         status_pill(ui, "Unreachable", colors.red);
@@ -1272,94 +1319,8 @@ impl Pui {
                 ui.add_space(10.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.add_enabled_ui(!busy, |ui| {
-                        if accent_button(ui, "Sync Provider Logins").clicked() {
-                            if let Ok(mut st) = shared.lock() {
-                                st.busy = true;
-                                st.notice = None;
-                                st.error = None;
-                            }
-                            let cfg_c = cfg.clone();
-                            let s_clone = shared.clone();
-                            let ctx = ui.ctx().clone();
-                            std::thread::spawn(move || {
-                                let sync_res = cloud::sync_pi_auth(&cfg_c);
-                                let status_res = cloud::fetch_status(&cfg_c).ok();
-                                if let Ok(mut st) = s_clone.lock() {
-                                    st.busy = false;
-                                    if let Some(fresh) = status_res {
-                                        st.status = Some(fresh);
-                                    }
-                                    match sync_res {
-                                        Ok(provs) => {
-                                            st.notice = Some(format!(
-                                                "Synced {} provider login(s) to {} (chmod 600).",
-                                                provs.len(),
-                                                cfg_c.name
-                                            ));
-                                        }
-                                        Err(e) => st.error = Some(e),
-                                    }
-                                }
-                                ctx.request_repaint();
-                            });
-                        }
-
-                        if secondary_button(ui, "Setup Git & GitHub Key").clicked() {
-                            if let Ok(mut st) = shared.lock() {
-                                st.busy = true;
-                                st.notice = None;
-                                st.error = None;
-                            }
-                            let cfg_c = cfg.clone();
-                            let s_clone = shared.clone();
-                            let ctx = ui.ctx().clone();
-                            std::thread::spawn(move || {
-                                let git_res = cloud::setup_git_and_register_github(&cfg_c);
-                                let status_res = cloud::fetch_status(&cfg_c).ok();
-                                if let Ok(mut st) = s_clone.lock() {
-                                    st.busy = false;
-                                    if let Some(fresh) = status_res {
-                                        st.status = Some(fresh);
-                                    }
-                                    match git_res {
-                                        Ok(res) => {
-                                            if !res.registered_on_github {
-                                                ctx.copy_text(res.public_key.clone());
-                                            }
-                                            st.notice = Some(res.detail);
-                                        }
-                                        Err(e) => st.error = Some(e),
-                                    }
-                                }
-                                ctx.request_repaint();
-                            });
-                        }
-
-                        if secondary_button(ui, "Clone Current Project").clicked() {
-                            if let Ok(mut st) = shared.lock() {
-                                st.busy = true;
-                                st.notice = None;
-                                st.error = None;
-                            }
-                            let cfg_c = cfg.clone();
-                            let cwd = self.prefs.cwd.clone();
-                            let s_clone = shared.clone();
-                            let ctx = ui.ctx().clone();
-                            std::thread::spawn(move || {
-                                let clone_res = cloud::clone_current_repo_to_cloud(&cfg_c, &cwd);
-                                let status_res = cloud::fetch_status(&cfg_c).ok();
-                                if let Ok(mut st) = s_clone.lock() {
-                                    st.busy = false;
-                                    if let Some(fresh) = status_res {
-                                        st.status = Some(fresh);
-                                    }
-                                    match clone_res {
-                                        Ok(msg) => st.notice = Some(msg),
-                                        Err(e) => st.error = Some(e),
-                                    }
-                                }
-                                ctx.request_repaint();
-                            });
+                        if accent_button(ui, "Sync to Cloud…").clicked() {
+                            open_sync_picker(&shared, &self.prefs.cwd);
                         }
 
                         if ghost_button(ui, "Refresh", Some(Icon::Refresh)).clicked() {
@@ -1413,7 +1374,7 @@ impl Pui {
                 settings::page_row(
                     ui,
                     "Pair cloud daemon",
-                    "Paste the `pui://pair?...` link printed by `pui-daemon` (run `npm run pair` on your server).",
+                    "Paste the `pui://pair?...` link from `pui-daemon` (`npm run --silent pair` on your server). Nothing is synced until you choose what to push.",
                     |ui| {
                         ui.horizontal(|ui| {
                             let w = (ui.available_width() - 90.0).clamp(160.0, 320.0);
@@ -1430,6 +1391,7 @@ impl Pui {
                                             st.error = None;
                                             st.auto_fetched = false;
                                         }
+                                        open_sync_picker(&shared, &self.prefs.cwd);
                                     }
                                     Err(e) => {
                                         if let Ok(mut st) = shared.lock() {
@@ -1452,6 +1414,249 @@ impl Pui {
                 }
             }
         });
+
+        // Quiet Mac selective "Sync to Cloud" modal — asks explicitly what to push.
+        let modal_open = shared.lock().map(|s| s.sync_modal_open).unwrap_or(false);
+        if modal_open {
+            if let Some(cfg) = existing {
+                let mut close_modal = false;
+                let mut run_sync = false;
+                let modal_resp = prompt_ui::modal(
+                    ui.ctx(),
+                    egui::Id::new("pui_cloud_sync_modal"),
+                    480.0,
+                    |ui| {
+                        prompt_ui::heading(
+                            ui,
+                            &format!("Sync to {}", cfg.name),
+                            "Choose what to push from this Mac to your cloud host over Tailscale. Nothing is sent unless selected.",
+                        );
+                        ui.add_space(12.0);
+
+                        if let Ok(mut st) = shared.lock() {
+                            let inv = st.inventory.clone().unwrap_or_default();
+                            let cloud_st = st.status.clone();
+
+                            egui::ScrollArea::vertical()
+                                .max_height(340.0)
+                                .show(ui, |ui| {
+                                    // 1. Provider logins
+                                    ui.label(
+                                        RichText::new("Provider logins (auth.json)")
+                                            .size(12.5)
+                                            .strong()
+                                            .color(colors.text),
+                                    );
+                                    if inv.providers.is_empty() {
+                                        ui.label(
+                                            RichText::new("No local provider logins found.")
+                                                .size(11.5)
+                                                .color(colors.muted),
+                                        );
+                                    } else {
+                                        for prov in &inv.providers {
+                                            let already = cloud_st.as_ref().is_some_and(|s| {
+                                                s.pi_auth_providers.contains(prov)
+                                            });
+                                            let mut checked = st.plan.providers.contains(prov);
+                                            let label = if already {
+                                                format!("{prov} (already on cloud)")
+                                            } else {
+                                                prov.clone()
+                                            };
+                                            if ui.checkbox(&mut checked, label).changed() {
+                                                if checked {
+                                                    st.plan.providers.insert(prov.clone());
+                                                } else {
+                                                    st.plan.providers.remove(prov);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ui.add_space(10.0);
+                                    // 2. Dedicated Git SSH key
+                                    ui.label(
+                                        RichText::new("Git & GitHub access")
+                                            .size(12.5)
+                                            .strong()
+                                            .color(colors.text),
+                                    );
+                                    let git_label = if cloud_st
+                                        .as_ref()
+                                        .is_some_and(|s| s.has_git_ssh_key)
+                                    {
+                                        "Verify dedicated cloud SSH key & Git author (already set)"
+                                    } else {
+                                        "Generate dedicated cloud SSH key & register on GitHub (keeps Mac private key local)"
+                                    };
+                                    ui.checkbox(&mut st.plan.setup_git_ssh, git_label);
+
+                                    // 3. MCP servers
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        RichText::new("MCP servers")
+                                            .size(12.5)
+                                            .strong()
+                                            .color(colors.text),
+                                    );
+                                    if inv.mcps.is_empty() {
+                                        ui.label(
+                                            RichText::new("No local MCP servers configured.")
+                                                .size(11.5)
+                                                .color(colors.muted),
+                                        );
+                                    } else {
+                                        for mcp in &inv.mcps {
+                                            let mut checked = st.plan.mcps.contains(&mcp.name);
+                                            let label = if let Some(ref reason) = mcp.reason {
+                                                format!("{} — {}", mcp.name, reason)
+                                            } else {
+                                                mcp.name.clone()
+                                            };
+                                            if ui.checkbox(&mut checked, label).changed() {
+                                                if checked {
+                                                    st.plan.mcps.insert(mcp.name.clone());
+                                                } else {
+                                                    st.plan.mcps.remove(&mcp.name);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 4. Skills
+                                    ui.add_space(10.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("Skills ({})", inv.skills.len()))
+                                                .size(12.5)
+                                                .strong()
+                                                .color(colors.text),
+                                        );
+                                        if !inv.skills.is_empty() {
+                                            if ghost_button(ui, "All", None).clicked() {
+                                                for s in &inv.skills {
+                                                    st.plan.skills.insert(s.clone());
+                                                }
+                                            }
+                                            if ghost_button(ui, "None", None).clicked() {
+                                                st.plan.skills.clear();
+                                            }
+                                        }
+                                    });
+                                    if inv.skills.is_empty() {
+                                        ui.label(
+                                            RichText::new("No local skills found.")
+                                                .size(11.5)
+                                                .color(colors.muted),
+                                        );
+                                    } else {
+                                        ui.horizontal_wrapped(|ui| {
+                                            for skill in &inv.skills {
+                                                let mut checked = st.plan.skills.contains(skill);
+                                                if ui.checkbox(&mut checked, skill).changed() {
+                                                    if checked {
+                                                        st.plan.skills.insert(skill.clone());
+                                                    } else {
+                                                        st.plan.skills.remove(skill);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+
+                                    // 5. Current Git repository
+                                    if let Some(ref remote_url) = inv.git_remote {
+                                        ui.add_space(10.0);
+                                        ui.label(
+                                            RichText::new("Repository")
+                                                .size(12.5)
+                                                .strong()
+                                                .color(colors.text),
+                                        );
+                                        ui.checkbox(
+                                            &mut st.plan.clone_current_repo,
+                                            format!(
+                                                "Clone {} ({remote_url}) into cloud workspaces",
+                                                inv.project_name
+                                            ),
+                                        );
+                                    }
+                                });
+
+                            ui.add_space(14.0);
+                            let can_sync = !st.plan.is_empty() && !st.busy;
+                            prompt_ui::footer(ui, |ui| {
+                                if prompt_ui::button(
+                                    ui,
+                                    "Sync selected",
+                                    prompt_ui::Button::Primary,
+                                    can_sync,
+                                )
+                                .clicked()
+                                {
+                                    run_sync = true;
+                                    close_modal = true;
+                                }
+                                if prompt_ui::button(
+                                    ui,
+                                    "Cancel",
+                                    prompt_ui::Button::Secondary,
+                                    true,
+                                )
+                                .clicked()
+                                {
+                                    close_modal = true;
+                                }
+                            });
+                        }
+                    },
+                );
+                if modal_resp.should_close() {
+                    close_modal = true;
+                }
+                if close_modal {
+                    if let Ok(mut st) = shared.lock() {
+                        st.sync_modal_open = false;
+                    }
+                }
+                if run_sync {
+                    let plan = shared
+                        .lock()
+                        .map(|mut st| {
+                            st.busy = true;
+                            st.notice = None;
+                            st.error = None;
+                            st.plan.clone()
+                        })
+                        .unwrap_or_default();
+                    let cfg_c = cfg.clone();
+                    let cwd = self.prefs.cwd.clone();
+                    let s_clone = shared.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let sync_res = cloud::execute_selective_sync(&cfg_c, &cwd, &plan);
+                        let status_res = cloud::fetch_status(&cfg_c).ok();
+                        if let Ok(mut st) = s_clone.lock() {
+                            st.busy = false;
+                            if let Some(fresh) = status_res {
+                                st.status = Some(fresh);
+                            }
+                            match sync_res {
+                                Ok((msg, copy_key)) => {
+                                    if let Some(pub_key) = copy_key {
+                                        ctx.copy_text(pub_key);
+                                    }
+                                    st.notice = Some(msg);
+                                }
+                                Err(e) => st.error = Some(e),
+                            }
+                        }
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
     }
 }
 

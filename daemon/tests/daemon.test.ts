@@ -36,6 +36,7 @@ describe('pui-daemon v1 remote server', () => {
     const proj = path.join(wsDir, 'demo-app');
     const daemonHome = path.join(tmp, 'daemon-home');
     const piDir = path.join(tmp, 'pi-agent');
+    const skillsDir = path.join(tmp, 'skills');
     fs.mkdirSync(proj, { recursive: true });
     fs.mkdirSync(daemonHome, { recursive: true });
     fs.writeFileSync(path.join(proj, 'README.md'), '# Demo App\nHello cloud\n');
@@ -44,6 +45,7 @@ describe('pui-daemon v1 remote server', () => {
 
     process.env.PUI_DAEMON_HOME = daemonHome;
     process.env.PI_CODING_AGENT_DIR = piDir;
+    process.env.PUI_DAEMON_SKILLS_DIR = skillsDir;
 
     const sessionPath = createEmptySessionFile(proj, {
       platform: 'android',
@@ -132,6 +134,39 @@ describe('pui-daemon v1 remote server', () => {
       ).json()) as { has_pi_auth: boolean; pi_auth_providers: string[] };
       assert.equal(st1.has_pi_auth, true);
       assert.deepEqual(st1.pi_auth_providers, ['anthropic']);
+
+      // Sync selective MCPs and skills safely (path traversal ignored).
+      const mcpRes = await fetch(`${base}/v1/admin/sync-mcps`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mcpServers: { linear: { command: 'npx', args: ['-y', 'linear-mcp'] } } }),
+      });
+      assert.equal(mcpRes.status, 200);
+
+      const skillRes = await fetch(`${base}/v1/admin/sync-skills`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          skills: [
+            {
+              name: 'deploy',
+              files: [
+                { path: 'SKILL.md', content: '# Deploy\n' },
+                { path: '../evil.txt', content: 'blocked' },
+              ],
+            },
+          ],
+        }),
+      });
+      assert.equal(skillRes.status, 200);
+      assert.equal(fs.existsSync(path.join(skillsDir, 'deploy', 'SKILL.md')), true);
+      assert.equal(fs.existsSync(path.join(skillsDir, 'evil.txt')), false);
+
+      const st2 = (await (
+        await fetch(`${base}/v1/admin/status`, { headers: authHeaders })
+      ).json()) as { skills: string[]; mcp_servers: string[] };
+      assert.deepEqual(st2.skills, ['deploy']);
+      assert.deepEqual(st2.mcp_servers, ['linear']);
 
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),

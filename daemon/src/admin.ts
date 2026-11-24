@@ -11,6 +11,12 @@ export interface CloudAdminStatus {
   git_public_key: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
+  skills: string[];
+  mcp_servers: string[];
+}
+
+function skillsDir(): string {
+  return process.env.PUI_DAEMON_SKILLS_DIR || path.join(os.homedir(), '.agents', 'skills');
 }
 
 function sshDir(): string {
@@ -59,6 +65,39 @@ export function getAdminStatus(): CloudAdminStatus {
     }
   }
 
+  const skills: string[] = [];
+  const sDir = skillsDir();
+  if (fs.existsSync(sDir)) {
+    try {
+      for (const ent of fs.readdirSync(sDir, { withFileTypes: true })) {
+        if (ent.isDirectory() && !ent.name.startsWith('.')) {
+          skills.push(ent.name);
+        }
+      }
+      skills.sort();
+    } catch {
+      // ignore
+    }
+  }
+
+  const mcp_servers: string[] = [];
+  const mcpPath = path.join(piAgentDir(), 'mcp.json');
+  if (fs.existsSync(mcpPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf8')) as Record<string, unknown>;
+      const servers =
+        parsed.mcpServers && typeof parsed.mcpServers === 'object'
+          ? (parsed.mcpServers as Record<string, unknown>)
+          : parsed;
+      for (const key of Object.keys(servers)) {
+        if (key !== 'mcpServers') mcp_servers.push(key);
+      }
+      mcp_servers.sort();
+    } catch {
+      // ignore
+    }
+  }
+
   return {
     has_pi_auth,
     pi_auth_providers,
@@ -66,6 +105,8 @@ export function getAdminStatus(): CloudAdminStatus {
     git_public_key,
     git_user_name: gitConfigGet('user.name'),
     git_user_email: gitConfigGet('user.email'),
+    skills,
+    mcp_servers,
   };
 }
 
@@ -163,6 +204,80 @@ export function setupCloudGit(opts: {
     user_name: gitConfigGet('user.name'),
     user_email: gitConfigGet('user.email'),
   };
+}
+
+export function writeCloudMcps(
+  mcpServers: Record<string, unknown>,
+  merge = true,
+): { mcp_servers: string[] } {
+  const dir = piAgentDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const mcpPath = path.join(dir, 'mcp.json');
+
+  let existing: Record<string, unknown> = {};
+  if (merge && fs.existsSync(mcpPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf8')) as Record<string, unknown>;
+      if (parsed.mcpServers && typeof parsed.mcpServers === 'object') {
+        existing = parsed.mcpServers as Record<string, unknown>;
+      }
+    } catch {
+      existing = {};
+    }
+  }
+
+  const merged = { ...existing, ...mcpServers };
+  fs.writeFileSync(mcpPath, JSON.stringify({ mcpServers: merged }, null, 2) + '\n', {
+    mode: 0o600,
+  });
+  try {
+    fs.chmodSync(mcpPath, 0o600);
+  } catch {
+    // ignore
+  }
+  return { mcp_servers: Object.keys(merged).sort() };
+}
+
+export interface IncomingSkillBundle {
+  name: string;
+  files: { path: string; content: string }[];
+}
+
+export function writeCloudSkills(bundles: IncomingSkillBundle[]): { skills: string[] } {
+  const root = skillsDir();
+  fs.mkdirSync(root, { recursive: true });
+  const written: string[] = [];
+
+  for (const bundle of bundles.slice(0, 60)) {
+    const safeName = bundle.name.trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+    if (!safeName || safeName === '.' || safeName === '..' || safeName.startsWith('.')) {
+      continue;
+    }
+    const skillRoot = path.join(root, safeName);
+    fs.mkdirSync(skillRoot, { recursive: true });
+    const resolvedRoot = fs.realpathSync(skillRoot);
+
+    for (const file of (bundle.files ?? []).slice(0, 40)) {
+      const rel = file.path.replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!rel || rel.split('/').some((seg) => !seg || seg === '.' || seg === '..')) {
+        continue;
+      }
+      if (typeof file.content !== 'string' || file.content.length > 256 * 1024) {
+        continue;
+      }
+      const target = path.join(resolvedRoot, rel);
+      const targetDir = path.dirname(target);
+      fs.mkdirSync(targetDir, { recursive: true });
+      const resolvedDir = fs.realpathSync(targetDir);
+      if (resolvedDir !== resolvedRoot && !resolvedDir.startsWith(resolvedRoot + path.sep)) {
+        continue;
+      }
+      fs.writeFileSync(target, file.content, 'utf8');
+    }
+    written.push(safeName);
+  }
+
+  return { skills: written.sort() };
 }
 
 export function validateGitCloneUrl(url: string): string {
