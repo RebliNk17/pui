@@ -55,3 +55,15 @@ The History→branch validation run recorded two existing Git fixture 3-second d
 About **65% shorter / 2.9× faster** than the prior ~493-second serial body, despite comparing total split wall against serial test-body time. Compilation/cache/load affect timings; not a guaranteed CI duration or repeated flake-rate proof. The split command was measured directly; the checked-in runner contains the same commands and passed `bash -n`.
 
 Remaining optimization candidates from read-only audit: repeated per-context font parsing, Git fixture setup, and excessive UI settling frames. These are hypotheses, not measured attribution; profile before changing them. Production shutdown deadlines account for some necessary test time and should not be shortened for test speed.
+
+## CI: optimized dependencies and affected suites
+
+CI installs `scripts/ci/cargo-config.toml` as `$CARGO_HOME/config.toml`: dependencies build at
+`opt-level = 2` (the `pui` crate stays unoptimized) with line-table debug info. CPU-bound UI,
+render and SVG tests run ~2.4× faster. Locally, the complete `scripts/test-rust.sh` under this
+config passed twice: 2,350 passed, 0 failed (2m31s including compile, then 1m17s). Settle tests
+that raced background thumbnail decodes now wait via `media::wait_decodes`. Developer builds
+are unchanged.
+
+Pull requests run only affected suites (`scripts/ci/affected.py`) and never bundle the app;
+the always-reporting **CI result** job is the single required check for `master`.

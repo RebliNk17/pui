@@ -22,6 +22,7 @@ class GitHubActionsTests(unittest.TestCase):
                 (root / "packaging/runtime" / name).write_text("{}")
             (root / "bin").mkdir()
             (root / "scripts/ci/github-macos.sh").write_text((ROOT / "scripts/ci/github-macos.sh").read_text())
+            (root / "scripts/ci/cargo-config.toml").write_text((ROOT / "scripts/ci/cargo-config.toml").read_text())
             (root / "scripts/ci/setup-macos.sh").write_text('''
 [[ "$CI_COMMIT_SHA" == expected-revision && "$CI_COMMIT_TAG" == v1.2.3 && "$CI_PIPELINE_IID" == 42 ]]
 [[ "$CI_COMMIT_REF_PROTECTED" == false && "$PUI_REQUIRE_SIGNING" == false ]]
@@ -53,6 +54,7 @@ done
             calls = log.read_text()
             self.assertIn("bash scripts/test-rust.sh", calls)
             self.assertIn("-p test_*.py", calls)
+            self.assertIn('opt-level = 2', (root / ".cargo-ci/config.toml").read_text())
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
             self.assertIn("npm ci --prefix", calls)
             self.assertIn("--ignore-scripts", calls)
@@ -259,6 +261,7 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
                 (root / "tests" / name).write_text("")
             (root / "bin").mkdir()
             (root / "scripts/ci/github-macos.sh").write_text((ROOT / "scripts/ci/github-macos.sh").read_text())
+            (root / "scripts/ci/cargo-config.toml").write_text((ROOT / "scripts/ci/cargo-config.toml").read_text())
             (root / "scripts/ci/setup-macos.sh").write_text('printf "setup needs_rust=%s\\n" "$PUI_CI_NEEDS_RUST" >> "$COMMAND_LOG"\n')
             log = root / "commands"
             (root / "bin/git").write_text('#!/bin/bash\necho rev\n')
