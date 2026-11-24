@@ -143,6 +143,7 @@ export function writeCloudServiceCreds(
       }
     }
   }
+  let ghUpdated = false;
   for (const item of items.slice(0, 16)) {
     const rel = SERVICE_CRED_RELATIVE_PATHS[item.id];
     if (!rel) continue;
@@ -156,6 +157,15 @@ export function writeCloudServiceCreds(
     } catch {
       // ignore
     }
+    if (item.id === 'gh') ghUpdated = true;
+  }
+  if (ghUpdated && !process.env.PUI_DAEMON_HOME_DIR) {
+    try {
+      execFileSync('gh', ['auth', 'setup-git'], { timeout: 5000, stdio: 'ignore' });
+    } catch {
+      // gh may not be installed in minimal test environments
+    }
+    invalidateGithubSshCheck();
   }
   return { service_creds: detectCloudServiceCreds() };
 }
@@ -186,12 +196,31 @@ function gitConfigGet(key: string): string | null {
 
 let githubCheckCache: { at: number; key: string; ok: boolean } | null = null;
 
-/** Probes `ssh -T git@github.com` (exit 1 + "successfully authenticated" = OK). Cached for 2 min. */
+function checkGithubGhAuth(): boolean {
+  const hostsFile = path.join(serviceCredHome(), '.config', 'gh', 'hosts.yml');
+  if (!fs.existsSync(hostsFile)) return false;
+  try {
+    const text = fs.readFileSync(hostsFile, 'utf8');
+    if (!text.includes('oauth_token:')) return false;
+    execFileSync('gh', ['auth', 'status'], { timeout: 6000, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Probes GitHub access via SSH (`ssh -T git@github.com`) OR authenticated `gh` CLI. Cached for 2 min. */
 export function checkGithubSsh(publicKey: string | null, force = false): boolean | null {
-  if (!publicKey) return null;
+  const ghOk = checkGithubGhAuth();
+  if (!publicKey) return ghOk ? true : null;
+  const cacheKey = `${publicKey}|gh:${ghOk}`;
   const now = Date.now();
-  if (!force && githubCheckCache && githubCheckCache.key === publicKey && now - githubCheckCache.at < 120_000) {
+  if (!force && githubCheckCache && githubCheckCache.key === cacheKey && now - githubCheckCache.at < 120_000) {
     return githubCheckCache.ok;
+  }
+  if (ghOk) {
+    githubCheckCache = { at: now, key: cacheKey, ok: true };
+    return true;
   }
   let output = '';
   try {
@@ -205,7 +234,7 @@ export function checkGithubSsh(publicKey: string | null, force = false): boolean
     output = `${e.stdout?.toString() ?? ''}${e.stderr?.toString() ?? ''}`;
   }
   const ok = /successfully authenticated/i.test(output);
-  githubCheckCache = { at: now, key: publicKey, ok };
+  githubCheckCache = { at: now, key: cacheKey, ok };
   return ok;
 }
 
@@ -592,20 +621,36 @@ export function cloneRepoIntoWorkspace(
     return { path: fs.realpathSync(target), already_exists: true };
   }
 
-  const args = ['clone'];
-  if (opts.branch && /^[a-zA-Z0-9._/-]+$/.test(opts.branch) && !opts.branch.startsWith('-')) {
-    args.push('--branch', opts.branch);
-  }
-  args.push('--', safeUrl, target);
+  // If cloning a GitHub SSH URL while `gh` CLI HTTPS auth is active, prefer HTTPS via `gh`
+  // if SSH fails (or when SSH isn't registered on GitHub yet).
+  const sshGithubMatch = safeUrl.match(/^git@github\.com:([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+?)(?:\.git)?$/);
+  const httpsFallback = sshGithubMatch ? `https://github.com/${sshGithubMatch[1]}.git` : null;
 
-  try {
+  const runClone = (cloneUrl: string) => {
+    const args = ['clone'];
+    if (opts.branch && /^[a-zA-Z0-9._/-]+$/.test(opts.branch) && !opts.branch.startsWith('-')) {
+      args.push('--branch', opts.branch);
+    }
+    args.push('--', cloneUrl, target);
     execFileSync('git', args, {
       cwd: config.workspaces_dir,
       timeout: 120_000,
       stdio: 'pipe',
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     });
+  };
+
+  try {
+    runClone(safeUrl);
   } catch (err: unknown) {
+    if (httpsFallback && checkGithubGhAuth()) {
+      try {
+        runClone(httpsFallback);
+        return { path: fs.realpathSync(target), already_exists: false };
+      } catch (httpsErr: unknown) {
+        throw describeCloneError(httpsErr, httpsFallback);
+      }
+    }
     throw describeCloneError(err, safeUrl);
   }
 

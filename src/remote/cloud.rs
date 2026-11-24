@@ -565,26 +565,54 @@ fn discover_local_service_creds() -> Vec<LocalServiceCred> {
 fn discover_local_ssh_key() -> Option<LocalSshKeyInfo> {
     let home = dirs::home_dir()?;
     let ssh_dir = home.join(".ssh");
-    for name in ["id_ed25519", "id_rsa"] {
-        let p = ssh_dir.join(name);
-        if p.is_file() {
-            // Check whether the key can be read without a passphrase for headless Linux use.
-            let unencrypted = Command::new("ssh-keygen")
-                .args(["-y", "-P", "", "-f"])
-                .arg(&p)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success());
-            return Some(LocalSshKeyInfo {
-                path: p,
-                label: format!("~/.ssh/{name}"),
-                unencrypted,
-            });
+    let mut candidates: Vec<PathBuf> = vec![ssh_dir.join("id_ed25519"), ssh_dir.join("id_rsa")];
+    if let Ok(rd) = std::fs::read_dir(&ssh_dir) {
+        let mut extras: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        !n.ends_with(".pub")
+                            && n.to_ascii_lowercase().contains("github")
+                            && !candidates.contains(p)
+                    })
+            })
+            .collect();
+        extras.sort();
+        candidates.extend(extras);
+    }
+
+    let mut fallback_encrypted: Option<LocalSshKeyInfo> = None;
+    for p in candidates {
+        if !p.is_file() {
+            continue;
+        }
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "key".into());
+        let unencrypted = Command::new("ssh-keygen")
+            .args(["-y", "-P", "", "-f"])
+            .arg(&p)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        let info = LocalSshKeyInfo {
+            path: p,
+            label: format!("~/.ssh/{name}"),
+            unencrypted,
+        };
+        if unencrypted {
+            return Some(info);
+        }
+        if fallback_encrypted.is_none() {
+            fallback_encrypted = Some(info);
         }
     }
-    None
+    fallback_encrypted
 }
 
 pub fn discover_local_git_projects(known_paths: &[PathBuf]) -> Vec<CloudCatalogProject> {
@@ -810,6 +838,34 @@ pub fn sync_selected_mcps(
     Ok(servers)
 }
 
+/// On macOS, `gh` stores its OAuth token in Keychain so `~/.config/gh/hosts.yml` has no
+/// `oauth_token:` line. Materialize the token into a Linux-compatible `hosts.yml` so headless
+/// Ubuntu doesn't fail looking for `org.freedesktop.secrets`.
+fn materialize_gh_hosts_yml(existing: &str) -> String {
+    if existing.contains("oauth_token:") {
+        return existing.to_owned();
+    }
+    let token = Command::new("gh")
+        .args(["auth", "token", "--hostname", "github.com"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let Some(token) = token else {
+        return existing.to_owned();
+    };
+    let mut lines: Vec<String> = existing.lines().map(str::to_owned).collect();
+    if let Some(idx) = lines.iter().position(|l| l.trim() == "github.com:") {
+        lines.insert(idx + 1, format!("    oauth_token: {token}"));
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    } else {
+        format!("github.com:\n    oauth_token: {token}\n    git_protocol: https\n")
+    }
+}
+
 pub fn sync_selected_service_creds(
     cfg: &CloudHostConfig,
     add_ids: &BTreeSet<String>,
@@ -822,7 +878,12 @@ pub fn sync_selected_service_creds(
     let mut payload = Vec::new();
     for cred in available {
         if add_ids.contains(&cred.id) {
-            if let Ok(content) = std::fs::read_to_string(&cred.path) {
+            if let Ok(raw) = std::fs::read_to_string(&cred.path) {
+                let content = if cred.id == "gh" {
+                    materialize_gh_hosts_yml(&raw)
+                } else {
+                    raw
+                };
                 if !content.trim().is_empty() {
                     payload.push(json!({
                         "id": cred.id,
