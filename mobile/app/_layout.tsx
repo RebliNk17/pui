@@ -108,6 +108,7 @@ function NavigationStack() {
         }}
       >
         <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="new" options={{ headerShown: false }} />
         <Stack.Screen name="connect" options={{ title: 'Connect to Pui' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
         <Stack.Screen name="chat/[id]" options={{ headerShown: false }} />

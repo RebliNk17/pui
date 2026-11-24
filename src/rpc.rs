@@ -88,6 +88,46 @@ impl Client {
             commands,
         )
     }
+    /// Connects to a 24/7 headless `pui-daemon` cloud host over Tailscale using `/v1/rpc`.
+    /// Creates the remote session on demand (auto-cloning the local project's Git repo if needed),
+    /// then bridges Pi RPC JSONL frames over RFC 6455 WebSocket so all Desktop features work natively.
+    #[cfg(not(test))]
+    pub fn start_cloud(
+        cfg: crate::remote::CloudHostConfig,
+        local_cwd: &Path,
+        existing_remote_session: Option<&Path>,
+        permission_mode: String,
+        ctx: eframe::egui::Context,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let (control, _control_rx) = mpsc::channel();
+        let cwd = local_cwd.to_path_buf();
+        let existing = existing_remote_session.map(|p| p.to_string_lossy().into_owned());
+        let worker = thread::spawn(move || {
+            if let Err(err) = run_cloud(
+                cfg,
+                &cwd,
+                existing.as_deref(),
+                &permission_mode,
+                rx,
+                events_tx.clone(),
+                ctx.clone(),
+            ) {
+                let _ = events_tx.send(Event::Error(err));
+            }
+            let _ = events_tx.send(Event::Exited);
+            ctx.request_repaint();
+        });
+        Self {
+            tx,
+            control,
+            events,
+            next_id: 0,
+            worker: Some(worker),
+        }
+    }
+
     #[cfg(not(test))]
     pub fn start_with(
         cwd: &Path,
@@ -507,6 +547,97 @@ fn write_requests(
         }
     }
     Ok(()) // Closing stdin requests an orderly shutdown.
+}
+
+#[cfg(not(test))]
+fn run_cloud(
+    cfg: crate::remote::CloudHostConfig,
+    local_cwd: &Path,
+    existing_remote_session: Option<&str>,
+    permission_mode: &str,
+    rx: Receiver<Request>,
+    events: Sender<Event>,
+    ctx: eframe::egui::Context,
+) -> Result<(), String> {
+    let remote_path = match existing_remote_session {
+        Some(p) if !p.is_empty() => p.to_owned(),
+        _ => crate::remote::cloud::create_cloud_session(&cfg, local_cwd, permission_mode)?,
+    };
+
+    let query = format!(
+        "/v1/rpc?path={}&permission_mode={}",
+        crate::remote::cloud::percent_encode_component(&remote_path),
+        crate::remote::cloud::percent_encode_component(permission_mode),
+    );
+    let mut writer_stream =
+        crate::remote::ws::connect_client(&cfg.host, cfg.port, &query, &cfg.token)
+            .map_err(|e| format!("Could not connect to {} over Tailscale: {e}", cfg.name))?;
+    let mut reader_stream = writer_stream
+        .try_clone()
+        .map_err(|e| format!("Could not clone cloud RPC socket: {e}"))?;
+
+    let pong_stream = writer_stream.try_clone().ok();
+    let reader_events = events.clone();
+    let reader_ctx = ctx.clone();
+    let reader = thread::spawn(move || {
+        loop {
+            match crate::remote::ws::read_message(&mut reader_stream) {
+                Ok(crate::remote::ws::WsMessage::Text(text)) => {
+                    if let Ok(record) = serde_json::from_str::<Value>(&text) {
+                        if record["type"] == "response"
+                            && record["command"] == "get_entries"
+                            && record["success"].as_bool() == Some(true)
+                        {
+                            let messages = crate::history::from_entries(
+                                record["data"]["entries"]
+                                    .as_array()
+                                    .map(Vec::as_slice)
+                                    .unwrap_or_default(),
+                                record["data"]["leafId"].as_str(),
+                            );
+                            let _ = reader_events.send(Event::History(messages));
+                        } else {
+                            let _ = reader_events.send(Event::Record(record));
+                        }
+                        reader_ctx.request_repaint();
+                    }
+                }
+                Ok(crate::remote::ws::WsMessage::Ping(payload)) => {
+                    if let Some(mut s) = pong_stream.as_ref().and_then(|s| s.try_clone().ok()) {
+                        let _ = crate::remote::ws::write_client_pong(&mut s, &payload);
+                    }
+                }
+                Ok(crate::remote::ws::WsMessage::Pong(_)) => {}
+                Ok(crate::remote::ws::WsMessage::Close) | Err(_) => break,
+            }
+        }
+        let _ = reader_events.send(Event::Exited);
+        reader_ctx.request_repaint();
+    });
+
+    while let Ok(request) = rx.recv() {
+        match request {
+            Request::Shutdown => break,
+            Request::Record(record) => {
+                if let Ok(line) = serde_json::to_string(&record) {
+                    if let Err(err) =
+                        crate::remote::ws::write_client_text(&mut writer_stream, &line)
+                    {
+                        let _ = events.send(Event::Error(format!(
+                            "Lost connection to {}: {err}",
+                            cfg.name
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = crate::remote::ws::write_client_close(&mut writer_stream);
+    let _ = writer_stream.shutdown(std::net::Shutdown::Both);
+    let _ = reader.join();
+    Ok(())
 }
 
 #[cfg(test)]

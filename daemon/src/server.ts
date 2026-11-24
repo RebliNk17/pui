@@ -330,8 +330,44 @@ export class PuiDaemonServer {
     head: Buffer,
   ): void {
     const url = new URL(req.url || '/', `http://localhost:${this.config.port}`);
-    if (url.pathname !== '/v1/ws' || !this.checkAuth(req, url)) {
+    if (!this.checkAuth(req, url)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // Raw Pi RPC bridge for Pui Desktop cloud sessions (`/v1/rpc?path=...`).
+    if (url.pathname === '/v1/rpc') {
+      const sessionPath = url.searchParams.get('path') || '';
+      if (!sessionPath || !fs.existsSync(sessionPath)) {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      const perm = url.searchParams.get('permission_mode') || 'auto';
+      const agent = this.ensureLiveAgent(sessionPath, undefined, perm);
+      let unsubscribe: (() => void) | null = null;
+      const rpcClient = acceptWebSocket(
+        req,
+        socket,
+        head,
+        (_c, msg) => {
+          agent.writeRawRpc(msg);
+        },
+        () => {
+          if (unsubscribe) unsubscribe();
+          unsubscribe = null;
+        },
+      );
+      if (!rpcClient) return;
+      unsubscribe = agent.addRpcListener((rec) => {
+        rpcClient.sendJson(rec);
+      });
+      return;
+    }
+
+    if (url.pathname !== '/v1/ws') {
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
       return;
     }
@@ -550,6 +586,28 @@ export class PuiDaemonServer {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/v1/models') {
+        const live = Array.from(this.liveAgents.values()).find((a) => a.models.length > 0);
+        if (live) {
+          sendJson(res, 200, {
+            models: live.models,
+            current_model: live.model,
+            current_provider: live.provider,
+            current_thinking: live.thinking,
+            levels: live.levels,
+          });
+          return;
+        }
+        sendJson(res, 200, {
+          models: [],
+          current_model: '',
+          current_provider: '',
+          current_thinking: 'medium',
+          levels: ['off', 'low', 'medium', 'high'],
+        });
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/v1/sessions') {
         sendJson(res, 200, {
           revision: this.revision,
@@ -607,11 +665,22 @@ export class PuiDaemonServer {
         saveAllMeta(this.meta);
 
         const agent = this.ensureLiveAgent(sessionPath, cwd, perm);
-        if (typeof body.prompt === 'string' && body.prompt.trim()) {
-          agent.sendPrompt(body.prompt.trim(), 'steer');
+        const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+        const provider =
+          typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined;
+        const thinking =
+          typeof body.thinking === 'string' && body.thinking.trim() ? body.thinking.trim() : undefined;
+        if (model || thinking) {
+          agent.updateSettings({ model, provider, thinking });
+        }
+        const images = Array.isArray(body.images)
+          ? (body.images as { data_base64: string; mime: string; name?: string }[])
+          : [];
+        if (typeof body.prompt === 'string' && (body.prompt.trim() || images.length > 0)) {
+          agent.sendPrompt(body.prompt.trim(), 'steer', images);
         }
         this.broadcastSessions();
-        sendJson(res, 201, { ok: true, path: sessionPath });
+        sendJson(res, 201, { ok: true, path: sessionPath, cwd });
         return;
       }
 

@@ -12,6 +12,7 @@ pub mod ws;
 #[cfg(test)]
 mod tests;
 
+pub use cloud::CloudHostConfig;
 pub use origin::{OriginPlatform, SessionOrigin};
 
 use crate::protocol::{Message, Model, PendingMessage, SlashCommand};
@@ -276,7 +277,11 @@ pub enum RemoteCommand {
     CreateSession {
         cwd: PathBuf,
         permission_mode: Option<String>,
+        model: Option<String>,
+        provider: Option<String>,
+        thinking: Option<String>,
         prompt: Option<String>,
+        images: Vec<IncomingImage>,
         origin: SessionOrigin,
     },
     OpenSession {
@@ -1057,6 +1062,41 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
             (shared.wake)();
             let _ = http::write_json(stream, 202, "Accepted", &json!({ "ok": true }));
         }
+        ("GET", "/v1/models") => {
+            let snap = shared.snapshot.read().unwrap_or_else(|p| p.into_inner());
+            let detail = snap
+                .active_path
+                .as_ref()
+                .and_then(|p| snap.details.get(p))
+                .or_else(|| snap.details.values().find(|d| !d.models.is_empty()));
+            if let Some(d) = detail {
+                let _ = http::write_json(
+                    stream,
+                    200,
+                    "OK",
+                    &json!({
+                        "models": d.models,
+                        "current_model": d.model,
+                        "current_provider": d.provider,
+                        "current_thinking": d.thinking,
+                        "levels": d.levels,
+                    }),
+                );
+            } else {
+                let _ = http::write_json(
+                    stream,
+                    200,
+                    "OK",
+                    &json!({
+                        "models": [],
+                        "current_model": "",
+                        "current_provider": "",
+                        "current_thinking": "medium",
+                        "levels": ["off", "low", "medium", "high"],
+                    }),
+                );
+            }
+        }
         ("GET", "/v1/sessions") => {
             let snap = shared.snapshot.read().unwrap_or_else(|p| p.into_inner());
             let _ = http::write_json(
@@ -1175,15 +1215,38 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 origin.created_at = Some(chrono::Utc::now().timestamp_millis());
             }
             let permission_mode = body["permission_mode"].as_str().map(str::to_owned);
+            let model = body["model"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let provider = body["provider"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let thinking = body["thinking"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
             let prompt = body["prompt"]
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
+            let images: Vec<IncomingImage> = body
+                .get("images")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             let _ = shared.cmd_tx.send(RemoteCommand::CreateSession {
                 cwd,
                 permission_mode,
+                model,
+                provider,
+                thinking,
                 prompt,
+                images,
                 origin: origin.clone(),
             });
             (shared.wake)();

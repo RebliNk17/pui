@@ -238,7 +238,7 @@ pub fn pairing_uri(cfg: &CloudHostConfig) -> String {
     )
 }
 
-fn percent_encode_component(s: &str) -> String {
+pub fn percent_encode_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -1111,6 +1111,60 @@ pub fn clone_current_repo_to_cloud(cfg: &CloudHostConfig, cwd: &Path) -> Result<
     } else {
         Ok(format!("Cloned into {} at {path}.", cfg.name))
     }
+}
+
+/// Creates a new session on the cloud daemon (auto-cloning the local project's Git repo
+/// into `~/workspaces/<repo>` on demand if it isn't already cloned) and returns the remote
+/// session `.jsonl` path.
+pub fn create_cloud_session(
+    cfg: &CloudHostConfig,
+    local_cwd: &Path,
+    permission_mode: &str,
+) -> Result<String, String> {
+    let git_remote = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(local_cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let repo_name = local_cwd
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty());
+    let device = std::process::Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Mac".into());
+
+    let mut body = serde_json::Map::new();
+    if let Some(remote) = git_remote {
+        body.insert("git_remote".into(), json!(remote));
+    }
+    if let Some(name) = repo_name {
+        body.insert("repo_name".into(), json!(name));
+    }
+    body.insert("permission_mode".into(), json!(permission_mode));
+    body.insert(
+        "origin".into(),
+        json!({
+            "platform": "macos",
+            "device": device,
+            "client": "pui-desktop",
+            "created_at": chrono::Utc::now().timestamp_millis(),
+        }),
+    );
+
+    let (_, res) = http_request_json(cfg, "POST", "/v1/sessions", Some(&Value::Object(body)))?;
+    res["path"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Cloud host did not return a session path.".to_owned())
 }
 
 fn url_decode(s: &str) -> String {

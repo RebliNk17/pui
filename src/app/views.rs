@@ -319,28 +319,51 @@ impl Pui {
                                         ));
                                         return;
                                     }
+                                    let active_cloud = self
+                                        .agents
+                                        .nodes
+                                        .get(&self.agents.active)
+                                        .and_then(|n| n.cloud_host.as_ref());
                                     ui.horizontal(|ui| {
                                         dot(
                                             ui,
                                             if self.connected || self.demo {
                                                 colors.green
+                                            } else if active_cloud.is_some() && self.loading_chat {
+                                                colors.amber
                                             } else {
                                                 colors.dim
                                             },
                                         );
                                         ui.vertical(|ui| {
                                             ui.spacing_mut().item_spacing.y = 2.0;
-                                            ui.label(RichText::new("Local computer").size(12.0));
-                                            ui.label(
-                                                RichText::new(if self.demo {
-                                                    "Design preview · no agent connected"
-                                                } else if self.connected {
-                                                    "Pi RPC connected"
+                                            let env_title = match active_cloud {
+                                                Some(cfg) => format!("Cloud · {}", cfg.name),
+                                                None => "Local computer".to_owned(),
+                                            };
+                                            let env_sub = if self.demo {
+                                                "Design preview · no agent connected".to_owned()
+                                            } else if let Some(cfg) = active_cloud {
+                                                if self.connected {
+                                                    format!(
+                                                        "{}:{} · Cloud RPC connected",
+                                                        cfg.host, cfg.port
+                                                    )
+                                                } else if self.loading_chat {
+                                                    format!("Connecting to {}…", cfg.name)
                                                 } else {
-                                                    "Not connected"
-                                                })
-                                                .size(10.0)
-                                                .color(colors.muted),
+                                                    format!("{}:{} · Disconnected", cfg.host, cfg.port)
+                                                }
+                                            } else if self.connected {
+                                                "Pi RPC connected".to_owned()
+                                            } else {
+                                                "Not connected".to_owned()
+                                            };
+                                            ui.label(RichText::new(env_title).size(12.0));
+                                            ui.label(
+                                                RichText::new(env_sub)
+                                                    .size(10.0)
+                                                    .color(colors.muted),
                                             );
                                         });
                                     });

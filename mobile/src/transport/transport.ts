@@ -3,6 +3,7 @@ import type {
   FileMentionItem,
   GitChangesResponse,
   HostInfo,
+  ModelItem,
   SavedHost,
   SessionDetail,
   SessionOrigin,
@@ -97,15 +98,26 @@ export interface PuiTransport {
   reconnectNow(): void;
   subscribeSession(path: string | null): void;
   getInfo(): Promise<HostInfo>;
+  getModels(): Promise<{
+    models: ModelItem[];
+    current_model: string;
+    current_provider: string;
+    current_thinking: string;
+    levels: string[];
+  }>;
   listSessions(): Promise<{ revision: number; active_path: string | null; sessions: SessionSummary[] }>;
   getSessionDetail(path?: string): Promise<SessionDetail>;
   createSession(input: {
     cwd: string;
     git_remote?: string;
     permission_mode?: string;
+    model?: string;
+    provider?: string;
+    thinking?: string;
     prompt?: string;
+    images?: { data_base64: string; mime: string; name?: string }[];
     origin: SessionOrigin;
-  }): Promise<{ ok: boolean; origin: SessionOrigin }>;
+  }): Promise<{ ok: boolean; path?: string; cwd?: string; origin?: SessionOrigin }>;
   openSession(path: string): Promise<void>;
   sendMessage(input: {
     path?: string;
@@ -317,6 +329,16 @@ export class DirectTransport implements PuiTransport {
     return this.requestJson<HostInfo>('/v1/info');
   }
 
+  getModels(): Promise<{
+    models: ModelItem[];
+    current_model: string;
+    current_provider: string;
+    current_thinking: string;
+    levels: string[];
+  }> {
+    return this.requestJson('/v1/models');
+  }
+
   listSessions(): Promise<{ revision: number; active_path: string | null; sessions: SessionSummary[] }> {
     return this.requestJson('/v1/sessions');
   }
@@ -330,9 +352,13 @@ export class DirectTransport implements PuiTransport {
     cwd: string;
     git_remote?: string;
     permission_mode?: string;
+    model?: string;
+    provider?: string;
+    thinking?: string;
     prompt?: string;
+    images?: { data_base64: string; mime: string; name?: string }[];
     origin: SessionOrigin;
-  }): Promise<{ ok: boolean; origin: SessionOrigin }> {
+  }): Promise<{ ok: boolean; path?: string; cwd?: string; origin?: SessionOrigin }> {
     return this.requestJson('/v1/sessions', {
       method: 'POST',
       body: JSON.stringify(input),

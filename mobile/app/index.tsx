@@ -14,7 +14,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { CustomScrollbarOverlay, useCustomScrollbar } from '../src/components/CustomScrollbar';
-import { NewSessionModal } from '../src/components/NewSessionModal';
 import { UsageSheet } from '../src/components/UsageSheet';
 import type { SessionSummary } from '../src/protocol/types';
 import { usePui } from '../src/store/connectionStore';
@@ -58,7 +57,6 @@ export default function SessionsScreen() {
   const [filter, setFilter] = useState<SessionFilter>('all');
   const [sortModalOpen, setSortModalOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [newOpen, setNewOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<ReleaseInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
@@ -451,7 +449,7 @@ export default function SessionsScreen() {
           {/* Clean floating + New session pill */}
           <View pointerEvents="box-none" style={styles.fabContainer}>
             <Pressable
-              onPress={() => setNewOpen(true)}
+              onPress={() => router.push('/new')}
               style={[styles.newPill, { backgroundColor: colors.accent }]}
             >
               <Ionicons name="add" size={19} color="#fff" />
@@ -684,30 +682,6 @@ export default function SessionsScreen() {
         visible={usageOpen}
         transport={transport}
         onClose={() => setUsageOpen(false)}
-      />
-
-      <NewSessionModal
-        visible={newOpen}
-        hosts={hosts}
-        activeHostId={activeHost?.id}
-        onSelectHost={selectHost}
-        projects={hostInfo?.projects ?? []}
-        permissionModes={defaultPermissionModes}
-        deviceLabel={`${clientOrigin().platform === 'ios' ? 'iOS' : 'Android'} · ${deviceName}`}
-        onClose={() => setNewOpen(false)}
-        onCreate={async ({ cwd, gitRemote, permissionMode, prompt }) => {
-          if (!transport) return;
-          await transport.createSession({
-            cwd,
-            git_remote: gitRemote,
-            permission_mode: permissionMode,
-            prompt,
-            origin: clientOrigin(),
-          });
-          setTimeout(() => {
-            void refreshSessions();
-          }, 500);
-        }}
       />
     </SafeAreaView>
   );

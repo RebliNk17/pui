@@ -889,8 +889,13 @@ impl Pui {
         {
             return;
         }
+        let active_cloud_host = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .and_then(|n| n.cloud_host.clone());
         #[cfg(not(test))]
-        if session.as_ref().is_some_and(|p| !p.is_file()) {
+        if active_cloud_host.is_none() && session.as_ref().is_some_and(|p| !p.is_file()) {
             self.loading_chat = false;
             self.state.error =
                 Some("This chat was deleted or its session file is unavailable.".into());
@@ -956,32 +961,47 @@ impl Pui {
                 .map(|s| s.title.clone())
                 .unwrap_or_else(|| "Opening chat…".into());
             self.state.preserve_title(&self.state.session_name.clone());
-            let (tx, rx) = mpsc::channel();
-            self.preview_rx = Some(rx);
-            let ctx = ctx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(crate::history::load(&path));
-                ctx.request_repaint();
-            });
+            if active_cloud_host.is_none() {
+                let (tx, rx) = mpsc::channel();
+                self.preview_rx = Some(rx);
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(crate::history::load(&path));
+                    ctx.request_repaint();
+                });
+            }
         }
         self.output_revision = u64::MAX;
         self.restore_restart_checkpoint();
-        if let Some(path) = session.as_ref() {
-            if !self.attach_or_claim(path) {
-                return;
+        if active_cloud_host.is_none() {
+            if let Some(path) = session.as_ref() {
+                if !self.attach_or_claim(path) {
+                    return;
+                }
             }
         }
         #[cfg(not(test))]
         {
-            self.client = Some(rpc::Client::start_with(
-                &self.prefs.cwd,
-                session.as_deref(),
-                ctx.clone(),
-                rpc::Launch {
-                    settings: self.agent_settings(&self.agents.active).payload(),
-                    ..Default::default()
-                },
-            ));
+            if let Some(cloud_cfg) = active_cloud_host {
+                let perm = self.active_permission().key().to_owned();
+                self.client = Some(rpc::Client::start_cloud(
+                    cloud_cfg,
+                    &self.prefs.cwd,
+                    session.as_deref(),
+                    perm,
+                    ctx.clone(),
+                ));
+            } else {
+                self.client = Some(rpc::Client::start_with(
+                    &self.prefs.cwd,
+                    session.as_deref(),
+                    ctx.clone(),
+                    rpc::Launch {
+                        settings: self.agent_settings(&self.agents.active).payload(),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
         // Interaction tests never spawn a real agent or initialize user extensions.
         #[cfg(test)]

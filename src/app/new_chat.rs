@@ -168,6 +168,131 @@ impl Pui {
         if browse {
             self.choose_chat_folder(self.prefs.cwd.clone());
         }
+
+        // Unified Environment selector (Local computer vs Cloud host) right inside New Chat!
+        if let Some(cloud_cfg) = self.prefs.remote.cloud_host.clone() {
+            let colors = theme::palette(ui.ctx());
+            let active_id = self.agents.active.clone();
+            let is_cloud = self
+                .agents
+                .nodes
+                .get(&active_id)
+                .is_some_and(|n| n.cloud_host.is_some());
+            let can_switch = self.new_chat && self.deliveries.is_empty();
+
+            ui.add_space(12.0);
+            ui.label(theme::small(ui, "Environment"));
+            ui.add_space(4.0);
+            let mut desired_cloud = is_cloud;
+            let pill_w = 240.0_f32.min(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - pill_w) / 2.0).max(0.0));
+                egui::Frame::new()
+                    .fill(colors.sidebar)
+                    .stroke(Stroke::new(1.0_f32, colors.border))
+                    .corner_radius(9)
+                    .inner_margin(3)
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(can_switch, |ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let half = ((pill_w - 12.0) * 0.5).max(80.0);
+                            for (label, target_cloud) in
+                                [("Local computer", false), (cloud_cfg.name.as_str(), true)]
+                            {
+                                let selected = is_cloud == target_cloud;
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(Vec2::new(half, 26.0), Sense::click());
+                                let fill = if selected {
+                                    colors.accent.gamma_multiply(0.20)
+                                } else if resp.hovered() {
+                                    colors.hover
+                                } else {
+                                    Color32::TRANSPARENT
+                                };
+                                let stroke = if selected {
+                                    Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.50))
+                                } else {
+                                    Stroke::NONE
+                                };
+                                ui.painter()
+                                    .rect(rect, 6, fill, stroke, egui::StrokeKind::Inside);
+                                let dot_color = if target_cloud {
+                                    if selected { colors.green } else { colors.dim }
+                                } else if selected {
+                                    colors.accent
+                                } else {
+                                    colors.dim
+                                };
+                                let fg = if selected { colors.text } else { colors.muted };
+                                let galley = ui.painter().layout_no_wrap(
+                                    label.to_owned(),
+                                    FontId::proportional(11.5),
+                                    fg,
+                                );
+                                let total_w = 11.0 + galley.size().x;
+                                let start_x = rect.center().x - total_w * 0.5;
+                                ui.painter().circle_filled(
+                                    egui::pos2(start_x + 3.0, rect.center().y),
+                                    3.0,
+                                    dot_color,
+                                );
+                                ui.painter().galley(
+                                    egui::pos2(
+                                        start_x + 11.0,
+                                        rect.center().y - galley.size().y * 0.5,
+                                    ),
+                                    galley,
+                                    fg,
+                                );
+                                if resp
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    desired_cloud = target_cloud;
+                                }
+                            }
+                        });
+                    });
+            });
+
+            if is_cloud {
+                ui.add_space(4.0);
+                let repo = sessions::project_name(&self.prefs.cwd);
+                ui.label(theme::small(
+                    ui,
+                    format!(
+                        "Runs 24/7 on {} ({}:{}) · auto-clones {repo}",
+                        cloud_cfg.name, cloud_cfg.host, cloud_cfg.port
+                    ),
+                ));
+            }
+
+            if desired_cloud != is_cloud && can_switch {
+                self.set_new_chat_cloud_target(desired_cloud.then_some(cloud_cfg));
+            }
+        }
+    }
+
+    pub(super) fn set_new_chat_cloud_target(
+        &mut self,
+        cloud: Option<crate::remote::CloudHostConfig>,
+    ) {
+        if !self.new_chat || !self.deliveries.is_empty() {
+            return;
+        }
+        let id = self.ensure_agent();
+        if let Some(node) = self.agents.nodes.get_mut(&id) {
+            node.cloud_host = cloud;
+            node.path = None;
+        }
+        let ctx = self.ctx.clone();
+        let draft = std::mem::take(&mut self.draft);
+        let chips = std::mem::take(&mut self.context_chips);
+        let images = std::mem::take(&mut self.draft_images);
+        self.connect(&ctx, None);
+        self.draft = draft;
+        self.context_chips = chips;
+        self.draft_images = images;
     }
     pub(super) fn choose_chat_folder(&mut self, initial: PathBuf) {
         if self.chat_folder_rx.is_some() || !self.new_chat {

@@ -95,6 +95,7 @@ export class LiveAgent {
   private reqSeq = 0;
   private onChange: (agent: LiveAgent) => void;
   private onNotify: (event: NotificationEvent) => void;
+  private rpcListeners = new Set<(record: Record<string, unknown>) => void>();
   private seenDialogIds = new Set<string>();
   private queued: QueuedPayload[] = [];
   private streamingMsg: MessageRecord | null = null;
@@ -181,6 +182,13 @@ export class LiveAgent {
       if (!line.trim()) return;
       try {
         const rec = JSON.parse(line) as Record<string, unknown>;
+        for (const listener of this.rpcListeners) {
+          try {
+            listener(rec);
+          } catch {
+            // ignore
+          }
+        }
         this.handleRecord(rec);
       } catch {
         // ignore non-JSON output
@@ -222,6 +230,23 @@ export class LiveAgent {
   private bump(): void {
     this.revision += 1;
     this.onChange(this);
+  }
+
+  addRpcListener(listener: (record: Record<string, unknown>) => void): () => void {
+    this.rpcListeners.add(listener);
+    return () => {
+      this.rpcListeners.delete(listener);
+    };
+  }
+
+  writeRawRpc(record: Record<string, unknown>): void {
+    if (!this.proc) this.start();
+    if (!this.proc?.stdin.writable) return;
+    try {
+      this.proc.stdin.write(JSON.stringify(record) + '\n');
+    } catch {
+      // ignore
+    }
   }
 
   sendRpc(payload: Record<string, unknown>): void {

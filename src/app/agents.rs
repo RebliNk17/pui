@@ -27,6 +27,7 @@ pub(super) struct Node {
     depends: Vec<String>,
     setup: Option<Receiver<Result<PathBuf, String>>>,
     pub(super) worktree: Option<PathBuf>,
+    pub(super) cloud_host: Option<crate::remote::CloudHostConfig>,
 }
 impl Node {
     pub(super) fn setup_pending(&self) -> bool {
@@ -287,6 +288,7 @@ impl Pui {
                     depends: Vec::new(),
                     setup: None,
                     worktree: record.worktree,
+                    cloud_host: None,
                 },
             );
         }
@@ -496,6 +498,7 @@ impl Pui {
                 depends: Vec::new(),
                 setup: None,
                 worktree: None,
+                cloud_host: None,
             },
         );
         id
@@ -1155,6 +1158,7 @@ impl Pui {
                     depends,
                     setup: None,
                     worktree: None,
+                    cloud_host: None,
                 };
                 if access == "worktree" {
                     let (tx, rx) = mpsc::channel();
@@ -1806,6 +1810,7 @@ impl Pui {
                     depends: Vec::new(),
                     setup: None,
                     worktree: None,
+                    cloud_host: None,
                 },
             );
             self.agents.parked.insert(
@@ -1859,6 +1864,7 @@ impl Pui {
                     depends: Vec::new(),
                     setup: None,
                     worktree: None,
+                    cloud_host: None,
                 },
             );
             let mut state = State {

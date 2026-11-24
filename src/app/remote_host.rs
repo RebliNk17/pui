@@ -210,7 +210,11 @@ impl Pui {
             RemoteCommand::CreateSession {
                 cwd,
                 permission_mode,
+                model,
+                provider,
+                thinking,
                 prompt,
+                images,
                 origin,
             } => {
                 let target_cwd = if cwd.is_dir() {
@@ -240,13 +244,47 @@ impl Pui {
                 self.agents.background = true;
                 let ctx = self.ctx.clone();
                 self.connect(&ctx, None);
+                if let Some(m) = model {
+                    if let Some(client) = self.client.as_mut() {
+                        let _ = client.send(json!({
+                            "type": "set_model",
+                            "modelId": m,
+                            "provider": provider.unwrap_or_default(),
+                        }));
+                    }
+                }
+                if let Some(t) = thinking {
+                    if let Some(client) = self.client.as_mut() {
+                        let _ = client.send(json!({
+                            "type": "set_thinking_level",
+                            "level": t,
+                        }));
+                    }
+                }
                 if let Some(path_str) = self.state.session_file.clone() {
                     self.record_session_origin(std::path::Path::new(&path_str), origin);
                 } else {
                     self.pending_origins.insert(new_id.clone(), origin);
                 }
+                if !images.is_empty() {
+                    let mut decoded = Vec::new();
+                    for img in images {
+                        if let Ok(bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(img.data_base64.trim())
+                        {
+                            if let Ok(att) = crate::media::Attachment::from_bytes(&bytes) {
+                                decoded.push(att);
+                            }
+                        }
+                    }
+                    if !decoded.is_empty() {
+                        self.draft_images.set_images(decoded);
+                    }
+                }
                 if let Some(text) = prompt {
                     self.draft = text;
+                    self.submit_mode(&ctx, self.prefs.settings.delivery);
+                } else if !self.draft_images.is_empty() {
                     self.submit_mode(&ctx, self.prefs.settings.delivery);
                 }
                 let parked_chat = self.take_chat();
@@ -2879,7 +2917,11 @@ mod tests {
         app.handle_remote_command(RemoteCommand::CreateSession {
             cwd: dir.clone(),
             permission_mode: Some("manual".into()),
+            model: None,
+            provider: None,
+            thinking: None,
             prompt: None,
+            images: Vec::new(),
             origin: origin.clone(),
         });
         // Desktop's visible active session and draft MUST NOT have switched!

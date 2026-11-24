@@ -134,6 +134,103 @@ pub fn write_close(stream: &mut impl Write) -> io::Result<()> {
     stream.flush()
 }
 
+/// Encodes a client-to-server masked RFC 6455 frame.
+pub fn encode_client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 14);
+    frame.push(0x80 | (opcode & 0x0F));
+    let len = payload.len();
+    if len <= 125 {
+        frame.push(0x80 | (len as u8));
+    } else if len <= 65_535 {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0x55AA_33CC);
+    let mask = [
+        (nanos & 0xFF) as u8 ^ 0xA5,
+        ((nanos >> 8) & 0xFF) as u8 ^ 0x5A,
+        ((nanos >> 16) & 0xFF) as u8 ^ 0x3C,
+        ((nanos >> 24) & 0xFF) as u8 ^ 0xC3,
+    ];
+    frame.extend_from_slice(&mask);
+    for (i, b) in payload.iter().enumerate() {
+        frame.push(b ^ mask[i % 4]);
+    }
+    frame
+}
+
+pub fn write_client_text(stream: &mut impl Write, text: &str) -> io::Result<()> {
+    stream.write_all(&encode_client_frame(0x1, text.as_bytes()))?;
+    stream.flush()
+}
+
+pub fn write_client_pong(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+    let bounded = &payload[..payload.len().min(125)];
+    stream.write_all(&encode_client_frame(0xA, bounded))?;
+    stream.flush()
+}
+
+pub fn write_client_close(stream: &mut impl Write) -> io::Result<()> {
+    stream.write_all(&encode_client_frame(0x8, &[]))?;
+    stream.flush()
+}
+
+/// Performs an RFC 6455 client HTTP Upgrade handshake over an existing TCP stream.
+pub fn connect_client(
+    host: &str,
+    port: u16,
+    path_and_query: &str,
+    bearer_token: &str,
+) -> io::Result<TcpStream> {
+    let addr = format!("{host}:{port}");
+    let mut stream = TcpStream::connect(&addr)?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(15)));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(1);
+    let key = base64::engine::general_purpose::STANDARD.encode(nanos.to_le_bytes());
+    let req = format!(
+        "GET {path_and_query} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Authorization: Bearer {bearer_token}\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes())?;
+    stream.flush()?;
+
+    // Read HTTP response headers byte-by-byte until \r\n\r\n so we don't consume WS frames.
+    let mut header_buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    while header_buf.len() < 8192 {
+        stream.read_exact(&mut byte)?;
+        header_buf.push(byte[0]);
+        if header_buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&header_buf);
+    if !head.starts_with("HTTP/1.1 101") && !head.starts_with("HTTP/1.0 101") {
+        let first = head.lines().next().unwrap_or("Unexpected response");
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("Cloud RPC WebSocket upgrade failed: {first}"),
+        ));
+    }
+    let _ = stream.set_read_timeout(None);
+    Ok(stream)
+}
+
 pub fn read_message(stream: &mut impl Read) -> io::Result<WsMessage> {
     let mut assembled = Vec::new();
     let mut initial_opcode: Option<u8> = None;
