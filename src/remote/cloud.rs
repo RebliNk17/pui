@@ -26,6 +26,17 @@ pub const PLAYWRIGHT_RESEARCH_MCP: &str = "playwright-research";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct CloudRepoItem {
+    pub full_name: String,
+    pub name: String,
+    pub git_remote: String,
+    pub private: bool,
+    pub cloned: bool,
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct CloudCatalogProject {
     pub name: String,
     pub git_remote: String,
@@ -1281,26 +1292,46 @@ pub fn clone_current_repo_to_cloud(cfg: &CloudHostConfig, cwd: &Path) -> Result<
     }
 }
 
-/// Creates a new session on the cloud daemon (auto-cloning the local project's Git repo
+pub fn fetch_cloud_repos(
+    cfg: &CloudHostConfig,
+    refresh: bool,
+) -> Result<Vec<CloudRepoItem>, String> {
+    let path = if refresh {
+        "/v1/repos?refresh=1"
+    } else {
+        "/v1/repos"
+    };
+    let (_, res) = http_request_json(cfg, "GET", path, None)?;
+    serde_json::from_value(res["repos"].clone())
+        .map_err(|e| format!("Invalid cloud repos payload: {e}"))
+}
+
+/// Creates a new session on the cloud daemon (auto-cloning the selected Git repo
 /// into `~/workspaces/<repo>` on demand if it isn't already cloned) and returns the remote
 /// session `.jsonl` path.
 pub fn create_cloud_session(
     cfg: &CloudHostConfig,
     local_cwd: &Path,
+    selected_repo: Option<&CloudRepoItem>,
     permission_mode: &str,
 ) -> Result<String, String> {
-    let git_remote = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(local_cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let repo_name = local_cwd
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty());
+    let (git_remote, repo_name) = if let Some(repo) = selected_repo {
+        (Some(repo.git_remote.clone()), Some(repo.name.clone()))
+    } else {
+        let remote = Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(local_cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|s| !s.is_empty());
+        let name = local_cwd
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty());
+        (remote, name)
+    };
     let device = std::process::Command::new("scutil")
         .args(["--get", "ComputerName"])
         .output()

@@ -27,6 +27,15 @@ export interface PermissionModeOption {
   label: string;
 }
 
+export interface CloudRepoItem {
+  full_name: string;
+  name: string;
+  git_remote: string;
+  private: boolean;
+  cloned: boolean;
+  path?: string | null;
+}
+
 export interface CatalogProject {
   name: string;
   git_remote: string;

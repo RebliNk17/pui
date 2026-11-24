@@ -28,6 +28,7 @@ pub(super) struct Node {
     setup: Option<Receiver<Result<PathBuf, String>>>,
     pub(super) worktree: Option<PathBuf>,
     pub(super) cloud_host: Option<crate::remote::CloudHostConfig>,
+    pub(super) cloud_repo: Option<crate::remote::cloud::CloudRepoItem>,
 }
 impl Node {
     pub(super) fn setup_pending(&self) -> bool {
@@ -289,6 +290,7 @@ impl Pui {
                     setup: None,
                     worktree: record.worktree,
                     cloud_host: None,
+                    cloud_repo: None,
                 },
             );
         }
@@ -499,6 +501,7 @@ impl Pui {
                 setup: None,
                 worktree: None,
                 cloud_host: None,
+                cloud_repo: None,
             },
         );
         id
@@ -1159,6 +1162,7 @@ impl Pui {
                     setup: None,
                     worktree: None,
                     cloud_host: None,
+                    cloud_repo: None,
                 };
                 if access == "worktree" {
                     let (tx, rx) = mpsc::channel();
@@ -1811,6 +1815,7 @@ impl Pui {
                     setup: None,
                     worktree: None,
                     cloud_host: None,
+                    cloud_repo: None,
                 },
             );
             self.agents.parked.insert(
@@ -1865,6 +1870,7 @@ impl Pui {
                     setup: None,
                     worktree: None,
                     cloud_host: None,
+                    cloud_repo: None,
                 },
             );
             let mut state = State {

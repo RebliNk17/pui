@@ -9,6 +9,7 @@ import {
   getAdminStatus,
   invalidateGithubSshCheck,
   listCatalogProjects,
+  listCloudRepos,
   normalizeGitRemote,
   removeCloudGitKey,
   setupCloudGit,
@@ -461,6 +462,15 @@ export class PuiDaemonServer {
             platform: c.platform,
             device: c.device,
           })),
+        });
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/v1/repos') {
+        const q = url.searchParams.get('q') || undefined;
+        const refresh = url.searchParams.get('refresh') === '1';
+        sendJson(res, 200, {
+          repos: listCloudRepos(this.config, { query: q, refresh }),
         });
         return;
       }

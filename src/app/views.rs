@@ -368,12 +368,15 @@ impl Pui {
                                         });
                                     });
                                     ui.add_space(4.0);
+                                    let repo_label = self
+                                        .agents
+                                        .nodes
+                                        .get(&self.agents.active)
+                                        .and_then(|n| n.cloud_repo.as_ref())
+                                        .map(|r| r.full_name.clone())
+                                        .unwrap_or_else(|| sessions::project_name(&self.prefs.cwd));
                                     inspector::detail(ui, "Status", status);
-                                    inspector::detail(
-                                        ui,
-                                        "Repository",
-                                        &sessions::project_name(&self.prefs.cwd),
-                                    );
+                                    inspector::detail(ui, "Repository", &repo_label);
                                     if !self.workspace.branch.is_empty() {
                                         inspector::detail(ui, "Branch", &self.workspace.branch);
                                     }

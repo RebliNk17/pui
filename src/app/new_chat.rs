@@ -124,49 +124,92 @@ impl Pui {
         projects
     }
     pub(super) fn new_chat_project(&mut self, ui: &mut egui::Ui) {
-        ui.label(theme::small(ui, "Project"));
-        let current = self.prefs.cwd.clone();
-        let mut selection = None;
-        let mut browse = false;
+        let active_id = self.agents.active.clone();
+        let active_cloud = self
+            .agents
+            .nodes
+            .get(&active_id)
+            .and_then(|n| n.cloud_host.clone());
+        let active_cloud_repo = self
+            .agents
+            .nodes
+            .get(&active_id)
+            .and_then(|n| n.cloud_repo.clone());
         let width = 240.0_f32.min(ui.available_width());
-        let projects = self.chat_projects();
-        ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            (selection, browse) = self.project_picker.show(
-                ui,
-                &self.agents.active,
-                &current,
-                width,
-                projects,
-                self.chat_folder_rx.is_none(),
+
+        if let Some(cloud_cfg) = active_cloud {
+            ui.label(theme::small(ui, "Repository (org/repo)"));
+            let fallback_name = sessions::project_name(&self.prefs.cwd);
+            let mut picked_repo = None;
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                picked_repo = self.project_picker.show_cloud_repos(
+                    ui,
+                    &active_id,
+                    &cloud_cfg,
+                    active_cloud_repo.as_ref(),
+                    &fallback_name,
+                    width,
+                );
+            });
+            if let Some(repo) = picked_repo {
+                if let Some(node) = self.agents.nodes.get_mut(&active_id) {
+                    node.cloud_repo = Some(repo);
+                    node.path = None;
+                }
+                let ctx = self.ctx.clone();
+                let draft = std::mem::take(&mut self.draft);
+                let chips = std::mem::take(&mut self.context_chips);
+                let images = std::mem::take(&mut self.draft_images);
+                self.connect(&ctx, None);
+                self.draft = draft;
+                self.context_chips = chips;
+                self.draft_images = images;
+            }
+        } else {
+            ui.label(theme::small(ui, "Project"));
+            let current = self.prefs.cwd.clone();
+            let mut selection = None;
+            let mut browse = false;
+            let projects = self.chat_projects();
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                (selection, browse) = self.project_picker.show(
+                    ui,
+                    &self.agents.active,
+                    &current,
+                    width,
+                    projects,
+                    self.chat_folder_rx.is_none(),
+                );
+            });
+            ui.add(
+                egui::Label::new(theme::small(ui, current.display().to_string()))
+                    .wrap()
+                    .selectable(true),
             );
-        });
-        ui.add(
-            egui::Label::new(theme::small(ui, current.display().to_string()))
-                .wrap()
-                .selectable(true),
-        );
-        ui.add_space(6.0);
-        if ui
-            .add_enabled(
-                self.chat_folder_rx.is_none(),
-                egui::Button::new("Open folder…").frame(false),
-            )
-            .clicked()
-        {
-            browse = true;
-        }
-        if self.chat_folder_rx.is_some() {
-            ui.label(theme::small(
-                ui,
-                "Choose a folder in the file picker, or cancel to keep this project.",
-            ));
-        }
-        if let Some(project) = selection {
-            self.select_chat_project(project);
-        }
-        if browse {
-            self.choose_chat_folder(self.prefs.cwd.clone());
+            ui.add_space(6.0);
+            if ui
+                .add_enabled(
+                    self.chat_folder_rx.is_none(),
+                    egui::Button::new("Open folder…").frame(false),
+                )
+                .clicked()
+            {
+                browse = true;
+            }
+            if self.chat_folder_rx.is_some() {
+                ui.label(theme::small(
+                    ui,
+                    "Choose a folder in the file picker, or cancel to keep this project.",
+                ));
+            }
+            if let Some(project) = selection {
+                self.select_chat_project(project);
+            }
+            if browse {
+                self.choose_chat_folder(self.prefs.cwd.clone());
+            }
         }
 
         // Unified Environment selector (Local computer vs Cloud host) right inside New Chat!

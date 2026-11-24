@@ -1,4 +1,5 @@
 import type {
+  CloudRepoItem,
   FileContentResponse,
   FileMentionItem,
   GitChangesResponse,
@@ -98,6 +99,7 @@ export interface PuiTransport {
   reconnectNow(): void;
   subscribeSession(path: string | null): void;
   getInfo(): Promise<HostInfo>;
+  listRepos(query?: string, refresh?: boolean): Promise<{ repos: CloudRepoItem[] }>;
   getModels(): Promise<{
     models: ModelItem[];
     current_model: string;
@@ -327,6 +329,14 @@ export class DirectTransport implements PuiTransport {
 
   getInfo(): Promise<HostInfo> {
     return this.requestJson<HostInfo>('/v1/info');
+  }
+
+  listRepos(query?: string, refresh = false): Promise<{ repos: CloudRepoItem[] }> {
+    const params: string[] = [];
+    if (query?.trim()) params.push(`q=${encodeURIComponent(query.trim())}`);
+    if (refresh) params.push('refresh=1');
+    const qs = params.length > 0 ? `?${params.join('&')}` : '';
+    return this.requestJson<{ repos: CloudRepoItem[] }>(`/v1/repos${qs}`);
   }
 
   getModels(): Promise<{

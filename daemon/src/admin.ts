@@ -5,6 +5,180 @@ import os from 'node:os';
 import path from 'node:path';
 import { daemonHomeDir, piAgentDir, type DaemonConfig } from './config.ts';
 
+export interface CloudRepoItem {
+  full_name: string;
+  name: string;
+  git_remote: string;
+  private: boolean;
+  cloned: boolean;
+  path: string | null;
+}
+
+let cloudReposCache: { at: number; items: CloudRepoItem[] } | null = null;
+
+export function invalidateCloudReposCache(): void {
+  cloudReposCache = null;
+}
+
+function parseGithubFullName(remoteUrl: string): string | null {
+  const m =
+    remoteUrl.match(/github\.com[:/]([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+?)(?:\.git)?$/i) ||
+    remoteUrl.match(/^([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)$/);
+  return m ? m[1] : null;
+}
+
+function scanClonedWorkspaces(workspacesDir: string): CloudRepoItem[] {
+  const out: CloudRepoItem[] = [];
+  if (!fs.existsSync(workspacesDir)) return out;
+  try {
+    for (const ent of fs.readdirSync(workspacesDir, { withFileTypes: true })) {
+      if (ent.name.startsWith('.') || !ent.isDirectory()) continue;
+      const fullPath = fs.realpathSync(path.join(workspacesDir, ent.name));
+      let remote = '';
+      try {
+        remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
+          cwd: fullPath,
+          encoding: 'utf8',
+          timeout: 3000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+      } catch {
+        // non-git or no origin
+      }
+      const fullName = (remote && parseGithubFullName(remote)) || ent.name;
+      out.push({
+        full_name: fullName,
+        name: ent.name,
+        git_remote: remote || fullName,
+        private: false,
+        cloned: true,
+        path: fullPath,
+      });
+    }
+  } catch {
+    // ignore
+  }
+  return out;
+}
+
+function fetchGithubUserRepos(): CloudRepoItem[] {
+  const now = Date.now();
+  if (cloudReposCache && now - cloudReposCache.at < 180_000) {
+    return cloudReposCache.items;
+  }
+  if (!checkGithubGhAuth()) {
+    return [];
+  }
+  try {
+    const raw = execFileSync(
+      'gh',
+      [
+        'api',
+        'user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100',
+        '--jq',
+        '.[] | {full_name, name, ssh_url, clone_url, private}',
+      ],
+      { encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const items: CloudRepoItem[] = [];
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const obj = JSON.parse(trimmed) as {
+          full_name?: string;
+          name?: string;
+          ssh_url?: string;
+          clone_url?: string;
+          private?: boolean;
+        };
+        if (!obj.full_name || !obj.name) continue;
+        items.push({
+          full_name: obj.full_name,
+          name: obj.name,
+          git_remote: obj.ssh_url || obj.clone_url || `git@github.com:${obj.full_name}.git`,
+          private: Boolean(obj.private),
+          cloned: false,
+          path: null,
+        });
+      } catch {
+        // ignore malformed line
+      }
+    }
+    cloudReposCache = { at: now, items };
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lists all repos available on the cloud host: already-cloned workspaces first,
+ * followed by all accessible GitHub `org/repo` repositories (personal + orgs) and
+ * any fallback synced catalog entries. Supports case-insensitive multi-word search.
+ */
+export function listCloudRepos(
+  config: DaemonConfig,
+  opts: { query?: string; refresh?: boolean } = {},
+): CloudRepoItem[] {
+  if (opts.refresh) invalidateCloudReposCache();
+
+  const clonedList = scanClonedWorkspaces(config.workspaces_dir);
+  const byKey = new Map<string, CloudRepoItem>();
+  const keyOf = (fullName: string, name: string) =>
+    (fullName.includes('/') ? fullName : name).toLowerCase();
+
+  for (const item of clonedList) {
+    byKey.set(keyOf(item.full_name, item.name), item);
+  }
+
+  for (const ghRepo of fetchGithubUserRepos()) {
+    const k = keyOf(ghRepo.full_name, ghRepo.name);
+    const existing = byKey.get(k) || byKey.get(ghRepo.name.toLowerCase());
+    if (existing) {
+      existing.full_name = ghRepo.full_name;
+      existing.private = ghRepo.private;
+      if (!existing.git_remote || !existing.git_remote.includes('github.com')) {
+        existing.git_remote = ghRepo.git_remote;
+      }
+      byKey.delete(ghRepo.name.toLowerCase());
+      byKey.set(k, existing);
+    } else {
+      byKey.set(k, ghRepo);
+    }
+  }
+
+  for (const cat of listCatalogProjects(config.workspaces_dir)) {
+    const fullName = parseGithubFullName(cat.git_remote) || cat.name;
+    const k = keyOf(fullName, cat.name);
+    if (!byKey.has(k) && !byKey.has(cat.name.toLowerCase())) {
+      byKey.set(k, {
+        full_name: fullName,
+        name: cat.name,
+        git_remote: cat.git_remote,
+        private: false,
+        cloned: cat.cloned,
+        path: cat.path,
+      });
+    }
+  }
+
+  let merged = Array.from(byKey.values());
+  const q = (opts.query || '').trim().toLowerCase();
+  if (q) {
+    const words = q.split(/\s+/).filter(Boolean);
+    merged = merged.filter((r) => {
+      const hay = `${r.full_name} ${r.name}`.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  }
+
+  // Already-cloned workspaces float cleanly to the top; GitHub repos preserve pushed-recency order.
+  const clonedFirst = merged.filter((r) => r.cloned).sort((a, b) => a.full_name.localeCompare(b.full_name));
+  const remoteRest = merged.filter((r) => !r.cloned);
+  return [...clonedFirst, ...remoteRest];
+}
+
 export interface CatalogProject {
   name: string;
   git_remote: string;
@@ -166,6 +340,7 @@ export function writeCloudServiceCreds(
       // gh may not be installed in minimal test environments
     }
     invalidateGithubSshCheck();
+    invalidateCloudReposCache();
   }
   return { service_creds: detectCloudServiceCreds() };
 }

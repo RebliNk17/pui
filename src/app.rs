@@ -895,6 +895,12 @@ impl Pui {
             .get(&self.agents.active)
             .and_then(|n| n.cloud_host.clone());
         #[cfg(not(test))]
+        let active_cloud_repo = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .and_then(|n| n.cloud_repo.clone());
+        #[cfg(not(test))]
         if active_cloud_host.is_none() && session.as_ref().is_some_and(|p| !p.is_file()) {
             self.loading_chat = false;
             self.state.error =
@@ -987,6 +993,7 @@ impl Pui {
                 self.client = Some(rpc::Client::start_cloud(
                     cloud_cfg,
                     &self.prefs.cwd,
+                    active_cloud_repo,
                     session.as_deref(),
                     "auto".to_owned(),
                     ctx.clone(),

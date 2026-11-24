@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -16,7 +17,7 @@ import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Composer } from '../src/components/Composer';
 import { ImageModal } from '../src/components/ImageModal';
-import type { ModelItem, PermissionModeOption } from '../src/protocol/types';
+import type { CloudRepoItem, ModelItem, PermissionModeOption } from '../src/protocol/types';
 import { usePui } from '../src/store/connectionStore';
 import { usePalette } from '../src/theme/colors';
 
@@ -49,6 +50,16 @@ const STARTERS = [
   },
 ];
 
+interface DropdownItem {
+  key: string;
+  title: string;
+  subtitle: string;
+  cwd: string;
+  gitRemote?: string;
+  cloned: boolean;
+  isPrivate?: boolean;
+}
+
 function looksLikeGitRepo(val: string): boolean {
   const s = val.trim();
   return /^(git@|https:\/\/|ssh:\/\/)/.test(s) || /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(s);
@@ -68,49 +79,10 @@ export default function NewChatScreen() {
     refreshSessions,
   } = usePui();
 
-  const projectChoices = useMemo(() => {
-    const rawDirs = hostInfo?.projects ?? [];
-    const catalog = hostInfo?.catalog_projects ?? [];
-    const entries: {
-      key: string;
-      label: string;
-      cwd: string;
-      gitRemote?: string;
-      cloned: boolean;
-    }[] = [];
-    const seen = new Set<string>();
-
-    // First include all synced catalog projects (all Mac repos available on cloud!).
-    for (const c of catalog) {
-      const k = c.name.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k);
-      entries.push({
-        key: `cat:${c.name}`,
-        label: c.name,
-        cwd: c.cloned && c.path ? c.path : c.name,
-        gitRemote: c.cloned ? undefined : c.git_remote,
-        cloned: c.cloned,
-      });
-    }
-
-    // Then include any local/cloned workspace folders not already in catalog.
-    for (const p of rawDirs) {
-      const short = p.split('/').filter(Boolean).pop() ?? p;
-      // Hide the bare `workspaces` root folder when real projects exist.
-      if (short === 'workspaces' && (entries.length > 0 || rawDirs.length > 1)) continue;
-      const k = short.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k);
-      entries.push({
-        key: `dir:${p}`,
-        label: short,
-        cwd: p,
-        cloned: true,
-      });
-    }
-    return entries;
-  }, [hostInfo?.projects, hostInfo?.catalog_projects]);
+  const isCloudHost = Boolean(
+    activeHost?.name.toLowerCase().includes('cloud') ||
+      hostInfo?.pui_version?.includes('cloud'),
+  );
 
   const permissionModes = useMemo(
     () =>
@@ -118,8 +90,12 @@ export default function NewChatScreen() {
     [hostInfo?.permission_modes],
   );
 
-  const [selectedKey, setSelectedKey] = useState(projectChoices[0]?.key ?? '');
-  const [customRepoOrPath, setCustomRepoOrPath] = useState('');
+  const [cloudRepos, setCloudRepos] = useState<CloudRepoItem[]>([]);
+  const [reposLoading, setReposLoading] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [selectedItem, setSelectedItem] = useState<DropdownItem | null>(null);
+
   const [permissionMode, setPermissionMode] = useState(permissionModes[0]?.key ?? 'auto');
   const [models, setModels] = useState<ModelItem[]>([]);
   const [modelId, setModelId] = useState('');
@@ -133,6 +109,13 @@ export default function NewChatScreen() {
     null,
   );
   const [androidKeyboardHeight, setAndroidKeyboardHeight] = useState(0);
+
+  // Cloud agents always run in Auto mode inside an isolated pui_agent/… worktree.
+  useEffect(() => {
+    if (isCloudHost && permissionMode !== 'auto') {
+      setPermissionMode('auto');
+    }
+  }, [isCloudHost, permissionMode]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return;
@@ -148,16 +131,112 @@ export default function NewChatScreen() {
     };
   }, []);
 
-  // Keep selected project synced whenever the user switches host.
-  useEffect(() => {
-    if (projectChoices.length > 0 && !projectChoices.some((p) => p.key === selectedKey)) {
-      setSelectedKey(projectChoices[0].key);
-    } else if (projectChoices.length === 0) {
-      setSelectedKey('');
+  // Fetch GitHub org/repo list from cloud host whenever targeting a cloud host.
+  const loadCloudRepos = (refresh = false) => {
+    if (!transport || !isCloudHost) {
+      setCloudRepos([]);
+      return;
     }
-  }, [projectChoices, selectedKey]);
+    setReposLoading(true);
+    void transport
+      .listRepos(undefined, refresh)
+      .then((res) => {
+        setCloudRepos(res.repos ?? []);
+      })
+      .catch(() => {
+        setCloudRepos([]);
+      })
+      .finally(() => setReposLoading(false));
+  };
 
-  // Load models/effort options for the active host (fallback to any cached session detail).
+  useEffect(() => {
+    setSelectedItem(null);
+    setPickerQuery('');
+    if (isCloudHost) {
+      loadCloudRepos(false);
+    } else {
+      setCloudRepos([]);
+    }
+  }, [activeHost?.id, isCloudHost, transport]);
+
+  // Unified searchable dropdown items — same control for both Local and Cloud!
+  const dropdownItems = useMemo<DropdownItem[]>(() => {
+    if (isCloudHost) {
+      const items: DropdownItem[] = [];
+      const seen = new Set<string>();
+      for (const r of cloudRepos) {
+        const k = r.full_name.toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        items.push({
+          key: `repo:${r.full_name}`,
+          title: r.full_name,
+          subtitle: r.cloned ? 'Cloned on cloud · ready' : 'Auto-clones on first message',
+          cwd: r.cloned && r.path ? r.path : r.full_name,
+          gitRemote: r.cloned ? undefined : r.git_remote,
+          cloned: r.cloned,
+          isPrivate: r.private,
+        });
+      }
+      // Fallback to hostInfo.catalog_projects / projects while /v1/repos loads
+      if (items.length === 0) {
+        for (const c of hostInfo?.catalog_projects ?? []) {
+          items.push({
+            key: `cat:${c.name}`,
+            title: c.name,
+            subtitle: c.cloned ? 'Cloned on cloud · ready' : c.git_remote,
+            cwd: c.cloned && c.path ? c.path : c.name,
+            gitRemote: c.cloned ? undefined : c.git_remote,
+            cloned: c.cloned,
+          });
+        }
+        for (const p of hostInfo?.projects ?? []) {
+          const short = p.split('/').filter(Boolean).pop() ?? p;
+          if (short === 'workspaces' && items.length > 0) continue;
+          if (!items.some((x) => x.title.toLowerCase() === short.toLowerCase())) {
+            items.push({
+              key: `dir:${p}`,
+              title: short,
+              subtitle: p,
+              cwd: p,
+              cloned: true,
+            });
+          }
+        }
+      }
+      return items;
+    }
+
+    // Local host: existing local projects you already cloned & worked on
+    return (hostInfo?.projects ?? []).map((p) => ({
+      key: `local:${p}`,
+      title: p.split('/').filter(Boolean).pop() ?? p,
+      subtitle: p,
+      cwd: p,
+      cloned: true,
+    }));
+  }, [isCloudHost, cloudRepos, hostInfo?.projects, hostInfo?.catalog_projects]);
+
+  useEffect(() => {
+    if (!selectedItem && dropdownItems.length > 0) {
+      setSelectedItem(dropdownItems[0]);
+    }
+  }, [dropdownItems, selectedItem]);
+
+  const filteredItems = useMemo(() => {
+    const q = pickerQuery.trim().toLowerCase();
+    if (!q) return dropdownItems;
+    const words = q.split(/\s+/).filter(Boolean);
+    return dropdownItems.filter((item) => {
+      const hay = `${item.title} ${item.subtitle}`.toLowerCase();
+      return words.every((w) => hay.includes(w));
+    });
+  }, [dropdownItems, pickerQuery]);
+
+  const clonedFiltered = useMemo(() => filteredItems.filter((i) => i.cloned), [filteredItems]);
+  const remoteFiltered = useMemo(() => filteredItems.filter((i) => !i.cloned), [filteredItems]);
+
+  // Load models/effort options for the active host.
   useEffect(() => {
     let cancelled = false;
     const seedFromCache = () => {
@@ -196,26 +275,9 @@ export default function NewChatScreen() {
     };
   }, [transport, activeHost?.id]);
 
-  const selectedChoice = useMemo(
-    () => projectChoices.find((p) => p.key === selectedKey) ?? projectChoices[0] ?? null,
-    [projectChoices, selectedKey],
-  );
-  const effectiveCwd = customRepoOrPath.trim() || selectedChoice?.cwd || '';
-  const effectiveGitRemote = customRepoOrPath.trim()
-    ? looksLikeGitRepo(customRepoOrPath.trim())
-      ? customRepoOrPath.trim()
-      : undefined
-    : selectedChoice?.gitRemote;
-  const isCloudHost = Boolean(
-    activeHost?.name.toLowerCase().includes('cloud') ||
-      hostInfo?.pui_version?.includes('cloud'),
-  );
-  // Cloud agents always run in Auto mode inside an isolated pui_agent/… worktree.
-  useEffect(() => {
-    if (isCloudHost && permissionMode !== 'auto') {
-      setPermissionMode('auto');
-    }
-  }, [isCloudHost, permissionMode]);
+  const effectiveCwd = selectedItem?.cwd ?? '';
+  const effectiveGitRemote = selectedItem?.gitRemote;
+
   const currentModelLabel = useMemo(() => {
     if (!modelId) return 'Default model';
     const match = models.find((m) => m.id === modelId);
@@ -224,13 +286,9 @@ export default function NewChatScreen() {
 
   const headerSubtitle = useMemo(() => {
     const hostLabel = activeHost?.name ?? 'Host';
-    const projShort = customRepoOrPath.trim()
-      ? looksLikeGitRepo(customRepoOrPath.trim())
-        ? customRepoOrPath.trim()
-        : customRepoOrPath.trim().split('/').filter(Boolean).pop() ?? customRepoOrPath.trim()
-      : selectedChoice?.label ?? 'Choose project';
+    const projShort = selectedItem?.title ?? 'Select repository';
     return `${hostLabel} · ${projShort}`;
-  }, [activeHost?.name, customRepoOrPath, selectedChoice?.label]);
+  }, [activeHost?.name, selectedItem?.title]);
 
   const handleSend = async (
     text: string,
@@ -238,7 +296,9 @@ export default function NewChatScreen() {
   ) => {
     if (!transport || creating) return;
     if (!effectiveCwd) {
-      setCreateError('Pick a project folder or enter a Git repo (e.g. owner/repo) first.');
+      setCreateError(
+        isCloudHost ? 'Select a GitHub org/repo first.' : 'Select a project folder first.',
+      );
       return;
     }
     setCreating(true);
@@ -263,7 +323,6 @@ export default function NewChatScreen() {
         return;
       }
 
-      // Desktop creates parked background sessions asynchronously; poll briefly for its new path.
       for (let attempt = 0; attempt < 6; attempt++) {
         await new Promise((r) => setTimeout(r, 350));
         try {
@@ -289,6 +348,56 @@ export default function NewChatScreen() {
     } finally {
       setCreating(false);
     }
+  };
+
+  const renderDropdownRow = (item: DropdownItem) => {
+    const active = selectedItem?.key === item.key;
+    return (
+      <Pressable
+        key={item.key}
+        onPress={() => {
+          setSelectedItem(item);
+          setPickerOpen(false);
+          setPickerQuery('');
+          setCreateError(null);
+        }}
+        style={[
+          styles.pickerRow,
+          {
+            backgroundColor: active ? colors.accentBg : 'transparent',
+            borderColor: colors.border,
+          },
+        ]}
+      >
+        <Ionicons
+          name={item.cloned ? 'folder-outline' : 'git-branch-outline'}
+          size={16}
+          color={active ? colors.accent : colors.muted}
+        />
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <Text
+              numberOfLines={1}
+              style={{
+                color: colors.text,
+                fontSize: 13.5,
+                fontWeight: active ? '700' : '500',
+                flexShrink: 1,
+              }}
+            >
+              {item.title}
+            </Text>
+            {item.isPrivate ? (
+              <Ionicons name="lock-closed-outline" size={11} color={colors.dim} />
+            ) : null}
+          </View>
+          <Text numberOfLines={1} style={{ color: colors.dim, fontSize: 11, marginTop: 1 }}>
+            {item.subtitle}
+          </Text>
+        </View>
+        {active ? <Ionicons name="checkmark" size={17} color={colors.accent} /> : null}
+      </Pressable>
+    );
   };
 
   return (
@@ -345,8 +454,9 @@ export default function NewChatScreen() {
             </View>
             <Text style={[styles.heroTitle, { color: colors.text }]}>Start a new chat</Text>
             <Text style={[styles.heroSub, { color: colors.muted }]}>
-              Choose environment and project, then pick model, effort &amp; permissions in the
-              composer below.
+              {isCloudHost
+                ? 'Runs 24/7 in Auto mode inside an isolated pui_agent/… worktree and opens a PR when done.'
+                : 'Select environment and project, then pick model, effort & permissions in the composer below.'}
             </Text>
           </View>
 
@@ -398,86 +508,60 @@ export default function NewChatScreen() {
             </View>
           ) : null}
 
-          {/* Project / Repository */}
+          {/* Unified Searchable Dropdown for Project / Org/Repo */}
           <View style={styles.section}>
             <Text style={[styles.sectionLabel, { color: colors.muted }]}>
-              {isCloudHost ? 'PROJECT OR GIT REPO (AUTO-CLONES)' : 'PROJECT FOLDER'}
+              {isCloudHost ? 'REPOSITORY (ORG/REPO)' : 'PROJECT'}
             </Text>
-            {projectChoices.length > 0 ? (
-              <View style={styles.projectGrid}>
-                {projectChoices.map((p) => {
-                  const active = selectedChoice?.key === p.key && !customRepoOrPath.trim();
-                  return (
-                    <Pressable
-                      key={p.key}
-                      onPress={() => {
-                        setSelectedKey(p.key);
-                        setCustomRepoOrPath('');
-                        setCreateError(null);
-                      }}
-                      style={[
-                        styles.projectChip,
-                        {
-                          backgroundColor: active ? colors.accentBg : colors.surface,
-                          borderColor: active ? colors.accent : colors.border,
-                        },
-                      ]}
-                    >
-                      <Ionicons
-                        name={p.cloned ? 'folder-outline' : 'cloud-download-outline'}
-                        size={14}
-                        color={active ? colors.accent : colors.muted}
-                      />
-                      <Text
-                        numberOfLines={1}
-                        style={{
-                          color: active ? colors.text : colors.muted,
-                          fontSize: 13,
-                          fontWeight: active ? '600' : '500',
-                          flexShrink: 1,
-                        }}
-                      >
-                        {p.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ) : null}
-
-            <View
+            <Pressable
+              onPress={() => setPickerOpen(true)}
               style={[
-                styles.repoInputBox,
+                styles.dropdownTrigger,
                 { backgroundColor: colors.surface, borderColor: colors.border },
               ]}
             >
               <Ionicons
-                name={isCloudHost ? 'git-branch-outline' : 'folder-open-outline'}
-                size={15}
-                color={colors.dim}
-              />
-              <TextInput
-                value={customRepoOrPath}
-                onChangeText={(v) => {
-                  setCustomRepoOrPath(v);
-                  setCreateError(null);
-                }}
-                placeholder={
-                  isCloudHost
-                    ? 'Auto-clone any repo (e.g. owner/repo or git@github.com:…)'
-                    : 'Or enter another folder path on this host…'
+                name={
+                  selectedItem
+                    ? selectedItem.cloned
+                      ? 'folder-outline'
+                      : 'git-branch-outline'
+                    : isCloudHost
+                      ? 'git-branch-outline'
+                      : 'folder-outline'
                 }
-                placeholderTextColor={colors.dim}
-                autoCapitalize="none"
-                autoCorrect={false}
-                style={[styles.repoInput, { color: colors.text }]}
+                size={16}
+                color={colors.accent}
               />
-              {customRepoOrPath ? (
-                <Pressable onPress={() => setCustomRepoOrPath('')}>
-                  <Ionicons name="close-circle" size={16} color={colors.dim} />
-                </Pressable>
-              ) : null}
-            </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    color: selectedItem ? colors.text : colors.dim,
+                    fontSize: 13.5,
+                    fontWeight: '600',
+                  }}
+                >
+                  {selectedItem
+                    ? selectedItem.title
+                    : reposLoading
+                      ? 'Loading repositories…'
+                      : isCloudHost
+                        ? 'Search org/repo…'
+                        : 'Select project…'}
+                </Text>
+                {selectedItem ? (
+                  <Text numberOfLines={1} style={{ color: colors.dim, fontSize: 11, marginTop: 1 }}>
+                    {selectedItem.subtitle}
+                  </Text>
+                ) : null}
+              </View>
+              {reposLoading ? (
+                <ActivityIndicator size="small" color={colors.muted} />
+              ) : (
+                <Ionicons name="chevron-down" size={16} color={colors.muted} />
+              )}
+            </Pressable>
           </View>
 
           {/* Quick starter prompts */}
@@ -506,7 +590,7 @@ export default function NewChatScreen() {
               <ActivityIndicator size="small" color={colors.accent} />
               <Text style={{ color: colors.muted, fontSize: 12.5 }}>
                 {effectiveGitRemote
-                  ? `Cloning ${selectedChoice?.label || customRepoOrPath.trim()} on ${activeHost?.name ?? 'cloud'}…`
+                  ? `Cloning ${selectedItem?.title} & creating worktree on ${activeHost?.name ?? 'cloud'}…`
                   : `Starting session on ${activeHost?.name ?? 'host'}…`}
               </Text>
             </View>
@@ -569,6 +653,143 @@ export default function NewChatScreen() {
           />
         </View>
       </KeyboardAvoidingView>
+
+      {/* Unified Searchable Project / Org/Repo Dropdown Modal */}
+      <Modal
+        visible={pickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        <View style={styles.pickerBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPickerOpen(false)} />
+          <View
+            style={[
+              styles.pickerCard,
+              { backgroundColor: colors.surface, borderColor: colors.border },
+            ]}
+          >
+            <View style={styles.pickerHeader}>
+              <Text style={[styles.pickerTitle, { color: colors.text }]}>
+                {isCloudHost ? 'Select repository' : 'Select project'}
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                {isCloudHost ? (
+                  <Pressable onPress={() => loadCloudRepos(true)} hitSlop={8}>
+                    <Ionicons name="refresh-outline" size={18} color={colors.muted} />
+                  </Pressable>
+                ) : null}
+                <Pressable onPress={() => setPickerOpen(false)} hitSlop={8}>
+                  <Ionicons name="close" size={20} color={colors.muted} />
+                </Pressable>
+              </View>
+            </View>
+
+            <View
+              style={[
+                styles.pickerSearchBox,
+                { backgroundColor: colors.codeBg, borderColor: colors.border },
+              ]}
+            >
+              <Ionicons name="search-outline" size={16} color={colors.dim} />
+              <TextInput
+                autoFocus
+                value={pickerQuery}
+                onChangeText={setPickerQuery}
+                placeholder={isCloudHost ? 'Search org/repo…' : 'Search existing projects…'}
+                placeholderTextColor={colors.dim}
+                autoCapitalize="none"
+                autoCorrect={false}
+                style={[styles.pickerSearchInput, { color: colors.text }]}
+              />
+              {pickerQuery ? (
+                <Pressable onPress={() => setPickerQuery('')}>
+                  <Ionicons name="close-circle" size={16} color={colors.dim} />
+                </Pressable>
+              ) : null}
+            </View>
+
+            <ScrollView style={{ maxHeight: 380 }} keyboardShouldPersistTaps="handled">
+              {reposLoading && dropdownItems.length === 0 ? (
+                <View style={styles.pickerEmpty}>
+                  <ActivityIndicator size="small" color={colors.accent} />
+                  <Text style={{ color: colors.muted, fontSize: 12.5 }}>
+                    Loading GitHub repositories…
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  {clonedFiltered.length > 0 ? (
+                    <>
+                      <Text style={[styles.pickerGroupLabel, { color: colors.muted }]}>
+                        {isCloudHost ? 'EXISTING ON CLOUD' : 'EXISTING PROJECTS'}
+                      </Text>
+                      {clonedFiltered.map(renderDropdownRow)}
+                    </>
+                  ) : null}
+
+                  {remoteFiltered.length > 0 ? (
+                    <>
+                      <Text style={[styles.pickerGroupLabel, { color: colors.muted }]}>
+                        GITHUB REPOSITORIES
+                      </Text>
+                      {remoteFiltered.map(renderDropdownRow)}
+                    </>
+                  ) : null}
+
+                  {pickerQuery.trim() &&
+                  ((isCloudHost && looksLikeGitRepo(pickerQuery.trim())) ||
+                    (!isCloudHost && pickerQuery.trim().startsWith('/'))) ? (
+                    <Pressable
+                      onPress={() => {
+                        const q = pickerQuery.trim();
+                        setSelectedItem({
+                          key: `custom:${q}`,
+                          title: q,
+                          subtitle: isCloudHost
+                            ? 'Clone on demand into cloud workspaces'
+                            : q,
+                          cwd: q,
+                          gitRemote: isCloudHost ? q : undefined,
+                          cloned: !isCloudHost,
+                        });
+                        setPickerOpen(false);
+                        setPickerQuery('');
+                        setCreateError(null);
+                      }}
+                      style={[
+                        styles.pickerRow,
+                        { backgroundColor: colors.accentBg, borderColor: colors.border },
+                      ]}
+                    >
+                      <Ionicons
+                        name={isCloudHost ? 'cloud-download-outline' : 'folder-open-outline'}
+                        size={16}
+                        color={colors.accent}
+                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>
+                          {isCloudHost ? `Clone & use ${pickerQuery.trim()}` : `Use ${pickerQuery.trim()}`}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  ) : null}
+
+                  {filteredItems.length === 0 && !reposLoading ? (
+                    <View style={styles.pickerEmpty}>
+                      <Text style={{ color: colors.muted, fontSize: 12.5, textAlign: 'center' }}>
+                        {isCloudHost
+                          ? 'No matching repositories. Type any org/repo (e.g. owner/repo) to clone.'
+                          : 'No matching projects found.'}
+                      </Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <ImageModal
         uri={previewImage?.uri ?? null}
@@ -681,34 +902,14 @@ const styles = StyleSheet.create({
     fontSize: 10.5,
     fontWeight: '700',
   },
-  projectGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  projectChip: {
+  dropdownTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    borderRadius: 10,
+    gap: 10,
     borderWidth: 1,
-    maxWidth: '100%',
-  },
-  repoInputBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 11,
-    height: 42,
-  },
-  repoInput: {
-    flex: 1,
-    fontSize: 13,
-    paddingVertical: 0,
+    borderRadius: 11,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
   },
   starterCard: {
     flexDirection: 'row',
@@ -736,5 +937,62 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 9,
+  },
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    padding: 18,
+  },
+  pickerCard: {
+    borderRadius: 14,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: 14,
+    gap: 10,
+  },
+  pickerHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  pickerTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  pickerSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    height: 40,
+  },
+  pickerSearchInput: {
+    flex: 1,
+    fontSize: 13.5,
+    paddingVertical: 0,
+  },
+  pickerGroupLabel: {
+    fontSize: 10.5,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    marginTop: 8,
+    marginBottom: 4,
+    paddingHorizontal: 4,
+  },
+  pickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderRadius: 9,
+  },
+  pickerEmpty: {
+    paddingVertical: 24,
+    alignItems: 'center',
+    gap: 8,
   },
 });

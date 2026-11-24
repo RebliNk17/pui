@@ -95,6 +95,7 @@ impl Client {
     pub fn start_cloud(
         cfg: crate::remote::CloudHostConfig,
         local_cwd: &Path,
+        selected_repo: Option<crate::remote::cloud::CloudRepoItem>,
         existing_remote_session: Option<&Path>,
         permission_mode: String,
         ctx: eframe::egui::Context,
@@ -108,6 +109,7 @@ impl Client {
             if let Err(err) = run_cloud(
                 cfg,
                 &cwd,
+                selected_repo.as_ref(),
                 existing.as_deref(),
                 &permission_mode,
                 rx,
@@ -553,6 +555,7 @@ fn write_requests(
 fn run_cloud(
     cfg: crate::remote::CloudHostConfig,
     local_cwd: &Path,
+    selected_repo: Option<&crate::remote::cloud::CloudRepoItem>,
     existing_remote_session: Option<&str>,
     permission_mode: &str,
     rx: Receiver<Request>,
@@ -561,7 +564,12 @@ fn run_cloud(
 ) -> Result<(), String> {
     let remote_path = match existing_remote_session {
         Some(p) if !p.is_empty() => p.to_owned(),
-        _ => crate::remote::cloud::create_cloud_session(&cfg, local_cwd, permission_mode)?,
+        _ => crate::remote::cloud::create_cloud_session(
+            &cfg,
+            local_cwd,
+            selected_repo,
+            permission_mode,
+        )?,
     };
 
     let query = format!(

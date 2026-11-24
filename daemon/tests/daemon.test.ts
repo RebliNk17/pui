@@ -266,6 +266,12 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(demoCat.cloned, true);
       assert.equal(demoCat.git_remote, 'git@github.com:RebliNk17/demo-app.git');
 
+      // GET /v1/repos returns cloned workspaces first + searchable org/repo list.
+      const reposRes = (await (
+        await fetch(`${base}/v1/repos?q=pui`, { headers: authHeaders })
+      ).json()) as { repos: { full_name: string; cloned: boolean }[] };
+      assert.ok(reposRes.repos.some((r) => r.full_name === 'RebliNk17/pui'));
+
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
         'git@github.com:RebliNk17/pui.git',
