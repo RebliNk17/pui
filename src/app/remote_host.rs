@@ -1656,7 +1656,7 @@ impl Pui {
             }
         });
 
-        // Quiet Mac selective "Sync to Cloud" modal — asks explicitly what to push.
+        // Quiet Mac selective "Sync to Cloud" modal — Option A (Inset Cards + Toggles + Skill Pill Chips).
         let modal_open = shared.lock().map(|s| s.sync_modal_open).unwrap_or(false);
         if modal_open {
             if let Some(cfg) = existing.clone() {
@@ -1665,256 +1665,342 @@ impl Pui {
                 let modal_resp = prompt_ui::modal(
                     ui.ctx(),
                     egui::Id::new("pui_cloud_sync_modal"),
-                    480.0,
+                    520.0,
                     |ui| {
                         prompt_ui::heading(
                             ui,
                             &format!("Sync to {}", cfg.name),
-                            "Choose what to push from this Mac to your cloud host over Tailscale. Nothing is sent unless selected.",
+                            "Choose what to push from this Mac over Tailscale. Nothing is sent unless toggled on.",
                         );
                         ui.add_space(12.0);
 
                         if let Ok(mut st) = shared.lock() {
                             let inv = st.inventory.clone().unwrap_or_default();
                             let cloud_st = st.status.clone();
+                            let content_w = (ui.available_width() - 12.0).max(260.0);
 
                             egui::ScrollArea::vertical()
-                                .max_height(340.0)
+                                .max_height(410.0)
+                                .auto_shrink([false, true])
                                 .show(ui, |ui| {
-                                    // 1. Provider logins
-                                    ui.label(
-                                        RichText::new("Provider logins (auth.json)")
-                                            .size(12.5)
-                                            .strong()
-                                            .color(colors.text),
-                                    );
-                                    if inv.providers.is_empty() {
-                                        ui.label(
-                                            RichText::new("No local provider logins found.")
-                                                .size(11.5)
-                                                .color(colors.muted),
-                                        );
-                                    } else {
-                                        for prov in &inv.providers {
-                                            let already = cloud_st.as_ref().is_some_and(|s| {
-                                                s.pi_auth_providers.contains(prov)
-                                            });
-                                            let mut checked = st.plan.providers.contains(prov);
-                                            let label = if already {
-                                                format!("{prov} (already on cloud)")
-                                            } else {
-                                                prov.clone()
-                                            };
-                                            if ui.checkbox(&mut checked, label).changed() {
-                                                if checked {
-                                                    st.plan.providers.insert(prov.clone());
-                                                } else {
-                                                    st.plan.providers.remove(prov);
+                                    ui.set_width(content_w);
+                                    ui.set_max_width(content_w);
+
+                                    // 1. ACCESS & SERVICES
+                                    sync_section_label(ui, "ACCESS & SERVICES");
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        // Provider logins row
+                                        let mut sync_provs = !st.plan.providers.is_empty();
+                                        let prov_sub = if inv.providers.is_empty() {
+                                            "No local provider logins found".to_owned()
+                                        } else {
+                                            inv.providers.join(", ")
+                                        };
+                                        let cloud_prov_count = cloud_st
+                                            .as_ref()
+                                            .map(|s| s.pi_auth_providers.len())
+                                            .unwrap_or(0);
+                                        let prov_badge = if cloud_prov_count > 0 {
+                                            Some((
+                                                format!("{cloud_prov_count} synced"),
+                                                colors.green,
+                                            ))
+                                        } else {
+                                            None
+                                        };
+                                        if sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Provider logins",
+                                            &prov_sub,
+                                            prov_badge.as_ref().map(|(s, c)| (s.as_str(), *c)),
+                                            &mut sync_provs,
+                                            !inv.providers.is_empty(),
+                                            None,
+                                        ) {
+                                            if sync_provs {
+                                                for p in &inv.providers {
+                                                    st.plan.providers.insert(p.clone());
                                                 }
+                                            } else {
+                                                st.plan.providers.clear();
                                             }
                                         }
-                                    }
 
-                                    ui.add_space(10.0);
-                                    // 2. Dedicated Git SSH key + auto-clone note
-                                    ui.label(
-                                        RichText::new("Git & GitHub access")
-                                            .size(12.5)
-                                            .strong()
-                                            .color(colors.text),
-                                    );
-                                    let git_label = if cloud_st
-                                        .as_ref()
-                                        .is_some_and(|s| s.has_git_ssh_key)
-                                    {
-                                        "Verify dedicated cloud SSH key & Git author (already set)"
-                                    } else {
-                                        "Generate dedicated cloud SSH key & register on GitHub (keeps Mac private key local)"
-                                    };
-                                    ui.checkbox(&mut st.plan.setup_git_ssh, git_label);
-                                    ui.label(
-                                        RichText::new(
-                                            "Once enabled, cloud agents automatically clone any repo you start a chat from on demand.",
-                                        )
-                                        .size(11.0)
-                                        .color(colors.muted),
-                                    );
-
-                                    // 3. Opt-in Service & CLI credentials (Railway, GitHub CLI, Render, etc.)
-                                    ui.add_space(10.0);
-                                    ui.label(
-                                        RichText::new("Service & CLI credentials (opt-in)")
-                                            .size(12.5)
-                                            .strong()
-                                            .color(colors.text),
-                                    );
-                                    if inv.service_creds.is_empty() {
-                                        ui.label(
-                                            RichText::new(
-                                                "No local CLI service logins detected (gh, Railway, Render, Vercel, Fly, Wrangler).",
-                                            )
-                                            .size(11.5)
-                                            .color(colors.muted),
+                                        // Git & Auto-clone SSH key row
+                                        settings::page_separator(ui);
+                                        let git_ready = cloud_st
+                                            .as_ref()
+                                            .is_some_and(|s| s.has_git_ssh_key);
+                                        let git_badge = git_ready.then_some(("Ready", colors.green));
+                                        sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Git & Auto-clone SSH key",
+                                            "Dedicated cloud key · clones any repo on demand (Mac key stays local)",
+                                            git_badge,
+                                            &mut st.plan.setup_git_ssh,
+                                            true,
+                                            None,
                                         );
-                                    } else {
+
+                                        // Detected opt-in CLI Service credentials (gh, Railway, Render, etc.)
                                         for cred in &inv.service_creds {
-                                            let already = cloud_st
-                                                .as_ref()
-                                                .is_some_and(|s| s.service_creds.contains(&cred.id));
-                                            let mut checked =
-                                                st.plan.service_creds.contains(&cred.id);
-                                            let label = if already {
-                                                format!(
-                                                    "{} — {} (already on cloud)",
-                                                    cred.label, cred.scope
-                                                )
+                                            settings::page_separator(ui);
+                                            let already = cloud_st.as_ref().is_some_and(|s| {
+                                                s.service_creds.contains(&cred.id)
+                                            });
+                                            let mut on = st.plan.service_creds.contains(&cred.id);
+                                            let badge = if already {
+                                                Some(("Synced", colors.green))
                                             } else {
-                                                format!("{} — {}", cred.label, cred.scope)
+                                                Some(("Opt-in", colors.muted))
                                             };
-                                            if ui.checkbox(&mut checked, label).changed() {
-                                                if checked {
+                                            if sync_toggle_row(
+                                                ui,
+                                                row_w,
+                                                &cred.label,
+                                                &cred.scope,
+                                                badge,
+                                                &mut on,
+                                                true,
+                                                None,
+                                            ) {
+                                                if on {
                                                     st.plan.service_creds.insert(cred.id.clone());
                                                 } else {
                                                     st.plan.service_creds.remove(&cred.id);
                                                 }
                                             }
                                         }
-                                    }
-
-                                    // 4. Headless research browser & MCP servers
-                                    ui.add_space(10.0);
-                                    ui.label(
-                                        RichText::new("Research browser & MCP servers")
-                                            .size(12.5)
-                                            .strong()
-                                            .color(colors.text),
-                                    );
-                                    let pw_already = cloud_st.as_ref().is_some_and(|s| {
-                                        s.mcp_servers
-                                            .iter()
-                                            .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP)
                                     });
-                                    let pw_label = if pw_already {
-                                        "Headless Playwright MCP — isolated research browser, no logins/cookies (already on cloud)"
-                                    } else {
-                                        "Add Headless Playwright MCP — isolated research browser, no logins/cookies"
-                                    };
-                                    ui.checkbox(&mut st.plan.add_playwright_research, pw_label);
 
-                                    for mcp in &inv.mcps {
-                                        if mcp.blocked_on_cloud {
-                                            ui.add_enabled_ui(false, |ui| {
+                                    // 2. RESEARCH BROWSER & MCPS
+                                    ui.add_space(12.0);
+                                    sync_section_label(ui, "RESEARCH BROWSER & MCPS");
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        let pw_already = cloud_st.as_ref().is_some_and(|s| {
+                                            s.mcp_servers
+                                                .iter()
+                                                .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP)
+                                        });
+                                        let pw_badge =
+                                            pw_already.then_some(("Synced", colors.green));
+                                        sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Headless Playwright MCP",
+                                            "Isolated research browser — no personal logins or cookies",
+                                            pw_badge,
+                                            &mut st.plan.add_playwright_research,
+                                            true,
+                                            None,
+                                        );
+
+                                        for mcp in &inv.mcps {
+                                            settings::page_separator(ui);
+                                            if mcp.blocked_on_cloud {
                                                 let mut off = false;
-                                                let reason = mcp
+                                                let sub = mcp.reason.as_deref().unwrap_or(
+                                                    "Blocked on cloud — local desktop browser only",
+                                                );
+                                                sync_toggle_row(
+                                                    ui,
+                                                    row_w,
+                                                    &mcp.name,
+                                                    sub,
+                                                    None,
+                                                    &mut off,
+                                                    false,
+                                                    Some("Local only"),
+                                                );
+                                            } else {
+                                                let already = cloud_st.as_ref().is_some_and(|s| {
+                                                    s.mcp_servers.contains(&mcp.name)
+                                                });
+                                                let mut on = st.plan.mcps.contains(&mcp.name);
+                                                let sub = mcp
                                                     .reason
                                                     .as_deref()
-                                                    .unwrap_or("Blocked on cloud");
-                                                ui.checkbox(
-                                                    &mut off,
-                                                    format!("{} — {reason}", mcp.name),
-                                                );
-                                            });
-                                        } else {
-                                            let mut checked = st.plan.mcps.contains(&mcp.name);
-                                            let label = if let Some(ref reason) = mcp.reason {
-                                                format!("{} — {}", mcp.name, reason)
-                                            } else {
-                                                mcp.name.clone()
-                                            };
-                                            if ui.checkbox(&mut checked, label).changed() {
-                                                if checked {
-                                                    st.plan.mcps.insert(mcp.name.clone());
-                                                } else {
-                                                    st.plan.mcps.remove(&mcp.name);
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // 5. Skills
-                                    ui.add_space(10.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(format!("Skills ({})", inv.skills.len()))
-                                                .size(12.5)
-                                                .strong()
-                                                .color(colors.text),
-                                        );
-                                        if !inv.skills.is_empty() {
-                                            if ghost_button(ui, "All", None).clicked() {
-                                                for s in &inv.skills {
-                                                    st.plan.skills.insert(s.clone());
-                                                }
-                                            }
-                                            if ghost_button(ui, "None", None).clicked() {
-                                                st.plan.skills.clear();
-                                            }
-                                        }
-                                    });
-                                    if inv.skills.is_empty() {
-                                        ui.label(
-                                            RichText::new("No local skills found.")
-                                                .size(11.5)
-                                                .color(colors.muted),
-                                        );
-                                    } else {
-                                        ui.horizontal_wrapped(|ui| {
-                                            for skill in &inv.skills {
-                                                let mut checked = st.plan.skills.contains(skill);
-                                                if ui.checkbox(&mut checked, skill).changed() {
-                                                    if checked {
-                                                        st.plan.skills.insert(skill.clone());
+                                                    .unwrap_or("Portable MCP server");
+                                                let badge = already
+                                                    .then_some(("Synced", colors.green));
+                                                if sync_toggle_row(
+                                                    ui,
+                                                    row_w,
+                                                    &mcp.name,
+                                                    sub,
+                                                    badge,
+                                                    &mut on,
+                                                    true,
+                                                    None,
+                                                ) {
+                                                    if on {
+                                                        st.plan.mcps.insert(mcp.name.clone());
                                                     } else {
-                                                        st.plan.skills.remove(skill);
+                                                        st.plan.mcps.remove(&mcp.name);
                                                     }
                                                 }
                                             }
-                                        });
-                                    }
+                                        }
+                                    });
 
-                                    // 6. Optional immediate pre-clone of current repo
-                                    if let Some(ref remote_url) = inv.git_remote {
-                                        ui.add_space(10.0);
-                                        ui.label(
-                                            RichText::new("Optional pre-clone")
-                                                .size(12.5)
-                                                .strong()
-                                                .color(colors.text),
-                                        );
-                                        ui.checkbox(
-                                            &mut st.plan.clone_current_repo,
+                                    // 3. SKILLS (Pill chips + All / None)
+                                    ui.add_space(12.0);
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(content_w);
+                                        let sk_title = if inv.skills.is_empty() {
+                                            "SKILLS".to_owned()
+                                        } else {
                                             format!(
-                                                "Pre-clone {} now ({remote_url})",
-                                                inv.project_name
-                                            ),
+                                                "SKILLS · {} OF {} SELECTED",
+                                                st.plan.skills.len(),
+                                                inv.skills.len()
+                                            )
+                                        };
+                                        ui.label(
+                                            RichText::new(sk_title)
+                                                .size(10.5)
+                                                .strong()
+                                                .color(colors.muted),
                                         );
+                                        if !inv.skills.is_empty() {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ghost_button(ui, "None", None).clicked() {
+                                                        st.plan.skills.clear();
+                                                    }
+                                                    if ghost_button(ui, "All", None).clicked() {
+                                                        for s in &inv.skills {
+                                                            st.plan.skills.insert(s.clone());
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        egui::Frame::new()
+                                            .inner_margin(egui::Margin::symmetric(12, 10))
+                                            .show(ui, |ui| {
+                                                let inner_w = (row_w - 24.0).max(120.0);
+                                                ui.set_width(inner_w);
+                                                ui.set_max_width(inner_w);
+                                                if inv.skills.is_empty() {
+                                                    ui.label(
+                                                        RichText::new("No local skills found.")
+                                                            .size(11.5)
+                                                            .color(colors.muted),
+                                                    );
+                                                } else {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing =
+                                                            Vec2::new(6.0, 6.0);
+                                                        for skill in &inv.skills {
+                                                            let mut on =
+                                                                st.plan.skills.contains(skill);
+                                                            let already = cloud_st
+                                                                .as_ref()
+                                                                .is_some_and(|s| {
+                                                                    s.skills.contains(skill)
+                                                                });
+                                                            if sync_skill_chip(
+                                                                ui, skill, &mut on, already,
+                                                            ) {
+                                                                if on {
+                                                                    st.plan
+                                                                        .skills
+                                                                        .insert(skill.clone());
+                                                                } else {
+                                                                    st.plan.skills.remove(skill);
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                    });
+
+                                    // 4. OPTIONAL PRE-CLONE
+                                    if let Some(ref remote_url) = inv.git_remote {
+                                        ui.add_space(12.0);
+                                        sync_section_label(ui, "OPTIONAL PRE-CLONE");
+                                        sync_inset_card(ui, content_w, |ui, row_w| {
+                                            sync_toggle_row(
+                                                ui,
+                                                row_w,
+                                                &format!("Pre-clone {} now", inv.project_name),
+                                                remote_url,
+                                                None,
+                                                &mut st.plan.clone_current_repo,
+                                                true,
+                                                None,
+                                            );
+                                        });
                                     }
                                 });
 
+                            // Live footer summary + Cancel / Sync selected
+                            let mut parts: Vec<String> = Vec::new();
+                            if !st.plan.providers.is_empty() {
+                                parts.push(format!("{} provider(s)", st.plan.providers.len()));
+                            }
+                            if st.plan.setup_git_ssh {
+                                parts.push("Git SSH".into());
+                            }
+                            if !st.plan.service_creds.is_empty() {
+                                parts.push(format!("{} service(s)", st.plan.service_creds.len()));
+                            }
+                            if st.plan.add_playwright_research {
+                                parts.push("Playwright".into());
+                            }
+                            if !st.plan.mcps.is_empty() {
+                                parts.push(format!("{} MCP(s)", st.plan.mcps.len()));
+                            }
+                            if !st.plan.skills.is_empty() {
+                                parts.push(format!("{} skill(s)", st.plan.skills.len()));
+                            }
+                            if st.plan.clone_current_repo {
+                                parts.push("repo".into());
+                            }
+                            let summary_text = if parts.is_empty() {
+                                "Toggle any item above to sync".to_owned()
+                            } else {
+                                format!("Will sync: {}", parts.join(" · "))
+                            };
+
                             ui.add_space(14.0);
                             let can_sync = !st.plan.is_empty() && !st.busy;
-                            prompt_ui::footer(ui, |ui| {
-                                if prompt_ui::button(
-                                    ui,
-                                    "Sync selected",
-                                    prompt_ui::Button::Primary,
-                                    can_sync,
-                                )
-                                .clicked()
-                                {
-                                    run_sync = true;
-                                    close_modal = true;
-                                }
-                                if prompt_ui::button(
-                                    ui,
-                                    "Cancel",
-                                    prompt_ui::Button::Secondary,
-                                    true,
-                                )
-                                .clicked()
-                                {
-                                    close_modal = true;
-                                }
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(summary_text).size(11.5).color(colors.muted),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    if prompt_ui::button(
+                                        ui,
+                                        "Sync selected",
+                                        prompt_ui::Button::Primary,
+                                        can_sync,
+                                    )
+                                    .clicked()
+                                    {
+                                        run_sync = true;
+                                        close_modal = true;
+                                    }
+                                    if prompt_ui::button(
+                                        ui,
+                                        "Cancel",
+                                        prompt_ui::Button::Secondary,
+                                        true,
+                                    )
+                                    .clicked()
+                                    {
+                                        close_modal = true;
+                                    }
+                                });
                             });
                         }
                     },
@@ -2038,6 +2124,167 @@ impl Pui {
                 }
             }
         }
+    }
+}
+
+fn sync_section_label(ui: &mut egui::Ui, label: &str) {
+    let colors = crate::theme::palette(ui.ctx());
+    ui.label(RichText::new(label).size(10.5).strong().color(colors.muted));
+    ui.add_space(5.0);
+}
+
+fn sync_inset_card(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui, f32)) {
+    let colors = crate::theme::palette(ui.ctx());
+    let inner_w = (width - 2.0).max(120.0);
+    egui::Frame::new()
+        .fill(colors.bg.gamma_multiply(0.55))
+        .stroke(Stroke::new(1.0_f32, colors.border))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::ZERO)
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            body(ui, inner_w);
+        });
+}
+
+fn sync_small_tag(ui: &mut egui::Ui, label: &str, color: Color32, is_muted: bool) {
+    let colors = crate::theme::palette(ui.ctx());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(10.5), color);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 14.0, 20.0), Sense::hover());
+    let (fill, stroke) = if is_muted {
+        (colors.surface, Stroke::new(1.0_f32, colors.border))
+    } else {
+        (
+            color.gamma_multiply(0.12),
+            Stroke::new(1.0_f32, color.gamma_multiply(0.32)),
+        )
+    };
+    ui.painter()
+        .rect(rect, 10, fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        color,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_toggle_row(
+    ui: &mut egui::Ui,
+    row_w: f32,
+    title: &str,
+    subtitle: &str,
+    badge: Option<(&str, Color32)>,
+    checked: &mut bool,
+    enabled: bool,
+    disabled_tag: Option<&str>,
+) -> bool {
+    let colors = crate::theme::palette(ui.ctx());
+    let before = *checked;
+    let inner_w = (row_w - 24.0).max(120.0);
+    let right_reserve = if !enabled {
+        86.0
+    } else if badge.is_some() {
+        118.0
+    } else {
+        50.0
+    };
+    let left_w = (inner_w - right_reserve).max(120.0);
+
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.horizontal(|ui| {
+                ui.set_width(inner_w);
+                let title_color = if enabled { colors.text } else { colors.dim };
+                let sub_color = if enabled { colors.muted } else { colors.dim };
+                ui.vertical(|ui| {
+                    ui.set_width(left_w);
+                    ui.set_max_width(left_w);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(title).size(12.5).strong().color(title_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(subtitle).size(11.0).color(sub_color))
+                            .wrap(),
+                    );
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if enabled {
+                        settings::toggle_switch(ui, checked, title);
+                        if let Some((tag_label, tag_color)) = badge {
+                            let is_muted = tag_color == colors.muted;
+                            sync_small_tag(ui, tag_label, tag_color, is_muted);
+                        }
+                    } else if let Some(tag) = disabled_tag {
+                        sync_small_tag(ui, tag, colors.dim, true);
+                    }
+                });
+            });
+        });
+
+    *checked != before
+}
+
+fn sync_skill_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &mut bool,
+    already_on_cloud: bool,
+) -> bool {
+    let colors = crate::theme::palette(ui.ctx());
+    let fg = if *selected { colors.text } else { colors.muted };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(11.5), fg);
+    let dot_pad = if already_on_cloud { 10.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x + 20.0 + dot_pad, 24.0),
+        Sense::click(),
+    );
+    let (fill, stroke) = if *selected {
+        (
+            colors.accent.gamma_multiply(0.20),
+            Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.55)),
+        )
+    } else if resp.hovered() {
+        (colors.hover, Stroke::new(1.0_f32, colors.border))
+    } else {
+        (colors.surface, Stroke::new(1.0_f32, colors.border))
+    };
+    ui.painter()
+        .rect(rect, 12, fill, stroke, egui::StrokeKind::Inside);
+
+    let mut text_x = rect.left() + 10.0;
+    if already_on_cloud {
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + 10.0, rect.center().y),
+            2.5,
+            colors.green,
+        );
+        text_x += 8.0;
+    }
+    ui.painter().galley(
+        egui::pos2(text_x, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        *selected = !*selected;
+        true
+    } else {
+        false
     }
 }
 
