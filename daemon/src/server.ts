@@ -7,6 +7,7 @@ import {
   cloneRepoIntoWorkspace,
   getAdminStatus,
   normalizeGitRemote,
+  removeCloudGitKey,
   setupCloudGit,
   writeCloudMcps,
   writeCloudServiceCreds,
@@ -466,12 +467,11 @@ export class PuiDaemonServer {
           string,
           unknown
         >;
-        const skills = body.skills;
-        if (!Array.isArray(skills)) {
-          sendJson(res, 400, { error: 'Missing skills array.' });
-          return;
-        }
-        const result = writeCloudSkills(skills as IncomingSkillBundle[]);
+        const skills = Array.isArray(body.skills) ? (body.skills as IncomingSkillBundle[]) : [];
+        const remove = Array.isArray(body.remove)
+          ? body.remove.filter((x): x is string => typeof x === 'string')
+          : [];
+        const result = writeCloudSkills(skills, remove);
         sendJson(res, 200, { ok: true, ...result });
         return;
       }
@@ -481,12 +481,13 @@ export class PuiDaemonServer {
           string,
           unknown
         >;
-        const credentials = body.credentials;
-        if (!Array.isArray(credentials)) {
-          sendJson(res, 400, { error: 'Missing credentials array.' });
-          return;
-        }
-        const result = writeCloudServiceCreds(credentials as IncomingServiceCred[]);
+        const credentials = Array.isArray(body.credentials)
+          ? (body.credentials as IncomingServiceCred[])
+          : [];
+        const remove = Array.isArray(body.remove)
+          ? body.remove.filter((x): x is string => typeof x === 'string')
+          : [];
+        const result = writeCloudServiceCreds(credentials, remove);
         sendJson(res, 200, { ok: true, ...result });
         return;
       }
@@ -496,6 +497,11 @@ export class PuiDaemonServer {
           string,
           unknown
         >;
+        if (body.remove === true) {
+          const result = removeCloudGitKey();
+          sendJson(res, 200, { ok: true, ...result });
+          return;
+        }
         const result = setupCloudGit({
           userName: typeof body.user_name === 'string' ? body.user_name : undefined,
           userEmail: typeof body.user_email === 'string' ? body.user_email : undefined,

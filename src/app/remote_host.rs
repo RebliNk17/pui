@@ -1163,6 +1163,7 @@ impl Pui {
             sync_modal_open: bool,
             qr_modal_open: bool,
             inventory: Option<cloud::LocalSyncInventory>,
+            initial_plan: cloud::CloudSyncPlan,
             plan: cloud::CloudSyncPlan,
         }
 
@@ -1177,23 +1178,13 @@ impl Pui {
         let open_sync_picker = |shared: &Arc<Mutex<CloudUiState>>, cwd: &std::path::Path| {
             let inv = cloud::discover_local_inventory(cwd);
             if let Ok(mut st) = shared.lock() {
-                let mut plan = cloud::CloudSyncPlan::default();
-                let cloud_provs: BTreeSet<&str> = st
-                    .status
-                    .as_ref()
-                    .map(|s| s.pi_auth_providers.iter().map(String::as_str).collect())
-                    .unwrap_or_default();
-                for p in &inv.providers {
-                    if !cloud_provs.contains(p.as_str()) {
-                        plan.providers.insert(p.clone());
-                    }
-                }
-                plan.setup_git_ssh = !st.status.as_ref().is_some_and(|s| s.has_git_ssh_key);
-                for mcp in &inv.mcps {
-                    if !mcp.local_only {
-                        plan.mcps.insert(mcp.name.clone());
-                    }
-                }
+                let has_status = st.status.is_some();
+                let plan = cloud::CloudSyncPlan::from_live_state(&inv, st.status.as_ref());
+                st.initial_plan = if has_status {
+                    plan.clone()
+                } else {
+                    cloud::CloudSyncPlan::default()
+                };
                 st.inventory = Some(inv);
                 st.plan = plan;
                 st.sync_modal_open = true;
@@ -1788,6 +1779,7 @@ impl Pui {
             if let Some(cfg) = existing.clone() {
                 let mut close_modal = false;
                 let mut run_sync = false;
+                let mut force_resync = false;
                 let modal_resp = prompt_ui::modal(
                     ui.ctx(),
                     egui::Id::new("pui_cloud_sync_modal"),
@@ -1796,7 +1788,7 @@ impl Pui {
                         prompt_ui::heading(
                             ui,
                             &format!("Sync to {}", cfg.name),
-                            "Choose what to push from this Mac over Tailscale. Nothing is sent unless toggled on.",
+                            "Toggles reflect what is currently shared with your cloud host. Turn items on to push or off to remove.",
                         );
                         ui.add_space(12.0);
 
@@ -2135,52 +2127,121 @@ impl Pui {
                                     }
                                 });
 
-                            // Live footer summary + Cancel / Sync selected
-                            let mut parts: Vec<String> = Vec::new();
-                            if !st.plan.providers.is_empty() {
-                                parts.push(format!("{} provider(s)", st.plan.providers.len()));
+                            // Live diff summary + hairline divider + Cancel / Re-sync / Apply changes
+                            let mut add_parts: Vec<String> = Vec::new();
+                            let mut rm_parts: Vec<String> = Vec::new();
+                            if st.plan.providers != st.initial_plan.providers {
+                                if st.plan.providers.is_empty() {
+                                    rm_parts.push("providers".into());
+                                } else {
+                                    add_parts
+                                        .push(format!("{} provider(s)", st.plan.providers.len()));
+                                }
                             }
-                            if st.plan.setup_git_ssh {
-                                parts.push("Git SSH".into());
+                            if st.plan.setup_git_ssh != st.initial_plan.setup_git_ssh {
+                                if st.plan.setup_git_ssh {
+                                    add_parts.push("Git SSH".into());
+                                } else {
+                                    rm_parts.push("Git SSH".into());
+                                }
+                            } else if st.plan.setup_git_ssh
+                                && st.plan.git_auth_choice != st.initial_plan.git_auth_choice
+                            {
+                                add_parts.push(match st.plan.git_auth_choice {
+                                    cloud::GitAuthChoice::CopyMacKey => "Mac SSH key".into(),
+                                    cloud::GitAuthChoice::DedicatedCloudKey => {
+                                        "Dedicated SSH key".into()
+                                    }
+                                });
                             }
-                            if !st.plan.service_creds.is_empty() {
-                                parts.push(format!("{} service(s)", st.plan.service_creds.len()));
+                            let svc_add = st
+                                .plan
+                                .service_creds
+                                .difference(&st.initial_plan.service_creds)
+                                .count();
+                            let svc_rm = st
+                                .initial_plan
+                                .service_creds
+                                .difference(&st.plan.service_creds)
+                                .count();
+                            if svc_add > 0 {
+                                add_parts.push(format!("{svc_add} service(s)"));
                             }
-                            if st.plan.add_playwright_research {
-                                parts.push("Playwright".into());
+                            if svc_rm > 0 {
+                                rm_parts.push(format!("{svc_rm} service(s)"));
                             }
-                            if !st.plan.mcps.is_empty() {
-                                parts.push(format!("{} MCP(s)", st.plan.mcps.len()));
+                            if st.plan.add_playwright_research
+                                != st.initial_plan.add_playwright_research
+                            {
+                                if st.plan.add_playwright_research {
+                                    add_parts.push("Playwright".into());
+                                } else {
+                                    rm_parts.push("Playwright".into());
+                                }
                             }
-                            if !st.plan.skills.is_empty() {
-                                parts.push(format!("{} skill(s)", st.plan.skills.len()));
+                            let mcp_add = st.plan.mcps.difference(&st.initial_plan.mcps).count();
+                            let mcp_rm = st.initial_plan.mcps.difference(&st.plan.mcps).count();
+                            if mcp_add > 0 {
+                                add_parts.push(format!("{mcp_add} MCP(s)"));
+                            }
+                            if mcp_rm > 0 {
+                                rm_parts.push(format!("{mcp_rm} MCP(s)"));
+                            }
+                            let sk_add = st.plan.skills.difference(&st.initial_plan.skills).count();
+                            let sk_rm = st.initial_plan.skills.difference(&st.plan.skills).count();
+                            if sk_add > 0 {
+                                add_parts.push(format!("{sk_add} skill(s)"));
+                            }
+                            if sk_rm > 0 {
+                                rm_parts.push(format!("{sk_rm} skill(s)"));
                             }
                             if st.plan.clone_current_repo {
-                                parts.push("repo".into());
+                                add_parts.push("pre-clone repo".into());
                             }
-                            let summary_text = if parts.is_empty() {
-                                "Toggle any item above to sync".to_owned()
-                            } else {
-                                format!("Will sync: {}", parts.join(" · "))
+
+                            let has_changes = !add_parts.is_empty() || !rm_parts.is_empty();
+                            let summary_text = match (add_parts.is_empty(), rm_parts.is_empty()) {
+                                (true, true) => format!("In sync with {}", cfg.name),
+                                (false, true) => format!("Add: {}", add_parts.join(" · ")),
+                                (true, false) => format!("Remove: {}", rm_parts.join(" · ")),
+                                (false, false) => {
+                                    format!("+{} · -{}", add_parts.join(", "), rm_parts.join(", "))
+                                }
                             };
 
-                            ui.add_space(14.0);
-                            let can_sync = !st.plan.is_empty() && !st.busy;
+                            ui.add_space(10.0);
+                            settings::page_separator(ui);
+                            ui.add_space(12.0);
+                            let can_apply = has_changes && !st.busy;
+                            let can_resync = !st.plan.is_empty() && !st.busy;
                             ui.horizontal(|ui| {
                                 ui.label(
                                     RichText::new(summary_text).size(11.5).color(colors.muted),
                                 );
                                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
-                                    if prompt_ui::button(
+                                    if has_changes {
+                                        if prompt_ui::button(
+                                            ui,
+                                            "Apply changes",
+                                            prompt_ui::Button::Primary,
+                                            can_apply,
+                                        )
+                                        .clicked()
+                                        {
+                                            run_sync = true;
+                                            close_modal = true;
+                                        }
+                                    } else if prompt_ui::button(
                                         ui,
-                                        "Sync selected",
+                                        "Re-sync all",
                                         prompt_ui::Button::Primary,
-                                        can_sync,
+                                        can_resync,
                                     )
                                     .clicked()
                                     {
                                         run_sync = true;
+                                        force_resync = true;
                                         close_modal = true;
                                     }
                                     if prompt_ui::button(
@@ -2207,14 +2268,14 @@ impl Pui {
                     }
                 }
                 if run_sync {
-                    let plan = shared
+                    let (initial_plan, plan) = shared
                         .lock()
                         .map(|mut st| {
                             st.busy = true;
                             st.toast = None;
                             st.action_needed = None;
                             st.error = None;
-                            st.plan.clone()
+                            (st.initial_plan.clone(), st.plan.clone())
                         })
                         .unwrap_or_default();
                     let cfg_c = cfg.clone();
@@ -2222,7 +2283,13 @@ impl Pui {
                     let s_clone = shared.clone();
                     let ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
-                        let sync_res = cloud::execute_selective_sync(&cfg_c, &cwd, &plan);
+                        let sync_res = cloud::execute_selective_sync(
+                            &cfg_c,
+                            &cwd,
+                            &initial_plan,
+                            &plan,
+                            force_resync,
+                        );
                         let status_res = cloud::fetch_status(&cfg_c).ok();
                         if let Ok(mut st) = s_clone.lock() {
                             st.busy = false;

@@ -30,6 +30,7 @@ pub struct CloudAdminStatus {
     pub has_pi_auth: bool,
     pub pi_auth_providers: Vec<String>,
     pub has_git_ssh_key: bool,
+    pub git_key_mode: Option<String>,
     pub git_public_key: Option<String>,
     pub git_user_name: Option<String>,
     pub git_user_email: Option<String>,
@@ -44,7 +45,6 @@ pub struct CloudAdminStatus {
 pub struct LocalMcpItem {
     pub name: String,
     pub blocked_on_cloud: bool,
-    pub local_only: bool,
     pub reason: Option<String>,
 }
 
@@ -97,7 +97,7 @@ pub struct LocalSyncInventory {
     pub project_name: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CloudSyncPlan {
     pub providers: BTreeSet<String>,
     pub setup_git_ssh: bool,
@@ -118,6 +118,57 @@ impl CloudSyncPlan {
             && self.skills.is_empty()
             && self.service_creds.is_empty()
             && !self.clone_current_repo
+    }
+
+    /// Builds a plan reflecting what is currently shared on the cloud host.
+    /// On a fresh unconfigured host (`status == None`), suggests sensible defaults
+    /// (local providers + dedicated Git SSH) while keeping services/skills opt-in.
+    pub fn from_live_state(inv: &LocalSyncInventory, status: Option<&CloudAdminStatus>) -> Self {
+        let mut plan = Self::default();
+        let Some(st) = status else {
+            for p in &inv.providers {
+                plan.providers.insert(p.clone());
+            }
+            plan.setup_git_ssh = true;
+            return plan;
+        };
+
+        let cloud_provs: BTreeSet<&str> = st.pi_auth_providers.iter().map(String::as_str).collect();
+        for p in &inv.providers {
+            if cloud_provs.contains(p.as_str()) {
+                plan.providers.insert(p.clone());
+            }
+        }
+        plan.setup_git_ssh = st.has_git_ssh_key;
+        plan.git_auth_choice = if st.git_key_mode.as_deref() == Some("copied") {
+            GitAuthChoice::CopyMacKey
+        } else {
+            GitAuthChoice::DedicatedCloudKey
+        };
+
+        let cloud_svcs: BTreeSet<&str> = st.service_creds.iter().map(String::as_str).collect();
+        for cred in &inv.service_creds {
+            if cloud_svcs.contains(cred.id.as_str()) {
+                plan.service_creds.insert(cred.id.clone());
+            }
+        }
+
+        let cloud_mcps: BTreeSet<&str> = st.mcp_servers.iter().map(String::as_str).collect();
+        plan.add_playwright_research = cloud_mcps.contains(PLAYWRIGHT_RESEARCH_MCP);
+        for mcp in &inv.mcps {
+            if !mcp.blocked_on_cloud && cloud_mcps.contains(mcp.name.as_str()) {
+                plan.mcps.insert(mcp.name.clone());
+            }
+        }
+
+        let cloud_skills: BTreeSet<&str> = st.skills.iter().map(String::as_str).collect();
+        for s in &inv.skills {
+            if cloud_skills.contains(s.as_str()) {
+                plan.skills.insert(s.clone());
+            }
+        }
+
+        plan
     }
 }
 
@@ -378,12 +429,11 @@ fn read_local_mcp_map() -> serde_json::Map<String, Value> {
     }
 }
 
-fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, bool, Option<String>) {
+fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, Option<String>) {
     let lower = name.to_ascii_lowercase();
     let blob = cfg.to_string().to_ascii_lowercase();
     if lower.contains("browser") || blob.contains("browsermcp") || blob.contains("chrome") {
         return (
-            true,
             true,
             Some(
                 "Blocked on cloud — controls local desktop Chrome; use Headless Playwright instead"
@@ -392,9 +442,9 @@ fn classify_local_only_mcp(name: &str, cfg: &Value) -> (bool, bool, Option<Strin
         );
     }
     if blob.contains("/users/") || blob.contains("/applications/") || blob.contains("osascript") {
-        return (false, true, Some("References a local macOS path".into()));
+        return (false, Some("References a local macOS path".into()));
     }
-    (false, false, None)
+    (false, None)
 }
 
 fn discover_local_service_creds() -> Vec<LocalServiceCred> {
@@ -526,11 +576,10 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
     let mut mcps: Vec<LocalMcpItem> = read_local_mcp_map()
         .into_iter()
         .map(|(name, cfg)| {
-            let (blocked_on_cloud, local_only, reason) = classify_local_only_mcp(&name, &cfg);
+            let (blocked_on_cloud, reason) = classify_local_only_mcp(&name, &cfg);
             LocalMcpItem {
                 name,
                 blocked_on_cloud,
-                local_only,
                 reason,
             }
         })
@@ -580,8 +629,18 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
 pub fn sync_selected_pi_auth(
     cfg: &CloudHostConfig,
     selected: &BTreeSet<String>,
+    replace: bool,
 ) -> Result<Vec<String>, String> {
     if selected.is_empty() {
+        if !replace {
+            return Ok(Vec::new());
+        }
+        let (_, _) = http_request_json(
+            cfg,
+            "POST",
+            "/v1/admin/sync-auth",
+            Some(&json!({ "auth": {}, "merge": false })),
+        )?;
         return Ok(Vec::new());
     }
     let auth_path = local_pi_file("auth.json")
@@ -599,14 +658,11 @@ pub fn sync_selected_pi_auth(
             filtered.insert(k, v);
         }
     }
-    if filtered.is_empty() {
-        return Ok(Vec::new());
-    }
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-auth",
-        Some(&json!({ "auth": Value::Object(filtered), "merge": true })),
+        Some(&json!({ "auth": Value::Object(filtered), "merge": !replace })),
     )?;
     let providers = res["providers"]
         .as_array()
@@ -624,15 +680,16 @@ pub fn sync_selected_mcps(
     cfg: &CloudHostConfig,
     selected: &BTreeSet<String>,
     add_playwright_research: bool,
+    replace: bool,
 ) -> Result<Vec<String>, String> {
-    if selected.is_empty() && !add_playwright_research {
+    if selected.is_empty() && !add_playwright_research && !replace {
         return Ok(Vec::new());
     }
     let all = read_local_mcp_map();
     let mut filtered = serde_json::Map::new();
     for (k, v) in all {
         if selected.contains(&k) {
-            let (blocked, _, _) = classify_local_only_mcp(&k, &v);
+            let (blocked, _) = classify_local_only_mcp(&k, &v);
             if !blocked {
                 filtered.insert(k, v);
             }
@@ -647,14 +704,11 @@ pub fn sync_selected_mcps(
             }),
         );
     }
-    if filtered.is_empty() {
-        return Ok(Vec::new());
-    }
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-mcps",
-        Some(&json!({ "mcpServers": Value::Object(filtered), "merge": true })),
+        Some(&json!({ "mcpServers": Value::Object(filtered), "merge": !replace })),
     )?;
     let servers = res["mcp_servers"]
         .as_array()
@@ -670,15 +724,16 @@ pub fn sync_selected_mcps(
 
 pub fn sync_selected_service_creds(
     cfg: &CloudHostConfig,
-    selected: &BTreeSet<String>,
+    add_ids: &BTreeSet<String>,
+    remove_ids: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
-    if selected.is_empty() {
+    if add_ids.is_empty() && remove_ids.is_empty() {
         return Ok(Vec::new());
     }
     let available = discover_local_service_creds();
     let mut payload = Vec::new();
     for cred in available {
-        if selected.contains(&cred.id) {
+        if add_ids.contains(&cred.id) {
             if let Ok(content) = std::fs::read_to_string(&cred.path) {
                 if !content.trim().is_empty() {
                     payload.push(json!({
@@ -689,14 +744,12 @@ pub fn sync_selected_service_creds(
             }
         }
     }
-    if payload.is_empty() {
-        return Ok(Vec::new());
-    }
+    let remove_list: Vec<&String> = remove_ids.iter().collect();
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-service-creds",
-        Some(&json!({ "credentials": payload })),
+        Some(&json!({ "credentials": payload, "remove": remove_list })),
     )?;
     let synced = res["service_creds"]
         .as_array()
@@ -748,14 +801,15 @@ fn collect_skill_text_files(root: &Path, dir: &Path, out: &mut Vec<Value>) {
 
 pub fn sync_selected_skills(
     cfg: &CloudHostConfig,
-    selected: &BTreeSet<String>,
+    add_skills: &BTreeSet<String>,
+    remove_skills: &BTreeSet<String>,
 ) -> Result<Vec<String>, String> {
-    if selected.is_empty() {
+    if add_skills.is_empty() && remove_skills.is_empty() {
         return Ok(Vec::new());
     }
     let mut bundles = Vec::new();
     let dirs = local_skills_dirs();
-    for skill_name in selected {
+    for skill_name in add_skills {
         let Some(skill_dir) = dirs.iter().map(|d| d.join(skill_name)).find(|p| p.is_dir()) else {
             continue;
         };
@@ -768,14 +822,12 @@ pub fn sync_selected_skills(
             }));
         }
     }
-    if bundles.is_empty() {
-        return Ok(Vec::new());
-    }
+    let remove_list: Vec<&String> = remove_skills.iter().collect();
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-skills",
-        Some(&json!({ "skills": bundles })),
+        Some(&json!({ "skills": bundles, "remove": remove_list })),
     )?;
     let synced = res["skills"]
         .as_array()
@@ -787,6 +839,16 @@ pub fn sync_selected_skills(
         })
         .unwrap_or_default();
     Ok(synced)
+}
+
+pub fn remove_cloud_git_key(cfg: &CloudHostConfig) -> Result<(), String> {
+    http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/git-setup",
+        Some(&json!({ "remove": true })),
+    )?;
+    Ok(())
 }
 
 pub fn copy_mac_ssh_key_to_cloud(cfg: &CloudHostConfig) -> Result<(), String> {
@@ -822,67 +884,139 @@ pub fn copy_mac_ssh_key_to_cloud(cfg: &CloudHostConfig) -> Result<(), String> {
 pub fn execute_selective_sync(
     cfg: &CloudHostConfig,
     cwd: &Path,
+    initial: &CloudSyncPlan,
     plan: &CloudSyncPlan,
+    force_resync: bool,
 ) -> Result<CloudSyncReport, String> {
-    let mut parts = Vec::new();
+    let mut added_parts = Vec::new();
+    let mut removed_parts = Vec::new();
     let mut action_needed: Option<CloudActionNotice> = None;
 
-    if !plan.providers.is_empty() {
-        let provs = sync_selected_pi_auth(cfg, &plan.providers)?;
-        parts.push(format!("{} provider(s)", provs.len()));
+    // 1. Provider logins
+    if force_resync || plan.providers != initial.providers {
+        if plan.providers.is_empty() && !initial.providers.is_empty() {
+            sync_selected_pi_auth(cfg, &plan.providers, true)?;
+            removed_parts.push("providers".into());
+        } else if !plan.providers.is_empty() {
+            let provs = sync_selected_pi_auth(cfg, &plan.providers, true)?;
+            added_parts.push(format!("{} provider(s)", provs.len()));
+        }
     }
-    if plan.setup_git_ssh {
-        match plan.git_auth_choice {
-            GitAuthChoice::CopyMacKey => {
-                copy_mac_ssh_key_to_cloud(cfg)?;
-                parts.push("Mac SSH key".into());
-            }
-            GitAuthChoice::DedicatedCloudKey => {
-                let git_res = setup_git_and_register_github(cfg)?;
-                if git_res.registered_on_github {
-                    parts.push("Git SSH".into());
-                } else {
-                    parts.push("Git SSH key created".into());
-                    action_needed = Some(CloudActionNotice {
-                        title: "Add cloud SSH key to GitHub".into(),
-                        detail: "Public key copied — paste once in GitHub SSH settings to enable auto-clone.".into(),
-                        copy_text: Some(git_res.public_key),
-                        open_url: Some("https://github.com/settings/ssh/new".into()),
-                        open_label: Some("Open GitHub SSH".into()),
-                    });
+
+    // 2. Git SSH key
+    let git_changed = plan.setup_git_ssh != initial.setup_git_ssh
+        || (plan.setup_git_ssh && plan.git_auth_choice != initial.git_auth_choice);
+    if force_resync || git_changed {
+        if !plan.setup_git_ssh && initial.setup_git_ssh {
+            remove_cloud_git_key(cfg)?;
+            removed_parts.push("Git SSH key".into());
+        } else if plan.setup_git_ssh {
+            match plan.git_auth_choice {
+                GitAuthChoice::CopyMacKey => {
+                    copy_mac_ssh_key_to_cloud(cfg)?;
+                    added_parts.push("Mac SSH key".into());
+                }
+                GitAuthChoice::DedicatedCloudKey => {
+                    let git_res = setup_git_and_register_github(cfg)?;
+                    if git_res.registered_on_github {
+                        added_parts.push("Git SSH".into());
+                    } else {
+                        added_parts.push("Git SSH key".into());
+                        action_needed = Some(CloudActionNotice {
+                            title: "Add cloud SSH key to GitHub".into(),
+                            detail: "Public key copied — paste once in GitHub SSH settings to enable auto-clone.".into(),
+                            copy_text: Some(git_res.public_key),
+                            open_url: Some("https://github.com/settings/ssh/new".into()),
+                            open_label: Some("Open GitHub SSH".into()),
+                        });
+                    }
                 }
             }
         }
     }
-    if !plan.mcps.is_empty() || plan.add_playwright_research {
-        let mcps = sync_selected_mcps(cfg, &plan.mcps, plan.add_playwright_research)?;
-        if plan.add_playwright_research && plan.mcps.is_empty() {
-            parts.push("Playwright".into());
-        } else {
-            parts.push(format!("{} MCP(s)", mcps.len()));
+
+    // 3. Research browser & MCPs
+    let mcps_changed = plan.mcps != initial.mcps
+        || plan.add_playwright_research != initial.add_playwright_research;
+    if force_resync || mcps_changed {
+        sync_selected_mcps(cfg, &plan.mcps, plan.add_playwright_research, true)?;
+        if plan.add_playwright_research && !initial.add_playwright_research {
+            added_parts.push("Playwright".into());
+        } else if !plan.add_playwright_research && initial.add_playwright_research {
+            removed_parts.push("Playwright".into());
+        } else if force_resync && plan.add_playwright_research {
+            added_parts.push("Playwright".into());
+        }
+        let added_mcps = plan.mcps.difference(&initial.mcps).count();
+        let removed_mcps = initial.mcps.difference(&plan.mcps).count();
+        if added_mcps > 0 {
+            added_parts.push(format!("{added_mcps} MCP(s)"));
+        }
+        if removed_mcps > 0 {
+            removed_parts.push(format!("{removed_mcps} MCP(s)"));
         }
     }
-    if !plan.service_creds.is_empty() {
-        let creds = sync_selected_service_creds(cfg, &plan.service_creds)?;
-        parts.push(format!("{} service(s)", creds.len()));
-    }
-    if !plan.skills.is_empty() {
-        let skills = sync_selected_skills(cfg, &plan.skills)?;
-        parts.push(format!("{} skill(s)", skills.len()));
-    }
-    if plan.clone_current_repo {
-        let _ = clone_current_repo_to_cloud(cfg, cwd)?;
-        parts.push("repo cloned".into());
+
+    // 4. Service credentials
+    let add_svcs: BTreeSet<String> = if force_resync {
+        plan.service_creds.clone()
+    } else {
+        plan.service_creds
+            .difference(&initial.service_creds)
+            .cloned()
+            .collect()
+    };
+    let rm_svcs: BTreeSet<String> = initial
+        .service_creds
+        .difference(&plan.service_creds)
+        .cloned()
+        .collect();
+    if !add_svcs.is_empty() || !rm_svcs.is_empty() {
+        sync_selected_service_creds(cfg, &add_svcs, &rm_svcs)?;
+        if !add_svcs.is_empty() {
+            added_parts.push(format!("{} service(s)", add_svcs.len()));
+        }
+        if !rm_svcs.is_empty() {
+            removed_parts.push(format!("{} service(s)", rm_svcs.len()));
+        }
     }
 
-    let summary = if parts.is_empty() {
-        "Nothing selected to sync.".into()
+    // 5. Skills
+    let add_skills: BTreeSet<String> = if force_resync {
+        plan.skills.clone()
     } else {
-        parts.join(" · ")
+        plan.skills.difference(&initial.skills).cloned().collect()
+    };
+    let rm_skills: BTreeSet<String> = initial.skills.difference(&plan.skills).cloned().collect();
+    if !add_skills.is_empty() || !rm_skills.is_empty() {
+        sync_selected_skills(cfg, &add_skills, &rm_skills)?;
+        if !add_skills.is_empty() {
+            added_parts.push(format!("{} skill(s)", add_skills.len()));
+        }
+        if !rm_skills.is_empty() {
+            removed_parts.push(format!("{} skill(s)", rm_skills.len()));
+        }
+    }
+
+    // 6. Optional repo pre-clone
+    if plan.clone_current_repo {
+        let _ = clone_current_repo_to_cloud(cfg, cwd)?;
+        added_parts.push("repo cloned".into());
+    }
+
+    let summary = match (added_parts.is_empty(), removed_parts.is_empty()) {
+        (true, true) => "Already in sync.".into(),
+        (false, true) => added_parts.join(" · "),
+        (true, false) => format!("Removed: {}", removed_parts.join(" · ")),
+        (false, false) => format!(
+            "Synced: {} · Removed: {}",
+            added_parts.join(" · "),
+            removed_parts.join(" · ")
+        ),
     };
 
     Ok(CloudSyncReport {
-        title: format!("Synced to {}", cfg.name),
+        title: format!("Updated {}", cfg.name),
         summary,
         action_needed,
     })

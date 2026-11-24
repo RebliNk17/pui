@@ -214,6 +214,30 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(copyKeyJson.mode, 'copied');
       assert.ok(copyKeyJson.public_key.includes('mac-key'));
 
+      // Verify toggling off removes service creds, skills, and git key cleanly.
+      const rmSvc = await fetch(`${base}/v1/admin/sync-service-creds`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credentials: [], remove: ['railway'] }),
+      });
+      assert.equal(rmSvc.status, 200);
+      assert.equal(fs.existsSync(path.join(tmp, '.railway', 'config.json')), false);
+
+      const rmSkill = await fetch(`${base}/v1/admin/sync-skills`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skills: [], remove: ['deploy'] }),
+      });
+      assert.equal(rmSkill.status, 200);
+      assert.equal(fs.existsSync(path.join(skillsDir, 'deploy')), false);
+
+      const rmGit = await fetch(`${base}/v1/admin/git-setup`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ remove: true }),
+      });
+      assert.equal(rmGit.status, 200);
+
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
         'git@github.com:RebliNk17/pui.git',

@@ -8,6 +8,7 @@ export interface CloudAdminStatus {
   has_pi_auth: boolean;
   pi_auth_providers: string[];
   has_git_ssh_key: boolean;
+  git_key_mode: 'dedicated' | 'copied' | null;
   git_public_key: string | null;
   git_user_name: string | null;
   git_user_email: string | null;
@@ -49,8 +50,21 @@ function detectCloudServiceCreds(): string[] {
 
 export function writeCloudServiceCreds(
   items: IncomingServiceCred[],
+  removeIds: string[] = [],
 ): { service_creds: string[] } {
   const home = serviceCredHome();
+  for (const id of removeIds.slice(0, 16)) {
+    const rel = SERVICE_CRED_RELATIVE_PATHS[id];
+    if (!rel) continue;
+    const dest = path.join(home, rel);
+    if (fs.existsSync(dest)) {
+      try {
+        fs.unlinkSync(dest);
+      } catch {
+        // ignore
+      }
+    }
+  }
   for (const item of items.slice(0, 16)) {
     const rel = SERVICE_CRED_RELATIVE_PATHS[item.id];
     if (!rel) continue;
@@ -151,10 +165,18 @@ export function getAdminStatus(): CloudAdminStatus {
     }
   }
 
+  const hasKey = Boolean(git_public_key && fs.existsSync(cloudKeyPath()));
+  const git_key_mode: 'dedicated' | 'copied' | null = !hasKey
+    ? null
+    : git_public_key?.trim().endsWith('pui-cloud-git')
+      ? 'dedicated'
+      : 'copied';
+
   return {
     has_pi_auth,
     pi_auth_providers,
-    has_git_ssh_key: Boolean(git_public_key && fs.existsSync(cloudKeyPath())),
+    has_git_ssh_key: hasKey,
+    git_key_mode,
     git_public_key,
     git_user_name: gitConfigGet('user.name'),
     git_user_email: gitConfigGet('user.email'),
@@ -319,10 +341,40 @@ export interface IncomingSkillBundle {
   files: { path: string; content: string }[];
 }
 
-export function writeCloudSkills(bundles: IncomingSkillBundle[]): { skills: string[] } {
+export function removeCloudGitKey(): { removed: boolean } {
+  const keyFile = cloudKeyPath();
+  const pubFile = `${keyFile}.pub`;
+  let removed = false;
+  for (const f of [keyFile, pubFile]) {
+    if (fs.existsSync(f)) {
+      fs.unlinkSync(f);
+      removed = true;
+    }
+  }
+  return { removed };
+}
+
+export function writeCloudSkills(
+  bundles: IncomingSkillBundle[],
+  removeNames: string[] = [],
+): { skills: string[] } {
   const root = skillsDir();
   fs.mkdirSync(root, { recursive: true });
-  const written: string[] = [];
+  const resolvedBase = fs.realpathSync(root);
+
+  for (const rawName of removeNames.slice(0, 60)) {
+    const safeName = rawName.trim().replace(/[^a-zA-Z0-9._-]/g, '-');
+    if (!safeName || safeName === '.' || safeName === '..' || safeName.startsWith('.')) {
+      continue;
+    }
+    const target = path.join(resolvedBase, safeName);
+    if (fs.existsSync(target)) {
+      const resolvedTarget = fs.realpathSync(target);
+      if (resolvedTarget.startsWith(resolvedBase + path.sep)) {
+        fs.rmSync(resolvedTarget, { recursive: true, force: true });
+      }
+    }
+  }
 
   for (const bundle of bundles.slice(0, 60)) {
     const safeName = bundle.name.trim().replace(/[^a-zA-Z0-9._-]/g, '-');
@@ -350,10 +402,15 @@ export function writeCloudSkills(bundles: IncomingSkillBundle[]): { skills: stri
       }
       fs.writeFileSync(target, file.content, 'utf8');
     }
-    written.push(safeName);
   }
 
-  return { skills: written.sort() };
+  const present: string[] = [];
+  for (const ent of fs.readdirSync(root, { withFileTypes: true })) {
+    if (ent.isDirectory() && !ent.name.startsWith('.')) {
+      present.push(ent.name);
+    }
+  }
+  return { skills: present.sort() };
 }
 
 export function normalizeGitRemote(input: string): string | null {
