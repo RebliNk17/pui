@@ -22,10 +22,35 @@ pub(super) fn is_reply_quote(label: &str) -> bool {
     label.starts_with("Assistant reply") || label.starts_with("Quoted assistant reply")
 }
 
+/// Pastes at least this long collapse into a "Pasted text" card instead of the text box.
+const PASTE_COLLAPSE_LINES: usize = 8;
+const PASTE_COLLAPSE_CHARS: usize = 600;
+
+pub(super) fn is_paste(label: &str) -> bool {
+    label.starts_with("Pasted text")
+}
+
+/// Whether a paste is long enough to become a card.
+pub(in crate::app) fn collapses_paste(text: &str) -> bool {
+    text.lines().count() >= PASTE_COLLAPSE_LINES || text.chars().count() >= PASTE_COLLAPSE_CHARS
+}
+
+fn paste_label(text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    format!(
+        "Pasted text · {lines} line{} · {} chars",
+        if lines == 1 { "" } else { "s" },
+        text.chars().count()
+    )
+}
+
 /// Short card title and icon for a capture label.
 fn card_title(label: &str) -> (String, Icon) {
     if is_reply_quote(label) {
         return ("Pi reply".into(), Icon::Quote);
+    }
+    if is_paste(label) {
+        return (label.to_owned(), Icon::Copy);
     }
     let icon = if label.starts_with("Terminal") {
         Icon::Terminal
@@ -171,9 +196,34 @@ impl Pui {
             && !self.completion_active(ctx)
             && ctx.memory(|m| m.top_modal_layer().is_none())
     }
-    /// Backspace in an empty, focused composer removes the last card. Runs before
-    /// approvals/composer so the key is owned here and never reaches anything else.
+    /// Backspace in an empty, focused composer removes the last card, and long pastes
+    /// become a "Pasted text" card. Runs before approvals/composer so these inputs are
+    /// owned here and never reach anything else.
     pub(in crate::app) fn context_chip_inputs(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.has_focus(composer_text::widget_id(ctx, "composer"))) {
+            let pastes: Vec<String> = ctx.input_mut(|i| {
+                let mut long = Vec::new();
+                i.events.retain(|event| match event {
+                    egui::Event::Paste(text) if collapses_paste(text) => {
+                        long.push(text.replace("\r\n", "\n"));
+                        false
+                    }
+                    _ => true,
+                });
+                long
+            });
+            for text in pastes {
+                let snippet = Snippet {
+                    label: paste_label(&text),
+                    text,
+                    ask: None,
+                };
+                if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
+                    self.state.error = Some(error.into());
+                }
+                self.focus_composer = true;
+            }
+        }
         if self.context_chips.quotes.is_empty()
             || !self.draft.is_empty()
             || !self.context_chips_available(ctx)
@@ -221,11 +271,15 @@ impl Pui {
                             egui::Label::new(RichText::new(&title).size(10.5).color(colors.muted))
                                 .truncate(),
                         )
-                        .on_hover_text(format!(
-                            "{}\nFrozen untrusted excerpt · {} bytes · sent as context with your message; never sends by itself.",
-                            quote.label,
-                            quote.text.len()
-                        ));
+                        .on_hover_text(if is_paste(&quote.label) {
+                            "Collapsed paste · sent with your message. Hover the preview to read it.".to_owned()
+                        } else {
+                            format!(
+                                "{}\nFrozen untrusted excerpt · {} bytes · sent as context with your message; never sends by itself.",
+                                quote.label,
+                                quote.text.len()
+                            )
+                        });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (rect, response) =
                                 ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::click());
@@ -252,6 +306,21 @@ impl Pui {
                             }
                         });
                     });
+                    if is_paste(&quote.label) {
+                        let first = quote.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                        ui.add(
+                            egui::Label::new(RichText::new(first).size(11.5).color(colors.muted))
+                                .truncate()
+                                .sense(Sense::hover()),
+                        )
+                        .on_hover_ui(|ui| {
+                            ui.set_max_width(520.0);
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                ui.label(RichText::new(&quote.text).size(12.0).color(colors.text));
+                            });
+                        });
+                        return;
+                    }
                     let mut job = egui::text::LayoutJob::simple(
                         quote.text.clone(),
                         if reply {

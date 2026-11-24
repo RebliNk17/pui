@@ -557,6 +557,10 @@ impl Pui {
                         "It comes back the next time the phone connects to the Mac.",
                     ),
                     (
+                        "Pasted text · 9 lines · 812 chars",
+                        "The spy plane now works the way you described; the attached frames show one full pass:\n\nThe plane: it's a twin-propeller recon plane in your colour, not a jet.\nFlying in: it appears beyond the map edge and flies over the fog.\nSpying: along the strip it shows the ground with the scanner ring.\nFlying out: it keeps going straight over the fog and off the far edge.\n\nYour side now waits a few seconds for the plane to reach the strip.\nThe full suite is running now.",
+                    ),
+                    (
                         "src/main.rs:4–5 · selected source",
                         "let chosen = \"frozen literal\";",
                     ),

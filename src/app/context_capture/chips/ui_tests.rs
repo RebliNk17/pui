@@ -153,3 +153,38 @@ fn restart_checkpoint_keeps_cards_and_restores_them_as_cards() {
     assert_eq!(app.context_chips.labels(), vec!["console"]);
     assert!(app.deliveries.is_empty());
 }
+
+#[test]
+fn long_paste_becomes_a_card_and_short_paste_stays_text() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    app.draft.clear();
+    for _ in 0..3 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    ctx.memory_mut(|m| m.request_focus(composer_text::widget_id(&ctx, "composer")));
+    frame(&ctx, &mut app, vec![]);
+    frame(&ctx, &mut app, vec![egui::Event::Paste("short".into())]);
+    assert_eq!(app.draft, "short");
+    assert!(!app.context_chips.has_quotes());
+    let long = (1..=9)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    frame(&ctx, &mut app, vec![egui::Event::Paste(long.clone())]);
+    for _ in 0..2 {
+        frame(&ctx, &mut app, vec![]);
+    }
+    assert_eq!(app.draft, "short", "long paste never enters the text box");
+    assert_eq!(
+        app.context_chips.labels(),
+        vec!["Pasted text · 9 lines · 62 chars"]
+    );
+    assert_eq!(
+        app.outgoing_text(),
+        format!(
+            "short\n\n[Context: Pasted text · 9 lines · 62 chars]\n{}\n[/Context]",
+            long.replace("\r\n", "\n")
+        )
+    );
+}
