@@ -55,6 +55,15 @@ pub(in crate::app) fn restore_capture(ctx: &egui::Context, capture: ParkedCaptur
 struct Snippet {
     label: String,
     text: String,
+    /// Optional question typed in the quote popover, placed after the quote.
+    ask: Option<Ask>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct Ask {
+    pub question: String,
+    /// Send immediately (only when the draft was otherwise empty).
+    pub send: bool,
 }
 const MAX_BYTES: usize = 24 * 1024;
 
@@ -81,6 +90,28 @@ pub(in crate::app) fn queue_file_selection(ctx: &egui::Context, label: &str, sou
 }
 pub(crate) fn queue(ctx: &egui::Context, label: &str, source: &str) {
     queue_parts(ctx, label, std::iter::once(source));
+}
+
+/// Queue a quote with an optional follow-up question from the quote popover.
+pub(super) fn queue_ask(ctx: &egui::Context, label: &str, source: &str, ask: Option<Ask>) {
+    queue(ctx, label, source);
+    if let Some(ask) = ask.filter(|a| !a.question.is_empty()) {
+        ctx.data_mut(|data| {
+            let id = egui::Id::new("pui-context-capture");
+            if let Some(mut snippet) = data.get_temp::<Snippet>(id) {
+                snippet.ask = Some(Ask {
+                    question: ask
+                        .question
+                        .chars()
+                        .filter(|c| *c != '\r')
+                        .take(4000)
+                        .collect(),
+                    send: ask.send,
+                });
+                data.insert_temp(id, snippet);
+            }
+        });
+    }
 }
 
 /// Local-review batching retains exact draft ownership across the deferred collection step.
@@ -144,6 +175,7 @@ pub(crate) fn queue_parts<'a>(
                     .take(512)
                     .collect(),
                 text,
+                ask: None,
             },
         )
     });
@@ -184,9 +216,26 @@ impl Pui {
             self.state.error = Some("Local review context was not added: repository/session changed. Original notes remain in Changes.".into());
             return;
         }
+        let ask = snippet.ask.clone();
+        let draft_was_empty = self.draft.trim().is_empty() && self.draft_images.is_empty();
         if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
             self.state.error = Some(error.into());
             return;
+        }
+        if let Some(ask) = ask {
+            self.context_chips
+                .append_question(&mut self.draft, &ask.question);
+            if ask.send {
+                if draft_was_empty {
+                    let ctx = self.ctx.clone();
+                    self.submit(&ctx);
+                } else {
+                    self.state.notice = Some(
+                        "Quote and question added to your draft. Your existing text was kept, so nothing was sent."
+                            .into(),
+                    );
+                }
+            }
         }
         self.focus_composer = true;
         self.ctx.request_repaint();
