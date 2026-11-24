@@ -598,28 +598,32 @@ impl Pui {
         if connectors.is_empty() {
             ui.label(theme::small(ui, "No MCP connectors configured."));
         } else {
-            let mut reconnect = false;
+            let blocked = self.connector_reconnect_blocked();
+            let mut reconnect = None;
             for conn in connectors {
                 ui.push_id(&conn.name, |ui| {
                     // Allocate the action first, from the shared right edge. A
-                    // long connector name may elide but can never move Reload.
+                    // long connector name may elide but can never move Reconnect.
                     let width = ui.available_width();
                     let height = ui.spacing().interact_size.y.max(28.0);
                     let (row, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
                     let action_width = 66.0_f32.min(width * 0.45);
                     let action_rect = egui::Rect::from_min_max(
                         egui::pos2(row.right() - action_width, row.top()), row.max);
-                    let action_label = if conn.error.is_some() { "Reconnect" } else { "Reload" };
+                    let reconnected = self.resource_reload.connector_reconnected(&conn.name);
+                    let pending = self.resource_reload.connector_connecting(&conn.name);
+                    let action_label = if pending { "Connecting…" } else { "Reconnect" };
                     let action = ui.scope_builder(egui::UiBuilder::new().max_rect(action_rect).layout(Layout::right_to_left(Align::Center)), |ui| {
-                        ui.add_enabled(!self.demo && self.connected,
+                        ui.add_enabled(blocked.is_none(),
                             egui::Button::new(RichText::new(action_label).size(10.5)
-                                .color(if conn.error.is_some() { colors.amber } else { colors.muted }))
+                                .color(if conn.error.is_some() && !reconnected { colors.amber } else { colors.muted }))
                                 .frame(false))
-                    }).inner;
-                    reconnect |= action.clicked();
+                    }).inner.on_hover_text(blocked.unwrap_or("Reconnect only this connector without restarting the chat. Active requests using it may fail; configuration is not reloaded."))
+                        .on_disabled_hover_text(blocked.unwrap_or("Reconnect unavailable."));
+                    if action.clicked() { reconnect = Some(conn.name.clone()); }
                     let dot_center = row.left_center() + egui::vec2(4.0, 0.0);
                     ui.painter().circle_filled(dot_center, 3.0,
-                        if conn.error.is_some() { colors.amber } else if self.connected { colors.green } else { colors.dim });
+                        if pending || (conn.error.is_some() && !reconnected) { colors.amber } else if self.connected { colors.green } else { colors.dim });
                     let name_rect = egui::Rect::from_min_max(
                         egui::pos2(row.left() + 16.0, row.top()),
                         egui::pos2((action_rect.left() - 8.0).max(row.left() + 16.0), row.bottom()));
@@ -632,7 +636,7 @@ impl Pui {
                     ui.painter().with_clip_rect(name_rect).galley(
                         name_rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0), galley, colors.text);
                     let label = ui.interact(name_rect, ui.id().with("connector-name"), Sense::hover());
-                    if let Some(error) = &conn.error { label.on_hover_text(error); }
+                    if let Some(error) = &conn.error && !reconnected { label.on_hover_text(error); }
                     else if elided { label.on_hover_text(&conn.name); }
                     #[cfg(test)]
                     ui.ctx().data_mut(|data| {
@@ -640,9 +644,10 @@ impl Pui {
                     });
                 });
             }
-            if reconnect {
-                self.request_resource_reload();
+            if let Some(name) = reconnect {
+                self.request_connector_reconnect(&name);
             }
+            ui.label(theme::small(ui, "Reconnect affects one connector, not the chat. Use /reload when idle to load configuration changes."));
         }
     }
 
