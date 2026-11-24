@@ -40,7 +40,7 @@ jobs:
       macos: ${{ steps.affected.outputs.macos }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -66,7 +66,7 @@ jobs:
       # Git integration fixtures perform offline local clones and pushes.
       # A shallow/blobless checkout can leave historical objects unavailable.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -83,14 +83,14 @@ jobs:
       - name: Restore Rust toolchain
         id: restore-toolchain
         if: needs.changes.outputs.toolchain == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
           key: rust-toolchain-v1-arm64-${{ steps.cache-keys.outputs.toolchain }}
 
       - name: Restore downloads and verified CEF archive
         id: restore-downloads
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             .cargo-ci/registry
@@ -106,7 +106,7 @@ jobs:
       - name: Restore compiled Rust and CEF outputs
         id: restore-compiled
         if: needs.changes.outputs.toolchain == 'true'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             target/debug
@@ -128,7 +128,7 @@ jobs:
 
       - name: Save Rust toolchain even if checks fail
         if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-toolchain.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
           key: rust-toolchain-v1-arm64-${{ steps.cache-keys.outputs.toolchain }}
@@ -136,7 +136,7 @@ jobs:
       # Skipped for Python/Node-only runs so a cache without CEF is never saved.
       - name: Save downloads even if checks fail
         if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-downloads.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             .cargo-ci/registry
@@ -148,7 +148,7 @@ jobs:
 
       - name: Save compiled outputs (at most one snapshot per day)
         if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-compiled.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             target/debug
@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload macOS release artifacts
         if: needs.changes.outputs.package == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: dist/releases/*
@@ -173,8 +173,8 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -192,8 +192,8 @@ jobs:
       run:
         working-directory: daemon
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -235,10 +235,10 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download macOS release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: macos-arm64
           path: dist/releases
