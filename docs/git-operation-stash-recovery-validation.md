@@ -36,7 +36,17 @@ Compiled in dedicated target `/tmp/pui-browser-completion-owned.hav6QQ` (`debug/
 - **JavaScript suite**: **173 passed, 0 failed, 1 skipped** (`/tmp/pui-git-next-full-js.log`).
 - **Python suite**: **44 passed, 0 failed** (`/tmp/pui-git-next-full-python.log`; release output is mocked).
 
+## Merge with upstream `origin/master` (`abcd6290`)
+
+Merged upstream `origin/master` (`abcd6290`, which includes `9b68946d` MCP connector reconnect and `abcd6290` task apply-back/Git path-batching updates). Resolved the two overlapping path-batching hunks in `src/workspace/index_action.rs` and `src/workspace/index_action/conflict_resolution.rs` in favor of upstream's identical `rev-parse --path-format=absolute --show-toplevel --git-path index ...` batching while retaining our `src/workspace/branches/create.rs` operation-path batching and the three new Git modules (`operation`, `stash`, `recovery_manager`).
+
+Post-merge verification on the combined tree (`/tmp/pui-git-merge-slices.log` & `/tmp/pui-git-merge-clippy.log`):
+- `workspace::operation::` (2 passed), `workspace::stash::` (2 passed), `workspace::recovery_manager::` (1 passed), `workspace::index_action::` (32 passed), `workspace::branches::create::` (7 passed)
+- `app::changes::operation::` (1 passed), `app::changes::stash::` (1 passed), `app::changes::recovery_manager::` (1 passed), `tests/prompt_design.rs` (3 passed)
+- `cargo clippy --offline --locked --all-targets -- -D warnings` passed.
+
 ## Honest limitations
+
 
 - Operation support in this slice covers reviewed **abort** of in-progress `merge`, `rebase`, `cherry-pick`, and `revert`; initiating divergent merges/rebases or running `--continue` / `--skip` (which can invoke commit hooks/editors or replay arbitrary commits) remains separate future work.
 - Stash push stashes tracked modifications only (`--no-include-untracked`), and stash apply requires a clean working tree and index.

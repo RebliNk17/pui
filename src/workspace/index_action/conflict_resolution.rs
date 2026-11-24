@@ -76,13 +76,8 @@ fn mode(path: &Path) -> Result<String, String> {
         Err("Conflict writes require Unix file modes.".into())
     }
 }
-fn operation(root: &Path, cancel: &AtomicBool, deadline: Instant) -> Result<Operation, String> {
+fn operation(dir: &Path) -> Result<Operation, String> {
     // Freeze the Git operation control files, including detached rebase progress.
-    let dir = PathBuf::from(line(
-        &run(root, &["rev-parse", "--absolute-git-dir"], cancel, deadline)?,
-        8192,
-        "git directory",
-    )?);
     let mut files = Vec::new();
     for name in [
         "MERGE_HEAD",
@@ -135,28 +130,46 @@ fn inspect_at(
     deadline: Instant,
 ) -> Result<Review, String> {
     let full = input_path(root, path)?;
-    read_only::filters_disabled(root, cancel, deadline)?;
-    let meta = run(
+    let paths = String::from_utf8(run(
         root,
         &[
             "rev-parse",
             "--path-format=absolute",
+            "--show-toplevel",
             "--git-path",
             "index",
+            "--absolute-git-dir",
             "--shared-index-path",
         ],
         cancel,
         deadline,
-    )?;
-    let meta_str = std::str::from_utf8(&meta).map_err(|_| "Invalid index metadata")?;
-    let mut meta_lines = meta_str.lines();
-    let index_line = meta_lines.next().ok_or("Invalid index path")?;
-    if meta_lines.next().is_some_and(|s| !s.is_empty()) || meta_lines.next().is_some() {
-        return Err("Split index resolution unsupported.".into());
+    )?)
+    .map_err(|_| "Invalid Git paths.")?;
+    let mut path_lines = paths.lines();
+    let actual_root = path_lines.next().ok_or("Missing repository root.")?;
+    let index_raw = path_lines.next().ok_or("Missing index path.")?;
+    let git_dir_raw = path_lines.next().ok_or("Missing git directory.")?;
+    let shared_raw = path_lines.next();
+    if path_lines.next().is_some()
+        || actual_root.is_empty()
+        || actual_root.len() > 8192
+        || actual_root.chars().any(char::is_control)
+        || index_raw.is_empty()
+        || index_raw.len() > 8192
+        || index_raw.chars().any(char::is_control)
+        || git_dir_raw.is_empty()
+        || git_dir_raw.len() > 8192
+        || git_dir_raw.chars().any(char::is_control)
+    {
+        return Err("Invalid Git path inventory.".into());
     }
-    let index_path = PathBuf::from(line(format!("{index_line}\n").as_bytes(), 8192, "index")?);
+    if Path::new(actual_root) != root {
+        return Err("Exact repository root required.".into());
+    }
+    let index_path = PathBuf::from(index_raw);
+    let git_dir = PathBuf::from(git_dir_raw);
     let index = bytes(&index_path, MAX_INDEX)?;
-    let conflict = super::super::conflict::inspect_at(root, path, cancel, deadline)?;
+    let conflict = super::super::conflict::inspect_at(root, path, cancel, deadline, true)?;
     let mode = mode(&full)?;
     #[cfg(unix)]
     let permissions = {
@@ -196,8 +209,10 @@ fn inspect_at(
         read_only::command(root).args([
             "config",
             "--includes",
+            "--null",
+            "--name-only",
             "--get-regexp",
-            "^core\\.(autocrlf|eol|sparsecheckout|sparsecheckoutcone)$",
+            "^(filter\\..*\\.(clean|process)|core\\.(autocrlf|eol|sparsecheckout|sparsecheckoutcone))$",
         ]),
         cancel,
         deadline,
@@ -206,13 +221,18 @@ fn inspect_at(
         "Resolution configuration exceeds limit",
     )?;
     if status.code() != Some(1) || !out.is_empty() {
-        return Err("Line-ending/sparse-checkout configuration refuses resolution writes.".into());
+        return Err(
+            "Filter or line-ending/sparse-checkout configuration refuses resolution writes.".into(),
+        );
+    }
+    if shared_raw.is_some_and(|s| !s.is_empty()) {
+        return Err("Split index resolution unsupported.".into());
     }
     let (branch, head) = super::super::commit::branch_head(root, cancel, deadline)?;
     let text = String::from_utf8(bytes(&full, MAX_TEXT)?)
         .map_err(|_| "Resolution requires UTF-8 text.")?;
     check_text(&text)?;
-    let operation = operation(root, cancel, deadline)?;
+    let operation = operation(&git_dir)?;
     if bytes(&index_path, MAX_INDEX)? != index {
         return Err("Index changed during resolution inspection; review again.".into());
     }
@@ -275,7 +295,6 @@ pub(crate) fn save(review: Review, draft: String, cancel: &AtomicBool) -> Result
         return Err("Remove all conflict-marker lines and keep resolution within text bounds before saving.".into());
     }
     let deadline = Instant::now() + DEADLINE;
-    validate(&review, cancel, deadline)?;
     let (_lock, _guard) = lock(&review)?;
     validate(&review, cancel, deadline)?;
     let mut digest = Sha256::new();
@@ -314,7 +333,6 @@ pub(crate) fn stage(review: Review, cancel: &AtomicBool) -> Result<(), String> {
         );
     }
     let deadline = Instant::now() + DEADLINE;
-    validate(&review, cancel, deadline)?;
     let (mut lock, guard) = lock(&review)?;
     validate(&review, cancel, deadline)?;
     let temp = review

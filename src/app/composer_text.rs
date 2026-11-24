@@ -82,14 +82,15 @@ impl Presentation {
                             .take_while(|b| Some(*b) == marker)
                             .count();
                         if !editing(&opening, selection.clone()) {
-                            result.hide(opening);
+                            result
+                                .hide(range.start..(range.start + opening_end + 1).min(range.end));
                         }
                         if let Some(start) = closing_start {
                             let line = trimmed[start..].trim();
                             if line.len() >= opening_width
                                 && line.bytes().all(|b| Some(b) == marker)
                             {
-                                let closing = range.start + start..range.start + trimmed.len();
+                                let closing = range.start + start..range.end;
                                 if !editing(&closing, selection.clone()) {
                                     result.hide(closing);
                                 }
@@ -271,7 +272,30 @@ pub(super) fn layout(ui: &egui::Ui, text: &dyn TextBuffer, width: f32) -> Arc<eg
 }
 
 pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui::Galley> {
-    let presentation = Presentation::new(source, selection(ctx, source));
+    presentation_galley(ctx, source, width, selection(ctx, source))
+}
+
+pub(crate) fn message_galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui::Galley> {
+    presentation_galley(ctx, source, width, None)
+}
+
+fn presentation_galley(
+    ctx: &egui::Context,
+    source: &str,
+    width: f32,
+    selection: Option<Range<usize>>,
+) -> Arc<egui::Galley> {
+    layout_presentation(ctx, source, width, selection, None).0
+}
+
+fn layout_presentation(
+    ctx: &egui::Context,
+    source: &str,
+    width: f32,
+    selection: Option<Range<usize>>,
+    highlight: Option<&egui::Ui>,
+) -> (Arc<egui::Galley>, Option<usize>) {
+    let presentation = Presentation::new(source, selection);
     let colors = theme::palette(ctx);
     let mut display = LayoutJob::default();
     let inset = if presentation.lists.is_empty() && presentation.blocks.is_empty() {
@@ -347,15 +371,58 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
         display.append(&visible, 0.0, format.clone());
         original.append(value, 0.0, format);
     }
+    let active = highlight.and_then(|ui| markdown::highlight_job(ui, &mut original));
+    if highlight.is_some() {
+        // Find splits source-byte sections. Rebuild display-byte sections before
+        // tessellation, preserving the one-character mapping for hidden syntax.
+        display.sections.clear();
+        display.text.clear();
+        for section in &original.sections {
+            let visible: String = source[section.byte_range.clone()]
+                .char_indices()
+                .map(|(offset, c)| {
+                    let style = presentation.styles[section.byte_range.start + offset];
+                    if style.line_break {
+                        '\n'
+                    } else if style.hidden && c != '\n' {
+                        '\u{200b}'
+                    } else if style.bullet {
+                        '•'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            display.append(&visible, 0.0, section.format.clone());
+        }
+    }
     let mut galley = ctx.fonts(|f| f.layout_job(display));
     // Geometry uses presentation glyphs; word navigation/accessibility must see
     // the original text and its byte ranges. Section counts/formats are identical.
     let galley_mut = Arc::make_mut(&mut galley);
     galley_mut.job = Arc::new(original);
+    let byte_offsets: Vec<_> = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(source.len()))
+        .collect();
     let mut index = 0;
+    let mut collapsed_height = 0.0;
     for row in &mut galley_mut.rows {
-        let start = byte_index(source, index);
-        let end = byte_index(source, index + row.char_count_excluding_newline());
+        let start = byte_offsets[index];
+        let end = byte_offsets[index + row.char_count_excluding_newline()];
+        row.pos.y -= collapsed_height;
+        // Hidden fence markers retain their source characters/cursor indices,
+        // but must not leave an empty visual row above/below the code body.
+        // Only collapse nonempty, wholly hidden syntax, never authored blank lines.
+        if start < end
+            && presentation.styles[start..end]
+                .iter()
+                .all(|s| s.hidden && s.block)
+        {
+            collapsed_height += row.size.y;
+            Arc::make_mut(&mut row.row).size.y = 0.0;
+        }
         if presentation
             .blocks
             .iter()
@@ -369,17 +436,18 @@ pub(super) fn galley(ctx: &egui::Context, source: &str, width: f32) -> Arc<egui:
         }
         index += row.char_count_including_newline();
     }
+    theme::text_direction::update_bounds(galley_mut);
     galley_mut.rect.max.x += inset;
     galley_mut.mesh_bounds.max.x += inset;
     theme::text_direction::align_where(&mut galley, (width - inset).max(24.0), |range| {
-        let start = byte_index(source, range.start);
-        let end = byte_index(source, range.end);
+        let start = byte_offsets[range.start];
+        let end = byte_offsets[range.end];
         !presentation
             .blocks
             .iter()
             .any(|block| block.start < end && start < block.end)
     });
-    galley
+    (galley, active)
 }
 
 pub(super) fn list_at_cursor(ctx: &egui::Context, source: &str) -> bool {
@@ -399,6 +467,24 @@ pub(super) fn decorate(
     output: &TextEditOutput,
     source: &str,
 ) {
+    decorate_galley(
+        ui,
+        placeholder,
+        &output.galley,
+        output.galley_pos,
+        output.response.rect.width(),
+        source,
+    );
+}
+
+fn decorate_galley(
+    ui: &egui::Ui,
+    placeholder: egui::layers::ShapeIdx,
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    width: f32,
+    source: &str,
+) {
     let presentation = Presentation::new(source, None);
     let colors = theme::palette(ui.ctx());
     let mut shapes = Vec::new();
@@ -407,18 +493,18 @@ pub(super) fn decorate(
         let end = source[..block.end].chars().count();
         let mut offset = 0;
         let mut rect = egui::Rect::NOTHING;
-        for row in &output.galley.rows {
+        for row in &galley.rows {
             let next = offset + row.char_count_including_newline();
             let visible_end = offset + row.char_count_excluding_newline();
-            if offset < end && visible_end > start {
+            if offset < end && visible_end > start && row.size.y > 0.0 {
                 rect = rect.union(row.rect());
             }
             offset = next;
         }
         if rect.is_finite() {
             rect.min.x = 4.0;
-            rect.max.x = output.response.rect.width() - 4.0;
-            let rect = rect.translate(output.galley_pos.to_vec2());
+            rect.max.x = width - 4.0;
+            let rect = rect.translate(origin.to_vec2());
             shapes.push(egui::Shape::rect_filled(rect, 6, colors.code_bg));
             shapes.push(egui::Shape::rect_stroke(
                 rect,
@@ -429,6 +515,27 @@ pub(super) fn decorate(
         }
     }
     ui.painter().set(placeholder, egui::Shape::Vec(shapes));
+}
+
+/// The sent bubble uses the same Markdown presentation as the draft, with no
+/// editor selection revealing delimiters. Saved/copied text stays original.
+pub(crate) fn show_message(ui: &mut egui::Ui, source: &str) {
+    let width = ui.available_width();
+    let background = ui.painter().add(egui::Shape::Noop);
+    let (mut galley, active) = layout_presentation(ui.ctx(), source, width, None, Some(ui));
+    Arc::make_mut(&mut galley).rect.max.x = width;
+    let response = ui.add(egui::Label::new(galley.clone()).selectable(true));
+    decorate_galley(
+        ui,
+        background,
+        &galley,
+        response.rect.left_top(),
+        width,
+        source,
+    );
+    if let Some(byte_start) = active {
+        markdown::record_find_match_rect(ui, &galley, response.rect.left_top(), byte_start);
+    }
 }
 
 impl Pui {
@@ -654,6 +761,10 @@ pub(super) use commands::{Format, format, keys};
 
 #[cfg(test)]
 mod editing_tests;
+#[cfg(test)]
+mod message_interaction_tests;
+#[cfg(test)]
+mod message_tests;
 #[cfg(test)]
 mod scroll_tests;
 #[cfg(test)]

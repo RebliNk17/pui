@@ -98,3 +98,24 @@ Used the existing offline stable Rust/CEF/CMake/Ninja cache, explicit SDKROOT, t
 - Full JS `node --test tests/*.test.mjs`: **149 passed, 0 failed, 1 pre-existing skipped** (`/tmp/pui-recipes-final-js.log`).
 - Python `/opt/homebrew/bin/python3 -m unittest discover -s tests`: **41 passed, 0 failed** (`/tmp/pui-recipes-final-python.log`).
 - Strict `cargo clippy --offline --locked --all-targets -- -D warnings`, `cargo fmt -- --check`, and `git diff --check`: **passed** (`/tmp/pui-recipes-clippy2.log`).
+
+## Slice 4: practical journaled apply-back (+x modes, composed UTF-8 paths, bounded binaries) and Git inspection batching
+
+### Implemented production paths
+
+- **Executable file-mode changes (`0o644` ↔ `0o755`)**:
+  - `src/tasks/apply.rs` and `src/tasks/apply_transaction.rs` now allow regular-file mode transitions between `0o644` and `0o755` across net-change preparation, staged backup/apply journaling, rollback, and journal recovery while still refusing special permission modes outside `0o644 | 0o755` and symlinks.
+- **Composed non-ASCII UTF-8 paths**:
+  - `src/tasks/apply.rs` passes `-c core.precomposeUnicode=true` to Git subprocesses and validates composed UTF-8 relative paths up to 4,096 bytes while rejecting combining marks, Hangul Jamo, zero-width/bidi/isolation/variation-selector characters, BOM, control characters, and case-insensitive component collisions (`to_lowercase()`).
+- **Bounded binary files (`<= 4 MiB`)**:
+  - Added `MAX_BINARY_FILE_BYTES = 4 * 1024 * 1024` (`src/tasks/apply.rs`), optional `before_bytes` / `after_bytes` on `Change` (`src/tasks/apply.rs`, `src/tasks/apply_unsupported.rs`), and binary `FileState` support in `src/tasks/apply_transaction.rs`, while blocking binary files above 4 MiB with `"Binary file exceeds the 4 MiB per-file apply limit."`.
+  - `src/app/tasks/changes_preview.rs` renders mode transitions (`0644→0755`, `0755`) in change headers and displays bounded binary summaries (`"Binary content (N bytes · mode 0644 · sha256:...)"`).
+- **Batched Git inspection in `workspace::index_action` and `workspace::commit`**:
+  - Reduced redundant `git rev-parse`, `git config`, and duplicate pre-lock `prepare_at`/`validate` subprocess invocations across `src/workspace/index_action.rs`, `src/workspace/index_action/conflict_resolution.rs`, `src/workspace/index_action/recovery.rs`, `src/workspace/conflict.rs`, and `src/workspace/commit.rs`, and cached seed repositories with `OnceLock` + `copy_tree` in `src/workspace/tests.rs`, `src/workspace/commit/tests.rs`, `src/workspace/index_action/tests.rs`, and `src/workspace/index_action/conflict_resolution/tests.rs` without altering the 3-second production `DEADLINE` or test assertions.
+
+### Validation on `7a8b47c8b` (`v1.0.1` base)
+
+- Complete `PUI_TEST_THREADS=1 CARGO_BUILD_JOBS=2 ./scripts/test-rust.sh`: **2,220 binary + 10 integration passed (2,230 total), 0 failed, 2 pre-existing ignored** across all 24 scheduled groups (`/tmp/pui-apply-full-rust.log`).
+- Full JS `node --test tests/*.test.mjs`: **170 passed, 0 failed, 1 pre-existing skipped**.
+- Python `/opt/homebrew/bin/python3 -m unittest discover -s tests`: **41 passed, 0 failed**.
+- Strict `cargo clippy --offline --locked --all-targets -- -D warnings`, `cargo fmt -- --check`, and `git diff --check`: **passed**.

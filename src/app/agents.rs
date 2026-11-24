@@ -101,6 +101,7 @@ impl Chat {
     pub(super) fn deletion_busy(&self) -> bool {
         self.loading
             || self.resource_reload.pending()
+            || self.resource_reload.connector_pending()
             || self.resource_reload.confirming()
             || self.history_pending.is_some()
             || self.interrupt.is_some()
@@ -864,6 +865,7 @@ impl Pui {
             || chat.preview.is_some()
             || chat.history_pending.is_some()
             || chat.resource_reload.pending()
+            || chat.resource_reload.connector_pending()
             || !chat.deliveries.is_empty()
         {
             return true;

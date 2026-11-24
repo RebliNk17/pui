@@ -13,9 +13,9 @@ use std::{
 };
 
 mod error;
-mod inline_cards;
 #[cfg(test)]
 mod git_activity_tests;
+mod inline_cards;
 mod new_messages;
 mod progress;
 #[cfg(test)]
@@ -834,17 +834,7 @@ fn user_bubble(
         .max(footer_width.min(available))
         .max(140.0)
         .min(available);
-    let mut job = egui::text::LayoutJob::simple(
-        text.to_owned(),
-        FontId::proportional(14.0),
-        colors.text,
-        max - 34.0,
-    );
-    if let Some(section) = job.sections.first_mut() {
-        section.format.line_height = Some(23.0);
-    }
-    let active_find = markdown::highlight_job(ui, &mut job);
-    let mut galley = ui.fonts(|f| f.layout_job(job));
+    let galley = crate::app::composer_text::message_galley(ui.ctx(), text, (max - 34.0).max(1.0));
     let width = (galley.size().x + 34.0)
         .max(footer_width.min(max))
         .max(if message.images.is_empty() {
@@ -853,7 +843,6 @@ fn user_bubble(
             max.min(274.0)
         })
         .min(available);
-    crate::theme::text_direction::align(&mut galley, (width - 34.0).max(0.0));
     let left = ui.max_rect().right() - width;
     let top = ui.cursor().top();
     ui.scope_builder(
@@ -882,16 +871,7 @@ fn user_bubble(
                             ui.add_space(6.0);
                         }
                         if !text.is_empty() {
-                            let response =
-                                ui.add(egui::Label::new(galley.clone()).selectable(true));
-                            if let Some(byte_start) = active_find {
-                                markdown::record_find_match_rect(
-                                    ui,
-                                    &galley,
-                                    response.rect.left_top(),
-                                    byte_start,
-                                );
-                            }
+                            crate::app::composer_text::show_message(ui, text);
                         }
                     });
             });

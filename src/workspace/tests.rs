@@ -23,12 +23,26 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn copy_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 // A tiny immutable seed decouples index/status deadlines from the live Pui
 // checkout's file count and history. Build it once, entirely in disposable
 // storage; tests still exercise real Git objects, merge ancestry and indexes.
 pub(crate) fn fixture() -> PathBuf {
-    static SEED: std::sync::OnceLock<(PathBuf, Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    let (seed, head, index) = SEED.get_or_init(|| {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let clone_seed = SEED.get_or_init(|| {
         let root = history_fixture();
         fs::write(
             root.join("README.md"),
@@ -63,31 +77,44 @@ pub(crate) fn fixture() -> PathBuf {
         );
         let head = git(&root, &["rev-parse", "HEAD"]);
         let index = fs::read(root.join(".git/index")).unwrap();
-        (root, head, index)
+        let template =
+            std::env::temp_dir().join(format!("pui-git-review-seed-{}", uuid::Uuid::new_v4()));
+        assert!(
+            read_only::run(
+                read_only::command(&std::env::current_dir().unwrap())
+                    .args([
+                        "clone",
+                        "--template=",
+                        "--quiet",
+                        "--shared",
+                        "--no-checkout",
+                    ])
+                    .arg(&root)
+                    .arg(&template),
+                &AtomicBool::new(false),
+                Instant::now() + DEADLINE,
+                1024,
+                "fixture clone",
+                "fixture output too large",
+            )
+            .unwrap()
+            .1
+            .success()
+        );
+        fs::create_dir_all(template.join(".git/hooks")).unwrap();
+        fs::create_dir_all(template.join(".git/info")).unwrap();
+        fs::write(template.join(".git/refs/heads/pui-fixture-root"), head).unwrap();
+        fs::write(
+            template.join(".git/HEAD"),
+            "ref: refs/heads/pui-fixture-root\n",
+        )
+        .unwrap();
+        fs::write(template.join(".git/index"), index).unwrap();
+        fs::write(template.join("README.md"), "fixture modified README\n").unwrap();
+        template
     });
     let root = std::env::temp_dir().join(format!("pui-git-review-{}", uuid::Uuid::new_v4()));
-    assert!(
-        read_only::run(
-            read_only::command(&std::env::current_dir().unwrap())
-                .args(["clone", "--quiet", "--shared", "--no-checkout"])
-                .arg(seed)
-                .arg(&root),
-            &AtomicBool::new(false),
-            Instant::now() + DEADLINE,
-            1024,
-            "fixture clone",
-            "fixture output too large",
-        )
-        .unwrap()
-        .1
-        .success()
-    );
-    // Each clone owns its ref and index bytes, not a hardlink or shared writable
-    // index. Object sharing remains read-only through Git's clone alternates.
-    fs::write(root.join(".git/refs/heads/pui-fixture-root"), head).unwrap();
-    fs::write(root.join(".git/HEAD"), "ref: refs/heads/pui-fixture-root\n").unwrap();
-    fs::write(root.join(".git/index"), index).unwrap();
-    fs::write(root.join("README.md"), "fixture modified README\n").unwrap();
+    copy_tree(clone_seed, &root);
     root
 }
 
@@ -95,53 +122,61 @@ pub(crate) fn fixture() -> PathBuf {
 // integration commit size or which side of a merge contains a bounded patch.
 // Every write/commit is confined to this freshly created disposable repository.
 pub(crate) fn history_fixture() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("pui-history-seed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "-C",
+                    root.to_str().unwrap(),
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "history fixture command failed: {args:?}"
+            );
+        };
+        run(&["init", "--quiet", "--template=", "--initial-branch=main"]);
+        fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        fs::create_dir_all(root.join(".git/info")).unwrap();
+        fs::write(root.join("README.md"), "base\n").unwrap();
+        fs::write(root.join("side.txt"), "base\n").unwrap();
+        run(&["add", "--", "README.md", "side.txt"]);
+        run(&["commit", "--quiet", "-m", "base"]);
+        run(&["branch", "side"]);
+        fs::write(root.join("README.md"), "main change\n").unwrap();
+        run(&["commit", "--quiet", "-am", "main change"]);
+        run(&["checkout", "--quiet", "side"]);
+        fs::write(root.join("side.txt"), "side change\n").unwrap();
+        run(&["commit", "--quiet", "-am", "side change"]);
+        run(&["checkout", "--quiet", "main"]);
+        run(&[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge both small changes",
+            "side",
+        ]);
+        root
+    });
     let root = std::env::temp_dir().join(format!("pui-history-fixture-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let run = |args: &[&str]| {
-        let output = Command::new("git")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args([
-                "-C",
-                root.to_str().unwrap(),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "history fixture command failed: {args:?}"
-        );
-    };
-    run(&["init", "--quiet", "--template=", "--initial-branch=main"]);
-    fs::write(root.join("README.md"), "base\n").unwrap();
-    fs::write(root.join("side.txt"), "base\n").unwrap();
-    run(&["add", "--", "README.md", "side.txt"]);
-    run(&["commit", "--quiet", "-m", "base"]);
-    run(&["branch", "side"]);
-    fs::write(root.join("README.md"), "main change\n").unwrap();
-    run(&["commit", "--quiet", "-am", "main change"]);
-    run(&["checkout", "--quiet", "side"]);
-    fs::write(root.join("side.txt"), "side change\n").unwrap();
-    run(&["commit", "--quiet", "-am", "side change"]);
-    run(&["checkout", "--quiet", "main"]);
-    run(&[
-        "merge",
-        "--quiet",
-        "--no-ff",
-        "-m",
-        "merge both small changes",
-        "side",
-    ]);
+    copy_tree(seed, &root);
     root
 }
 

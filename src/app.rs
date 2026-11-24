@@ -11,7 +11,7 @@ mod chat_find;
 mod completions;
 mod composer_hints;
 mod composer_history;
-mod composer_text;
+pub(crate) mod composer_text;
 mod composer_toolbar;
 mod confirmations;
 pub(crate) mod context_capture;
@@ -1006,6 +1006,7 @@ impl Pui {
     fn retain_chat_on_switch(&self) -> bool {
         self.has_tree()
             || self.resource_reload.pending()
+            || self.resource_reload.connector_pending()
             || !self.draft.is_empty()
             || !self.draft_images.is_empty()
             || self.sync_live_owner()
@@ -1212,7 +1213,11 @@ impl Pui {
             .unwrap_or_default();
         if !events.is_empty() {
             had_activity = true;
-        } else if !had_activity && !self.resource_reload.pending() && self.agents.background {
+        } else if !had_activity
+            && !self.resource_reload.pending()
+            && !self.resource_reload.connector_pending()
+            && self.agents.background
+        {
             return false;
         }
         for event in events {
@@ -1238,6 +1243,9 @@ impl Pui {
                 }
                 rpc::Event::Record(record) => {
                     title_dirty |= session_titles::title_event(&record);
+                    if self.connector_reconnect_record(&record) {
+                        continue;
+                    }
                     self.resource_reload_record(&record);
                     self.completion_event(&record);
                     self.agent_event(&record);

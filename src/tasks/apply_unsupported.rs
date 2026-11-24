@@ -41,6 +41,10 @@ pub struct Change {
     pub conflict: bool,
     pub before: Option<String>,
     pub after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_bytes: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_bytes: Option<Vec<u8>>,
     pub unsupported: Option<String>,
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,

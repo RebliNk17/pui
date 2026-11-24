@@ -217,6 +217,9 @@ impl Pui {
                         || (id == &self.agents.active
                             && (!self.state.ready()
                                 || self.loading_chat
+                                || self.resource_reload.pending()
+                                || self.resource_reload.connector_pending()
+                                || self.resource_reload.confirming()
                                 || self.history_pending.is_some()
                                 || self.interrupt.is_some()
                                 || !self.deliveries.is_empty()
@@ -273,6 +276,9 @@ impl Pui {
             .is_some_and(|p| same(Path::new(p), path))
             && (!self.state.ready()
                 || self.loading_chat
+                || self.resource_reload.pending()
+                || self.resource_reload.connector_pending()
+                || self.resource_reload.confirming()
                 || self.history_pending.is_some()
                 || self.interrupt.is_some()
                 || !self.deliveries.is_empty()
