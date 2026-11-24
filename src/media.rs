@@ -966,6 +966,8 @@ fn decode(image: &Attachment, side: u32) -> Result<ColorImage, String> {
 /// Runs one detached attachment decode. Its final step sends the result and
 /// requests a repaint; tests can wait for that whole step via [`wait_decodes`].
 fn spawn_decode(ctx: &egui::Context, work: impl FnOnce() + Send + 'static) {
+    #[cfg(not(test))]
+    let _ = ctx;
     #[cfg(test)]
     let in_flight = decode_tracking::InFlight::start(ctx);
     thread::spawn(move || {

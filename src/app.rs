@@ -168,6 +168,12 @@ pub(super) struct CloudSessionMeta {
     pub(super) branch: Option<String>,
 }
 
+/// Cloud session list refresh: sessions plus per-session cloud metadata.
+type CloudSessionsUpdate = (
+    Vec<Session>,
+    std::collections::HashMap<PathBuf, CloudSessionMeta>,
+);
+
 pub struct Pui {
     prefs: Preferences,
     sync: sync::WindowSync,
@@ -256,12 +262,7 @@ pub struct Pui {
     local_sessions: Vec<Session>,
     cloud_sessions: Vec<Session>,
     cloud_session_meta: std::collections::HashMap<PathBuf, CloudSessionMeta>,
-    cloud_sessions_rx: Option<
-        Receiver<(
-            Vec<Session>,
-            std::collections::HashMap<PathBuf, CloudSessionMeta>,
-        )>,
-    >,
+    cloud_sessions_rx: Option<Receiver<CloudSessionsUpdate>>,
     cloud_sessions_last_poll: Option<std::time::Instant>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,

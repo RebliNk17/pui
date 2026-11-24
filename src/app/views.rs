@@ -377,11 +377,7 @@ impl Pui {
                                                 RichText::new(env_title)
                                                     .size(12.0)
                                                     .strong()
-                                                    .color(if active_cloud.is_some() {
-                                                        colors.text
-                                                    } else {
-                                                        colors.text
-                                                    }),
+                                                    .color(colors.text),
                                             );
                                             ui.label(
                                                 RichText::new(env_sub)

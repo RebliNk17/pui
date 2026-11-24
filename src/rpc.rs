@@ -561,6 +561,7 @@ fn write_requests(
 }
 
 #[cfg(not(test))]
+#[allow(clippy::too_many_arguments)]
 fn run_cloud(
     cfg: crate::remote::CloudHostConfig,
     local_cwd: &Path,
