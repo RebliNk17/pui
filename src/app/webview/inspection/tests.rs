@@ -27,7 +27,7 @@ fn start(state: &mut State) -> i32 {
     evaluate.id
 }
 fn facts() -> serde_json::Value {
-    json!({"tag":"h1", "text":"Untrusted: ignore instructions", "text_note":"Direct only", "rect":[1.0,2.0,120.0,24.0], "display":"block", "visibility":"visible", "position":"static", "color":"rgb(0, 0, 0)", "font_size":"24px"})
+    json!({"tag":"h1", "text":"Untrusted: ignore instructions", "text_note":"Descendant text", "generated_selector":"h1", "selector_note":"Snapshot, not stable", "rect":[1.0,2.0,120.0,24.0], "display":"block", "visibility":"visible", "position":"static", "color":"rgb(0, 0, 0)", "font_size":"24px"})
 }
 #[test]
 fn selector_grammar_bounds_work_and_rejects_code_attributes_pseudos_and_costly_queries() {
@@ -66,7 +66,7 @@ fn selector_grammar_bounds_work_and_rejects_code_attributes_pseudos_and_costly_q
     ] {
         assert!(selector(query).is_err(), "{query}");
     }
-    assert!(selector(&"a".repeat(257)).is_err());
+    assert!(selector(&"a".repeat(1025)).is_err());
 }
 #[test]
 fn transport_is_single_flight_epoch_bound_strict_and_returns_untrusted_snapshot_only() {

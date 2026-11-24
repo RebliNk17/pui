@@ -55,6 +55,10 @@ pub fn shutdown() {
 #[cfg(not(target_os = "macos"))]
 pub fn shutdown() {}
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub(crate) fn live_browser_count() -> usize {
+    mac::LIVE_BROWSERS.load(std::sync::atomic::Ordering::Relaxed)
+}
 #[cfg(target_os = "macos")]
 pub fn live_browser_created() {
     mac::LIVE_BROWSERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

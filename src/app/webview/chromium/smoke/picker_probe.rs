@@ -70,6 +70,7 @@ impl Probe {
                     ctx: tab.ctx.clone(),
                     key: String::new(),
                     snapshots: None,
+                    history: None,
                 },
             );
             let next_epoch = tab.state.lock().unwrap().inspection.epoch;
@@ -96,6 +97,7 @@ impl Probe {
                 ctx: tab.ctx.clone(),
                 key: String::new(),
                 snapshots: None,
+                history: None,
             });
             tab.diagnostics.probe.observed = tab
                 .host()

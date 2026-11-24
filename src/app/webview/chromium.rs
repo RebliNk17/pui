@@ -1,9 +1,10 @@
 //! CEF child views. Every tab owns its Browser; hidden tabs keep DOM/history.
 mod inspection;
 mod mask;
+mod screenshot;
 #[cfg(debug_assertions)]
 mod smoke;
-use super::{Action, Options, PageState, console, safe_html, web_url};
+use super::{Action, Options, PageState, console, history, privacy, safe_html, web_url};
 use cef::*;
 use eframe::egui;
 use objc2::{MainThreadMarker, rc::Retained};
@@ -22,6 +23,7 @@ struct Events {
     ctx: egui::Context,
     key: String,
     snapshots: Option<crate::inline_visual::PageSnapshots>,
+    history: Option<history::Recorder>,
 }
 impl Events {
     fn update(&self, update: impl FnOnce(&mut PageState)) {
@@ -35,24 +37,22 @@ wrap_display_handler! {
     struct Display { events: Events }
     impl DisplayHandler {
         fn on_address_change(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, url: Option<&CefString>) {
-            if frame.is_some_and(|f| f.is_main() == 1) {
+            let main=frame.as_ref().is_some_and(|f| f.is_main()==1);
+            if frame.is_some(){self.events.update(|s|s.navigation_changed());if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}}
+            if main {
                 if let Some(url) = url {
                     let url = url.to_string();
+                    if let Some(history) = &self.events.history { history.record(&url); }
                     self.events.update(|state| {
-                        state.inspection.cancel(Some("Page address changed. Inspect again for a new snapshot."));
                         if web_url(&url) { state.location = url; }
                     });
-                    if let Some(browser)=browser {inspection::cleanup(browser,&self.events);}
                 }
             }
         }
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
             if let Some(title) = title {
                 let title: String = title.to_string().chars().take(200).collect();
-                if let Some(snapshots) = &self.events.snapshots {
-                    snapshots.record_title(&self.events.key, title.clone());
-                }
-                self.events.update(|s| s.title = title);
+                self.events.update(|s|{if s.preview_active && let Some(snapshots)=&self.events.snapshots{snapshots.record_title(&self.events.key,title.clone());}s.title=title;});
             }
         }
         fn on_console_message(&self, _browser: Option<&mut Browser>, level: LogSeverity, message: Option<&CefString>, source: Option<&CefString>, line: i32) -> i32 {
@@ -67,8 +67,8 @@ wrap_load_handler! {
     struct Loading { events: Events }
     impl LoadHandler {
         fn on_load_start(&self, browser: Option<&mut Browser>, frame: Option<&mut Frame>, _transition: TransitionType) {
-            if frame.is_some_and(|frame| frame.is_main() == 1) {
-                self.events.update(|state| state.inspection.cancel(Some("Page changed. Inspect again for a new snapshot.")));
+            if frame.is_some() {
+                self.events.update(|state| state.navigation_changed());
                 if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
             }
         }
@@ -91,14 +91,8 @@ wrap_load_handler! {
                         "fromSurface": true
                     })
                     .to_string();
-                    let cef_json = CefString::from(params.as_str());
-                    let mut dict = cef::parse_json(Some(&cef_json), JsonParserOptions::RFC)
-                        .and_then(|v| v.dictionary());
-                    host.execute_dev_tools_method(
-                        SNAPSHOT_MSG_ID,
-                        Some(&CefString::from("Page.captureScreenshot")),
-                        dict.as_mut(),
-                    );
+                    let id=self.events.state.lock().ok().and_then(|mut s|{if !s.preview_active||s.preview_request.is_some(){return None;}let id=super::inspection::message_id()?;s.preview_request=Some((id,s.document.0));Some(id)});
+                    if let Some(id)=id{let bytes=format!("{{\"id\":{id},\"method\":\"Page.captureScreenshot\",\"params\":{params}}}").into_bytes();host.send_dev_tools_message(Some(&bytes));}
                 }
             }
         }
@@ -160,8 +154,8 @@ wrap_request_handler! {
             let url = request.map(|r| CefString::from(&r.url()).to_string()).unwrap_or_default();
             let allowed = url == "about:blank" || url == self.initial || (self.remote && web_url(&url)) || (self.devtools && (url.starts_with("devtools://") || url.starts_with("chrome-devtools://")));
             if !allowed { self.events.update(|state| state.error = Some("Blocked navigation: only HTTP/HTTPS pages are allowed.".into())); }
-            if allowed && frame.is_some_and(|frame| frame.is_main() == 1) {
-                self.events.update(|state| state.inspection.cancel(Some("Navigation cancelled inspection. Inspect again after loading.")));
+            if allowed && frame.is_some() {
+                self.events.update(|state| state.navigation_changed());
                 if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
             }
             (!allowed) as i32
@@ -171,7 +165,7 @@ wrap_request_handler! {
             0
         }
         fn on_render_process_terminated(&self, browser: Option<&mut Browser>, _status: TerminationStatus, error_code: i32, error_string: Option<&CefString>) {
-            self.events.update(|state| { state.inspection.cancel(Some("Renderer stopped. Reload before inspecting.")); state.loading = false; state.error = Some(format!("Chromium renderer stopped ({error_code}): {}. Reload to retry.", error_string.map(ToString::to_string).unwrap_or_default())); });
+            self.events.update(|state| { state.inspection.cancel(Some("Renderer stopped. Reload before inspecting."));state.screenshot.invalidate();state.document=super::PageEpoch::default(); state.loading = false; state.error = Some(format!("Chromium renderer stopped ({error_code}): {}. Reload to retry.", error_string.map(ToString::to_string).unwrap_or_default())); });
             if let Some(browser)=browser{inspection::cleanup(browser,&self.events);}
         }
     }
@@ -226,19 +220,16 @@ fn client(events: Events, initial: String, remote: bool, devtools: bool) -> Clie
         FileDialogs::new(),
     )
 }
-const SNAPSHOT_MSG_ID: i32 = 90_001;
 
 wrap_dev_tools_message_observer! {
     struct SnapshotObserver { events: Events }
     impl DevToolsMessageObserver {
         fn on_dev_tools_method_result(&self, _browser: Option<&mut Browser>, message_id: i32, success: i32, result: Option<&[u8]>) {
-            if message_id != SNAPSHOT_MSG_ID || success != 1 {
-                return;
-            }
+            let Some(document)=self.events.state.lock().ok().and_then(|mut s|{let (id,doc)=s.preview_request?;if id!=message_id{return None;}s.preview_request=None;(success==1&&s.preview_active&&s.document.0==doc).then_some(doc)})else{return;};
             let Some(snapshots) = self.events.snapshots.clone() else {
                 return;
             };
-            let Some(bytes) = result else {
+            let Some(bytes) = result.filter(|b|b.len()<=7*1024*1024) else {
                 return;
             };
             let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
@@ -256,12 +247,16 @@ wrap_dev_tools_message_observer! {
                 .map(|s| s.title.clone())
                 .filter(|t| !t.is_empty());
             let ctx = self.events.ctx.clone();
+            let state=self.events.state.clone();
             std::thread::spawn(move || {
                 use base64::Engine as _;
                 let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
                     return;
                 };
-                let Ok(img) = image::load_from_memory(&raw) else {
+                let Ok(reader)=image::ImageReader::new(std::io::Cursor::new(&raw)).with_guessed_format()else{return;};
+                let Some((w,h))=image::ImageReader::new(std::io::Cursor::new(&raw)).with_guessed_format().ok().and_then(|r|r.into_dimensions().ok())else{return;};
+                if w==0||h==0||u64::from(w)*u64::from(h)>16_000_000{return;}
+                let Ok(img) = reader.decode() else {
                     return;
                 };
                 let img = if img.width() > 960 || img.height() > 640 {
@@ -274,8 +269,7 @@ wrap_dev_tools_message_observer! {
                     [img.width() as usize, img.height() as usize],
                     img.as_raw(),
                 );
-                snapshots.record_image(&key, title, color);
-                ctx.request_repaint();
+                if let Ok(s)=state.lock() && s.preview_active && s.document.0==document{snapshots.record_image(&key, title, color);ctx.request_repaint();}
             });
         }
     }
@@ -288,7 +282,9 @@ struct Tab {
     options: Option<Options>,
     dimensions: (i32, i32),
     initial: String,
+    history: history::Recorder,
     inspection_observer: Option<Registration>,
+    screenshot_observer: Option<Registration>,
     _snapshot_observer: Option<Registration>,
     // CEF can resize its child during navigation. Its parent must be the pane,
     // never Pui's entire content view (which also contains chat and console).
@@ -310,6 +306,8 @@ impl Tab {
     }
     fn hide(&self) {
         if let Ok(mut state) = self.state.lock() {
+            state.preview_active = false;
+            state.preview_request = None;
             if state.inspection.pending()
                 || state.inspection.facts.is_some()
                 || state.inspection.picking()
@@ -326,6 +324,7 @@ impl Tab {
                 ctx: self.ctx.clone(),
                 key: String::new(),
                 snapshots: None,
+                history: None,
             },
         );
         if !self.container.isHidden() {
@@ -333,6 +332,12 @@ impl Tab {
         }
     }
     fn close(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.screenshot.invalidate();
+            s.preview_active = false;
+            s.preview_request = None;
+        }
+        self.history.close();
         self.hide();
         if let Some(host) = self.host() {
             host.close_dev_tools();
@@ -380,6 +385,7 @@ impl Tab {
 #[derive(Default)]
 pub(super) struct Engine {
     tabs: BTreeMap<String, Tab>,
+    contexts: privacy::Contexts<RequestContext>,
     active: String,
     snapshots: Option<crate::inline_visual::PageSnapshots>,
     // Runtime drops after tabs, not before their asynchronous close callbacks.
@@ -434,6 +440,7 @@ impl Engine {
                     ctx: tab.ctx.clone(),
                     key: String::new(),
                     snapshots: None,
+                    history: None,
                 },
             );
         }
@@ -452,25 +459,46 @@ impl Engine {
             }
         }
     }
-    pub fn inspect(&self, key: &str, epoch: u64, query: &str) {
-        if key == self.active {
-            if let Some(tab) = self
-                .tabs
-                .get(key)
-                .filter(|tab| tab.inspection_observer.is_some())
-            {
-                inspection::inspect(tab, epoch, Some(query));
-            }
-        }
-    }
-    pub fn pick(&self, key: &str, epoch: u64) {
+    pub fn inspect_scoped(
+        &self,
+        key: &str,
+        epoch: u64,
+        query: &str,
+        scope: &super::inspection::Scope,
+    ) {
         if key == self.active
             && let Some(tab) = self
                 .tabs
                 .get(key)
                 .filter(|t| t.inspection_observer.is_some())
         {
-            inspection::inspect(tab, epoch, None);
+            inspection::inspect_scoped(tab, epoch, Some(query), scope, false);
+        }
+    }
+    pub fn pick_scoped(&self, key: &str, epoch: u64, scope: &super::inspection::Scope) {
+        if key == self.active
+            && let Some(tab) = self
+                .tabs
+                .get(key)
+                .filter(|t| t.inspection_observer.is_some())
+        {
+            inspection::inspect_scoped(tab, epoch, None, scope, false);
+        }
+    }
+    pub fn inspect_frames(&self, key: &str, epoch: u64) {
+        if key == self.active
+            && let Some(tab) = self
+                .tabs
+                .get(key)
+                .filter(|t| t.inspection_observer.is_some())
+        {
+            inspection::inspect_scoped(
+                tab,
+                epoch,
+                None,
+                &super::inspection::Scope::default(),
+                true,
+            );
         }
     }
     pub fn hide(&self) {
@@ -478,16 +506,51 @@ impl Engine {
             tab.hide();
         }
     }
+    pub fn clear_previews(&self) {
+        for key in self.tabs.keys() {
+            if let Some(s) = &self.snapshots {
+                s.remove(key);
+            }
+        }
+    }
     pub fn close(&mut self, key: &str) {
         if let Some(tab) = self.tabs.remove(key) {
             tab.close();
         }
+        if let Some(s) = &self.snapshots {
+            s.remove(key);
+        }
     }
     pub fn close_all(&mut self) {
-        for (_, tab) in std::mem::take(&mut self.tabs) {
+        for (key, tab) in std::mem::take(&mut self.tabs) {
             tab.close();
+            if let Some(s) = &self.snapshots {
+                s.remove(&key);
+            }
         }
+        self.contexts.clear();
         self.active.clear();
+    }
+    pub fn drop_context(&mut self, context: history::ContextId) {
+        self.contexts.remove(context);
+    }
+    pub fn navigate(&mut self, key: &str, url: &str) {
+        if key != self.active || !history::address(url) {
+            return;
+        }
+        let Some(tab) = self.tabs.get(key) else {
+            return;
+        };
+        if let Some(frame) = tab.browser.main_frame() {
+            if let Ok(mut state) = tab.state.lock() {
+                state.error = None;
+                state
+                    .inspection
+                    .cancel(Some("Navigation cancelled inspection."));
+            }
+            self.cancel_inspection(key);
+            frame.load_url(Some(&CefString::from(url)));
+        }
     }
     pub fn action(&mut self, key: &str, action: Action) {
         let Some(tab) = self.tabs.get(key) else {
@@ -510,6 +573,7 @@ impl Engine {
                         ctx: tab.ctx.clone(),
                         key: String::new(),
                         snapshots: None,
+                        history: None,
                     };
                     let mut client = client(events, String::new(), false, true);
                     host.show_dev_tools(
@@ -531,6 +595,8 @@ impl Engine {
         url: Option<&str>,
         html: Option<&str>,
         options: &Options,
+        context: history::ContextId,
+        history: &history::History,
         holes: &[egui::Rect],
         ctx: &egui::Context,
     ) -> Result<(), String> {
@@ -578,11 +644,13 @@ impl Engine {
         }
         if !self.tabs.contains_key(key) {
             let state = Arc::new(Mutex::new(PageState::default()));
+            let recorder = history.recorder(context);
             let events = Events {
                 state: state.clone(),
                 ctx: ctx.clone(),
                 key: key.to_owned(),
                 snapshots: self.snapshots.clone(),
+                history: Some(recorder.clone()),
             };
             let mut client = client(events.clone(), initial.clone(), url.is_some(), false);
             let settings = BrowserSettings {
@@ -592,12 +660,16 @@ impl Engine {
                 javascript: State::DEFAULT,
                 ..Default::default()
             };
-            let mut handler = crate::chromium::context_handler();
-            let mut request_context = cef::request_context_create_context(
-                Some(&crate::chromium::context_settings()),
-                Some(&mut handler),
-            )
-            .ok_or("Cannot create private browser context")?;
+            // Only explicit owner-scoped context identities may share storage.
+            // Never use CEF's global context or a cache/profile path.
+            let mut request_context = self.contexts.get_or_create(context, || {
+                let mut handler = crate::chromium::context_handler();
+                cef::request_context_create_context(
+                    Some(&crate::chromium::context_settings()),
+                    Some(&mut handler),
+                )
+                .ok_or_else(|| "Cannot create private browser context".into())
+            })?;
             let mtm = MainThreadMarker::new().ok_or("Browser must run on the main thread")?;
             let container = mask::Container::new(
                 mtm,
@@ -649,7 +721,9 @@ impl Engine {
                     options: None,
                     dimensions: (0, 0),
                     initial,
+                    history: recorder,
                     inspection_observer: None,
+                    screenshot_observer: None,
                     _snapshot_observer: snapshot_observer,
                     container,
                     #[cfg(debug_assertions)]
@@ -658,10 +732,18 @@ impl Engine {
             );
         }
         if self.active != key {
+            for tab in self.tabs.values() {
+                if let Ok(mut s) = tab.state.lock() {
+                    s.screenshot.invalidate();
+                }
+            }
             self.hide();
             self.active = key.into();
         }
         let tab = self.tabs.get_mut(key).unwrap();
+        if let Ok(mut s) = tab.state.lock() {
+            s.preview_active = true;
+        }
         let page = rect;
         {
             let y = if parent.isFlipped() {
@@ -713,6 +795,7 @@ impl Engine {
                 ctx: tab.ctx.clone(),
                 key: String::new(),
                 snapshots: None,
+                history: None,
             },
         );
         tab.emulate(options, rect);

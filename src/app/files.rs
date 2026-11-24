@@ -210,6 +210,30 @@ impl Browser {
         });
     }
 
+    pub(super) fn bind_browser_owner(&mut self, root: &Path, session: &str) {
+        self.web.bind_owner(root, session);
+    }
+    #[cfg(test)]
+    pub(super) fn seed_browser_capture(&mut self, page: &str) -> u64 {
+        self.open = true;
+        self.browser_mode = true;
+        self.selected_url = Some(page.into());
+        self.web_preview = Some(WebPreview {
+            key: page.into(),
+            rect: egui::Rect::NOTHING,
+            url: Some(page.into()),
+            html: None,
+        });
+        self.web.seed_capture_page(page)
+    }
+    pub(super) fn browser_capture_matches(&self, page: &str, epoch: u64) -> bool {
+        self.open
+            && self
+                .web_preview
+                .as_ref()
+                .is_some_and(|p| self.web.matches_active(&p.key))
+            && self.web.capture_matches(page, epoch)
+    }
     pub(super) fn set_page_snapshots(&mut self, snapshots: crate::inline_visual::PageSnapshots) {
         self.web.set_snapshots(snapshots);
     }
@@ -375,6 +399,7 @@ impl Browser {
         self.tabs
             .sort_by_key(|tab| saved.paths.iter().position(|path| path == &tab.path));
         self.urls = saved.urls;
+        self.web.restore_suspended(&self.urls);
         self.selected = saved.selected;
         self.selected_url = saved.selected_url;
         self.expanded_dirs = saved.directories.into_iter().collect();
@@ -815,6 +840,9 @@ impl Browser {
         self.web_preview = None;
     }
 
+    pub(super) fn cancel_browser_intents(&mut self) {
+        self.web.cancel_intents();
+    }
     pub(super) fn hide_web(&mut self) {
         self.web.hide();
     }
@@ -857,6 +885,9 @@ impl Browser {
             .web_preview
             .as_ref()
             .is_some_and(|preview| overlays.iter().any(|o| o.contains_rect(preview.rect)));
+        if !self.open || self.web_preview.is_none() {
+            self.web.cancel_intents();
+        }
         if !self.open || covered {
             self.web.hide();
             return;
@@ -2073,6 +2104,8 @@ mod block_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod navigation_tests;
 mod path_menu;
+#[cfg(test)]
+mod privacy_restore_tests;
 #[cfg(test)]
 mod question_tests;
 #[cfg(test)]

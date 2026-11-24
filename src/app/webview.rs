@@ -9,7 +9,10 @@ pub(super) const NATIVE_EDGE_INSET: f32 = 2.0;
 
 pub(super) mod chrome;
 mod console;
+mod history;
 mod inspection;
+mod privacy;
+mod screenshot;
 mod viewport;
 use console::ConsoleLine;
 #[cfg(target_os = "macos")]
@@ -106,8 +109,17 @@ impl Options {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PageEpoch(u64);
+impl Default for PageEpoch {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
 #[derive(Clone, Default)]
 struct PageState {
+    document: PageEpoch,
     location: String,
     title: String,
     loading: bool,
@@ -116,6 +128,21 @@ struct PageState {
     error: Option<String>,
     console: std::collections::VecDeque<ConsoleLine>,
     inspection: inspection::State,
+    screenshot: screenshot::State,
+    preview_active: bool,
+    preview_request: Option<(i32, u64)>,
+}
+impl PageState {
+    /// Any child navigation invalidates frozen viewport/element provenance too.
+    /// CEF frame IDs are not assumed interchangeable with CDP frame IDs.
+    fn navigation_changed(&mut self) {
+        self.preview_request = None;
+        self.inspection.cancel(Some(
+            "Page or frame changed. Inspect again for a new snapshot.",
+        ));
+        self.screenshot.invalidate();
+        self.document = PageEpoch::default();
+    }
 }
 #[derive(Clone, Copy)]
 enum Action {
@@ -131,11 +158,16 @@ pub(super) struct BrowserView {
     #[cfg(target_os = "macos")]
     engine: chromium::Engine,
     options: BTreeMap<String, Options>,
+    history: history::History,
+    privacy: privacy::Privacy,
     active: String,
     last_location: String,
     viewport_editor: Option<viewport::Editor>,
     inspection: Option<inspection::Editor>,
+    screenshot: Option<screenshot::Editor>,
     unavailable: bool,
+    #[cfg(test)]
+    test_pages: std::collections::BTreeMap<String, PageState>,
 }
 impl BrowserView {
     pub(super) fn set_snapshots(&mut self, snapshots: crate::inline_visual::PageSnapshots) {
@@ -147,7 +179,11 @@ impl BrowserView {
     pub(super) fn focused(&self) -> bool {
         // App-level Escape handling runs before browser UI: an open dimension
         // editor owns cancellation even when the native page has lost focus.
-        if self.viewport_editor.is_some() || self.inspection.is_some() {
+        if self.viewport_editor.is_some()
+            || self.inspection.is_some()
+            || self.privacy.confirming()
+            || self.screenshot.is_some()
+        {
             return true;
         }
         #[cfg(target_os = "macos")]
@@ -165,13 +201,19 @@ impl BrowserView {
         #[cfg(target_os = "macos")]
         self.engine.close_all();
         self.options.clear();
+        self.history.reset();
+        self.privacy.reset();
         self.active.clear();
         self.last_location.clear();
         self.viewport_editor = None;
         self.inspection = None;
+        self.screenshot = None;
         self.unavailable = false;
     }
     pub(super) fn close(&mut self, key: &str) {
+        if self.screenshot.as_ref().is_some_and(|e| e.key == key) {
+            self.cancel_screenshot();
+        }
         if self
             .inspection
             .as_ref()
@@ -181,6 +223,11 @@ impl BrowserView {
         }
         #[cfg(target_os = "macos")]
         self.engine.close(key);
+        if let Some(context) = self.privacy.close(key) {
+            #[cfg(target_os = "macos")]
+            self.engine.drop_context(context);
+            self.history.remove_context(context);
+        }
         self.options.remove(key);
         if self
             .viewport_editor
@@ -236,6 +283,10 @@ impl BrowserView {
         Ok(())
     }
     fn state(&self, key: &str) -> PageState {
+        #[cfg(test)]
+        if let Some(state) = self.test_pages.get(key) {
+            return state.clone();
+        }
         #[cfg(target_os = "macos")]
         {
             self.engine.state(key)
@@ -247,10 +298,44 @@ impl BrowserView {
         }
     }
     fn action(&mut self, action: Action) {
+        if self.privacy.suspended(&self.active) {
+            if matches!(action, Action::Reload) {
+                let key = self.active.clone();
+                self.resume_session(&key);
+            }
+            return;
+        }
+        if self.privacy.confirming() {
+            return;
+        }
         #[cfg(target_os = "macos")]
         self.engine.action(&self.active, action);
         #[cfg(not(target_os = "macos"))]
         let _ = action;
+    }
+    pub(super) fn matches_active(&self, key: &str) -> bool {
+        self.active == key
+    }
+    #[cfg(test)]
+    pub(super) fn seed_capture_page(&mut self, key: &str) -> u64 {
+        self.active = key.into();
+        let state = PageState {
+            location: key.into(),
+            ..Default::default()
+        };
+        let epoch = state.document.0;
+        self.test_pages.insert(key.into(), state);
+        epoch
+    }
+    pub(super) fn capture_matches(&self, page: &str, epoch: u64) -> bool {
+        let state = self.state(&self.active);
+        !self.active.is_empty()
+            && !state.loading
+            && !self.session_suspended(&self.active)
+            && !self.privacy_confirming()
+            && state.document.0 == epoch
+            && !state.location.is_empty()
+            && state.location == page
     }
     pub(super) fn tab_title(&self, key: &str) -> String {
         let state = self.state(key);
@@ -273,6 +358,7 @@ impl BrowserView {
     }
     pub(super) fn navigation(&mut self, ui: &mut egui::Ui, key: &str) {
         if self.active != key {
+            self.cancel_screenshot();
             self.last_location.clear();
         }
         self.active = key.into();
@@ -310,6 +396,8 @@ impl BrowserView {
             .as_ref()
             .is_some_and(|editor| editor.key == key);
         if chrome::icon_button(ui, Icon::Inspect, "Inspect an element", inspecting).clicked() {
+            self.cancel_screenshot();
+            self.viewport_editor = None;
             #[cfg(target_os = "macos")]
             self.engine.cancel_inspection(key);
             #[cfg(target_os = "macos")]
@@ -325,9 +413,51 @@ impl BrowserView {
                 ))
             };
         }
-        if chrome::icon_button(ui, Icon::Code, "Open Chrome DevTools", false).clicked() {
-            self.action(Action::DevTools);
-        }
+        let more = chrome::icon_button(ui, Icon::Details, "More browser tools", false);
+        egui::Popup::from_toggle_button_response(&more)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .frame(prompt_ui::popup(ui.ctx()))
+            .width((ui.ctx().screen_rect().width() - 40.0).clamp(120.0, 270.0))
+            .show(|ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("browser-tools-scroll", key))
+                    .max_height((ui.ctx().screen_rect().height() - 100.0).max(80.0))
+                    .show(ui, |ui| {
+                        theme::menu_controls(ui);
+                        privacy::guard_keys(ui.ctx());
+                        prompt_ui::compact_heading(ui, "Browser tools");
+                        let shot = prompt_ui::button(
+                            ui,
+                            "Screenshot & annotate…",
+                            prompt_ui::Button::Secondary,
+                            !self.unavailable && !self.state(key).loading,
+                        );
+                        context_capture::browser::register(&shot);
+                        if shot.clicked() {
+                            if let Some(token) = context_capture::browser::freeze(ui.ctx()) {
+                                if let Err(error) = self.begin_screenshot(ui.ctx(), key, token) {
+                                    context_capture::browser::failed(ui.ctx(), token, error);
+                                }
+                            }
+                            ui.close();
+                        }
+                        if prompt_ui::button(
+                            ui,
+                            "Chrome DevTools",
+                            prompt_ui::Button::Secondary,
+                            !self.unavailable,
+                        )
+                        .clicked()
+                        {
+                            self.action(Action::DevTools);
+                            ui.close();
+                        }
+                        ui.separator();
+                        self.history_menu(ui, key);
+                        ui.separator();
+                        self.privacy_menu(ui, key);
+                    });
+            });
     }
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui, key: &str, source: Option<&mut bool>) {
         let colors = theme::palette(ui.ctx());
@@ -462,6 +592,16 @@ impl BrowserView {
     }
     pub(super) fn viewport(&mut self, ui: &mut egui::Ui, key: &str) -> egui::Rect {
         let state = self.state(key);
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new("browser-current-page"),
+                if state.location.is_empty() {
+                    key.to_owned()
+                } else {
+                    state.location.clone()
+                },
+            )
+        });
         self.viewport_with_state(ui, key, state)
     }
 
@@ -483,7 +623,18 @@ impl BrowserView {
                 let _ = editor;
             }
         }
+        self.privacy_dialog(ui.ctx(), key);
+        if self.session_notice(ui, key) {
+            return egui::Rect::from_min_size(ui.cursor().min, Vec2::ZERO);
+        }
         if let Some(editor) = self.inspection.as_mut() {
+            editor.page = if state.location.is_empty() {
+                key.into()
+            } else {
+                state.location.clone()
+            };
+            editor.page_title = state.title.clone();
+            editor.document = state.document.0;
             let colors = theme::palette(ui.ctx());
             let decision = egui::Frame::new()
                 .fill(colors.surface)
@@ -513,15 +664,43 @@ impl BrowserView {
             } else if decision.cancel_pick {
                 #[cfg(target_os = "macos")]
                 self.engine.cancel_inspection(key);
+            } else if decision.inventory {
+                #[cfg(target_os = "macos")]
+                self.engine.inspect_frames(key, state.inspection.epoch);
             } else if decision.pick {
                 #[cfg(target_os = "macos")]
-                self.engine.pick(key, state.inspection.epoch);
+                self.engine
+                    .pick_scoped(key, state.inspection.epoch, &decision.scope);
             } else if let Some(query) = decision.inspect {
                 #[cfg(target_os = "macos")]
-                self.engine.inspect(key, state.inspection.epoch, &query);
+                self.engine
+                    .inspect_scoped(key, state.inspection.epoch, &query, &decision.scope);
                 #[cfg(not(target_os = "macos"))]
                 let _ = query;
             }
+        }
+        let token = context_capture::browser::token(ui.ctx());
+        if token.is_none() {
+            self.cancel_screenshot();
+        }
+        if let Some(token) = token
+            && let Some(image) = self.screenshot_ui(ui.ctx(), key, token, ui.is_enabled())
+        {
+            debug_assert_eq!(image.page, key);
+            debug_assert_ne!(image.epoch, 0);
+            debug_assert_ne!(image.request, 0);
+            context_capture::browser::queue(
+                ui.ctx(),
+                context_capture::browser::Handoff::Image {
+                    token: image.draft_token,
+                    page: state.location.clone(),
+                    epoch: state.document.0,
+                    image: image.image,
+                },
+            );
+        }
+        if let Some(notice) = context_capture::browser::notice(ui.ctx()) {
+            ui.add(egui::Label::new(theme::small(ui, notice)).wrap());
         }
         let options = self.options.entry(key.into()).or_default();
         let mut state = state;
@@ -703,10 +882,19 @@ impl BrowserView {
         holes: &[egui::Rect],
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        #[cfg(all(debug_assertions, target_os = "macos"))]
+        if self.privacy_smoke_tick(frame, rect, key, ctx) {
+            return Ok(());
+        }
         if self.active != key {
             self.last_location.clear();
         }
         self.active = key.into();
+        if self.privacy.suspended(key) || self.privacy.confirming() {
+            self.hide();
+            return Ok(());
+        }
+        let context = self.privacy.ensure(key);
         #[cfg(target_os = "macos")]
         let result = {
             self.engine.show(
@@ -716,13 +904,15 @@ impl BrowserView {
                 url,
                 html,
                 self.options.entry(key.into()).or_default(),
+                context,
+                &self.history,
                 holes,
                 ctx,
             )
         };
         #[cfg(not(target_os = "macos"))]
         let result = {
-            let _ = (frame, rect, url, html, holes, ctx);
+            let _ = (frame, rect, url, html, holes, ctx, context);
             Err("Bundled Chromium is currently packaged for macOS only. File/Markdown/image viewing and HTML Source remain available.".into())
         };
         self.unavailable = result.is_err();
