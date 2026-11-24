@@ -10,7 +10,9 @@ impl Pui {
     pub(super) fn agent_settings(&self, id: &str) -> settings::Settings {
         let mut settings = self.prefs.settings.clone();
         if let Some(node) = self.agents.nodes.get(id) {
-            if node.access == "read-only" {
+            if node.cloud_host.is_some() {
+                settings.permission = PermissionMode::Auto;
+            } else if node.access == "read-only" {
                 settings.permission = PermissionMode::Plan;
             } else if let Some(permission) = node.permission {
                 settings.permission = permission;

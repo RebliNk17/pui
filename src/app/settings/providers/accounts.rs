@@ -35,6 +35,7 @@ pub(super) enum LoginEvent {
 pub(super) struct BrowserLogin {
     pub target: String,
     pub base: String,
+    pub cloud_host: Option<crate::remote::CloudHostConfig>,
     pub url: Option<String>,
     pub device: Option<(String, String)>,
     pub progress: Option<String>,
@@ -72,6 +73,7 @@ pub(super) struct AccountsState {
     pub login: Option<BrowserLogin>,
     pub rename: Option<(String, String)>,
     pub remove: Option<String>,
+    pub cloud_auth_completed: Option<String>,
 }
 
 /// Parses one stdout line of scripts/login.mjs.
@@ -97,12 +99,18 @@ pub(super) fn parse_login_line(line: &str) -> Option<LoginEvent> {
     }
 }
 
-fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> BrowserLogin {
+fn start_browser_login(
+    ctx: &egui::Context,
+    target: &str,
+    base: &str,
+    cloud_host: Option<crate::remote::CloudHostConfig>,
+) -> BrowserLogin {
     let (tx, rx) = mpsc::channel();
     let child_slot = Arc::new(Mutex::new(None));
     let mut login = BrowserLogin {
         target: target.to_owned(),
         base: base.to_owned(),
+        cloud_host: cloud_host.clone(),
         url: None,
         device: None,
         progress: None,
@@ -118,6 +126,27 @@ fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> Browser
         login.error = Some("Pi SDK not found. Set PUI_PI_SDK to its dist/index.js.".into());
         return login;
     };
+    let isolated_dir = if cloud_host.is_some() {
+        let dir = std::env::temp_dir().join(format!(
+            "pui-cloud-oauth-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            login.running = false;
+            login.error = Some(format!("Could not prepare temporary sign-in folder: {e}"));
+            return login;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        Some(dir)
+    } else {
+        None
+    };
+
     let mut command = std::process::Command::new(crate::runtime::node_binary());
     command
         .args([
@@ -132,9 +161,16 @@ fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> Browser
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::runtime::configure(&mut command);
+    if let Some(ref dir) = isolated_dir {
+        // Isolate Pi's auth.json in a temp dir so the Mac's own login is untouched.
+        command.env("PI_CODING_AGENT_DIR", dir);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
+            if let Some(ref dir) = isolated_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             login.running = false;
             login.error = Some("Could not start Node for sign-in.".into());
             return login;
@@ -146,6 +182,7 @@ fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> Browser
         *slot = Some(child);
     }
     let ctx = ctx.clone();
+    let target_owned = target.to_owned();
     std::thread::spawn(move || {
         let mut finished = false;
         if let Some(stdout) = stdout {
@@ -154,6 +191,51 @@ fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> Browser
                 .map_while(Result::ok)
             {
                 if let Some(event) = parse_login_line(&line) {
+                    if let LoginEvent::Finished(Ok(email)) = event {
+                        finished = true;
+                        if let (Some(cfg), Some(dir)) = (cloud_host.as_ref(), isolated_dir.as_ref())
+                        {
+                            let _ = tx.send(LoginEvent::Progress(format!(
+                                "Saving dedicated session to {}…",
+                                cfg.name
+                            )));
+                            ctx.request_repaint();
+                            let auth_path = dir.join("auth.json");
+                            let push_res = std::fs::read_to_string(&auth_path)
+                                .map_err(|e| format!("Could not read temporary auth.json: {e}"))
+                                .and_then(|raw| {
+                                    serde_json::from_str::<Value>(&raw)
+                                        .map_err(|e| format!("Invalid temporary auth.json: {e}"))
+                                })
+                                .and_then(|val| {
+                                    val.get(&target_owned).cloned().ok_or_else(|| {
+                                        format!(
+                                            "Temporary auth.json did not contain '{target_owned}'."
+                                        )
+                                    })
+                                })
+                                .and_then(|cred| {
+                                    crate::remote::cloud::push_single_provider_auth(
+                                        cfg,
+                                        &target_owned,
+                                        &cred,
+                                    )
+                                    .map(|_| ())
+                                });
+                            match push_res {
+                                Ok(()) => {
+                                    let _ = tx.send(LoginEvent::Finished(Ok(email)));
+                                }
+                                Err(err) => {
+                                    let _ = tx.send(LoginEvent::Finished(Err(err)));
+                                }
+                            }
+                        } else {
+                            let _ = tx.send(LoginEvent::Finished(Ok(email)));
+                        }
+                        ctx.request_repaint();
+                        continue;
+                    }
                     finished |= matches!(event, LoginEvent::Finished(_));
                     let _ = tx.send(event);
                     ctx.request_repaint();
@@ -164,6 +246,9 @@ fn start_browser_login(ctx: &egui::Context, target: &str, base: &str) -> Browser
             && let Some(mut child) = slot.take()
         {
             let _ = child.wait();
+        }
+        if let Some(dir) = isolated_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
         if !finished {
             let _ = tx.send(LoginEvent::Finished(Err(
@@ -199,7 +284,7 @@ impl ProvidersManager {
         if base == "antigravity" {
             self.open_antigravity_for(&target);
         } else {
-            self.accounts.login = Some(start_browser_login(ctx, &target, base));
+            self.accounts.login = Some(start_browser_login(ctx, &target, base, None));
         }
     }
 
@@ -208,8 +293,24 @@ impl ProvidersManager {
         if base == "antigravity" {
             self.open_antigravity_for(target);
         } else {
-            self.accounts.login = Some(start_browser_login(ctx, target, base));
+            self.accounts.login = Some(start_browser_login(ctx, target, base, None));
         }
+    }
+
+    /// Runs a dedicated browser OAuth login and writes the new independent session straight to
+    /// the remote cloud host without touching the Mac's local `~/.pi/agent/auth.json`.
+    pub(in crate::app) fn start_cloud_oauth_login(
+        &mut self,
+        ctx: &egui::Context,
+        target: &str,
+        cloud_host: crate::remote::CloudHostConfig,
+    ) {
+        let base = registry::family(target);
+        self.accounts.login = Some(start_browser_login(ctx, target, base, Some(cloud_host)));
+    }
+
+    pub(in crate::app) fn take_cloud_auth_completed(&mut self) -> Option<String> {
+        self.accounts.cloud_auth_completed.take()
     }
 
     pub(in crate::app) fn provider_display_name(&mut self, target: &str) -> String {
@@ -243,7 +344,7 @@ impl ProvidersManager {
         } else if auth_kind == Some("api_key") {
             self.open_api_key_modal(Some(target));
         } else if auth_kind == Some("oauth") || matches!(base, "anthropic" | "openai-codex") {
-            self.accounts.login = Some(start_browser_login(ctx, target, base));
+            self.accounts.login = Some(start_browser_login(ctx, target, base, None));
         } else {
             self.open_api_key_modal(Some(target));
         }
@@ -281,16 +382,33 @@ impl ProvidersManager {
                         login.running = false;
                         login.rx = None;
                         match result {
-                            Ok(email) => finished = Some((login.target.clone(), email)),
+                            Ok(email) => {
+                                finished =
+                                    Some((login.target.clone(), email, login.cloud_host.clone()))
+                            }
                             Err(error) => login.error = Some(error),
                         }
                     }
                 }
             }
         }
-        if let Some((target, email)) = finished {
+        if let Some((target, email, cloud_host)) = finished {
             self.accounts.login = None;
-            self.account_signed_in(&target, email.as_deref());
+            if let Some(cfg) = cloud_host {
+                self.status_error = None;
+                self.status_notice = Some(format!(
+                    "Signed in {} on {}{}.",
+                    family_name(registry::family(&target)),
+                    cfg.name,
+                    email
+                        .as_deref()
+                        .map(|e| format!(" as {e}"))
+                        .unwrap_or_default()
+                ));
+                self.accounts.cloud_auth_completed = Some(cfg.name);
+            } else {
+                self.account_signed_in(&target, email.as_deref());
+            }
         }
     }
 
@@ -379,19 +497,25 @@ impl ProvidersManager {
         if let Some(login) = &mut self.accounts.login {
             let mut close = false;
             let mut submit = false;
-            let title = format!("Sign in to {}", family_name(&login.base));
+            let title = if let Some(cfg) = &login.cloud_host {
+                format!("Sign in to {} on {}", family_name(&login.base), cfg.name)
+            } else {
+                format!("Sign in to {}", family_name(&login.base))
+            };
+            let subtitle = if let Some(cfg) = &login.cloud_host {
+                format!(
+                    "Creates a dedicated session for {} so your Mac and cloud host never expire each other.",
+                    cfg.name
+                )
+            } else if registry::is_alias(&login.target) {
+                "Adds another account. Your existing accounts stay signed in.".to_owned()
+            } else {
+                "Sign in with your subscription in the browser.".to_owned()
+            };
             let response = prompt_ui::modal(ctx, egui::Id::new("pui-account-login"), 440.0, |ui| {
                 let mut dismiss = prompt_ui::close(ui);
                 prompt_ui::badge(ui, Icon::Spark, false);
-                prompt_ui::heading(
-                    ui,
-                    &title,
-                    if registry::is_alias(&login.target) {
-                        "Adds another account. Your existing accounts stay signed in."
-                    } else {
-                        "Sign in with your subscription in the browser."
-                    },
-                );
+                prompt_ui::heading(ui, &title, &subtitle);
                 ui.add_space(12.0);
                 let status = if let Some(error) = &login.error {
                     error.clone()
@@ -758,6 +882,7 @@ mod tests {
         BrowserLogin {
             target: target.into(),
             base: base.into(),
+            cloud_host: None,
             url: Some("https://claude.ai/oauth/authorize?code=true".into()),
             device: None,
             progress: None,

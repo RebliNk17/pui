@@ -681,12 +681,49 @@ pub fn sync_catalog_projects(
     Ok(synced)
 }
 
+/// Anthropic Pro/Max OAuth uses single-use rotating refresh tokens: copying the same
+/// credential to two hosts causes whichever host refreshes first to revoke the other.
+/// Cloud hosts should use a dedicated sign-in (`push_single_provider_auth`) instead.
+pub fn is_single_use_oauth_provider(provider_id: &str, cred: &Value) -> bool {
+    let is_anthropic = provider_id == "anthropic" || provider_id.starts_with("anthropic~");
+    is_anthropic && cred["type"].as_str() == Some("oauth")
+}
+
+pub fn push_single_provider_auth(
+    cfg: &CloudHostConfig,
+    provider_id: &str,
+    cred: &Value,
+) -> Result<Vec<String>, String> {
+    let mut map = serde_json::Map::new();
+    map.insert(provider_id.to_owned(), cred.clone());
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-auth",
+        Some(&json!({ "auth": Value::Object(map), "merge": true })),
+    )?;
+    let providers = res["providers"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(providers)
+}
+
 pub fn discover_local_inventory(cwd: &Path, known_projects: &[PathBuf]) -> LocalSyncInventory {
     let mut providers = Vec::new();
     if let Some(auth_path) = local_pi_file("auth.json") {
         if let Ok(raw) = std::fs::read_to_string(&auth_path) {
             if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&raw) {
-                providers = map.keys().cloned().collect();
+                providers = map
+                    .iter()
+                    .filter(|(k, v)| !is_single_use_oauth_provider(k, v))
+                    .map(|(k, _)| k.clone())
+                    .collect();
                 providers.sort();
             }
         }
@@ -781,15 +818,21 @@ pub fn sync_selected_pi_auth(
     };
     let mut filtered = serde_json::Map::new();
     for (k, v) in all_map {
-        if selected.contains(&k) {
+        if selected.contains(&k) && !is_single_use_oauth_provider(&k, &v) {
             filtered.insert(k, v);
         }
+    }
+    // Always merge so dedicated cloud-only OAuth logins (like Claude Pro/Max on pui-cloud)
+    // are never wiped out by a Mac -> Cloud sync.
+    let _ = replace;
+    if filtered.is_empty() {
+        return Ok(Vec::new());
     }
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-auth",
-        Some(&json!({ "auth": Value::Object(filtered), "merge": !replace })),
+        Some(&json!({ "auth": Value::Object(filtered), "merge": true })),
     )?;
     let providers = res["providers"]
         .as_array()

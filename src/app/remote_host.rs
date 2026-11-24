@@ -1756,6 +1756,13 @@ impl Pui {
                                     if accent_button(ui, "Sync from Mac…").clicked() {
                                         open_sync_picker(&shared, &self.prefs.cwd, &known_projects);
                                     }
+                                    if secondary_button(ui, "Sign in to Claude…").clicked() {
+                                        self.settings_view.providers.start_cloud_oauth_login(
+                                            ui.ctx(),
+                                            "anthropic",
+                                            cfg.clone(),
+                                        );
+                                    }
                                     if secondary_button(ui, "Copy pair link").clicked() {
                                         let uri = cloud::pairing_uri(&cfg);
                                         ui.ctx().copy_text(uri);

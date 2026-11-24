@@ -1242,6 +1242,13 @@ impl Pui {
         self.updates.poll();
         self.settings_view.resources.poll();
         self.settings_view.providers.poll();
+        if let Some(host_name) = self.settings_view.providers.take_cloud_auth_completed() {
+            self.state.error = None;
+            self.dismissed_auth_error = None;
+            self.state.notice = Some(format!(
+                "Signed in to Claude on {host_name}. You can send a message now."
+            ));
+        }
         if self.catalog.poll(&self.ctx) {
             self.catalog.with_extensions(&self.prefs.extension_models);
         }
