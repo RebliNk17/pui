@@ -966,6 +966,7 @@ impl Pui {
                 self.transcript.view = self.prefs.transcript_view;
                 self.transcript.pending_messages = self.state.pending_messages.clone();
                 self.transcript.message_actions_enabled = self.history_ready();
+                self.transcript.continue_enabled = self.can_continue_after_error();
                 self.transcript.progress = self.transcript_progress();
                 self.transcript.cwd =
                     (!self.prefs.cwd.as_os_str().is_empty()).then(|| self.prefs.cwd.clone());
@@ -1031,6 +1032,9 @@ impl Pui {
                 self.attention_rendered(ui);
                 if let Some(action) = self.transcript.action.take() {
                     match action {
+                        crate::transcript::TranscriptAction::Continue(index) => {
+                            self.continue_after_error(index);
+                        }
                         crate::transcript::TranscriptAction::Open(target) => {
                             if let Err(error) =
                                 self.files.open_target(ctx, &self.prefs.cwd, &target)
