@@ -801,12 +801,8 @@ fn user_actions(
     gallery: &mut crate::media::Gallery,
     enabled: bool,
 ) -> Option<MessageAction> {
-    let footer_width = footer_text_width(ui, &time_label(message.timestamp))
-        + ["Copy", "Edit", "Rewind", "Fork"]
-            .into_iter()
-            .map(|label| footer_action_width(ui, label))
-            .sum::<f32>()
-        + 40.0;
+    // Timestamp + four 24px icon actions with 2px spacing.
+    let footer_width = footer_text_width(ui, &time_label(message.timestamp)) + 4.0 * 26.0 + 16.0;
     user_bubble(ui, message, gallery, footer_width);
     user_footer(ui, user_display_text(message), message.timestamp, enabled)
 }
@@ -894,30 +890,58 @@ fn user_footer(
     let colors = crate::theme::palette(ui.ctx());
     let unavailable = "Finish or stop the run, or use the owning window to change history.";
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
         // Reverse construction keeps the visible order timestamp, Copy, Edit,
         // Rewind, Fork while anchoring the whole footer to the user's right edge.
         for (label, icon, kind, hint) in [
-            ("Fork", Icon::Branch, MessageAction::Fork, "Start a separate conversation branched from this message. Original chat and files stay unchanged."),
+            ("Fork from here", Icon::Branch, MessageAction::Fork, "Starts a new session from this point. This one stays as it is."),
             ("Rewind", Icon::Rewind, MessageAction::Rewind, "Return to before this message. Choose file restore only when available; nothing is resent."),
             ("Edit", Icon::Edit, MessageAction::Edit, "Bring this message back to the composer. Your current draft is saved; nothing is sent automatically."),
         ] {
-            if icons::labeled_button(ui, icon, label, enabled)
-                .on_hover_text(hint)
+            if icons::action(ui, icon, label, hint, enabled)
                 .on_disabled_hover_text(unavailable)
                 .clicked()
             {
                 action = Some(kind);
             }
         }
-        if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-            .clicked()
-        {
-            ui.ctx().copy_text(text.to_owned());
-        }
+        copy_action(ui, ("user-copy", timestamp, text.len()), "Copies this message.", || text.to_owned());
+        ui.add_space(6.0);
         ui.label(RichText::new(time_label(timestamp)).size(10.0).color(colors.dim));
     });
     action
+}
+
+/// Copy icon that briefly turns into a check after copying.
+fn copy_action(
+    ui: &mut egui::Ui,
+    identity: impl Hash,
+    detail: &str,
+    text: impl FnOnce() -> String,
+) {
+    let id = egui::Id::new(("copy-action", identity));
+    let now = ui.input(|i| i.time);
+    let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(id));
+    let copied = copied_at.is_some_and(|t| now - t < 1.2);
+    let response = icons::action_with_state(
+        ui,
+        if copied { Icon::Check } else { Icon::Copy },
+        if copied { "Copied" } else { "Copy" },
+        detail,
+        true,
+        copied,
+    );
+    if response.clicked() {
+        ui.ctx().copy_text(text());
+        ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(1250));
+    } else if copied {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    } else if copied_at.is_some() {
+        ui.ctx().data_mut(|d| d.remove::<f64>(id));
+    }
 }
 
 #[cfg(test)]
@@ -1277,26 +1301,49 @@ fn assistant_with_media(
                 )
                 .on_hover_text(usage.cache_tooltip());
             }
-            if icons::labeled_button(ui, Icon::Copy, "Copy", true)
-                .clicked()
-            {
-                ui.ctx().copy_text(
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
+            copy_action(
+                ui,
+                ("assistant-copy", start, last.timestamp),
+                "Copies this reply as Markdown.",
+                || {
                     messages
                         .iter()
                         .map(|m| m.text.as_str())
                         .collect::<Vec<_>>()
-                        .join("\n\n"),
+                        .join("\n\n")
+                },
+            );
+            if icons::action(
+                ui,
+                Icon::Quote,
+                "Quote reply",
+                "Adds this whole reply to your draft. Select text to quote just part of it.",
+                true,
+            )
+            .clicked()
+            {
+                crate::app::context_capture::queue_parts(
+                    ui.ctx(),
+                    "Quoted assistant reply",
+                    messages.iter().map(|message| message.text.as_str()),
                 );
             }
-            if icons::labeled_button(ui, Icon::Copy, "Quote", true)
-                .on_hover_text("Append a reply excerpt to the draft without sending it")
+            if last.role == "assistant"
+                && last.error.is_none()
+                && last.tools.is_empty()
+                && icons::action(
+                    ui,
+                    Icon::Branch,
+                    "Fork from here",
+                    "Starts a new session including this reply. This one stays as it is.",
+                    actions_enabled,
+                )
                 .clicked()
             {
-                crate::app::context_capture::queue_parts(ui.ctx(), "Quoted assistant reply", messages.iter().map(|message| message.text.as_str()));
+                fork = true;
             }
-            if last.role == "assistant" && last.error.is_none() && last.tools.is_empty()
-                && icons::labeled_button(ui, Icon::Branch, "Fork", actions_enabled)
-                    .on_hover_text("Start a separate chat including this response. The original chat and files stay unchanged.").clicked() { fork = true; }
         });
     }
     (changed, fork)
@@ -2170,7 +2217,8 @@ mod tests {
                             .find(|(s, _)| s == &time_label(message.timestamp))
                             .unwrap()
                             .1;
-                        let rewind = labels.iter().find(|(s, _)| s == "Rewind").unwrap().1;
+                        let _ = &labels;
+                        let rewind = crate::icons::action_rect(&ctx, "Fork from here").unwrap();
                         assert!(
                             bubbles.iter().any(|r| r.left() <= timestamp.left() + 1.0
                                 && r.right() >= rewind.right() - 1.0
@@ -2241,19 +2289,25 @@ mod tests {
                     .unwrap()
                     .1;
                 let mut previous = timestamp;
+                // Icon-only actions: no text labels, ordered after the timestamp.
                 for label in ["Copy", "Edit", "Rewind", "Fork"] {
-                    let rect = text.iter().find(|(t, _)| t == label).expect(label).1;
+                    assert!(
+                        !text.iter().any(|(t, _)| t == label),
+                        "actions are icon-only"
+                    );
+                }
+                for label in ["Copy", "Edit", "Rewind", "Fork from here"] {
+                    let rect = crate::icons::action_rect(&ctx, label).expect(label);
                     assert!(
                         rect.left() > previous.right(),
                         "footer order must match assistant actions: {text:?}"
                     );
-                    assert!((rect.center().y - timestamp.center().y).abs() < 0.5);
-                    assert!((rect.height() - timestamp.height()).abs() < 0.5);
+                    assert!((rect.center().y - timestamp.center().y).abs() < 1.0);
                     assert!(rect.right() < 340.0);
                     previous = rect;
                 }
                 for label in ["Copy", "Edit", "Rewind"] {
-                    let pos = text.iter().find(|(t, _)| t == label).unwrap().1.center();
+                    let pos = crate::icons::action_rect(&ctx, label).unwrap().center();
                     let mut copied = false;
                     for pressed in [true, false] {
                         let output = frame(vec![
