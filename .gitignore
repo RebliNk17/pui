@@ -7,5 +7,6 @@
 /mobile/android/
 /mobile/ios/
 /mobile/dist-apk/
+/daemon/node_modules/
 __pycache__/
 .DS_Store

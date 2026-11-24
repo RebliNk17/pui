@@ -181,6 +181,7 @@ fn live_server_auth_sessions_completions_files_and_ws_push() {
             host_name: "Test Mac".into(),
             use_tls_in_qr: false,
             public_host: String::new(),
+            cloud_host: None,
         },
         || {},
     );

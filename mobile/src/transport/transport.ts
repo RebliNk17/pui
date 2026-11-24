@@ -101,6 +101,7 @@ export interface PuiTransport {
   getSessionDetail(path?: string): Promise<SessionDetail>;
   createSession(input: {
     cwd: string;
+    git_remote?: string;
     permission_mode?: string;
     prompt?: string;
     origin: SessionOrigin;
@@ -327,6 +328,7 @@ export class DirectTransport implements PuiTransport {
 
   createSession(input: {
     cwd: string;
+    git_remote?: string;
     permission_mode?: string;
     prompt?: string;
     origin: SessionOrigin;

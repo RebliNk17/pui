@@ -37,7 +37,9 @@ export default function SessionsScreen() {
   const colors = usePalette();
   const { prefs, updatePrefs } = usePreferences();
   const {
+    hosts,
     activeHost,
+    selectHost,
     connectionState,
     connectionError,
     hostInfo,
@@ -686,14 +688,18 @@ export default function SessionsScreen() {
 
       <NewSessionModal
         visible={newOpen}
+        hosts={hosts}
+        activeHostId={activeHost?.id}
+        onSelectHost={selectHost}
         projects={hostInfo?.projects ?? []}
         permissionModes={defaultPermissionModes}
         deviceLabel={`${clientOrigin().platform === 'ios' ? 'iOS' : 'Android'} · ${deviceName}`}
         onClose={() => setNewOpen(false)}
-        onCreate={async ({ cwd, permissionMode, prompt }) => {
+        onCreate={async ({ cwd, gitRemote, permissionMode, prompt }) => {
           if (!transport) return;
           await transport.createSession({
             cwd,
+            git_remote: gitRemote,
             permission_mode: permissionMode,
             prompt,
             origin: clientOrigin(),

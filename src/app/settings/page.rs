@@ -24,11 +24,11 @@ impl Page {
         Self::Appearance,
         Self::Notifications,
         Self::Shortcuts,
+        Self::Remote,
         Self::Permissions,
         Self::Providers,
         Self::Models,
         Self::Resources,
-        Self::Remote,
     ];
     fn title(self) -> &'static str {
         match self {
@@ -742,7 +742,7 @@ impl Pui {
                         .desired_width(ui.available_width()),
                 );
                 ui.add_space(13.0);
-                for (group, pages) in [("App", &Page::ALL[..4]), ("Agent", &Page::ALL[4..])] {
+                for (group, pages) in [("App", &Page::ALL[..5]), ("Agent", &Page::ALL[5..])] {
                     let visible: Vec<_> = pages
                         .iter()
                         .copied()

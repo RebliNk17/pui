@@ -1,0 +1,23 @@
+{
+  "name": "pui-daemon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless Pui Remote v1 host daemon for Linux/Cloud/Docker (Oracle Cloud, Railway, VPS)",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "pair": "node --experimental-strip-types src/index.ts --print-pair",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "protobufjs": "7.6.6"
+  }
+}

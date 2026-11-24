@@ -1135,6 +1135,1156 @@ impl Pui {
         if self.prefs.remote != before_adv && !self.demo {
             self.remote.apply_config(self.prefs.remote.clone());
         }
+
+        ui.add_space(18.0);
+        self.cloud_host_settings_ui(ui);
+    }
+
+    fn cloud_host_settings_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::remote::cloud;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct CloudUiState {
+            pair_draft: String,
+            busy: bool,
+            notice: Option<String>,
+            error: Option<String>,
+            status: Option<cloud::CloudAdminStatus>,
+            auto_fetched: bool,
+            sync_modal_open: bool,
+            qr_modal_open: bool,
+            inventory: Option<cloud::LocalSyncInventory>,
+            plan: cloud::CloudSyncPlan,
+        }
+
+        let state_id = egui::Id::new("pui_cloud_host_ui_state");
+        let shared: Arc<Mutex<CloudUiState>> = ui.ctx().data_mut(|d| {
+            d.get_temp_mut_or_insert_with(state_id, || {
+                Arc::new(Mutex::new(CloudUiState::default()))
+            })
+            .clone()
+        });
+
+        let open_sync_picker = |shared: &Arc<Mutex<CloudUiState>>, cwd: &std::path::Path| {
+            let inv = cloud::discover_local_inventory(cwd);
+            if let Ok(mut st) = shared.lock() {
+                let mut plan = cloud::CloudSyncPlan::default();
+                let cloud_provs: BTreeSet<&str> = st
+                    .status
+                    .as_ref()
+                    .map(|s| s.pi_auth_providers.iter().map(String::as_str).collect())
+                    .unwrap_or_default();
+                for p in &inv.providers {
+                    if !cloud_provs.contains(p.as_str()) {
+                        plan.providers.insert(p.clone());
+                    }
+                }
+                plan.setup_git_ssh = !st.status.as_ref().is_some_and(|s| s.has_git_ssh_key);
+                for mcp in &inv.mcps {
+                    if !mcp.local_only {
+                        plan.mcps.insert(mcp.name.clone());
+                    }
+                }
+                st.inventory = Some(inv);
+                st.plan = plan;
+                st.sync_modal_open = true;
+            }
+        };
+
+        let colors = crate::theme::palette(ui.ctx());
+        settings::page_section(ui, "Cloud host", "");
+
+        let existing = self.prefs.remote.cloud_host.clone();
+
+        // Auto-fetch status once when opening Settings with a configured cloud host.
+        if let Some(cfg) = existing.clone() {
+            let should_fetch = shared
+                .lock()
+                .map(|mut s| {
+                    if !s.auto_fetched && !s.busy {
+                        s.auto_fetched = true;
+                        s.busy = true;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if should_fetch {
+                let s_clone = shared.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let res = cloud::fetch_status(&cfg);
+                    if let Ok(mut st) = s_clone.lock() {
+                        st.busy = false;
+                        match res {
+                            Ok(status) => {
+                                st.status = Some(status);
+                                st.error = None;
+                            }
+                            Err(e) => st.error = Some(e),
+                        }
+                    }
+                    ctx.request_repaint();
+                });
+            }
+        }
+
+        settings::page_card(ui, |ui| {
+            if let Some(cfg) = existing.clone() {
+                let (busy, status_opt, notice, error) = shared
+                    .lock()
+                    .map(|s| (s.busy, s.status.clone(), s.notice.clone(), s.error.clone()))
+                    .unwrap_or((false, None, None, None));
+
+                // Top body with exact Quiet Mac 20x16 padding (matches "Pair your phone").
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(20, 16))
+                    .show(ui, |ui| {
+                        let card_inner_w = ui.available_width();
+                        ui.set_width(card_inner_w);
+                        ui.set_max_width(card_inner_w);
+
+                        // Header bar: host identity + online pill on left, Refresh/Disconnect flush right.
+                        ui.horizontal(|ui| {
+                            ui.set_width(card_inner_w);
+                            ui.label(
+                                RichText::new(&cfg.name)
+                                    .size(13.5)
+                                    .strong()
+                                    .color(colors.text),
+                            );
+                            ui.label(
+                                RichText::new(format!("{}:{}", cfg.host, cfg.port))
+                                    .size(11.5)
+                                    .monospace()
+                                    .color(colors.muted),
+                            );
+                            if busy {
+                                status_pill(ui, "Working…", colors.amber);
+                            } else if status_opt.is_some() {
+                                status_pill(ui, "Online · 24/7", colors.green);
+                            } else if error.is_some() {
+                                status_pill(ui, "Unreachable", colors.red);
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                ui.add_enabled_ui(!busy, |ui| {
+                                    if ghost_button(ui, "Disconnect", None).clicked() {
+                                        self.prefs.remote.cloud_host = None;
+                                        if let Ok(mut st) = shared.lock() {
+                                            *st = CloudUiState::default();
+                                        }
+                                    }
+                                    if ghost_button(ui, "Refresh", Some(Icon::Refresh)).clicked() {
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.busy = true;
+                                            st.error = None;
+                                        }
+                                        let cfg_c = cfg.clone();
+                                        let s_clone = shared.clone();
+                                        let ctx = ui.ctx().clone();
+                                        std::thread::spawn(move || {
+                                            let res = cloud::fetch_status(&cfg_c);
+                                            if let Ok(mut st) = s_clone.lock() {
+                                                st.busy = false;
+                                                match res {
+                                                    Ok(fresh) => {
+                                                        st.status = Some(fresh);
+                                                        st.error = None;
+                                                    }
+                                                    Err(e) => st.error = Some(e),
+                                                }
+                                            }
+                                            ctx.request_repaint();
+                                        });
+                                    }
+                                });
+                            });
+                        });
+
+                        // 2x2 Capability Dashboard tiles strictly constrained inside card_inner_w.
+                        if let Some(ref st) = status_opt {
+                            ui.add_space(14.0);
+                            let prov_summary = if st.pi_auth_providers.is_empty() {
+                                "No providers synced yet".to_owned()
+                            } else if st.pi_auth_providers.len() <= 2 {
+                                st.pi_auth_providers.join(", ")
+                            } else {
+                                format!(
+                                    "{}, {} (+{})",
+                                    st.pi_auth_providers[0],
+                                    st.pi_auth_providers[1],
+                                    st.pi_auth_providers.len() - 2
+                                )
+                            };
+                            let git_summary = if st.has_git_ssh_key {
+                                "Dedicated SSH key · clones any repo".to_owned()
+                            } else {
+                                "Not configured — click Sync from Mac…".to_owned()
+                            };
+                            let svc_summary = {
+                                let mut parts = Vec::new();
+                                if !st.service_creds.is_empty() {
+                                    parts.push(st.service_creds.join(" · "));
+                                }
+                                if !st.skills.is_empty() {
+                                    parts.push(format!("{} skills", st.skills.len()));
+                                }
+                                if parts.is_empty() {
+                                    "None synced yet".to_owned()
+                                } else {
+                                    parts.join(" · ")
+                                }
+                            };
+                            let mcp_summary = if st.mcp_servers.is_empty() {
+                                "None configured".to_owned()
+                            } else {
+                                let has_pw = st
+                                    .mcp_servers
+                                    .iter()
+                                    .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP);
+                                if has_pw && st.mcp_servers.len() == 1 {
+                                    "Headless Playwright (no logins)".to_owned()
+                                } else if has_pw {
+                                    format!(
+                                        "Headless Playwright (+{} MCP)",
+                                        st.mcp_servers.len() - 1
+                                    )
+                                } else {
+                                    st.mcp_servers.join(", ")
+                                }
+                            };
+
+                            let gap = 10.0_f32;
+                            let two_col = card_inner_w >= 440.0;
+                            let tile_outer_w = if two_col {
+                                ((card_inner_w - gap) * 0.5).floor()
+                            } else {
+                                card_inner_w
+                            };
+                            let pad_x = 12_i8;
+                            let pad_y = 10_i8;
+                            let tile_content_w =
+                                (tile_outer_w - (pad_x as f32) * 2.0 - 2.0).max(80.0);
+
+                            let draw_tile =
+                                |ui: &mut egui::Ui,
+                                 title: &str,
+                                 detail: &str,
+                                 dot_color: Color32| {
+                                    egui::Frame::new()
+                                        .fill(colors.bg.gamma_multiply(0.55))
+                                        .stroke(Stroke::new(1.0_f32, colors.border))
+                                        .corner_radius(8)
+                                        .inner_margin(egui::Margin::symmetric(pad_x, pad_y))
+                                        .show(ui, |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.set_width(tile_content_w);
+                                                ui.set_max_width(tile_content_w);
+                                                ui.spacing_mut().item_spacing.y = 3.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.set_width(tile_content_w);
+                                                    ui.label(
+                                                        RichText::new(title)
+                                                            .size(12.0)
+                                                            .strong()
+                                                            .color(colors.text),
+                                                    );
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(Align::Center),
+                                                        |ui| {
+                                                            let (dot_rect, _) = ui
+                                                                .allocate_exact_size(
+                                                                    Vec2::splat(7.0),
+                                                                    Sense::hover(),
+                                                                );
+                                                            ui.painter().circle_filled(
+                                                                dot_rect.center(),
+                                                                3.5,
+                                                                dot_color,
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(detail)
+                                                            .size(11.0)
+                                                            .color(colors.muted),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            });
+                                        });
+                                };
+
+                            if two_col {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = gap;
+                                    draw_tile(
+                                        ui,
+                                        "Providers",
+                                        &prov_summary,
+                                        if st.has_pi_auth {
+                                            colors.green
+                                        } else {
+                                            colors.amber
+                                        },
+                                    );
+                                    draw_tile(
+                                        ui,
+                                        "Git & Auto-clone",
+                                        &git_summary,
+                                        if st.has_git_ssh_key {
+                                            colors.green
+                                        } else {
+                                            colors.dim
+                                        },
+                                    );
+                                });
+                                ui.add_space(gap);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = gap;
+                                    draw_tile(
+                                        ui,
+                                        "Services & Skills",
+                                        &svc_summary,
+                                        if !st.service_creds.is_empty() || !st.skills.is_empty() {
+                                            colors.green
+                                        } else {
+                                            colors.dim
+                                        },
+                                    );
+                                    draw_tile(
+                                        ui,
+                                        "Research Browser & MCPs",
+                                        &mcp_summary,
+                                        if !st.mcp_servers.is_empty() {
+                                            colors.green
+                                        } else {
+                                            colors.dim
+                                        },
+                                    );
+                                });
+                            } else {
+                                draw_tile(
+                                    ui,
+                                    "Providers",
+                                    &prov_summary,
+                                    if st.has_pi_auth {
+                                        colors.green
+                                    } else {
+                                        colors.amber
+                                    },
+                                );
+                                ui.add_space(gap);
+                                draw_tile(
+                                    ui,
+                                    "Git & Auto-clone",
+                                    &git_summary,
+                                    if st.has_git_ssh_key {
+                                        colors.green
+                                    } else {
+                                        colors.dim
+                                    },
+                                );
+                                ui.add_space(gap);
+                                draw_tile(
+                                    ui,
+                                    "Services & Skills",
+                                    &svc_summary,
+                                    if !st.service_creds.is_empty() || !st.skills.is_empty() {
+                                        colors.green
+                                    } else {
+                                        colors.dim
+                                    },
+                                );
+                                ui.add_space(gap);
+                                draw_tile(
+                                    ui,
+                                    "Research Browser & MCPs",
+                                    &mcp_summary,
+                                    if !st.mcp_servers.is_empty() {
+                                        colors.green
+                                    } else {
+                                        colors.dim
+                                    },
+                                );
+                            }
+                        }
+
+                        if let Some(msg) = notice {
+                            ui.add_space(10.0);
+                            ui.add(
+                                egui::Label::new(RichText::new(msg).size(11.5).color(colors.green))
+                                    .wrap(),
+                            );
+                        }
+                        if let Some(err) = error {
+                            ui.add_space(10.0);
+                            ui.add(
+                                egui::Label::new(RichText::new(err).size(11.5).color(colors.red))
+                                    .wrap(),
+                            );
+                        }
+                    });
+
+                // Tinted rounded-bottom footer strip matching "Pair your phone" pixel-for-pixel.
+                settings::page_separator(ui);
+                egui::Frame::new()
+                    .fill(colors.bg.gamma_multiply(0.45))
+                    .corner_radius(egui::CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: 9,
+                        se: 9,
+                    })
+                    .inner_margin(egui::Margin::symmetric(20, 11))
+                    .show(ui, |ui| {
+                        let footer_w = ui.available_width();
+                        ui.set_width(footer_w);
+                        ui.horizontal(|ui| {
+                            ui.set_width(footer_w);
+                            if let Some(ref st) = status_opt {
+                                let ws_label =
+                                    if let Some(rest) = st.workspaces_dir.strip_prefix("/home/") {
+                                        rest.split_once('/')
+                                            .map(|(_, tail)| format!("~/{tail}"))
+                                            .unwrap_or_else(|| st.workspaces_dir.clone())
+                                    } else {
+                                        st.workspaces_dir.clone()
+                                    };
+                                let repo_count = st
+                                    .projects
+                                    .iter()
+                                    .filter(|p| p.as_str() != st.workspaces_dir.as_str())
+                                    .count();
+                                let ws_text = if repo_count > 0 {
+                                    format!("{ws_label} · {repo_count} repo(s)")
+                                } else {
+                                    format!("{ws_label} · auto-clones repos")
+                                };
+                                ui.label(RichText::new(ws_text).size(11.5).color(colors.muted));
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                ui.add_enabled_ui(!busy, |ui| {
+                                    if accent_button(ui, "Sync from Mac…").clicked() {
+                                        open_sync_picker(&shared, &self.prefs.cwd);
+                                    }
+                                    if secondary_button(ui, "Copy pair link").clicked() {
+                                        let uri = cloud::pairing_uri(&cfg);
+                                        ui.ctx().copy_text(uri);
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.notice = Some(format!(
+                                                "Copied pairing link for {} to clipboard.",
+                                                cfg.name
+                                            ));
+                                        }
+                                    }
+                                    if secondary_button(ui, "Show Phone QR").clicked() {
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.qr_modal_open = true;
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    });
+            } else {
+                let mut draft = shared
+                    .lock()
+                    .map(|s| s.pair_draft.clone())
+                    .unwrap_or_default();
+                let err = shared.lock().ok().and_then(|s| s.error.clone());
+
+                settings::page_row(
+                    ui,
+                    "Pair cloud daemon",
+                    "Paste the `pui://pair?...` link from `pui-daemon` (`npm run --silent pair` on your server). Nothing is synced until you choose what to push.",
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 90.0).clamp(160.0, 320.0);
+                            ui.add_sized(
+                                [w, theme::CONTROL_HEIGHT],
+                                theme::text_field(&mut draft, "pui://pair?v=1&host=100.x.y.z..."),
+                            );
+                            if accent_button(ui, "Connect").clicked() {
+                                match cloud::parse_pairing_uri(&draft) {
+                                    Ok(cfg) => {
+                                        self.prefs.remote.cloud_host = Some(cfg);
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.pair_draft.clear();
+                                            st.error = None;
+                                            st.auto_fetched = false;
+                                        }
+                                        open_sync_picker(&shared, &self.prefs.cwd);
+                                    }
+                                    Err(e) => {
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.error = Some(e);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    },
+                );
+                if let Ok(mut st) = shared.lock() {
+                    if self.prefs.remote.cloud_host.is_none() {
+                        st.pair_draft = draft;
+                    }
+                }
+                if let Some(e) = err {
+                    egui::Frame::new()
+                        .inner_margin(egui::Margin {
+                            left: 20,
+                            right: 20,
+                            top: 0,
+                            bottom: 12,
+                        })
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(e).size(12.0).color(colors.red))
+                                    .wrap(),
+                            );
+                        });
+                }
+            }
+        });
+
+        // Quiet Mac selective "Sync to Cloud" modal — Option A (Inset Cards + Toggles + Skill Pill Chips).
+        let modal_open = shared.lock().map(|s| s.sync_modal_open).unwrap_or(false);
+        if modal_open {
+            if let Some(cfg) = existing.clone() {
+                let mut close_modal = false;
+                let mut run_sync = false;
+                let modal_resp = prompt_ui::modal(
+                    ui.ctx(),
+                    egui::Id::new("pui_cloud_sync_modal"),
+                    520.0,
+                    |ui| {
+                        prompt_ui::heading(
+                            ui,
+                            &format!("Sync to {}", cfg.name),
+                            "Choose what to push from this Mac over Tailscale. Nothing is sent unless toggled on.",
+                        );
+                        ui.add_space(12.0);
+
+                        if let Ok(mut st) = shared.lock() {
+                            let inv = st.inventory.clone().unwrap_or_default();
+                            let cloud_st = st.status.clone();
+                            let content_w = (ui.available_width() - 12.0).max(260.0);
+
+                            egui::ScrollArea::vertical()
+                                .max_height(410.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.set_width(content_w);
+                                    ui.set_max_width(content_w);
+
+                                    // 1. ACCESS & SERVICES
+                                    sync_section_label(ui, "ACCESS & SERVICES");
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        // Provider logins row
+                                        let mut sync_provs = !st.plan.providers.is_empty();
+                                        let prov_sub = if inv.providers.is_empty() {
+                                            "No local provider logins found".to_owned()
+                                        } else {
+                                            inv.providers.join(", ")
+                                        };
+                                        let cloud_prov_count = cloud_st
+                                            .as_ref()
+                                            .map(|s| s.pi_auth_providers.len())
+                                            .unwrap_or(0);
+                                        let prov_badge = if cloud_prov_count > 0 {
+                                            Some((
+                                                format!("{cloud_prov_count} synced"),
+                                                colors.green,
+                                            ))
+                                        } else {
+                                            None
+                                        };
+                                        if sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Provider logins",
+                                            &prov_sub,
+                                            prov_badge.as_ref().map(|(s, c)| (s.as_str(), *c)),
+                                            &mut sync_provs,
+                                            !inv.providers.is_empty(),
+                                            None,
+                                        ) {
+                                            if sync_provs {
+                                                for p in &inv.providers {
+                                                    st.plan.providers.insert(p.clone());
+                                                }
+                                            } else {
+                                                st.plan.providers.clear();
+                                            }
+                                        }
+
+                                        // Git & Auto-clone SSH key row
+                                        settings::page_separator(ui);
+                                        let git_ready = cloud_st
+                                            .as_ref()
+                                            .is_some_and(|s| s.has_git_ssh_key);
+                                        let git_badge = git_ready.then_some(("Ready", colors.green));
+                                        sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Git & Auto-clone SSH key",
+                                            "Dedicated cloud key · clones any repo on demand (Mac key stays local)",
+                                            git_badge,
+                                            &mut st.plan.setup_git_ssh,
+                                            true,
+                                            None,
+                                        );
+
+                                        // Detected opt-in CLI Service credentials (gh, Railway, Render, etc.)
+                                        for cred in &inv.service_creds {
+                                            settings::page_separator(ui);
+                                            let already = cloud_st.as_ref().is_some_and(|s| {
+                                                s.service_creds.contains(&cred.id)
+                                            });
+                                            let mut on = st.plan.service_creds.contains(&cred.id);
+                                            let badge = if already {
+                                                Some(("Synced", colors.green))
+                                            } else {
+                                                Some(("Opt-in", colors.muted))
+                                            };
+                                            if sync_toggle_row(
+                                                ui,
+                                                row_w,
+                                                &cred.label,
+                                                &cred.scope,
+                                                badge,
+                                                &mut on,
+                                                true,
+                                                None,
+                                            ) {
+                                                if on {
+                                                    st.plan.service_creds.insert(cred.id.clone());
+                                                } else {
+                                                    st.plan.service_creds.remove(&cred.id);
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    // 2. RESEARCH BROWSER & MCPS
+                                    ui.add_space(12.0);
+                                    sync_section_label(ui, "RESEARCH BROWSER & MCPS");
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        let pw_already = cloud_st.as_ref().is_some_and(|s| {
+                                            s.mcp_servers
+                                                .iter()
+                                                .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP)
+                                        });
+                                        let pw_badge =
+                                            pw_already.then_some(("Synced", colors.green));
+                                        sync_toggle_row(
+                                            ui,
+                                            row_w,
+                                            "Headless Playwright MCP",
+                                            "Isolated research browser — no personal logins or cookies",
+                                            pw_badge,
+                                            &mut st.plan.add_playwright_research,
+                                            true,
+                                            None,
+                                        );
+
+                                        for mcp in &inv.mcps {
+                                            settings::page_separator(ui);
+                                            if mcp.blocked_on_cloud {
+                                                let mut off = false;
+                                                let sub = mcp.reason.as_deref().unwrap_or(
+                                                    "Blocked on cloud — local desktop browser only",
+                                                );
+                                                sync_toggle_row(
+                                                    ui,
+                                                    row_w,
+                                                    &mcp.name,
+                                                    sub,
+                                                    None,
+                                                    &mut off,
+                                                    false,
+                                                    Some("Local only"),
+                                                );
+                                            } else {
+                                                let already = cloud_st.as_ref().is_some_and(|s| {
+                                                    s.mcp_servers.contains(&mcp.name)
+                                                });
+                                                let mut on = st.plan.mcps.contains(&mcp.name);
+                                                let sub = mcp
+                                                    .reason
+                                                    .as_deref()
+                                                    .unwrap_or("Portable MCP server");
+                                                let badge = already
+                                                    .then_some(("Synced", colors.green));
+                                                if sync_toggle_row(
+                                                    ui,
+                                                    row_w,
+                                                    &mcp.name,
+                                                    sub,
+                                                    badge,
+                                                    &mut on,
+                                                    true,
+                                                    None,
+                                                ) {
+                                                    if on {
+                                                        st.plan.mcps.insert(mcp.name.clone());
+                                                    } else {
+                                                        st.plan.mcps.remove(&mcp.name);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+
+                                    // 3. SKILLS (Pill chips + All / None)
+                                    ui.add_space(12.0);
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(content_w);
+                                        let sk_title = if inv.skills.is_empty() {
+                                            "SKILLS".to_owned()
+                                        } else {
+                                            format!(
+                                                "SKILLS · {} OF {} SELECTED",
+                                                st.plan.skills.len(),
+                                                inv.skills.len()
+                                            )
+                                        };
+                                        ui.label(
+                                            RichText::new(sk_title)
+                                                .size(10.5)
+                                                .strong()
+                                                .color(colors.muted),
+                                        );
+                                        if !inv.skills.is_empty() {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ghost_button(ui, "None", None).clicked() {
+                                                        st.plan.skills.clear();
+                                                    }
+                                                    if ghost_button(ui, "All", None).clicked() {
+                                                        for s in &inv.skills {
+                                                            st.plan.skills.insert(s.clone());
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                    sync_inset_card(ui, content_w, |ui, row_w| {
+                                        egui::Frame::new()
+                                            .inner_margin(egui::Margin::symmetric(12, 10))
+                                            .show(ui, |ui| {
+                                                let inner_w = (row_w - 24.0).max(120.0);
+                                                ui.set_width(inner_w);
+                                                ui.set_max_width(inner_w);
+                                                if inv.skills.is_empty() {
+                                                    ui.label(
+                                                        RichText::new("No local skills found.")
+                                                            .size(11.5)
+                                                            .color(colors.muted),
+                                                    );
+                                                } else {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing =
+                                                            Vec2::new(6.0, 6.0);
+                                                        for skill in &inv.skills {
+                                                            let mut on =
+                                                                st.plan.skills.contains(skill);
+                                                            let already = cloud_st
+                                                                .as_ref()
+                                                                .is_some_and(|s| {
+                                                                    s.skills.contains(skill)
+                                                                });
+                                                            if sync_skill_chip(
+                                                                ui, skill, &mut on, already,
+                                                            ) {
+                                                                if on {
+                                                                    st.plan
+                                                                        .skills
+                                                                        .insert(skill.clone());
+                                                                } else {
+                                                                    st.plan.skills.remove(skill);
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                            });
+                                    });
+
+                                    // 4. OPTIONAL PRE-CLONE
+                                    if let Some(ref remote_url) = inv.git_remote {
+                                        ui.add_space(12.0);
+                                        sync_section_label(ui, "OPTIONAL PRE-CLONE");
+                                        sync_inset_card(ui, content_w, |ui, row_w| {
+                                            sync_toggle_row(
+                                                ui,
+                                                row_w,
+                                                &format!("Pre-clone {} now", inv.project_name),
+                                                remote_url,
+                                                None,
+                                                &mut st.plan.clone_current_repo,
+                                                true,
+                                                None,
+                                            );
+                                        });
+                                    }
+                                });
+
+                            // Live footer summary + Cancel / Sync selected
+                            let mut parts: Vec<String> = Vec::new();
+                            if !st.plan.providers.is_empty() {
+                                parts.push(format!("{} provider(s)", st.plan.providers.len()));
+                            }
+                            if st.plan.setup_git_ssh {
+                                parts.push("Git SSH".into());
+                            }
+                            if !st.plan.service_creds.is_empty() {
+                                parts.push(format!("{} service(s)", st.plan.service_creds.len()));
+                            }
+                            if st.plan.add_playwright_research {
+                                parts.push("Playwright".into());
+                            }
+                            if !st.plan.mcps.is_empty() {
+                                parts.push(format!("{} MCP(s)", st.plan.mcps.len()));
+                            }
+                            if !st.plan.skills.is_empty() {
+                                parts.push(format!("{} skill(s)", st.plan.skills.len()));
+                            }
+                            if st.plan.clone_current_repo {
+                                parts.push("repo".into());
+                            }
+                            let summary_text = if parts.is_empty() {
+                                "Toggle any item above to sync".to_owned()
+                            } else {
+                                format!("Will sync: {}", parts.join(" · "))
+                            };
+
+                            ui.add_space(14.0);
+                            let can_sync = !st.plan.is_empty() && !st.busy;
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(summary_text).size(11.5).color(colors.muted),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    if prompt_ui::button(
+                                        ui,
+                                        "Sync selected",
+                                        prompt_ui::Button::Primary,
+                                        can_sync,
+                                    )
+                                    .clicked()
+                                    {
+                                        run_sync = true;
+                                        close_modal = true;
+                                    }
+                                    if prompt_ui::button(
+                                        ui,
+                                        "Cancel",
+                                        prompt_ui::Button::Secondary,
+                                        true,
+                                    )
+                                    .clicked()
+                                    {
+                                        close_modal = true;
+                                    }
+                                });
+                            });
+                        }
+                    },
+                );
+                if modal_resp.should_close() {
+                    close_modal = true;
+                }
+                if close_modal {
+                    if let Ok(mut st) = shared.lock() {
+                        st.sync_modal_open = false;
+                    }
+                }
+                if run_sync {
+                    let plan = shared
+                        .lock()
+                        .map(|mut st| {
+                            st.busy = true;
+                            st.notice = None;
+                            st.error = None;
+                            st.plan.clone()
+                        })
+                        .unwrap_or_default();
+                    let cfg_c = cfg.clone();
+                    let cwd = self.prefs.cwd.clone();
+                    let s_clone = shared.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let sync_res = cloud::execute_selective_sync(&cfg_c, &cwd, &plan);
+                        let status_res = cloud::fetch_status(&cfg_c).ok();
+                        if let Ok(mut st) = s_clone.lock() {
+                            st.busy = false;
+                            if let Some(fresh) = status_res {
+                                st.status = Some(fresh);
+                            }
+                            match sync_res {
+                                Ok((msg, copy_key)) => {
+                                    if let Some(pub_key) = copy_key {
+                                        ctx.copy_text(pub_key);
+                                    }
+                                    st.notice = Some(msg);
+                                }
+                                Err(e) => st.error = Some(e),
+                            }
+                        }
+                        ctx.request_repaint();
+                    });
+                }
+            }
+        }
+
+        // Quiet Mac "Show Phone QR" modal for pairing Pui Mobile directly with the cloud host.
+        let qr_open = shared.lock().map(|s| s.qr_modal_open).unwrap_or(false);
+        if qr_open {
+            if let Some(cfg) = existing {
+                let mut close_qr = false;
+                let uri = cloud::pairing_uri(&cfg);
+                let matrix = qr::encode(&uri);
+                let resp = prompt_ui::modal(
+                    ui.ctx(),
+                    egui::Id::new("pui_cloud_qr_modal"),
+                    380.0,
+                    |ui| {
+                        prompt_ui::heading(
+                            ui,
+                            &format!("Pair phone with {}", cfg.name),
+                            "Open Pui Mobile → Connect to Pui → Scan QR to add this 24/7 cloud host.",
+                        );
+                        ui.add_space(14.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(ref mat) = matrix {
+                                paint_qr(ui, mat, 200.0);
+                            } else {
+                                ui.label(
+                                    RichText::new("QR too dense — use Copy pairing link below.")
+                                        .size(12.0)
+                                        .color(colors.muted),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!("{}:{}", cfg.host, cfg.port))
+                                    .size(11.5)
+                                    .monospace()
+                                    .color(colors.muted),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        prompt_ui::footer(ui, |ui| {
+                            if prompt_ui::button(
+                                ui,
+                                "Copy pairing link",
+                                prompt_ui::Button::Primary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                ui.ctx().copy_text(uri.clone());
+                                if let Ok(mut st) = shared.lock() {
+                                    st.notice = Some(format!(
+                                        "Copied pairing link for {} to clipboard.",
+                                        cfg.name
+                                    ));
+                                }
+                                close_qr = true;
+                            }
+                            if prompt_ui::button(ui, "Done", prompt_ui::Button::Secondary, true)
+                                .clicked()
+                            {
+                                close_qr = true;
+                            }
+                        });
+                    },
+                );
+                if resp.should_close() {
+                    close_qr = true;
+                }
+                if close_qr {
+                    if let Ok(mut st) = shared.lock() {
+                        st.qr_modal_open = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn sync_section_label(ui: &mut egui::Ui, label: &str) {
+    let colors = crate::theme::palette(ui.ctx());
+    ui.label(RichText::new(label).size(10.5).strong().color(colors.muted));
+    ui.add_space(5.0);
+}
+
+fn sync_inset_card(ui: &mut egui::Ui, width: f32, body: impl FnOnce(&mut egui::Ui, f32)) {
+    let colors = crate::theme::palette(ui.ctx());
+    let inner_w = (width - 2.0).max(120.0);
+    egui::Frame::new()
+        .fill(colors.bg.gamma_multiply(0.55))
+        .stroke(Stroke::new(1.0_f32, colors.border))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::ZERO)
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            body(ui, inner_w);
+        });
+}
+
+fn sync_small_tag(ui: &mut egui::Ui, label: &str, color: Color32, is_muted: bool) {
+    let colors = crate::theme::palette(ui.ctx());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(10.5), color);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 14.0, 20.0), Sense::hover());
+    let (fill, stroke) = if is_muted {
+        (colors.surface, Stroke::new(1.0_f32, colors.border))
+    } else {
+        (
+            color.gamma_multiply(0.12),
+            Stroke::new(1.0_f32, color.gamma_multiply(0.32)),
+        )
+    };
+    ui.painter()
+        .rect(rect, 10, fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        color,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_toggle_row(
+    ui: &mut egui::Ui,
+    row_w: f32,
+    title: &str,
+    subtitle: &str,
+    badge: Option<(&str, Color32)>,
+    checked: &mut bool,
+    enabled: bool,
+    disabled_tag: Option<&str>,
+) -> bool {
+    let colors = crate::theme::palette(ui.ctx());
+    let before = *checked;
+    let inner_w = (row_w - 24.0).max(120.0);
+    let right_reserve = if !enabled {
+        86.0
+    } else if badge.is_some() {
+        118.0
+    } else {
+        50.0
+    };
+    let left_w = (inner_w - right_reserve).max(120.0);
+
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(inner_w);
+            ui.set_max_width(inner_w);
+            ui.horizontal(|ui| {
+                ui.set_width(inner_w);
+                let title_color = if enabled { colors.text } else { colors.dim };
+                let sub_color = if enabled { colors.muted } else { colors.dim };
+                ui.vertical(|ui| {
+                    ui.set_width(left_w);
+                    ui.set_max_width(left_w);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(title).size(12.5).strong().color(title_color));
+                    ui.add(
+                        egui::Label::new(RichText::new(subtitle).size(11.0).color(sub_color))
+                            .wrap(),
+                    );
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if enabled {
+                        settings::toggle_switch(ui, checked, title);
+                        if let Some((tag_label, tag_color)) = badge {
+                            let is_muted = tag_color == colors.muted;
+                            sync_small_tag(ui, tag_label, tag_color, is_muted);
+                        }
+                    } else if let Some(tag) = disabled_tag {
+                        sync_small_tag(ui, tag, colors.dim, true);
+                    }
+                });
+            });
+        });
+
+    *checked != before
+}
+
+fn sync_skill_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &mut bool,
+    already_on_cloud: bool,
+) -> bool {
+    let colors = crate::theme::palette(ui.ctx());
+    let fg = if *selected { colors.text } else { colors.muted };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::proportional(11.5), fg);
+    let dot_pad = if already_on_cloud { 10.0 } else { 0.0 };
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new(galley.size().x + 20.0 + dot_pad, 24.0),
+        Sense::click(),
+    );
+    let (fill, stroke) = if *selected {
+        (
+            colors.accent.gamma_multiply(0.20),
+            Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.55)),
+        )
+    } else if resp.hovered() {
+        (colors.hover, Stroke::new(1.0_f32, colors.border))
+    } else {
+        (colors.surface, Stroke::new(1.0_f32, colors.border))
+    };
+    ui.painter()
+        .rect(rect, 12, fill, stroke, egui::StrokeKind::Inside);
+
+    let mut text_x = rect.left() + 10.0;
+    if already_on_cloud {
+        ui.painter().circle_filled(
+            egui::pos2(rect.left() + 10.0, rect.center().y),
+            2.5,
+            colors.green,
+        );
+        text_x += 8.0;
+    }
+    ui.painter().galley(
+        egui::pos2(text_x, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        *selected = !*selected;
+        true
+    } else {
+        false
     }
 }
 
