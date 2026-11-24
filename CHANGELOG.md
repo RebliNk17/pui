@@ -5,6 +5,34 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-24
+
+### Added
+
+- **Cloud agents:** a headless Pui cloud daemon (`daemon/`) runs agents 24/7 on your own Linux host over Tailscale, with an [Oracle Cloud Always Free setup guide](docs/cloud-host-oracle.md).
+- Start cloud chats from Desktop **New Chat** or the phone; each agent works in an isolated `pui_agent/<slug>-<id>` worktree under Auto mode and can commit, push and open a PR.
+- **Sync to Cloud:** choose which providers, Git/SSH credentials, MCP servers, skills and repos to share with the cloud host; the host clones repos on demand.
+- A unified, searchable Org/Repo and Project picker on Desktop and Mobile, and one **Sessions** list for local and cloud chats.
+- Per-host Claude sign-in on the cloud host, and an Auto mode indicator for cloud chats.
+- **Settings:** Remote & Mobile moved under App; a new Cloud Host dashboard with a phone pairing QR code.
+- **Chat:** continue work from the latest agent error; docked side chats now use the regular transcript and composer.
+- **Git:** reviewed abort, stash and recovery copies for in-progress Git operations; Git actions are summarized as compact activity lines.
+- **Browser:** scoped element inspection, reviewed captures and temporary tab groups.
+
+### Fixed
+
+- Right-to-left prose and lists align automatically.
+- Single MCP connectors reconnect correctly, and sent user messages render as Markdown.
+- LiteLLM model limits and capabilities load accurately.
+- Task apply-back handles executable modes, UTF-8 paths and bounded binary files.
+- Session identity is consistent, and development builds no longer steal notification clicks from the installed app.
+- Cloud: chunked HTTP responses, clone failures, GitHub key detection and Keychain `gh` tokens are handled correctly.
+
+### Development
+
+- Pull requests run only the affected test suites and skip packaging; the Rust suite runs about 3x faster on CI.
+- `master` is protected (pull request, review and a required **CI result** check); Dependabot and a contributing guide were added.
+
 ## [1.0.1] - 2026-11-24
 
 ### Fixed
