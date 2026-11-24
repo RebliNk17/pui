@@ -143,6 +143,31 @@ pub fn parse_pairing_uri(input: &str) -> Result<CloudHostConfig, String> {
     })
 }
 
+/// Reconstructs the `pui://pair?...` URI for this cloud host so Pui Mobile can scan or paste it.
+pub fn pairing_uri(cfg: &CloudHostConfig) -> String {
+    let encoded_name = percent_encode_component(&cfg.name);
+    format!(
+        "pui://pair?v=1&host={}&port={}&token={}&name={}&tls={}",
+        cfg.host,
+        cfg.port,
+        cfg.token,
+        encoded_name,
+        if cfg.tls { 1 } else { 0 }
+    )
+}
+
+fn percent_encode_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn decode_chunked_body(raw: &str) -> String {
     let mut out = String::new();
     let mut rest = raw;

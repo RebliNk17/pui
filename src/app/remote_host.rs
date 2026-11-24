@@ -1153,6 +1153,7 @@ impl Pui {
             status: Option<cloud::CloudAdminStatus>,
             auto_fetched: bool,
             sync_modal_open: bool,
+            qr_modal_open: bool,
             inventory: Option<cloud::LocalSyncInventory>,
             plan: cloud::CloudSyncPlan,
         }
@@ -1251,7 +1252,8 @@ impl Pui {
                     .map(|s| (s.busy, s.status.clone(), s.notice.clone(), s.error.clone()))
                     .unwrap_or((false, None, None, None));
 
-                ui.horizontal_wrapped(|ui| {
+                // Header bar: host identity + online pill on left, Refresh/Disconnect on right.
+                ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&cfg.name)
                             .size(13.5)
@@ -1260,115 +1262,300 @@ impl Pui {
                     );
                     ui.label(
                         RichText::new(format!("{}:{}", cfg.host, cfg.port))
-                            .size(12.0)
+                            .size(11.5)
                             .monospace()
                             .color(colors.muted),
                     );
                     if busy {
                         status_pill(ui, "Working…", colors.amber);
-                    } else if let Some(ref st) = status_opt {
-                        status_pill(ui, "Connected", colors.green);
-                        status_pill(
+                    } else if status_opt.is_some() {
+                        status_pill(ui, "Online · 24/7", colors.green);
+                    } else if error.is_some() {
+                        status_pill(ui, "Unreachable", colors.red);
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if ghost_button(ui, "Disconnect", None).clicked() {
+                                self.prefs.remote.cloud_host = None;
+                                if let Ok(mut st) = shared.lock() {
+                                    *st = CloudUiState::default();
+                                }
+                            }
+                            if ghost_button(ui, "Refresh", Some(Icon::Refresh)).clicked() {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.busy = true;
+                                    st.error = None;
+                                }
+                                let cfg_c = cfg.clone();
+                                let s_clone = shared.clone();
+                                let ctx = ui.ctx().clone();
+                                std::thread::spawn(move || {
+                                    let res = cloud::fetch_status(&cfg_c);
+                                    if let Ok(mut st) = s_clone.lock() {
+                                        st.busy = false;
+                                        match res {
+                                            Ok(fresh) => {
+                                                st.status = Some(fresh);
+                                                st.error = None;
+                                            }
+                                            Err(e) => st.error = Some(e),
+                                        }
+                                    }
+                                    ctx.request_repaint();
+                                });
+                            }
+                        });
+                    });
+                });
+
+                // 2x2 Capability Dashboard tiles
+                if let Some(ref st) = status_opt {
+                    ui.add_space(12.0);
+                    let prov_summary = if st.pi_auth_providers.is_empty() {
+                        "No providers synced yet".to_owned()
+                    } else if st.pi_auth_providers.len() <= 2 {
+                        st.pi_auth_providers.join(", ")
+                    } else {
+                        format!(
+                            "{}, {} (+{})",
+                            st.pi_auth_providers[0],
+                            st.pi_auth_providers[1],
+                            st.pi_auth_providers.len() - 2
+                        )
+                    };
+                    let git_summary = if st.has_git_ssh_key {
+                        "Dedicated SSH key · clones any repo".to_owned()
+                    } else {
+                        "Not configured — click Sync from Mac…".to_owned()
+                    };
+                    let svc_summary = {
+                        let mut parts = Vec::new();
+                        if !st.service_creds.is_empty() {
+                            parts.push(st.service_creds.join(" · "));
+                        }
+                        if !st.skills.is_empty() {
+                            parts.push(format!("{} skills", st.skills.len()));
+                        }
+                        if parts.is_empty() {
+                            "None synced yet".to_owned()
+                        } else {
+                            parts.join(" · ")
+                        }
+                    };
+                    let mcp_summary = if st.mcp_servers.is_empty() {
+                        "None configured".to_owned()
+                    } else {
+                        let has_pw = st
+                            .mcp_servers
+                            .iter()
+                            .any(|m| m == cloud::PLAYWRIGHT_RESEARCH_MCP);
+                        if has_pw && st.mcp_servers.len() == 1 {
+                            "Headless Playwright (no logins)".to_owned()
+                        } else if has_pw {
+                            format!("Headless Playwright (+{} MCP)", st.mcp_servers.len() - 1)
+                        } else {
+                            st.mcp_servers.join(", ")
+                        }
+                    };
+
+                    let avail = ui.available_width();
+                    let gap = 8.0_f32;
+                    let two_col = avail >= 420.0;
+                    let tile_w = if two_col {
+                        ((avail - gap) * 0.5).floor()
+                    } else {
+                        avail
+                    };
+
+                    let draw_tile = |ui: &mut egui::Ui,
+                                     title: &str,
+                                     detail: &str,
+                                     dot_color: Color32| {
+                        egui::Frame::new()
+                            .fill(colors.surface)
+                            .stroke(Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::symmetric(11, 9))
+                            .show(ui, |ui| {
+                                ui.set_width((tile_w - 24.0).max(120.0));
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(title).size(12.0).strong().color(colors.text),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            let (dot_rect, _) = ui.allocate_exact_size(
+                                                Vec2::splat(7.0),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                dot_rect.center(),
+                                                3.5,
+                                                dot_color,
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.add_space(2.0);
+                                ui.label(RichText::new(detail).size(11.0).color(colors.muted));
+                            });
+                    };
+
+                    if two_col {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            draw_tile(
+                                ui,
+                                "Providers",
+                                &prov_summary,
+                                if st.has_pi_auth {
+                                    colors.green
+                                } else {
+                                    colors.amber
+                                },
+                            );
+                            draw_tile(
+                                ui,
+                                "Git & Auto-clone",
+                                &git_summary,
+                                if st.has_git_ssh_key {
+                                    colors.green
+                                } else {
+                                    colors.dim
+                                },
+                            );
+                        });
+                        ui.add_space(gap);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+                            draw_tile(
+                                ui,
+                                "Services & Skills",
+                                &svc_summary,
+                                if !st.service_creds.is_empty() || !st.skills.is_empty() {
+                                    colors.green
+                                } else {
+                                    colors.dim
+                                },
+                            );
+                            draw_tile(
+                                ui,
+                                "Research Browser & MCPs",
+                                &mcp_summary,
+                                if !st.mcp_servers.is_empty() {
+                                    colors.green
+                                } else {
+                                    colors.dim
+                                },
+                            );
+                        });
+                    } else {
+                        draw_tile(
                             ui,
-                            &format!("Providers ({})", st.pi_auth_providers.len()),
+                            "Providers",
+                            &prov_summary,
                             if st.has_pi_auth {
                                 colors.green
                             } else {
                                 colors.amber
                             },
                         );
-                        status_pill(
+                        ui.add_space(gap);
+                        draw_tile(
                             ui,
-                            if st.has_git_ssh_key {
-                                "Git SSH ready"
-                            } else {
-                                "Git SSH not set"
-                            },
+                            "Git & Auto-clone",
+                            &git_summary,
                             if st.has_git_ssh_key {
                                 colors.green
                             } else {
-                                colors.muted
+                                colors.dim
                             },
                         );
-                        if !st.mcp_servers.is_empty() {
-                            status_pill(
-                                ui,
-                                &format!("MCPs ({})", st.mcp_servers.len()),
-                                colors.muted,
-                            );
-                        }
-                        if !st.service_creds.is_empty() {
-                            status_pill(
-                                ui,
-                                &format!("Services ({})", st.service_creds.len()),
-                                colors.muted,
-                            );
-                        }
-                        if !st.skills.is_empty() {
-                            status_pill(ui, &format!("Skills ({})", st.skills.len()), colors.muted);
-                        }
-                    } else if error.is_some() {
-                        status_pill(ui, "Unreachable", colors.red);
-                    }
-                });
-
-                if let Some(ref st) = status_opt {
-                    if !st.projects.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(format!("Cloud workspaces: {}", st.projects.join(", ")))
-                                .size(11.5)
-                                .color(colors.muted),
+                        ui.add_space(gap);
+                        draw_tile(
+                            ui,
+                            "Services & Skills",
+                            &svc_summary,
+                            if !st.service_creds.is_empty() || !st.skills.is_empty() {
+                                colors.green
+                            } else {
+                                colors.dim
+                            },
+                        );
+                        ui.add_space(gap);
+                        draw_tile(
+                            ui,
+                            "Research Browser & MCPs",
+                            &mcp_summary,
+                            if !st.mcp_servers.is_empty() {
+                                colors.green
+                            } else {
+                                colors.dim
+                            },
                         );
                     }
                 }
 
+                // Footer separator + workspace info & actions
+                ui.add_space(12.0);
+                settings::page_separator(ui);
                 ui.add_space(10.0);
+
                 ui.horizontal_wrapped(|ui| {
-                    ui.add_enabled_ui(!busy, |ui| {
-                        if accent_button(ui, "Sync to Cloud…").clicked() {
-                            open_sync_picker(&shared, &self.prefs.cwd);
-                        }
+                    if let Some(ref st) = status_opt {
+                        let ws_label = if let Some(rest) = st.workspaces_dir.strip_prefix("/home/")
+                        {
+                            rest.split_once('/')
+                                .map(|(_, tail)| format!("~/{tail}"))
+                                .unwrap_or_else(|| st.workspaces_dir.clone())
+                        } else {
+                            st.workspaces_dir.clone()
+                        };
+                        let repo_count = st
+                            .projects
+                            .iter()
+                            .filter(|p| p.as_str() != st.workspaces_dir.as_str())
+                            .count();
+                        let ws_text = if repo_count > 0 {
+                            format!("Workspaces: {ws_label} ({repo_count} repo(s))")
+                        } else {
+                            format!("Workspaces: {ws_label} (clones repos on demand)")
+                        };
+                        ui.label(RichText::new(ws_text).size(11.5).color(colors.muted));
+                    }
 
-                        if ghost_button(ui, "Refresh", Some(Icon::Refresh)).clicked() {
-                            if let Ok(mut st) = shared.lock() {
-                                st.busy = true;
-                                st.error = None;
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            if accent_button(ui, "Sync from Mac…").clicked() {
+                                open_sync_picker(&shared, &self.prefs.cwd);
                             }
-                            let cfg_c = cfg.clone();
-                            let s_clone = shared.clone();
-                            let ctx = ui.ctx().clone();
-                            std::thread::spawn(move || {
-                                let res = cloud::fetch_status(&cfg_c);
-                                if let Ok(mut st) = s_clone.lock() {
-                                    st.busy = false;
-                                    match res {
-                                        Ok(fresh) => {
-                                            st.status = Some(fresh);
-                                            st.error = None;
-                                        }
-                                        Err(e) => st.error = Some(e),
-                                    }
+                            if secondary_button(ui, "Copy pair link").clicked() {
+                                let uri = cloud::pairing_uri(&cfg);
+                                ui.ctx().copy_text(uri);
+                                if let Ok(mut st) = shared.lock() {
+                                    st.notice = Some(format!(
+                                        "Copied pairing link for {} to clipboard.",
+                                        cfg.name
+                                    ));
                                 }
-                                ctx.request_repaint();
-                            });
-                        }
-
-                        if ghost_button(ui, "Disconnect", None).clicked() {
-                            self.prefs.remote.cloud_host = None;
-                            if let Ok(mut st) = shared.lock() {
-                                *st = CloudUiState::default();
                             }
-                        }
+                            if secondary_button(ui, "Show Phone QR").clicked() {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.qr_modal_open = true;
+                                }
+                            }
+                        });
                     });
                 });
 
                 if let Some(msg) = notice {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     ui.label(RichText::new(msg).size(12.0).color(colors.green));
                 }
                 if let Some(err) = error {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     ui.label(RichText::new(err).size(12.0).color(colors.red));
                 }
             } else {
@@ -1425,7 +1612,7 @@ impl Pui {
         // Quiet Mac selective "Sync to Cloud" modal — asks explicitly what to push.
         let modal_open = shared.lock().map(|s| s.sync_modal_open).unwrap_or(false);
         if modal_open {
-            if let Some(cfg) = existing {
+            if let Some(cfg) = existing.clone() {
                 let mut close_modal = false;
                 let mut run_sync = false;
                 let modal_resp = prompt_ui::modal(
@@ -1727,6 +1914,80 @@ impl Pui {
                         }
                         ctx.request_repaint();
                     });
+                }
+            }
+        }
+
+        // Quiet Mac "Show Phone QR" modal for pairing Pui Mobile directly with the cloud host.
+        let qr_open = shared.lock().map(|s| s.qr_modal_open).unwrap_or(false);
+        if qr_open {
+            if let Some(cfg) = existing {
+                let mut close_qr = false;
+                let uri = cloud::pairing_uri(&cfg);
+                let matrix = qr::encode(&uri);
+                let resp = prompt_ui::modal(
+                    ui.ctx(),
+                    egui::Id::new("pui_cloud_qr_modal"),
+                    380.0,
+                    |ui| {
+                        prompt_ui::heading(
+                            ui,
+                            &format!("Pair phone with {}", cfg.name),
+                            "Open Pui Mobile → Connect to Pui → Scan QR to add this 24/7 cloud host.",
+                        );
+                        ui.add_space(14.0);
+                        ui.vertical_centered(|ui| {
+                            if let Some(ref mat) = matrix {
+                                paint_qr(ui, mat, 200.0);
+                            } else {
+                                ui.label(
+                                    RichText::new("QR too dense — use Copy pairing link below.")
+                                        .size(12.0)
+                                        .color(colors.muted),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(format!("{}:{}", cfg.host, cfg.port))
+                                    .size(11.5)
+                                    .monospace()
+                                    .color(colors.muted),
+                            );
+                        });
+                        ui.add_space(14.0);
+                        prompt_ui::footer(ui, |ui| {
+                            if prompt_ui::button(
+                                ui,
+                                "Copy pairing link",
+                                prompt_ui::Button::Primary,
+                                true,
+                            )
+                            .clicked()
+                            {
+                                ui.ctx().copy_text(uri.clone());
+                                if let Ok(mut st) = shared.lock() {
+                                    st.notice = Some(format!(
+                                        "Copied pairing link for {} to clipboard.",
+                                        cfg.name
+                                    ));
+                                }
+                                close_qr = true;
+                            }
+                            if prompt_ui::button(ui, "Done", prompt_ui::Button::Secondary, true)
+                                .clicked()
+                            {
+                                close_qr = true;
+                            }
+                        });
+                    },
+                );
+                if resp.should_close() {
+                    close_qr = true;
+                }
+                if close_qr {
+                    if let Ok(mut st) = shared.lock() {
+                        st.qr_modal_open = false;
+                    }
                 }
             }
         }
