@@ -56,12 +56,43 @@ pub struct LocalServiceCred {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GitAuthChoice {
+    #[default]
+    DedicatedCloudKey,
+    CopyMacKey,
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalSshKeyInfo {
+    pub path: PathBuf,
+    pub label: String,
+    pub unencrypted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CloudActionNotice {
+    pub title: String,
+    pub detail: String,
+    pub copy_text: Option<String>,
+    pub open_url: Option<String>,
+    pub open_label: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CloudSyncReport {
+    pub title: String,
+    pub summary: String,
+    pub action_needed: Option<CloudActionNotice>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LocalSyncInventory {
     pub providers: Vec<String>,
     pub mcps: Vec<LocalMcpItem>,
     pub skills: Vec<String>,
     pub service_creds: Vec<LocalServiceCred>,
+    pub mac_ssh_key: Option<LocalSshKeyInfo>,
     pub git_remote: Option<String>,
     pub project_name: String,
 }
@@ -70,6 +101,7 @@ pub struct LocalSyncInventory {
 pub struct CloudSyncPlan {
     pub providers: BTreeSet<String>,
     pub setup_git_ssh: bool,
+    pub git_auth_choice: GitAuthChoice,
     pub add_playwright_research: bool,
     pub mcps: BTreeSet<String>,
     pub skills: BTreeSet<String>,
@@ -93,7 +125,6 @@ impl CloudSyncPlan {
 pub struct CloudGitResult {
     pub public_key: String,
     pub registered_on_github: bool,
-    pub detail: String,
 }
 
 pub fn parse_pairing_uri(input: &str) -> Result<CloudHostConfig, String> {
@@ -456,6 +487,31 @@ fn discover_local_service_creds() -> Vec<LocalServiceCred> {
     found
 }
 
+fn discover_local_ssh_key() -> Option<LocalSshKeyInfo> {
+    let home = dirs::home_dir()?;
+    let ssh_dir = home.join(".ssh");
+    for name in ["id_ed25519", "id_rsa"] {
+        let p = ssh_dir.join(name);
+        if p.is_file() {
+            // Check whether the key can be read without a passphrase for headless Linux use.
+            let unencrypted = Command::new("ssh-keygen")
+                .args(["-y", "-P", "", "-f"])
+                .arg(&p)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            return Some(LocalSshKeyInfo {
+                path: p,
+                label: format!("~/.ssh/{name}"),
+                unencrypted,
+            });
+        }
+    }
+    None
+}
+
 pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
     let mut providers = Vec::new();
     if let Some(auth_path) = local_pi_file("auth.json") {
@@ -515,6 +571,7 @@ pub fn discover_local_inventory(cwd: &Path) -> LocalSyncInventory {
         mcps,
         skills,
         service_creds: discover_local_service_creds(),
+        mac_ssh_key: discover_local_ssh_key(),
         git_remote,
         project_name,
     }
@@ -732,50 +789,103 @@ pub fn sync_selected_skills(
     Ok(synced)
 }
 
+pub fn copy_mac_ssh_key_to_cloud(cfg: &CloudHostConfig) -> Result<(), String> {
+    let key_info = discover_local_ssh_key().ok_or_else(|| {
+        "No local SSH key found at ~/.ssh/id_ed25519 or ~/.ssh/id_rsa.".to_owned()
+    })?;
+    if !key_info.unencrypted {
+        return Err(format!(
+            "{} is passphrase-protected and cannot be used unattended on a headless cloud host. Use a dedicated cloud key instead.",
+            key_info.label
+        ));
+    }
+    let private_key = std::fs::read_to_string(&key_info.path)
+        .map_err(|e| format!("Could not read {}: {e}", key_info.label))?;
+    let pub_path = PathBuf::from(format!("{}.pub", key_info.path.display()));
+    let public_key = std::fs::read_to_string(&pub_path).ok();
+    let user_name = local_git_config("user.name");
+    let user_email = local_git_config("user.email");
+    http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/git-setup",
+        Some(&json!({
+            "user_name": user_name,
+            "user_email": user_email,
+            "private_key": private_key,
+            "public_key": public_key,
+        })),
+    )?;
+    Ok(())
+}
+
 pub fn execute_selective_sync(
     cfg: &CloudHostConfig,
     cwd: &Path,
     plan: &CloudSyncPlan,
-) -> Result<(String, Option<String>), String> {
-    let mut summary = Vec::new();
-    let mut copy_pubkey: Option<String> = None;
+) -> Result<CloudSyncReport, String> {
+    let mut parts = Vec::new();
+    let mut action_needed: Option<CloudActionNotice> = None;
 
     if !plan.providers.is_empty() {
         let provs = sync_selected_pi_auth(cfg, &plan.providers)?;
-        summary.push(format!("{} provider(s)", provs.len()));
+        parts.push(format!("{} provider(s)", provs.len()));
     }
     if plan.setup_git_ssh {
-        let git_res = setup_git_and_register_github(cfg)?;
-        if !git_res.registered_on_github {
-            copy_pubkey = Some(git_res.public_key);
+        match plan.git_auth_choice {
+            GitAuthChoice::CopyMacKey => {
+                copy_mac_ssh_key_to_cloud(cfg)?;
+                parts.push("Mac SSH key".into());
+            }
+            GitAuthChoice::DedicatedCloudKey => {
+                let git_res = setup_git_and_register_github(cfg)?;
+                if git_res.registered_on_github {
+                    parts.push("Git SSH".into());
+                } else {
+                    parts.push("Git SSH key created".into());
+                    action_needed = Some(CloudActionNotice {
+                        title: "Add cloud SSH key to GitHub".into(),
+                        detail: "Public key copied — paste once in GitHub SSH settings to enable auto-clone.".into(),
+                        copy_text: Some(git_res.public_key),
+                        open_url: Some("https://github.com/settings/ssh/new".into()),
+                        open_label: Some("Open GitHub SSH".into()),
+                    });
+                }
+            }
         }
-        summary.push(git_res.detail);
     }
     if !plan.mcps.is_empty() || plan.add_playwright_research {
         let mcps = sync_selected_mcps(cfg, &plan.mcps, plan.add_playwright_research)?;
-        summary.push(format!("{} MCP(s)", mcps.len()));
+        if plan.add_playwright_research && plan.mcps.is_empty() {
+            parts.push("Playwright".into());
+        } else {
+            parts.push(format!("{} MCP(s)", mcps.len()));
+        }
     }
     if !plan.service_creds.is_empty() {
         let creds = sync_selected_service_creds(cfg, &plan.service_creds)?;
-        summary.push(format!("{} service cred(s)", creds.len()));
+        parts.push(format!("{} service(s)", creds.len()));
     }
     if !plan.skills.is_empty() {
         let skills = sync_selected_skills(cfg, &plan.skills)?;
-        summary.push(format!("{} skill(s)", skills.len()));
+        parts.push(format!("{} skill(s)", skills.len()));
     }
     if plan.clone_current_repo {
-        let msg = clone_current_repo_to_cloud(cfg, cwd)?;
-        summary.push(msg);
+        let _ = clone_current_repo_to_cloud(cfg, cwd)?;
+        parts.push("repo cloned".into());
     }
 
-    if summary.is_empty() {
-        Ok(("Nothing selected to sync.".into(), None))
+    let summary = if parts.is_empty() {
+        "Nothing selected to sync.".into()
     } else {
-        Ok((
-            format!("Synced to {}: {}", cfg.name, summary.join(" · ")),
-            copy_pubkey,
-        ))
-    }
+        parts.join(" · ")
+    };
+
+    Ok(CloudSyncReport {
+        title: format!("Synced to {}", cfg.name),
+        summary,
+        action_needed,
+    })
 }
 
 fn local_git_config(key: &str) -> Option<String> {
@@ -826,40 +936,17 @@ pub fn setup_git_and_register_github(cfg: &CloudHostConfig) -> Result<CloudGitRe
         Ok(out) if out.status.success() => Ok(CloudGitResult {
             public_key,
             registered_on_github: true,
-            detail: format!(
-                "Dedicated SSH key created on {} and added to GitHub as \"{title}\".",
-                cfg.name
-            ),
         }),
         Ok(out) => {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-            if err.to_ascii_lowercase().contains("already in use") {
-                Ok(CloudGitResult {
-                    public_key,
-                    registered_on_github: true,
-                    detail: format!(
-                        "Dedicated SSH key on {} is already registered on GitHub.",
-                        cfg.name
-                    ),
-                })
-            } else {
-                Ok(CloudGitResult {
-                    public_key,
-                    registered_on_github: false,
-                    detail: format!(
-                        "Dedicated SSH key ready on {}. Add the public key to GitHub manually ({err}).",
-                        cfg.name
-                    ),
-                })
-            }
+            Ok(CloudGitResult {
+                public_key,
+                registered_on_github: err.to_ascii_lowercase().contains("already in use"),
+            })
         }
         Err(_) => Ok(CloudGitResult {
             public_key,
             registered_on_github: false,
-            detail: format!(
-                "Dedicated SSH key ready on {}. Install/login `gh` or add the copied public key in GitHub SSH settings.",
-                cfg.name
-            ),
         }),
     }
 }

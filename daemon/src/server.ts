@@ -500,6 +500,8 @@ export class PuiDaemonServer {
           userName: typeof body.user_name === 'string' ? body.user_name : undefined,
           userEmail: typeof body.user_email === 'string' ? body.user_email : undefined,
           regenerateKey: Boolean(body.regenerate_key),
+          privateKey: typeof body.private_key === 'string' ? body.private_key : undefined,
+          publicKey: typeof body.public_key === 'string' ? body.public_key : undefined,
         });
         sendJson(res, 200, { ok: true, ...result });
         return;

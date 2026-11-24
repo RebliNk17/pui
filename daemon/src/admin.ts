@@ -207,13 +207,34 @@ export function setupCloudGit(opts: {
   userName?: string;
   userEmail?: string;
   regenerateKey?: boolean;
-}): { public_key: string; user_name: string | null; user_email: string | null } {
+  privateKey?: string;
+  publicKey?: string;
+}): { public_key: string; user_name: string | null; user_email: string | null; mode: 'copied' | 'dedicated' } {
   const dir = sshDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const keyFile = cloudKeyPath();
   const pubFile = `${keyFile}.pub`;
 
-  if (opts.regenerateKey || !fs.existsSync(keyFile) || !fs.existsSync(pubFile)) {
+  let mode: 'copied' | 'dedicated' = 'dedicated';
+  if (opts.privateKey && opts.privateKey.trim()) {
+    const priv = opts.privateKey.trim();
+    if (!priv.startsWith('-----BEGIN ') || !priv.includes('PRIVATE KEY-----')) {
+      throw Object.assign(new Error('Invalid SSH private key format.'), { status: 400 });
+    }
+    fs.writeFileSync(keyFile, priv + '\n', { mode: 0o600 });
+    fs.chmodSync(keyFile, 0o600);
+    if (opts.publicKey && opts.publicKey.trim()) {
+      fs.writeFileSync(pubFile, opts.publicKey.trim() + '\n', { mode: 0o644 });
+    } else {
+      const derived = execFileSync('ssh-keygen', ['-y', '-P', '', '-f', keyFile], {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+      fs.writeFileSync(pubFile, derived + '\n', { mode: 0o644 });
+    }
+    fs.chmodSync(pubFile, 0o644);
+    mode = 'copied';
+  } else if (opts.regenerateKey || !fs.existsSync(keyFile) || !fs.existsSync(pubFile)) {
     if (fs.existsSync(keyFile)) fs.unlinkSync(keyFile);
     if (fs.existsSync(pubFile)) fs.unlinkSync(pubFile);
     execFileSync(
@@ -257,6 +278,7 @@ export function setupCloudGit(opts: {
     public_key: fs.readFileSync(pubFile, 'utf8').trim(),
     user_name: gitConfigGet('user.name'),
     user_email: gitConfigGet('user.email'),
+    mode,
   };
 }
 

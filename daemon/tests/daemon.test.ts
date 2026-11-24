@@ -192,6 +192,28 @@ describe('pui-daemon v1 remote server', () => {
       assert.deepEqual(st3.service_creds, ['railway']);
       assert.equal(fs.existsSync(path.join(tmp, '.railway', 'config.json')), true);
 
+      // Copy existing SSH keypair via /v1/admin/git-setup (rejects malformed key, accepts valid PEM).
+      process.env.PUI_DAEMON_SSH_DIR = path.join(tmp, '.ssh-test');
+      const badKeyRes = await fetch(`${base}/v1/admin/git-setup`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ private_key: 'not-a-key' }),
+      });
+      assert.equal(badKeyRes.status, 400);
+
+      const copyKeyRes = await fetch(`${base}/v1/admin/git-setup`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          private_key: '-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n',
+          public_key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey mac-key',
+        }),
+      });
+      assert.equal(copyKeyRes.status, 200);
+      const copyKeyJson = (await copyKeyRes.json()) as { mode: string; public_key: string };
+      assert.equal(copyKeyJson.mode, 'copied');
+      assert.ok(copyKeyJson.public_key.includes('mac-key'));
+
       assert.equal(
         validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
         'git@github.com:RebliNk17/pui.git',

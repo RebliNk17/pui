@@ -1144,11 +1144,19 @@ impl Pui {
         use crate::remote::cloud;
         use std::sync::{Arc, Mutex};
 
+        #[derive(Clone)]
+        struct CloudToast {
+            title: String,
+            subtitle: String,
+            created_at: std::time::Instant,
+        }
+
         #[derive(Default)]
         struct CloudUiState {
             pair_draft: String,
             busy: bool,
-            notice: Option<String>,
+            toast: Option<CloudToast>,
+            action_needed: Option<cloud::CloudActionNotice>,
             error: Option<String>,
             status: Option<cloud::CloudAdminStatus>,
             auto_fetched: bool,
@@ -1233,9 +1241,16 @@ impl Pui {
 
         settings::page_card(ui, |ui| {
             if let Some(cfg) = existing.clone() {
-                let (busy, status_opt, notice, error) = shared
+                let (busy, status_opt, action_opt, error) = shared
                     .lock()
-                    .map(|s| (s.busy, s.status.clone(), s.notice.clone(), s.error.clone()))
+                    .map(|s| {
+                        (
+                            s.busy,
+                            s.status.clone(),
+                            s.action_needed.clone(),
+                            s.error.clone(),
+                        )
+                    })
                     .unwrap_or((false, None, None, None));
 
                 // Top body with exact Quiet Mac 20x16 padding (matches "Pair your phone").
@@ -1515,19 +1530,126 @@ impl Pui {
                             }
                         }
 
-                        if let Some(msg) = notice {
-                            ui.add_space(10.0);
-                            ui.add(
-                                egui::Label::new(RichText::new(msg).size(11.5).color(colors.green))
-                                    .wrap(),
-                            );
+                        // Compact amber follow-up banner ONLY when a manual step is needed (Option C).
+                        if let Some(action) = action_opt {
+                            ui.add_space(12.0);
+                            let mut dismiss_action = false;
+                            let mut copied_key = false;
+                            let banner_inner_w = (card_inner_w - 26.0).max(160.0);
+                            egui::Frame::new()
+                                .fill(colors.amber.gamma_multiply(0.10))
+                                .stroke(Stroke::new(1.0_f32, colors.amber.gamma_multiply(0.35)))
+                                .corner_radius(8)
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.set_width(banner_inner_w);
+                                    ui.set_max_width(banner_inner_w);
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(banner_inner_w);
+                                        let right_reserve = 228.0_f32;
+                                        let left_w = (banner_inner_w - right_reserve).max(120.0);
+                                        ui.vertical(|ui| {
+                                            ui.set_width(left_w);
+                                            ui.set_max_width(left_w);
+                                            ui.spacing_mut().item_spacing.y = 2.0;
+                                            ui.label(
+                                                RichText::new(&action.title)
+                                                    .size(12.0)
+                                                    .strong()
+                                                    .color(colors.text),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&action.detail)
+                                                        .size(11.0)
+                                                        .color(colors.muted),
+                                                )
+                                                .wrap(),
+                                            );
+                                        });
+
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                if ghost_button(ui, "×", None).clicked() {
+                                                    dismiss_action = true;
+                                                }
+                                                if let Some(ref copy_val) = action.copy_text {
+                                                    if secondary_button(ui, "Copy key").clicked() {
+                                                        ui.ctx().copy_text(copy_val.clone());
+                                                        copied_key = true;
+                                                    }
+                                                }
+                                                if let Some(ref url) = action.open_url {
+                                                    let lbl = action
+                                                        .open_label
+                                                        .as_deref()
+                                                        .unwrap_or("Open ↗");
+                                                    if accent_button(ui, lbl).clicked() {
+                                                        ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                                            url.clone(),
+                                                        ));
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            if dismiss_action {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.action_needed = None;
+                                }
+                            }
+                            if copied_key {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.toast = Some(CloudToast {
+                                        title: "Copied public SSH key".into(),
+                                        subtitle: "Paste it in GitHub SSH settings".into(),
+                                        created_at: std::time::Instant::now(),
+                                    });
+                                }
+                            }
                         }
+
                         if let Some(err) = error {
                             ui.add_space(10.0);
-                            ui.add(
-                                egui::Label::new(RichText::new(err).size(11.5).color(colors.red))
-                                    .wrap(),
-                            );
+                            let mut dismiss_err = false;
+                            let err_w = (card_inner_w - 26.0).max(160.0);
+                            egui::Frame::new()
+                                .fill(colors.red.gamma_multiply(0.10))
+                                .stroke(Stroke::new(1.0_f32, colors.red.gamma_multiply(0.32)))
+                                .corner_radius(8)
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(err_w);
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(err_w);
+                                        ui.vertical(|ui| {
+                                            let lw = (err_w - 36.0).max(100.0);
+                                            ui.set_width(lw);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(err).size(11.5).color(colors.red),
+                                                )
+                                                .wrap(),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(Align::Center),
+                                            |ui| {
+                                                if ghost_button(ui, "×", None).clicked() {
+                                                    dismiss_err = true;
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            if dismiss_err {
+                                if let Ok(mut st) = shared.lock() {
+                                    st.error = None;
+                                }
+                            }
                         }
                     });
 
@@ -1579,10 +1701,14 @@ impl Pui {
                                         let uri = cloud::pairing_uri(&cfg);
                                         ui.ctx().copy_text(uri);
                                         if let Ok(mut st) = shared.lock() {
-                                            st.notice = Some(format!(
-                                                "Copied pairing link for {} to clipboard.",
-                                                cfg.name
-                                            ));
+                                            st.toast = Some(CloudToast {
+                                                title: "Copied pairing link".into(),
+                                                subtitle: format!(
+                                                    "Paste in Pui Mobile to add {}",
+                                                    cfg.name
+                                                ),
+                                                created_at: std::time::Instant::now(),
+                                            });
                                         }
                                     }
                                     if secondary_button(ui, "Show Phone QR").clicked() {
@@ -1733,16 +1859,83 @@ impl Pui {
                                             .as_ref()
                                             .is_some_and(|s| s.has_git_ssh_key);
                                         let git_badge = git_ready.then_some(("Ready", colors.green));
+                                        let git_sub = match st.plan.git_auth_choice {
+                                            cloud::GitAuthChoice::DedicatedCloudKey => {
+                                                "Dedicated cloud key · clones any repo on demand (Mac key stays local)"
+                                            }
+                                            cloud::GitAuthChoice::CopyMacKey => {
+                                                "Copy this Mac's SSH key over Tailscale · instant GitHub access, no extra key"
+                                            }
+                                        };
                                         sync_toggle_row(
                                             ui,
                                             row_w,
                                             "Git & Auto-clone SSH key",
-                                            "Dedicated cloud key · clones any repo on demand (Mac key stays local)",
+                                            git_sub,
                                             git_badge,
                                             &mut st.plan.setup_git_ssh,
                                             true,
                                             None,
                                         );
+                                        if st.plan.setup_git_ssh {
+                                            egui::Frame::new()
+                                                .inner_margin(egui::Margin {
+                                                    left: 12,
+                                                    right: 12,
+                                                    top: 0,
+                                                    bottom: 10,
+                                                })
+                                                .show(ui, |ui| {
+                                                    let choice_w = (row_w - 24.0).max(120.0);
+                                                    ui.set_width(choice_w);
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing =
+                                                            Vec2::new(6.0, 6.0);
+                                                        let mut is_ded = st.plan.git_auth_choice
+                                                            == cloud::GitAuthChoice::DedicatedCloudKey;
+                                                        if sync_skill_chip(
+                                                            ui,
+                                                            "Dedicated key (revocable)",
+                                                            &mut is_ded,
+                                                            false,
+                                                        ) && is_ded
+                                                        {
+                                                            st.plan.git_auth_choice =
+                                                                cloud::GitAuthChoice::DedicatedCloudKey;
+                                                        }
+
+                                                        let mac_key = inv.mac_ssh_key.as_ref();
+                                                        let can_copy_mac = mac_key
+                                                            .is_some_and(|k| k.unencrypted);
+                                                        let mac_label = match mac_key {
+                                                            Some(k) if k.unencrypted => {
+                                                                format!("Copy Mac key ({})", k.label)
+                                                            }
+                                                            Some(k) => {
+                                                                format!(
+                                                                    "{} (passphrase-protected)",
+                                                                    k.label
+                                                                )
+                                                            }
+                                                            None => "No local SSH key found".into(),
+                                                        };
+                                                        ui.add_enabled_ui(can_copy_mac, |ui| {
+                                                            let mut is_copy = st.plan.git_auth_choice
+                                                                == cloud::GitAuthChoice::CopyMacKey;
+                                                            if sync_skill_chip(
+                                                                ui,
+                                                                &mac_label,
+                                                                &mut is_copy,
+                                                                false,
+                                                            ) && is_copy
+                                                            {
+                                                                st.plan.git_auth_choice =
+                                                                    cloud::GitAuthChoice::CopyMacKey;
+                                                            }
+                                                        });
+                                                    });
+                                                });
+                                        }
 
                                         // Detected opt-in CLI Service credentials (gh, Railway, Render, etc.)
                                         for cred in &inv.service_creds {
@@ -2018,7 +2211,8 @@ impl Pui {
                         .lock()
                         .map(|mut st| {
                             st.busy = true;
-                            st.notice = None;
+                            st.toast = None;
+                            st.action_needed = None;
                             st.error = None;
                             st.plan.clone()
                         })
@@ -2036,11 +2230,18 @@ impl Pui {
                                 st.status = Some(fresh);
                             }
                             match sync_res {
-                                Ok((msg, copy_key)) => {
-                                    if let Some(pub_key) = copy_key {
-                                        ctx.copy_text(pub_key);
+                                Ok(report) => {
+                                    if let Some(ref action) = report.action_needed {
+                                        if let Some(ref pub_key) = action.copy_text {
+                                            ctx.copy_text(pub_key.clone());
+                                        }
                                     }
-                                    st.notice = Some(msg);
+                                    st.toast = Some(CloudToast {
+                                        title: report.title,
+                                        subtitle: report.summary,
+                                        created_at: std::time::Instant::now(),
+                                    });
+                                    st.action_needed = report.action_needed;
                                 }
                                 Err(e) => st.error = Some(e),
                             }
@@ -2099,10 +2300,14 @@ impl Pui {
                             {
                                 ui.ctx().copy_text(uri.clone());
                                 if let Ok(mut st) = shared.lock() {
-                                    st.notice = Some(format!(
-                                        "Copied pairing link for {} to clipboard.",
-                                        cfg.name
-                                    ));
+                                    st.toast = Some(CloudToast {
+                                        title: "Copied pairing link".into(),
+                                        subtitle: format!(
+                                            "Paste in Pui Mobile to add {}",
+                                            cfg.name
+                                        ),
+                                        created_at: std::time::Instant::now(),
+                                    });
                                 }
                                 close_qr = true;
                             }
@@ -2121,6 +2326,104 @@ impl Pui {
                     if let Ok(mut st) = shared.lock() {
                         st.qr_modal_open = false;
                     }
+                }
+            }
+        }
+
+        // Option C: Auto-fading bottom-right floating toast for clean sync confirmations.
+        let active_toast = shared.lock().ok().and_then(|mut st| {
+            if let Some(ref t) = st.toast {
+                if t.created_at.elapsed() >= std::time::Duration::from_millis(4500) {
+                    st.toast = None;
+                    None
+                } else {
+                    Some(t.clone())
+                }
+            } else {
+                None
+            }
+        });
+        if let Some(toast) = active_toast {
+            let remaining =
+                std::time::Duration::from_millis(4500).saturating_sub(toast.created_at.elapsed());
+            ui.ctx()
+                .request_repaint_after(remaining.min(std::time::Duration::from_millis(250)));
+            let mut dismiss_toast = false;
+            egui::Area::new(egui::Id::new("pui_cloud_sync_toast"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-20.0, -20.0))
+                .show(ui.ctx(), |ui| {
+                    let toast_w = 310.0_f32;
+                    egui::Frame::new()
+                        .fill(colors.surface)
+                        .stroke(Stroke::new(1.0_f32, colors.border))
+                        .corner_radius(11)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 8],
+                            blur: 24,
+                            spread: 0,
+                            color: Color32::from_black_alpha(120),
+                        })
+                        .inner_margin(egui::Margin::symmetric(13, 10))
+                        .show(ui, |ui| {
+                            let inner_w = toast_w - 26.0;
+                            ui.set_width(inner_w);
+                            ui.set_max_width(inner_w);
+                            ui.vertical(|ui| {
+                                ui.set_width(inner_w);
+                                ui.spacing_mut().item_spacing.y = 3.0;
+                                ui.horizontal(|ui| {
+                                    ui.set_width(inner_w);
+                                    let (badge_rect, _) =
+                                        ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                    ui.painter().circle(
+                                        badge_rect.center(),
+                                        8.0,
+                                        colors.green.gamma_multiply(0.14),
+                                        Stroke::new(1.0_f32, colors.green.gamma_multiply(0.38)),
+                                    );
+                                    let check_g = ui.painter().layout_no_wrap(
+                                        "✓".to_owned(),
+                                        FontId::proportional(10.5),
+                                        colors.green,
+                                    );
+                                    ui.painter().galley(
+                                        egui::pos2(
+                                            badge_rect.center().x - check_g.size().x * 0.5,
+                                            badge_rect.center().y - check_g.size().y * 0.5,
+                                        ),
+                                        check_g,
+                                        colors.green,
+                                    );
+                                    ui.label(
+                                        RichText::new(&toast.title)
+                                            .size(12.5)
+                                            .strong()
+                                            .color(colors.text),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(Align::Center),
+                                        |ui| {
+                                            if ghost_button(ui, "×", None).clicked() {
+                                                dismiss_toast = true;
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&toast.subtitle)
+                                            .size(11.5)
+                                            .color(colors.muted),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                });
+            if dismiss_toast {
+                if let Ok(mut st) = shared.lock() {
+                    st.toast = None;
                 }
             }
         }
