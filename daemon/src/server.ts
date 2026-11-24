@@ -62,6 +62,16 @@ const LOCAL_SLASH_COMMANDS = [
   { name: 'model', description: 'Switch model or effort level', source: 'pui' },
 ];
 
+function projectNameForCwd(cwd: string, meta?: ChatMeta): string {
+  if (meta?.repo_dir) {
+    const base = path.basename(meta.repo_dir);
+    if (base) return base;
+  }
+  const m = cwd.match(/\/\.worktrees\/([^/]+)\//);
+  if (m && m[1]) return m[1];
+  return path.basename(cwd) || 'workspace';
+}
+
 function constantTimeEq(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -170,9 +180,10 @@ export class PuiDaemonServer {
       list.push({
         path: s.path,
         title: m?.title || live?.title || s.title,
-        project: cwd,
-        project_name: path.basename(cwd) || 'workspace',
+        project: m?.repo_dir || cwd,
+        project_name: projectNameForCwd(cwd, m),
         cwd,
+        branch: m?.branch || live?.branch || null,
         status: live
           ? live.dialogs.length > 0
             ? 'Needs approval'
@@ -200,9 +211,10 @@ export class PuiDaemonServer {
       list.unshift({
         path: p,
         title: m?.title || live.title,
-        project: live.cwd,
-        project_name: path.basename(live.cwd) || 'workspace',
+        project: m?.repo_dir || live.cwd,
+        project_name: projectNameForCwd(live.cwd, m),
         cwd: live.cwd,
+        branch: m?.branch || live.branch || null,
         status: live.dialogs.length > 0 ? 'Needs approval' : live.busy ? 'Working…' : 'Idle',
         busy: live.busy,
         unread: false,

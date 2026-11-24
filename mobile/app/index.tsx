@@ -44,6 +44,7 @@ export default function SessionsScreen() {
     hostInfo,
     sessions,
     transport,
+    getTransportForHost,
     clientOrigin,
     deviceName,
     retryConnection,
@@ -98,11 +99,15 @@ export default function SessionsScreen() {
   };
 
   const openSession = (session: SessionSummary) => {
-    // Loads the session in background on host without switching Desktop's active chat.
-    void transport?.openSession(session.path).catch(() => {});
+    // Loads the session in background on its owning host without switching Desktop's active chat.
+    const hostTransport = getTransportForHost(session.host_id);
+    void hostTransport?.openSession(session.path).catch(() => {});
     router.push({
       pathname: '/chat/[id]',
-      params: { id: encodeURIComponent(session.path) },
+      params: {
+        id: encodeURIComponent(session.path),
+        ...(session.host_id ? { hostId: session.host_id } : {}),
+      },
     });
   };
 
@@ -159,6 +164,9 @@ export default function SessionsScreen() {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
             {item.pinned ? (
               <Ionicons name="pin" size={11} color={colors.accent} />
+            ) : null}
+            {item.host_kind === 'cloud' ? (
+              <Ionicons name="cloud-outline" size={13} color={colors.accent} />
             ) : null}
             <Text
               numberOfLines={1}
@@ -578,8 +586,9 @@ export default function SessionsScreen() {
                     <Pressable
                       onPress={async () => {
                         const trimmed = renameDraft.trim();
-                        if (trimmed && transport) {
-                          await transport.renameSession(actionTarget.path, trimmed).catch(() => {});
+                        const targetTransport = getTransportForHost(actionTarget.host_id);
+                        if (trimmed && targetTransport) {
+                          await targetTransport.renameSession(actionTarget.path, trimmed).catch(() => {});
                           setTimeout(() => void refreshSessions().catch(() => {}), 200);
                         }
                         setActionTarget(null);
@@ -594,8 +603,9 @@ export default function SessionsScreen() {
                 <>
                   <Pressable
                     onPress={async () => {
-                      if (transport) {
-                        await transport
+                      const targetTransport = getTransportForHost(actionTarget.host_id);
+                      if (targetTransport) {
+                        await targetTransport
                           .pinSession(actionTarget.path, !actionTarget.pinned)
                           .catch(() => {});
                         setTimeout(() => void refreshSessions().catch(() => {}), 200);
@@ -628,15 +638,19 @@ export default function SessionsScreen() {
                     onPress={async () => {
                       const target = actionTarget;
                       setActionTarget(null);
-                      if (!transport) return;
+                      const targetTransport = getTransportForHost(target.host_id);
+                      if (!targetTransport) return;
                       try {
-                        const res = await transport.forkSession(target.path, clientOrigin());
+                        const res = await targetTransport.forkSession(target.path, clientOrigin());
                         void refreshSessions().catch(() => {});
                         if (res.path) {
-                          void transport.openSession(res.path).catch(() => {});
+                          void targetTransport.openSession(res.path).catch(() => {});
                           router.push({
                             pathname: '/chat/[id]',
-                            params: { id: encodeURIComponent(res.path) },
+                            params: {
+                              id: encodeURIComponent(res.path),
+                              ...(target.host_id ? { hostId: target.host_id } : {}),
+                            },
                           });
                         }
                       } catch {
@@ -659,8 +673,9 @@ export default function SessionsScreen() {
                       }
                       const target = actionTarget;
                       setActionTarget(null);
-                      if (transport) {
-                        await transport.deleteSession(target.path).catch(() => {});
+                      const targetTransport = getTransportForHost(target.host_id);
+                      if (targetTransport) {
+                        await targetTransport.deleteSession(target.path).catch(() => {});
                         setTimeout(() => void refreshSessions().catch(() => {}), 200);
                       }
                     }}

@@ -26,6 +26,7 @@ const MAX_PAGE_SNAPSHOTS: usize = 16;
 #[derive(Clone, Default)]
 pub struct PageSnapshots {
     inner: Arc<Mutex<HashMap<String, PageSnapshotData>>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -36,6 +37,12 @@ struct PageSnapshotData {
 }
 
 impl PageSnapshots {
+    /// Remove cached private pixels/title when its owning browser is disposed.
+    pub fn remove(&self, target: &str) {
+        if let Ok(mut map) = self.inner.lock() {
+            map.remove(target);
+        }
+    }
     pub fn record_title(&self, target: &str, title: String) {
         if target.is_empty() || title.is_empty() {
             return;
@@ -80,7 +87,10 @@ impl PageSnapshots {
                 entry.title = title;
             }
             entry.image = Some(image);
-            entry.revision = entry.revision.wrapping_add(1);
+            entry.revision = self
+                .revision
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .wrapping_add(1);
         }
     }
 
@@ -381,7 +391,10 @@ impl InlineVisualHost {
 
     /// Fetch or upload a cached GPU texture for a Browser preview card (`pui_open`).
     pub fn page_texture(&mut self, ctx: &egui::Context, target: &str) -> Option<TextureHandle> {
-        let (revision, image) = self.page_snapshots.snapshot(target)?;
+        let Some((revision, image)) = self.page_snapshots.snapshot(target) else {
+            self.page_textures.remove(target);
+            return None;
+        };
         if let Some((cached_rev, tex)) = self.page_textures.get(target)
             && *cached_rev == revision
         {
@@ -1005,5 +1018,18 @@ mod tests {
         let (rev, img) = snapshots.snapshot("http://127.0.0.1:8765/").unwrap();
         assert_eq!(rev, 1);
         assert_eq!(img.size, [16, 12]);
+        snapshots.remove("http://127.0.0.1:8765/");
+        assert!(snapshots.title("http://127.0.0.1:8765/").is_none());
+        assert!(snapshots.snapshot("http://127.0.0.1:8765/").is_none());
+        snapshots.record_image(
+            "http://127.0.0.1:8765/",
+            None,
+            ColorImage::filled([16, 12], egui::Color32::WHITE),
+        );
+        assert_ne!(
+            snapshots.snapshot("http://127.0.0.1:8765/").unwrap().0,
+            rev,
+            "cache replacement cannot reuse a texture revision after disposal"
+        );
     }
 }

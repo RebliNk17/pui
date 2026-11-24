@@ -342,7 +342,7 @@ fn browser_chrome_has_one_address_row_and_switches_tabs_in_narrow_panels() {
                 "Forward",
                 "Reload page",
                 "Inspect an element",
-                "Open Chrome DevTools",
+                "More browser tools",
                 "Expand viewer",
             ] {
                 let rect = ctx

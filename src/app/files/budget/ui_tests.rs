@@ -68,6 +68,7 @@ fn bounded_error_fits_narrow_theme_zoom_and_keyboard_refresh_retries_once() {
             };
             for _ in 0..50 {
                 draw(&mut app, vec![]);
+                crate::media::wait_decodes(&ctx);
             }
             let out = draw(&mut app, vec![]);
             let error = out

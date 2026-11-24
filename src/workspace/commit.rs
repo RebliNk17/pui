@@ -47,7 +47,7 @@ fn line(bytes: Vec<u8>) -> Result<String, String> {
     }
     Ok(s.into())
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub name: String,
     pub email: String,
@@ -91,6 +91,34 @@ pub(super) fn branch_head(
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Result<(String, String), String> {
+    let (fast, fast_status) = read_only::run(
+        read_only::command(root)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args(["rev-parse", "HEAD^{commit}", "--symbolic-full-name", "HEAD"]),
+        cancel,
+        deadline,
+        2048,
+        "Commit HEAD",
+        "Invalid HEAD response",
+    )?;
+    if fast_status.success()
+        && let Ok(text) = String::from_utf8(fast)
+    {
+        let lines: Vec<_> = text.lines().collect();
+        if lines.len() == 2 && history::oid(lines[0]) {
+            let head = lines[0].to_owned();
+            if lines[1] == "HEAD" {
+                return Ok((String::new(), head));
+            }
+            if lines[1].starts_with("refs/heads/")
+                && lines[1].len() <= 1024
+                && !lines[1].chars().any(char::is_control)
+            {
+                return Ok((lines[1].to_owned(), head));
+            }
+            return Err("Invalid local branch".into());
+        }
+    }
     let (out, status) = read_only::run(
         read_only::command(root).args(["symbolic-ref", "-q", "HEAD"]),
         cancel,
@@ -110,78 +138,52 @@ pub(super) fn branch_head(
     } else {
         return Err("Current branch unavailable".into());
     };
-    let (out, status) = read_only::run(
-        read_only::command(root)
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]),
+    if branch.is_empty() {
+        return Err("Missing HEAD without a local unborn branch".into());
+    }
+    let (_, exists) = read_only::run(
+        read_only::command(root).args(["show-ref", "--verify", "--quiet", &branch]),
         cancel,
         deadline,
         1024,
-        "Commit HEAD",
-        "Invalid HEAD response",
+        "Unborn branch inspection",
+        "Invalid branch response",
     )?;
-    let head = if status.success() {
-        let head = line(out)?;
-        if !history::oid(&head) {
-            return Err("Invalid HEAD".into());
-        }
-        head
-    } else {
-        if branch.is_empty() {
-            return Err("Missing HEAD without a local unborn branch".into());
-        }
-        let (_, exists) = read_only::run(
-            read_only::command(root).args(["show-ref", "--verify", "--quiet", &branch]),
-            cancel,
-            deadline,
-            1024,
-            "Unborn branch inspection",
-            "Invalid branch response",
-        )?;
-        if status.code() != Some(1) || exists.code() != Some(1) {
-            return Err("HEAD is unavailable or invalid, not an unborn local branch.".into());
-        }
-        match line(run(
-            root,
-            &["rev-parse", "--show-object-format"],
-            cancel,
-            deadline,
-        )?)?
-        .as_str()
-        {
-            "sha1" => "0".repeat(40),
-            "sha256" => "0".repeat(64),
-            _ => return Err("Unsupported object format".into()),
-        }
+    if exists.code() != Some(1) {
+        return Err("HEAD is unavailable or invalid, not an unborn local branch.".into());
+    }
+    let head = match line(run(
+        root,
+        &["rev-parse", "--show-object-format"],
+        cancel,
+        deadline,
+    )?)?
+    .as_str()
+    {
+        "sha1" => "0".repeat(40),
+        "sha256" => "0".repeat(64),
+        _ => return Err("Unsupported object format".into()),
     };
     Ok((branch, head))
 }
 pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, String> {
     let deadline = Instant::now() + DEADLINE;
     read_only::filters_disabled(root, cancel, deadline)?;
-    if !root.is_absolute()
-        || Path::new(&line(run(
-            root,
-            &["rev-parse", "--show-toplevel"],
-            cancel,
-            deadline,
-        )?)?)
-            != root
-    {
+    if !root.is_absolute() {
         return Err("Exact repository root required.".into());
     }
     let (branch, head) = branch_head(root, cancel, deadline)?;
     if branch.is_empty() {
         return Err("Commit requires a local branch, not detached HEAD.".into());
     }
-    // Resolve the exact same six Git-owned paths in one invocation. Six
-    // sequential process launches consumed most of the unchanged 3s deadline
-    // on macOS even in tiny fixture repositories. Validate every returned row.
+    // Resolve the repository root, six Git-owned paths, and optional split-index
+    // path in one invocation. Validate every returned row.
     let paths = run(
         root,
         &[
             "rev-parse",
             "--path-format=absolute",
+            "--show-toplevel",
             "--git-path",
             "MERGE_HEAD",
             "--git-path",
@@ -194,6 +196,7 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
             "rebase-apply",
             "--git-path",
             "index",
+            "--shared-index-path",
         ],
         cancel,
         deadline,
@@ -203,22 +206,18 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
         .lines()
         .map(|path| line(format!("{path}\n").into_bytes()).map(PathBuf::from))
         .collect::<Result<Vec<_>, _>>()?;
-    if paths.len() != 6 || paths.iter().any(|path| !path.is_absolute()) {
+    if !matches!(paths.len(), 7 | 8) || paths.iter().any(|path| !path.is_absolute()) {
         return Err("Invalid Git path inventory.".into());
     }
-    if paths[..5].iter().any(|path| path.exists()) {
+    if paths[0] != root {
+        return Err("Exact repository root required.".into());
+    }
+    if paths[1..6].iter().any(|path| path.exists()) {
         return Err("Finish the merge/rebase/cherry-pick/revert first.".into());
     }
-    let index_path = paths[5].clone();
+    let index_path = paths[6].clone();
     let index = index_bytes(&index_path)?;
-    if !run(
-        root,
-        &["rev-parse", "--shared-index-path"],
-        cancel,
-        deadline,
-    )?
-    .is_empty()
-    {
+    if paths.len() == 8 {
         return Err("Split index unsupported.".into());
     }
     if !run(root, &["ls-files", "--unmerged", "-z"], cancel, deadline)?.is_empty() {
@@ -267,12 +266,24 @@ pub(crate) fn prepare(root: &Path, cancel: &AtomicBool) -> Result<Snapshot, Stri
         return Err("Index changed during staged review; inspect again.".into());
     }
     let author = identity(run(root, &["var", "GIT_AUTHOR_IDENT"], cancel, deadline)?)?;
-    let committer = identity(run(
-        root,
-        &["var", "GIT_COMMITTER_IDENT"],
-        cancel,
-        deadline,
-    )?)?;
+    let committer = if [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ]
+    .iter()
+    .all(|k| std::env::var_os(k).is_none())
+    {
+        author.clone()
+    } else {
+        identity(run(
+            root,
+            &["var", "GIT_COMMITTER_IDENT"],
+            cancel,
+            deadline,
+        )?)?
+    };
     let (signing_config, signing_status) = read_only::run(
         read_only::command(root).args([
             "config",
@@ -411,12 +422,6 @@ pub(crate) fn apply_message_preparation(
             "Commit message requires 1–4096 UTF-8 bytes without unsupported controls.".into(),
         );
     }
-    let fresh = prepare(&snapshot.root, cancel)?;
-    if fresh != snapshot {
-        return Err(
-            "Staged snapshot, branch or author/committer identity changed; inspect again.".into(),
-        );
-    }
     let lock_path = snapshot.index_path.with_file_name("index.lock");
     let _lock = fs::OpenOptions::new()
         .write(true)
@@ -432,6 +437,12 @@ pub(crate) fn apply_message_preparation(
     let _cleanup = Lock(lock_path);
     if index_bytes(&snapshot.index_path)? != snapshot.index {
         return Err("Index changed; inspect again.".into());
+    }
+    let fresh = prepare(&snapshot.root, cancel)?;
+    if fresh != snapshot {
+        return Err(
+            "Staged snapshot, branch or author/committer identity changed; inspect again.".into(),
+        );
     }
     // Hook waits do not consume the later short Git-publication budget.
     // write-tree uses a private exact index, never updates the original index.
@@ -464,7 +475,10 @@ pub(crate) fn apply_message_preparation(
             Instant::now() + std::time::Duration::from_secs(hook_timeout),
             "Pre-commit check",
         )?;
-        if index_bytes(&private)? != snapshot.index || prepare(&snapshot.root, cancel)? != snapshot
+        if index_bytes(&private)? != snapshot.index
+            || index_bytes(&snapshot.index_path)? != snapshot.index
+            || branch_head(&snapshot.root, cancel, Instant::now() + DEADLINE)?
+                != (snapshot.branch.clone(), snapshot.head.clone())
         {
             return Err("Pre-commit check changed the reviewed index or source state; nothing committed. Inspect changes and review again.".into());
         }
@@ -519,7 +533,9 @@ pub(crate) fn apply_message_preparation(
                 .map_err(|_| "Cannot read checked message")?;
             if actual != confirmed
                 || index_bytes(&private)? != snapshot.index
-                || prepare(&snapshot.root, cancel)? != snapshot
+                || index_bytes(&snapshot.index_path)? != snapshot.index
+                || branch_head(&snapshot.root, cancel, Instant::now() + DEADLINE)?
+                    != (snapshot.branch.clone(), snapshot.head.clone())
             {
                 return Err("Commit-message hook changed the reviewed message or snapshot; nothing committed. Review again.".into());
             }

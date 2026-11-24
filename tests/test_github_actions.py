@@ -22,6 +22,7 @@ class GitHubActionsTests(unittest.TestCase):
                 (root / "packaging/runtime" / name).write_text("{}")
             (root / "bin").mkdir()
             (root / "scripts/ci/github-macos.sh").write_text((ROOT / "scripts/ci/github-macos.sh").read_text())
+            (root / "scripts/ci/cargo-config.toml").write_text((ROOT / "scripts/ci/cargo-config.toml").read_text())
             (root / "scripts/ci/setup-macos.sh").write_text('''
 [[ "$CI_COMMIT_SHA" == expected-revision && "$CI_COMMIT_TAG" == v1.2.3 && "$CI_PIPELINE_IID" == 42 ]]
 [[ "$CI_COMMIT_REF_PROTECTED" == false && "$PUI_REQUIRE_SIGNING" == false ]]
@@ -53,6 +54,7 @@ done
             calls = log.read_text()
             self.assertIn("bash scripts/test-rust.sh", calls)
             self.assertIn("-p test_*.py", calls)
+            self.assertIn('opt-level = 2', (root / ".cargo-ci/config.toml").read_text())
             self.assertIn("bash scripts/ci/build-macos.sh", calls)
             self.assertIn("npm ci --prefix", calls)
             self.assertIn("--ignore-scripts", calls)
@@ -60,13 +62,48 @@ done
             self.assertNotIn("fake-secret", calls)
 
     def test_complete_rust_runner_keeps_all_contention_groups_and_restart_test(self):
-        runner = (ROOT / "scripts/test-rust.sh").read_text()
-        self.assertIn('--skip "$lock_test"', runner)
-        self.assertIn('"$lock_test" -- --exact --test-threads=1', runner)
-        for group in ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::",
-                      "app::tasks::save_conflict_tests::"):
-            self.assertIn("--skip " + group, runner)
-            self.assertIn(group + " -- --test-threads=1", runner)
+        lock_test = "app::automation::tests::store_lock_restart_missed_cron_and_uncertain_delivery"
+        orphan_test = ("app::automation::delete::tests::"
+                       "cross_window_orphan_delete_uses_real_transport_without_creator_and_handles_owner_exit")
+        required = ("app::sync::", "app::files::delimited::projection::", "app::files::delimited::export::",
+                    "app::tasks::save_conflict_tests::", "app::tasks::recovery::tests::",
+                    "app::tasks::store_safety_tests::", "tasks::apply::tests::", "tasks::apply::tests::additional::",
+                    "workspace::commit::tests::", "file_watch::", "sessions::watch::")
+        for lanes in ("", "1"):
+            with self.subTest(lanes=lanes or "parallel"), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                log = root / "commands"
+                for name, body in (("cargo", 'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'), ("git", "exit 0\n")):
+                    path = root / name
+                    path.write_text("#!/bin/bash\n" + body)
+                    path.chmod(0o755)
+                env = {"PATH": f"{root}:/usr/bin:/bin", "COMMAND_LOG": str(log), "PUI_SERIAL_LANES": lanes}
+                result = subprocess.run(["/bin/bash", str(ROOT / "scripts/test-rust.sh")], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = [line.split() for line in log.read_text().splitlines()]
+                bulk = [c for c in calls if "--bin" not in c]
+                self.assertEqual(len(bulk), 1)
+                self.assertEqual(bulk[0][:5], ["test", "--offline", "--locked", "--", "--test-threads=4"])
+                skips = {bulk[0][i + 1] for i, arg in enumerate(bulk[0]) if arg == "--skip"}
+                serial = [c for c in calls if "--bin" in c]
+                filters = [c[5] for c in serial]
+                # Every serial group runs exactly once, single-threaded, and is skipped in bulk.
+                self.assertEqual(len(filters), len(set(filters)))
+                for call in serial:
+                    self.assertEqual(call[:5], ["test", "--offline", "--locked", "--bin", "pui"])
+                    self.assertEqual(call[6], "--")
+                    self.assertIn("--test-threads=1", call[7:])
+                    self.assertTrue(any(skip in call[5] for skip in skips), call)
+                for group in required:
+                    self.assertIn(group, filters)
+                    self.assertIn(group, skips)
+                apply = next(c for c in serial if c[5] == "tasks::apply::tests::")
+                self.assertEqual(apply[8:], ["--skip", "tasks::apply::tests::additional::"])
+                # OS-lock tests run last, alone and exact.
+                self.assertEqual(serial[-2:], [["test", "--offline", "--locked", "--bin", "pui", test, "--",
+                                                "--exact", "--test-threads=1"] for test in (lock_test, orphan_test)])
+                self.assertTrue({lock_test, orphan_test} <= skips)
 
     def test_setup_skips_homebrew_rustup_postinstall_and_selects_exact_toolchain(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -165,6 +202,101 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
             self.assertIn(expected, paths)
         for forbidden in ("dist", "~/.ssh", "~/.npmrc"):
             self.assertNotIn(forbidden, paths)
+        # Affected-suite selection gates the macOS job; partial runs never seed caches or upload.
+        self.assertEqual(job["needs"], "changes")
+        self.assertEqual(job["if"], "needs.changes.outputs.macos == 'true'")
+        self.assertTrue(all("needs.changes.outputs.toolchain == 'true'" in s["if"] for s in saves))
+        upload = next(s for s in job["steps"] if s.get("uses") == "actions/upload-artifact@v4")
+        self.assertEqual(upload["if"], "needs.changes.outputs.package == 'true'")
+        # PRs are unfiltered so the required gate always reports; it depends on every validation job.
+        self.assertIsNone(triggers["pull_request"])
+        gate = config["jobs"]["ci-result"]
+        self.assertEqual(gate["name"], "CI result")
+        self.assertEqual(gate["if"], "always()")
+        self.assertEqual(set(gate["needs"]), {"changes", "macos-build", "mobile-validate", "daemon-validate"})
+
+    def test_affected_selects_only_changed_suites_and_fails_safe(self):
+        spec = importlib.util.spec_from_file_location("affected", ROOT / "scripts/ci/affected.py")
+        affected = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(affected)
+        everything = {**dict.fromkeys(affected.SUITES, True), "toolchain": True, "macos": True}
+
+        def only(*suites):
+            result = {suite: suite in suites for suite in affected.SUITES}
+            result["toolchain"] = result["rust"] or result["package"]
+            result["macos"] = any(result[s] for s in ("rust", "node", "python", "package"))
+            return result
+
+        self.assertEqual(affected.select(["README.md", "docs/x.md", ".github/workflows/android.yml"]), only())
+        self.assertEqual(affected.select(["mobile/App.tsx", "mobile/README.md"]), only("mobile"))
+        self.assertEqual(affected.select(["daemon/src/a.ts"]), only("daemon"))
+        self.assertFalse(affected.select(["mobile/App.tsx", "daemon/src/a.ts"])["macos"])
+        self.assertEqual(affected.select(["src/app/views.rs"]), only("rust"))
+        self.assertEqual(affected.select(["tests/prompt_design.rs", "vendor/egui/src/lib.rs"]), only("rust"))
+        self.assertEqual(affected.select(["scripts/permissions.ts", "tests/permissions.test.mjs"]), only("node"))
+        self.assertEqual(affected.select(["scripts/release.py"]), only("python", "package"))
+        self.assertEqual(affected.select(["scripts/bundle-macos.sh"]), only("python", "package"))
+        self.assertEqual(affected.select(["CHANGELOG.md"]), only("python"))
+        for shared in ("Cargo.lock", "Cargo.toml", ".github/workflows/macos.yml", "scripts/ci/affected.py",
+                       "packaging/runtime/package-lock.json"):
+            self.assertEqual(affected.select(["src/main.rs", shared]), everything, shared)
+        self.assertEqual(affected.select(["brand-new-dir/file"]), everything)
+
+    def test_affected_cli_runs_everything_without_base_or_on_bad_base(self):
+        script = str(ROOT / "scripts/ci/affected.py")
+        for args in ([], ["0000000000000000000000000000000000000000"]):
+            output = subprocess.run(["python3", script, *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+            self.assertEqual(output.split(), ["rust=true", "node=true", "python=true", "package=true", "mobile=true",
+                                              "daemon=true", "toolchain=true", "macos=true"])
+
+    def test_pull_request_runs_only_selected_suites(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "scripts/ci").mkdir(parents=True)
+            (root / "tests").mkdir()
+            (root / "packaging/runtime").mkdir(parents=True)
+            for name in ("package.json", "package-lock.json"):
+                (root / "packaging/runtime" / name).write_text("{}")
+            for name in ("a.test.mjs", "streaming.test.mjs"):
+                (root / "tests" / name).write_text("")
+            (root / "bin").mkdir()
+            (root / "scripts/ci/github-macos.sh").write_text((ROOT / "scripts/ci/github-macos.sh").read_text())
+            (root / "scripts/ci/cargo-config.toml").write_text((ROOT / "scripts/ci/cargo-config.toml").read_text())
+            (root / "scripts/ci/setup-macos.sh").write_text('printf "setup needs_rust=%s\\n" "$PUI_CI_NEEDS_RUST" >> "$COMMAND_LOG"\n')
+            log = root / "commands"
+            (root / "bin/git").write_text('#!/bin/bash\necho rev\n')
+            (root / "bin/git").chmod(0o755)
+            for command in ("python3", "cargo", "node", "npm", "bash"):
+                path = root / "bin" / command
+                path.write_text('#!/bin/bash\nprintf "%s\\n" "$(basename "$0") $*" >> "$COMMAND_LOG"\n')
+                path.chmod(0o755)
+            base = {"PATH": str(root / "bin") + ":/usr/bin:/bin", "COMMAND_LOG": str(log), "GITHUB_ACTIONS": "true",
+                    "GITHUB_SHA": "rev", "GITHUB_RUN_NUMBER": "1", "GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "7/merge"}
+
+            def run(**suites):
+                log.write_text("")
+                env = {**base, **{f"PUI_CI_{k.upper()}": v for k, v in suites.items()}}
+                result = subprocess.run(["/bin/bash", str(root / "scripts/ci/github-macos.sh")], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return log.read_text()
+
+            calls = run(rust="false", node="true", python="false", package="false")
+            self.assertIn("setup needs_rust=false", calls)
+            self.assertIn("node --test tests/a.test.mjs\n", calls)
+            for absent in ("cargo", "unittest", "build-macos.sh", "streaming"):
+                self.assertNotIn(absent, calls)
+            calls = run(rust="true", node="false", python="false", package="false")
+            self.assertIn("setup needs_rust=true", calls)
+            self.assertIn("bash scripts/test-rust.sh", calls)
+            self.assertIn("node --test tests/streaming.test.mjs\n", calls)
+            self.assertNotIn("build-macos.sh", calls)
+            calls = run(rust="false", node="false", python="false", package="false")
+            self.assertNotIn("cargo", calls)
+            self.assertNotIn("node --test", calls)
+            self.assertIn("python3 scripts/release.py check", calls)
+            result = subprocess.run(["/bin/bash", str(root / "scripts/ci/github-macos.sh")],
+                                    env={**base, "PUI_CI_RUST": "maybe"}, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_refuses_non_github_actions_environment(self):
         result = subprocess.run(["bash", str(ROOT / "scripts/ci/github-macos.sh")], env={"PATH": "/usr/bin:/bin"}, capture_output=True)

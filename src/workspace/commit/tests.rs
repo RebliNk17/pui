@@ -1,10 +1,16 @@
 use super::*;
 fn fixture() -> PathBuf {
-    let root = fs::canonicalize(super::super::tests::fixture()).unwrap();
-    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
-    super::super::tests::git(&root, &["config", "user.email", "pui-test@example.invalid"]);
-    super::super::tests::git(&root, &["add", "--", "README.md"]);
-    root
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root = fs::canonicalize(super::super::tests::fixture()).unwrap();
+        super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+        super::super::tests::git(&root, &["config", "user.email", "pui-test@example.invalid"]);
+        super::super::tests::git(&root, &["add", "--", "README.md"]);
+        root
+    });
+    let root = std::env::temp_dir().join(format!("pui-commit-fixture-{}", uuid::Uuid::new_v4()));
+    super::super::tests::copy_tree(seed, &root);
+    fs::canonicalize(root).unwrap()
 }
 #[test]
 fn real_commit_moves_only_disposable_branch_preserves_index_worktree_and_skips_hooks() {
@@ -114,15 +120,22 @@ fn file_list_exact_unicode_literal_paths_added_deleted_modified_and_revalidated(
     );
 }
 fn unborn() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root =
+            std::env::temp_dir().join(format!("pui-initial-commit-seed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        super::super::tests::git(&root, &["init", "--template=", "--initial-branch=main"]);
+        super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
+        super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
+        fs::write(root.join("first.txt"), "first staged version\n").unwrap();
+        super::super::tests::git(&root, &["add", "--", "first.txt"]);
+        root
+    });
     let root = std::env::temp_dir().join(format!("pui-initial-commit-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let root = fs::canonicalize(root).unwrap();
-    super::super::tests::git(&root, &["init", "--initial-branch=main"]);
-    super::super::tests::git(&root, &["config", "user.name", "Pui Test"]);
-    super::super::tests::git(&root, &["config", "user.email", "pui@example.invalid"]);
-    fs::write(root.join("first.txt"), "first staged version\n").unwrap();
-    super::super::tests::git(&root, &["add", "--", "first.txt"]);
-    root
+    super::super::tests::copy_tree(seed, &root);
+    fs::canonicalize(root).unwrap()
 }
 #[test]
 fn initial_commit_is_parentless_and_preserves_unstaged_content_and_index() {

@@ -591,57 +591,66 @@ impl Pui {
 
         if let Some(path_str) = &active_path {
             let path = PathBuf::from(path_str);
-            let origin = self
-                .pending_origins
-                .get(&self.agents.active)
-                .cloned()
-                .unwrap_or_else(|| self.session_origin_for(&path));
-            let (artifacts, paths) = extract_artifacts(&self.state.messages);
-            allowed_artifacts.extend(paths);
-            let title = self
-                .prefs
-                .chats
-                .get(&path)
-                .and_then(|m| m.title.clone())
-                .or_else(|| {
-                    (!self.state.session_name.is_empty()).then(|| self.state.session_name.clone())
-                })
-                .unwrap_or_else(|| "New conversation".into());
-            let (status_label, _) = self.run_label();
-            let detail = SessionDetail {
-                path: path_str.clone(),
-                title,
-                cwd: self.prefs.cwd.to_string_lossy().into_owned(),
-                project: self.prefs.cwd.to_string_lossy().into_owned(),
-                status: status_label.to_owned(),
-                busy: self.state.busy,
-                ready: self.state.ready(),
-                model: self.state.model.clone(),
-                model_name: self.state.model_name.clone(),
-                provider: self.state.provider.clone(),
-                thinking: self.state.thinking.clone(),
-                levels: self.state.levels.clone(),
-                permission_mode: self
-                    .state
-                    .permission_mode
-                    .clone()
-                    .unwrap_or_else(|| self.active_permission().key().to_owned()),
-                cost: self.state.cost,
-                context_tokens: self.state.context_tokens,
-                context_window: self.state.context_window,
-                error: self.state.error.clone(),
-                notice: self.state.notice.clone(),
-                origin,
-                messages: self.state.messages.clone(),
-                pending_messages: self.state.pending_messages.clone(),
-                waiting_messages: active_waiting,
-                dialogs: self.state.dialogs.iter().cloned().collect(),
-                commands: self.state.commands.clone(),
-                models: self.state.models.clone(),
-                artifacts,
-                revision: active_detail_rev,
-            };
-            details.insert(path_str.clone(), detail);
+            let active_is_cloud = self.cloud_session_meta.contains_key(&path)
+                || self
+                    .agents
+                    .nodes
+                    .get(&self.agents.active)
+                    .is_some_and(|n| n.cloud_host.is_some());
+            if !active_is_cloud {
+                let origin = self
+                    .pending_origins
+                    .get(&self.agents.active)
+                    .cloned()
+                    .unwrap_or_else(|| self.session_origin_for(&path));
+                let (artifacts, paths) = extract_artifacts(&self.state.messages);
+                allowed_artifacts.extend(paths);
+                let title = self
+                    .prefs
+                    .chats
+                    .get(&path)
+                    .and_then(|m| m.title.clone())
+                    .or_else(|| {
+                        (!self.state.session_name.is_empty())
+                            .then(|| self.state.session_name.clone())
+                    })
+                    .unwrap_or_else(|| "New conversation".into());
+                let (status_label, _) = self.run_label();
+                let detail = SessionDetail {
+                    path: path_str.clone(),
+                    title,
+                    cwd: self.prefs.cwd.to_string_lossy().into_owned(),
+                    project: self.prefs.cwd.to_string_lossy().into_owned(),
+                    status: status_label.to_owned(),
+                    busy: self.state.busy,
+                    ready: self.state.ready(),
+                    model: self.state.model.clone(),
+                    model_name: self.state.model_name.clone(),
+                    provider: self.state.provider.clone(),
+                    thinking: self.state.thinking.clone(),
+                    levels: self.state.levels.clone(),
+                    permission_mode: self
+                        .state
+                        .permission_mode
+                        .clone()
+                        .unwrap_or_else(|| self.active_permission().key().to_owned()),
+                    cost: self.state.cost,
+                    context_tokens: self.state.context_tokens,
+                    context_window: self.state.context_window,
+                    error: self.state.error.clone(),
+                    notice: self.state.notice.clone(),
+                    origin,
+                    messages: self.state.messages.clone(),
+                    pending_messages: self.state.pending_messages.clone(),
+                    waiting_messages: active_waiting,
+                    dialogs: self.state.dialogs.iter().cloned().collect(),
+                    commands: self.state.commands.clone(),
+                    models: self.state.models.clone(),
+                    artifacts,
+                    revision: active_detail_rev,
+                };
+                details.insert(path_str.clone(), detail);
+            }
         }
 
         // Also expose live parked agents so mobile can view running background chats seamlessly.
@@ -652,6 +661,14 @@ impl Pui {
                 continue;
             };
             if details.contains_key(&path_str) {
+                continue;
+            }
+            if self
+                .agents
+                .nodes
+                .get(id)
+                .is_some_and(|n| n.cloud_host.is_some())
+            {
                 continue;
             }
             if chat.client.is_none() && chat.state.messages.is_empty() {
@@ -721,6 +738,9 @@ impl Pui {
         let mut seen_paths = BTreeSet::new();
         let mut sessions = Vec::new();
         for s in &self.sessions {
+            if self.cloud_session_meta.contains_key(&s.path) {
+                continue;
+            }
             let path_str = s.path.to_string_lossy().into_owned();
             if !seen_paths.insert(path_str.clone()) {
                 continue;
@@ -1735,6 +1755,13 @@ impl Pui {
                                 ui.add_enabled_ui(!busy, |ui| {
                                     if accent_button(ui, "Sync from Mac…").clicked() {
                                         open_sync_picker(&shared, &self.prefs.cwd, &known_projects);
+                                    }
+                                    if secondary_button(ui, "Sign in to Claude…").clicked() {
+                                        self.settings_view.providers.start_cloud_oauth_login(
+                                            ui.ctx(),
+                                            "anthropic",
+                                            cfg.clone(),
+                                        );
                                     }
                                     if secondary_button(ui, "Copy pair link").clicked() {
                                         let uri = cloud::pairing_uri(&cfg);

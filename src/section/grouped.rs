@@ -97,6 +97,7 @@ pub(super) fn show(
                 .size()
                 .x;
             let mut title_right = right;
+            let mut hidden_summary = false;
             if !section.summary.is_empty() {
                 let summary = ui.painter().layout_no_wrap(
                     section.summary.clone(),
@@ -115,9 +116,11 @@ pub(super) fn show(
                         summary,
                         colors.dim,
                     );
+                } else {
+                    hidden_summary = true;
                 }
             }
-            paint(
+            let title_elided = paint(
                 ui,
                 &section.title,
                 egui::pos2(left, rect.center().y),
@@ -136,16 +139,21 @@ pub(super) fn show(
                     ui.push_id(id, contents);
                 });
             }
-            response
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(if section.summary.is_empty() {
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            if title_elided || hidden_summary {
+                response.on_hover_text(if section.summary.is_empty() {
                     section.title
                 } else {
                     format!("{}\n{}", section.title, section.summary)
                 })
+            } else {
+                response
+            }
         })
         .inner
 }
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tooltip_tests;

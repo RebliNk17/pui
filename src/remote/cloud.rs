@@ -681,12 +681,49 @@ pub fn sync_catalog_projects(
     Ok(synced)
 }
 
+/// Anthropic Pro/Max OAuth uses single-use rotating refresh tokens: copying the same
+/// credential to two hosts causes whichever host refreshes first to revoke the other.
+/// Cloud hosts should use a dedicated sign-in (`push_single_provider_auth`) instead.
+pub fn is_single_use_oauth_provider(provider_id: &str, cred: &Value) -> bool {
+    let is_anthropic = provider_id == "anthropic" || provider_id.starts_with("anthropic~");
+    is_anthropic && cred["type"].as_str() == Some("oauth")
+}
+
+pub fn push_single_provider_auth(
+    cfg: &CloudHostConfig,
+    provider_id: &str,
+    cred: &Value,
+) -> Result<Vec<String>, String> {
+    let mut map = serde_json::Map::new();
+    map.insert(provider_id.to_owned(), cred.clone());
+    let (_, res) = http_request_json(
+        cfg,
+        "POST",
+        "/v1/admin/sync-auth",
+        Some(&json!({ "auth": Value::Object(map), "merge": true })),
+    )?;
+    let providers = res["providers"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(providers)
+}
+
 pub fn discover_local_inventory(cwd: &Path, known_projects: &[PathBuf]) -> LocalSyncInventory {
     let mut providers = Vec::new();
     if let Some(auth_path) = local_pi_file("auth.json") {
         if let Ok(raw) = std::fs::read_to_string(&auth_path) {
             if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&raw) {
-                providers = map.keys().cloned().collect();
+                providers = map
+                    .iter()
+                    .filter(|(k, v)| !is_single_use_oauth_provider(k, v))
+                    .map(|(k, _)| k.clone())
+                    .collect();
                 providers.sort();
             }
         }
@@ -781,15 +818,21 @@ pub fn sync_selected_pi_auth(
     };
     let mut filtered = serde_json::Map::new();
     for (k, v) in all_map {
-        if selected.contains(&k) {
+        if selected.contains(&k) && !is_single_use_oauth_provider(&k, &v) {
             filtered.insert(k, v);
         }
+    }
+    // Always merge so dedicated cloud-only OAuth logins (like Claude Pro/Max on pui-cloud)
+    // are never wiped out by a Mac -> Cloud sync.
+    let _ = replace;
+    if filtered.is_empty() {
+        return Ok(Vec::new());
     }
     let (_, res) = http_request_json(
         cfg,
         "POST",
         "/v1/admin/sync-auth",
-        Some(&json!({ "auth": Value::Object(filtered), "merge": !replace })),
+        Some(&json!({ "auth": Value::Object(filtered), "merge": true })),
     )?;
     let providers = res["providers"]
         .as_array()
@@ -1309,6 +1352,8 @@ pub fn fetch_cloud_repos(
 /// Creates a new session on the cloud daemon (auto-cloning the selected Git repo
 /// into `~/workspaces/<repo>` on demand if it isn't already cloned) and returns the remote
 /// session `.jsonl` path.
+// Only the non-test cloud transport (rpc::run_cloud) calls this.
+#[cfg_attr(test, allow(dead_code))]
 pub fn create_cloud_session(
     cfg: &CloudHostConfig,
     local_cwd: &Path,
@@ -1364,6 +1409,105 @@ pub fn create_cloud_session(
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| "Cloud host did not return a session path.".to_owned())
+}
+
+#[derive(Clone, Debug)]
+pub struct CloudSessionSummary {
+    pub path: String,
+    pub title: String,
+    pub project: String,
+    pub project_name: String,
+    pub cwd: String,
+    pub branch: Option<String>,
+    pub status: String,
+    pub busy: bool,
+    pub has_pending_dialog: bool,
+    pub modified_ms: u64,
+    pub created_ms: Option<u64>,
+    pub origin: Option<crate::remote::SessionOrigin>,
+}
+
+/// Extracts the cloud worktree branch (e.g. `pui_agent/hello-132e5b`) from a worktree path
+/// like `/home/ubuntu/workspaces/.worktrees/pui/pui_agent/hello-132e5b`.
+pub fn extract_cloud_branch(explicit: Option<&str>, cwd: &str) -> Option<String> {
+    if let Some(b) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(b.to_owned());
+    }
+    if let Some(rest) = cwd.split("/.worktrees/").nth(1) {
+        if let Some((_, branch)) = rest.split_once('/') {
+            let trimmed = branch.trim_matches('/');
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Shortens `/home/<user>/...` cloud paths to `~/...` for compact display.
+pub fn compact_cloud_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("/home/") {
+        if let Some((_, tail)) = rest.split_once('/') {
+            return format!("~/{tail}");
+        }
+    }
+    path.to_owned()
+}
+
+/// Maps a cloud worktree path like `/home/ubuntu/workspaces/.worktrees/pui/pui_agent/foo-123456`
+/// to a clean logical project path so `sessions::project_name` shows `pui`.
+pub fn project_path_for_cloud_session(project: &str, project_name: &str, cwd: &str) -> PathBuf {
+    if !project_name.trim().is_empty() && !project_name.contains('/') {
+        return PathBuf::from(format!("cloud/{}", project_name.trim()));
+    }
+    if let Some(rest) = cwd.split("/.worktrees/").nth(1) {
+        if let Some(repo) = rest.split('/').next().filter(|s| !s.is_empty()) {
+            return PathBuf::from(format!("cloud/{repo}"));
+        }
+    }
+    PathBuf::from(if !project.is_empty() { project } else { cwd })
+}
+
+pub fn fetch_cloud_sessions(cfg: &CloudHostConfig) -> Result<Vec<CloudSessionSummary>, String> {
+    let (_, res) = http_request_json(cfg, "GET", "/v1/sessions", None)?;
+    let arr = res["sessions"].as_array().cloned().unwrap_or_default();
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let Some(path) = item["path"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let title = item["title"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("New conversation")
+            .to_owned();
+        let cwd = item["cwd"].as_str().unwrap_or("").to_owned();
+        let project = item["project"].as_str().unwrap_or(&cwd).to_owned();
+        let project_name = item["project_name"].as_str().unwrap_or("").to_owned();
+        let branch = extract_cloud_branch(item["branch"].as_str(), &cwd);
+        let status = item["status"].as_str().unwrap_or("Saved").to_owned();
+        let busy = item["busy"].as_bool().unwrap_or(false);
+        let has_pending_dialog = item["has_pending_dialog"].as_bool().unwrap_or(false);
+        let modified_ms = item["modified_ms"].as_u64().unwrap_or(0);
+        let created_ms = item["created_ms"].as_u64();
+        let origin =
+            serde_json::from_value::<crate::remote::SessionOrigin>(item["origin"].clone()).ok();
+        out.push(CloudSessionSummary {
+            path,
+            title,
+            project,
+            project_name,
+            cwd,
+            branch,
+            status,
+            busy,
+            has_pending_dialog,
+            modified_ms,
+            created_ms,
+            origin,
+        });
+    }
+    Ok(out)
 }
 
 fn url_decode(s: &str) -> String {

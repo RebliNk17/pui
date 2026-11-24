@@ -1,5 +1,6 @@
 //! Explicit context actions append bounded excerpts to the draft, never directly to Pi.
 use super::*;
+pub(in crate::app) mod browser;
 mod chips;
 mod diff;
 mod file_blocks;
@@ -17,6 +18,7 @@ pub(super) use source::{demo as demo_source, offer as offer_source_selection};
 pub(super) fn clear_source(ctx: &egui::Context) {
     source::clear(ctx);
     file_blocks::clear(ctx);
+    browser::clear(ctx);
     ctx.data_mut(|data| {
         data.remove::<Snippet>(egui::Id::new("pui-context-capture"));
         data.remove::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"));
@@ -26,6 +28,27 @@ pub(super) fn clear_source(ctx: &egui::Context) {
 pub(super) fn inputs(ctx: &egui::Context) {
     file_blocks::inputs(ctx);
     source::inputs(ctx);
+}
+
+pub(in crate::app) struct ParkedCapture {
+    snippet: Option<Snippet>,
+    owner: Option<(PathBuf, String)>,
+}
+pub(in crate::app) fn park_capture(ctx: &egui::Context) -> ParkedCapture {
+    ctx.data_mut(|data| ParkedCapture {
+        snippet: data.remove_temp(egui::Id::new("pui-context-capture")),
+        owner: data.remove_temp(egui::Id::new("pui-review-capture-owner")),
+    })
+}
+pub(in crate::app) fn restore_capture(ctx: &egui::Context, capture: ParkedCapture) {
+    ctx.data_mut(|data| {
+        if let Some(snippet) = capture.snippet {
+            data.insert_temp(egui::Id::new("pui-context-capture"), snippet);
+        }
+        if let Some(owner) = capture.owner {
+            data.insert_temp(egui::Id::new("pui-review-capture-owner"), owner);
+        }
+    });
 }
 
 #[derive(Clone, Default)]
@@ -128,6 +151,7 @@ pub(crate) fn queue_parts<'a>(
 impl Pui {
     pub(super) fn prepare_file_block_capture(&mut self, ctx: &egui::Context) {
         file_blocks::prepare(self, ctx);
+        browser::prepare(self, ctx);
     }
     /// Runtime owner for local review: an unsaved chat is not the shared string "new".
     pub(super) fn review_comment_owner(&mut self) -> String {
@@ -138,7 +162,13 @@ impl Pui {
     }
     pub(super) fn collect_context_capture(&mut self) {
         file_blocks::collect(self);
+        browser::collect(self);
         source::finish(&self.ctx);
+        self.collect_queued_context_capture();
+    }
+    /// Drain only this transcript's queued excerpt; global file/selection
+    /// lifecycle collection runs once after every pane has rendered.
+    pub(in crate::app) fn collect_queued_context_capture(&mut self) {
         let snippet = self
             .ctx
             .data_mut(|data| data.remove_temp::<Snippet>(egui::Id::new("pui-context-capture")));

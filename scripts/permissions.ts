@@ -66,6 +66,10 @@ export function parseDecision(text: string) {
   const body = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   return JSON.parse(body);
 }
+// OpenAI-compatible gateways can enable reasoning by default; those tokens
+// share the output ceiling with the decision JSON. Keep a bounded budget that
+// leaves room for both, without exceeding the selected model's output limit.
+const CLASSIFIER_MAX_TOKENS = 2048;
 const CLASSIFIER_ATTEMPTS = 3;
 const CLASSIFIER_COOLDOWN_MS = 5 * 60_000;
 
@@ -99,45 +103,170 @@ export function safeShell(command: string) {
 }
 
 /**
+ * Parses a single POSIX shell command into literal argv tokens while strictly rejecting any
+ * shell chaining (`;`, `&&`, `||`, `|`, `&`, unquoted newlines), redirections (`>`, `<`),
+ * subshells (`(`, `)`), and command/variable expansion (unquoted or unescaped `$` / `` ` ``).
+ * Safely permits multi-line markdown text, backticks (`\`code\``), and `>` / `;` INSIDE
+ * quoted string arguments (e.g. `git commit -m "..."` and `gh pr create --body "..."`).
+ */
+export function tokenizeSafeSingleCommand(command: string): string[] | null {
+  const s = command.trim();
+  if (!s) return null;
+  const argv: string[] = [];
+  let cur = "";
+  let inToken = false;
+  let i = 0;
+
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === " " || ch === "\t") {
+      if (inToken) {
+        argv.push(cur);
+        cur = "";
+        inToken = false;
+      }
+      i++;
+      continue;
+    }
+    // Outside quotes: disallow all shell operators, redirections, newlines, and expansions.
+    if (/[;&|`$><()\r\n]/.test(ch)) {
+      return null;
+    }
+    if (ch === "'") {
+      inToken = true;
+      i++;
+      const start = i;
+      while (i < s.length && s[i] !== "'") i++;
+      if (i >= s.length) return null; // unclosed single quote
+      cur += s.slice(start, i);
+      i++; // skip closing '
+      continue;
+    }
+    if (ch === '"') {
+      inToken = true;
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        const c = s[i];
+        if (c === "\\") {
+          if (i + 1 >= s.length) return null;
+          const next = s[i + 1];
+          // Inside double quotes, backslash escapes `$`, `` ` ``, `"`, `\`, and newline.
+          if (next === "$" || next === "`" || next === '"' || next === "\\") {
+            cur += next;
+          } else if (next === "\n") {
+            // line continuation
+          } else {
+            cur += "\\" + next;
+          }
+          i += 2;
+          continue;
+        }
+        // Reject any UNESCAPED `$` or backtick inside double quotes (command/var expansion).
+        if (c === "$" || c === "`") return null;
+        cur += c;
+        i++;
+      }
+      if (i >= s.length) return null; // unclosed double quote
+      i++; // skip closing "
+      continue;
+    }
+    if (ch === "\\") {
+      if (i + 1 >= s.length) return null;
+      const next = s[i + 1];
+      if (next === "\n") {
+        i += 2;
+        continue;
+      }
+      inToken = true;
+      cur += next;
+      i += 2;
+      continue;
+    }
+    inToken = true;
+    cur += ch;
+    i++;
+  }
+  if (inToken) argv.push(cur);
+  return argv.length > 0 ? argv : null;
+}
+
+/**
  * Cloud worktree Auto-mode allowlist (active ONLY when `PUI_CLOUD_BRANCH` is set to a
  * dedicated `pui_agent/...` branch). Pre-approves staging, committing, pushing strictly
  * to the session's own `pui_agent/...` branch (never force, never main/master), and
- * opening/viewing PRs via `gh pr create`/`view`/`list`, with zero shell chaining.
+ * opening/viewing PRs via `gh pr create`/`view`/`list`, with zero shell chaining or expansion.
  */
 export function isAllowedCloudWorktreeGitAction(command: string, cloudBranch: string): boolean {
   if (!/^pui_agent\/[a-z0-9][a-z0-9-]*$/.test(cloudBranch)) return false;
-  const c = command.trim();
-  if (!c) return false;
-  // Reject any shell chaining, subshells, command substitution, pipes, or redirections.
-  if (/[;&|`$><\r\n]/.test(c)) return false;
-  // Never allow force push, history rewrite, hook bypass, or destructive deletes.
-  if (/\s(?:--force|-f|--force-with-lease|--delete|--mirror|--all|--no-verify|--amend)\b/.test(c)) {
-    return false;
-  }
+  const argv = tokenizeSafeSingleCommand(command);
+  if (!argv || argv.length < 2) return false;
 
-  // 1. Safe git staging & diff/status inside worktree
-  if (/^git\s+(?:add|diff|status|show|branch|rev-parse)\b/.test(c)) {
-    if (/\s-(?:D|d)\b/.test(c)) return false;
-    return true;
-  }
+  const bin = argv[0];
+  const sub = argv[1];
 
-  // 2. git commit (standard commit with message)
-  if (/^git\s+commit\b/.test(c)) {
-    return true;
-  }
+  if (bin === "git") {
+    // Reject git global overrides (e.g. -c core.sshCommand=...) or force/destructive flags.
+    const rest = argv.slice(2);
+    const forbidden = new Set([
+      "--force",
+      "-f",
+      "--force-with-lease",
+      "--delete",
+      "--mirror",
+      "--all",
+      "--no-verify",
+      "--amend",
+      "-c",
+      "--config-env",
+      "--exec-path",
+      "--git-dir",
+      "--work-tree",
+    ]);
+    for (const tok of argv.slice(1)) {
+      if (forbidden.has(tok) || tok.startsWith("--force-with-lease=") || tok.startsWith("--exec-path=")) {
+        return false;
+      }
+    }
 
-  // 3. git push strictly to origin + the exact cloud worktree branch
-  const pushMatch = c.match(/^git\s+push(?:\s+(?:-u|--set-upstream))?\s+origin\s+([^\s]+)$/);
-  if (pushMatch) {
-    const refspec = pushMatch[1];
-    if (refspec === cloudBranch || refspec === `HEAD:${cloudBranch}`) {
+    // 1. Safe git staging, inspection, and standard commits inside the isolated worktree
+    if (["add", "diff", "status", "show", "branch", "rev-parse", "commit"].includes(sub)) {
+      if (sub === "branch" && rest.some((t) => t === "-d" || t === "-D")) return false;
       return true;
     }
+
+    // 2. git push strictly to origin + the exact cloud worktree branch
+    if (sub === "push") {
+      const positional = rest.filter((t) => t !== "-u" && t !== "--set-upstream");
+      if (positional.length === 2 && positional[0] === "origin") {
+        const refspec = positional[1];
+        return refspec === cloudBranch || refspec === `HEAD:${cloudBranch}`;
+      }
+      return false;
+    }
+
     return false;
   }
 
-  // 4. gh pr create / view / list (never gh pr merge / close / delete)
-  if (/^gh\s+pr\s+(?:create|view|list)\b/.test(c)) {
+  if (bin === "gh" && sub === "pr" && argv.length >= 3) {
+    const action = argv[2];
+    if (!["create", "view", "list", "status", "checks", "diff"].includes(action)) {
+      return false;
+    }
+    if (action === "create") {
+      // If --head / -H is specified, it must match the session's own cloud branch.
+      for (let idx = 3; idx < argv.length; idx++) {
+        const tok = argv[idx];
+        if ((tok === "--head" || tok === "-H") && idx + 1 < argv.length) {
+          const headVal = argv[idx + 1];
+          const branchPart = headVal.includes(":") ? headVal.split(":")[1] : headVal;
+          if (branchPart !== cloudBranch) return false;
+        } else if (tok.startsWith("--head=")) {
+          const headVal = tok.slice("--head=".length);
+          const branchPart = headVal.includes(":") ? headVal.split(":")[1] : headVal;
+          if (branchPart !== cloudBranch) return false;
+        }
+      }
+    }
     return true;
   }
 
@@ -323,7 +452,7 @@ export function installPermissions(pi: any, initial: any = {}) {
           result = await ctx.modelRegistry.streamSimple(model, {
             systemPrompt: CLASSIFIER_PROMPT,
             messages: [{ role: "user", content: JSON.stringify({ RECENT_USER_REQUESTS: requestsContext, ...(automated.length ? { RECENT_AUTOMATED_PROMPTS: automated } : {}), WORKSPACE: ctx.cwd, ...(risky ? { BUILT_IN_SAFETY_RULE: sensitiveRead || (["write", "edit"].includes(name) && await sensitivePath(ctx.cwd, args.path)) ? "credentials" : "destructive_or_external" } : {}), ACTION: { tool: name, description: pi.getAllTools?.().find((t: any) => t.name === name)?.description?.slice(0, 2000), arguments: args } }), timestamp: Date.now() }],
-          }, { maxTokens: 256, signal, cacheRetention: "none" }).result();
+          }, { maxTokens: Math.min(CLASSIFIER_MAX_TOKENS, model.maxTokens), signal, cacheRetention: "none" }).result();
           if (revision !== version || ctx.signal?.aborted || controller.signal.aborted) return block("Permission check cancelled; retry under the current settings.");
           if (deadline.aborted) throw new Error("Classifier deadline exceeded");
           spent += result.usage?.cost?.total || 0;

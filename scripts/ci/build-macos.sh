@@ -63,7 +63,7 @@ else
   # No ambient identity/profile may accidentally sign an untrusted build.
   unset PUI_SIGN_IDENTITY PUI_SIGN_KEYCHAIN PUI_NOTARY_PROFILE PUI_SIGN_P12 PUI_SIGN_P12_BASE64 PUI_SIGN_PASSWORD PUI_APPLE_ID PUI_APPLE_TEAM_ID PUI_APPLE_APP_PASSWORD
 fi
-bash scripts/bundle-macos.sh
+bash scripts/bundle-macos.sh --distribution
 python3 scripts/smoke-runtime-macos.py dist/Pui.app
 if [[ "$signing" == true ]]; then
   ditto -c -k --sequesterRsrc --keepParent dist/Pui.app "$private/notarize.zip"

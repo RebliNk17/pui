@@ -11,7 +11,7 @@ mod chat_find;
 mod completions;
 mod composer_hints;
 mod composer_history;
-mod composer_text;
+pub(crate) mod composer_text;
 mod composer_toolbar;
 mod confirmations;
 pub(crate) mod context_capture;
@@ -157,6 +157,23 @@ impl Preferences {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct CloudSessionMeta {
+    pub(super) host: crate::remote::CloudHostConfig,
+    pub(super) status: String,
+    pub(super) busy: bool,
+    pub(super) has_pending_dialog: bool,
+    pub(super) cwd: String,
+    pub(super) repo_name: String,
+    pub(super) branch: Option<String>,
+}
+
+/// Cloud session list refresh: sessions plus per-session cloud metadata.
+type CloudSessionsUpdate = (
+    Vec<Session>,
+    std::collections::HashMap<PathBuf, CloudSessionMeta>,
+);
+
 pub struct Pui {
     prefs: Preferences,
     sync: sync::WindowSync,
@@ -242,6 +259,11 @@ pub struct Pui {
     dismissed_usage_warning: Option<String>,
     dismissed_auth_error: Option<String>,
     sessions: Vec<Session>,
+    local_sessions: Vec<Session>,
+    cloud_sessions: Vec<Session>,
+    cloud_session_meta: std::collections::HashMap<PathBuf, CloudSessionMeta>,
+    cloud_sessions_rx: Option<Receiver<CloudSessionsUpdate>>,
+    cloud_sessions_last_poll: Option<std::time::Instant>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
     workspace: Workspace,
@@ -423,6 +445,11 @@ impl Pui {
             dismissed_usage_warning: None,
             dismissed_auth_error: None,
             sessions: Vec::new(),
+            local_sessions: Vec::new(),
+            cloud_sessions: Vec::new(),
+            cloud_session_meta: std::collections::HashMap::new(),
+            cloud_sessions_rx: None,
+            cloud_sessions_last_poll: None,
             session_rx: None,
             session_watch: if options.demo || cfg!(test) {
                 None
@@ -889,11 +916,32 @@ impl Pui {
         {
             return;
         }
-        let active_cloud_host = self
-            .agents
-            .nodes
-            .get(&self.agents.active)
-            .and_then(|n| n.cloud_host.clone());
+        let active_cloud_host = if let Some(ref p) = session {
+            if let Some(meta) = self.cloud_session_meta.get(p) {
+                if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+                    node.cloud_host = Some(meta.host.clone());
+                    node.cloud_repo = None;
+                }
+                Some(meta.host.clone())
+            } else if p.is_file() {
+                if let Some(node) = self.agents.nodes.get_mut(&self.agents.active) {
+                    node.cloud_host = None;
+                    node.cloud_repo = None;
+                }
+                None
+            } else {
+                self.agents
+                    .nodes
+                    .get(&self.agents.active)
+                    .and_then(|n| n.cloud_host.clone())
+            }
+        } else {
+            self.agents
+                .nodes
+                .get(&self.agents.active)
+                .and_then(|n| n.cloud_host.clone())
+        };
+        let is_cloud_session = active_cloud_host.is_some();
         #[cfg(not(test))]
         let active_cloud_repo = self
             .agents
@@ -1021,7 +1069,11 @@ impl Pui {
         self.send(protocol::command("get_entries"));
         self.send(protocol::command("get_commands"));
         self.send(protocol::command("get_session_stats"));
-        self.refresh_workspace();
+        if !is_cloud_session {
+            self.refresh_workspace();
+        } else {
+            self.refresh_cloud_sessions(true);
+        }
         #[cfg(not(test))]
         if !self.demo {
             self.usage.refresh(&self.ctx, false);
@@ -1033,6 +1085,7 @@ impl Pui {
     fn retain_chat_on_switch(&self) -> bool {
         self.has_tree()
             || self.resource_reload.pending()
+            || self.resource_reload.connector_pending()
             || !self.draft.is_empty()
             || !self.draft_images.is_empty()
             || self.sync_live_owner()
@@ -1081,11 +1134,19 @@ impl Pui {
             }
         }
         self.discard_empty_new_chat();
+        let target_is_cloud = self.cloud_session_meta.contains_key(&path);
+        let current_is_cloud = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .is_some_and(|n| n.cloud_host.is_some());
         if self.retain_chat_on_switch() {
             self.ensure_agent();
             self.publish_live();
             self.park_tree();
-            self.prefs.cwd = session.cwd;
+            if !target_is_cloud {
+                self.prefs.cwd = session.cwd;
+            }
             self.connect(&self.ctx.clone(), Some(path));
             self.ensure_agent();
             self.enter_session_layout();
@@ -1104,13 +1165,17 @@ impl Pui {
         }
         // Superseding a pending switch gets a fresh client and receiver. Late
         // events/preview results from the abandoned session cannot select it again.
-        let reuse = !self.loading_chat
+        let reuse = !target_is_cloud
+            && !current_is_cloud
+            && !self.loading_chat
             && self.connected
             && self.client.is_some()
             && self.prefs.cwd == session.cwd
             && !self.sync.enabled();
         self.leave_session_layout();
-        self.prefs.cwd = session.cwd;
+        if !target_is_cloud {
+            self.prefs.cwd = session.cwd;
+        }
         self.workspace_rx = None;
         self.draft.clear();
         self.context_chips.clear();
@@ -1182,6 +1247,13 @@ impl Pui {
         self.updates.poll();
         self.settings_view.resources.poll();
         self.settings_view.providers.poll();
+        if let Some(host_name) = self.settings_view.providers.take_cloud_auth_completed() {
+            self.state.error = None;
+            self.dismissed_auth_error = None;
+            self.state.notice = Some(format!(
+                "Signed in to Claude on {host_name}. You can send a message now."
+            ));
+        }
         if self.catalog.poll(&self.ctx) {
             self.catalog.with_extensions(&self.prefs.extension_models);
         }
@@ -1239,7 +1311,11 @@ impl Pui {
             .unwrap_or_default();
         if !events.is_empty() {
             had_activity = true;
-        } else if !had_activity && !self.resource_reload.pending() && self.agents.background {
+        } else if !had_activity
+            && !self.resource_reload.pending()
+            && !self.resource_reload.connector_pending()
+            && self.agents.background
+        {
             return false;
         }
         for event in events {
@@ -1265,6 +1341,9 @@ impl Pui {
                 }
                 rpc::Event::Record(record) => {
                     title_dirty |= session_titles::title_event(&record);
+                    if self.connector_reconnect_record(&record) {
+                        continue;
+                    }
                     self.resource_reload_record(&record);
                     self.completion_event(&record);
                     self.agent_event(&record);
@@ -1502,12 +1581,142 @@ impl Pui {
         }
         had_activity
     }
+    pub(super) fn active_cloud_host(&self) -> Option<crate::remote::CloudHostConfig> {
+        if let Some(cfg) = self
+            .agents
+            .nodes
+            .get(&self.agents.active)
+            .and_then(|n| n.cloud_host.clone())
+        {
+            return Some(cfg);
+        }
+        self.state
+            .session_file
+            .as_deref()
+            .and_then(|p| self.cloud_session_meta.get(std::path::Path::new(p)))
+            .map(|m| m.host.clone())
+    }
+
+    pub(super) fn active_cloud_meta(&self) -> Option<&CloudSessionMeta> {
+        self.state
+            .session_file
+            .as_deref()
+            .and_then(|p| self.cloud_session_meta.get(std::path::Path::new(p)))
+    }
+
+    fn merge_sessions(&mut self) {
+        let mut combined = self.local_sessions.clone();
+        let mut seen: std::collections::HashSet<PathBuf> =
+            combined.iter().map(|s| s.path.clone()).collect();
+        for s in &self.cloud_sessions {
+            if seen.insert(s.path.clone()) {
+                combined.push(s.clone());
+            }
+        }
+        combined.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        self.sessions = combined;
+    }
+
+    pub(super) fn refresh_cloud_sessions(&mut self, force: bool) {
+        if self.demo || cfg!(test) {
+            return;
+        }
+        let Some(cfg) = self.prefs.remote.cloud_host.clone() else {
+            if !self.cloud_sessions.is_empty() || !self.cloud_session_meta.is_empty() {
+                self.cloud_sessions.clear();
+                self.cloud_session_meta.clear();
+                self.merge_sessions();
+            }
+            return;
+        };
+        if self.cloud_sessions_rx.is_some() {
+            return;
+        }
+        if !force
+            && self
+                .cloud_sessions_last_poll
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(8))
+        {
+            return;
+        }
+        self.cloud_sessions_last_poll = Some(std::time::Instant::now());
+        let (tx, rx) = mpsc::channel();
+        self.cloud_sessions_rx = Some(rx);
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            if let Ok(items) = crate::remote::cloud::fetch_cloud_sessions(&cfg) {
+                let mut sessions_out = Vec::with_capacity(items.len());
+                let mut meta_out = std::collections::HashMap::with_capacity(items.len());
+                for item in items {
+                    let path = PathBuf::from(&item.path);
+                    if let Some(origin) = item.origin {
+                        sessions::remember_origin(&path, origin);
+                    }
+                    let project = crate::remote::cloud::project_path_for_cloud_session(
+                        &item.project,
+                        &item.project_name,
+                        &item.cwd,
+                    );
+                    let repo_name = if !item.project_name.trim().is_empty() {
+                        item.project_name.clone()
+                    } else {
+                        sessions::project_name(&project)
+                    };
+                    let modified =
+                        std::time::UNIX_EPOCH + Duration::from_millis(item.modified_ms.max(1));
+                    let created = item
+                        .created_ms
+                        .map(|ms| std::time::UNIX_EPOCH + Duration::from_millis(ms));
+                    meta_out.insert(
+                        path.clone(),
+                        CloudSessionMeta {
+                            host: cfg.clone(),
+                            status: item.status,
+                            busy: item.busy,
+                            has_pending_dialog: item.has_pending_dialog,
+                            cwd: item.cwd.clone(),
+                            repo_name,
+                            branch: item.branch,
+                        },
+                    );
+                    sessions_out.push(Session {
+                        path,
+                        cwd: PathBuf::from(&item.cwd),
+                        project,
+                        title: item.title,
+                        created,
+                        modified,
+                    });
+                }
+                let _ = tx.send((sessions_out, meta_out));
+                ctx.request_repaint();
+            }
+        });
+    }
+
     fn poll_views(&mut self) {
         if let Some(result) = self.session_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.sessions = result;
+            self.local_sessions = result;
+            self.merge_sessions();
             self.session_rx = None;
             self.refresh_session_titles();
         }
+        if let Some(rx) = &self.cloud_sessions_rx {
+            match rx.try_recv() {
+                Ok((cloud_sessions, cloud_meta)) => {
+                    self.cloud_sessions = cloud_sessions;
+                    self.cloud_session_meta = cloud_meta;
+                    self.cloud_sessions_rx = None;
+                    self.merge_sessions();
+                    self.refresh_session_titles();
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.cloud_sessions_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        self.refresh_cloud_sessions(false);
         if !self.demo
             && self
                 .session_watch
@@ -1803,7 +2012,7 @@ impl Pui {
         }
         // Optional extension/MCP diagnostics live in a fixed top-bar popover.
         // Inserting multiline notifications here moves the viewport and composer.
-        if self.demo {
+        if self.demo && !self.side_chat.rendering {
             ui.horizontal(|ui| {
                 icons::inline(ui, Icon::Spark, colors.accent);
                 ui.label(theme::small(ui, "Design preview · example conversation"));
@@ -1863,7 +2072,7 @@ impl Pui {
                     "composer-last-cursor",
                     self.state.session_file.as_deref(),
                 ));
-                let cursor_before = egui::TextEdit::load_state(ctx, egui::Id::new("composer"))
+                let cursor_before = egui::TextEdit::load_state(ctx, composer_text::widget_id(ctx, "composer"))
                     .and_then(|s| s.cursor.char_range());
                 let reveal_cursor = self.focus_composer
                     || ctx.data(|d| {
@@ -1873,7 +2082,7 @@ impl Pui {
                 let mut layouter = composer_text::layout;
                 // Only the editor scrolls: delivery/model controls stay below it.
                 // Bound growth on short windows and at higher UI zoom as well.
-                let max_height = (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0);
+                let max_height = if self.side_chat.rendering { 72.0 } else { (ctx.screen_rect().height() * 0.3).clamp(48.0, 240.0) };
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt(("composer-text-scroll", self.state.session_file.as_deref()))
                     .max_height(max_height)
@@ -1889,7 +2098,7 @@ impl Pui {
                             smart_newline,
                         };
                         let output = egui::TextEdit::multiline(&mut buffer)
-                            .id(egui::Id::new("composer"))
+                            .id(composer_text::widget_id(ctx, "composer"))
                             .font(FontId::proportional(14.0))
                             .layouter(&mut layouter)
                             .frame(false)
@@ -1924,7 +2133,7 @@ impl Pui {
                                 .pos_from_cursor(range.primary)
                                 .translate(output.galley_pos.to_vec2());
                             ctx.data_mut(|d| {
-                                d.insert_temp(egui::Id::new("composer-caret-rect"), caret)
+                                d.insert_temp(composer_text::widget_id(ctx, "composer-caret-rect"), caret)
                             });
                         }
                         output.response
@@ -1941,7 +2150,7 @@ impl Pui {
                 #[cfg(test)]
                 ctx.data_mut(|d| {
                     d.insert_temp(
-                        egui::Id::new("composer-scroll-metrics"),
+                        composer_text::widget_id(ctx, "composer-scroll-metrics"),
                         (editor_rect, scroll.content_size, scroll.state.offset.y),
                     )
                 });
@@ -2009,7 +2218,7 @@ impl Pui {
                         let (rect, response) =
                             ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
                         #[cfg(test)]
-                        ctx.data_mut(|d| d.insert_temp(egui::Id::new("composer-send-rect"), rect));
+                        ctx.data_mut(|d| d.insert_temp(composer_text::widget_id(ctx, "composer-send-rect"), rect));
                         let response = if enabled {
                             response.on_hover_cursor(egui::CursorIcon::PointingHand)
                         } else {
@@ -2547,6 +2756,13 @@ impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::chromium::Runtime::pump(ctx);
         self.files.begin_frame();
+        let side_keyboard = self.side_chat_owns_keyboard(ctx);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("side-chat-main-keyboard-blocked"),
+                side_keyboard,
+            )
+        });
         self.prefs.color_styles.apply(ctx, self.prefs.theme);
         self.frames += 1;
         self.remember_navigation();
@@ -2639,10 +2855,14 @@ impl eframe::App for Pui {
             && !self.tasks.open
             && !self.automation.open
             && !terminal_input
+            && !self.side_chat_image_inputs(ctx)
         {
             self.image_inputs(ctx);
         }
-        let theater = self.transcript.gallery.is_open() || self.draft_images.gallery.is_open();
+        let side_theater = self.side_chat_gallery_viewer(ctx);
+        let theater = side_theater
+            || self.transcript.gallery.is_open()
+            || self.draft_images.gallery.is_open();
         if theater {
             self.close_model_popovers();
             self.transcript.gallery.viewer(ctx);
@@ -2664,7 +2884,8 @@ impl eframe::App for Pui {
             self.settings_open = !self.settings_open;
             self.close_model_popovers();
         }
-        let composer_formatting = self.composer_formatting_available(ctx);
+        let composer_formatting =
+            self.composer_formatting_available(ctx) || self.side_chat_owns_keyboard(ctx);
         if !self.attention.open
             && !self.settings_open
             && !composer_formatting
@@ -2712,6 +2933,7 @@ impl eframe::App for Pui {
             && !self.kanban.open
             && !confirming
             && !terminal_input
+            && !self.side_chat_owns_keyboard(ctx)
             && !self.files.focused(ctx)
             && !self.diagnostics_open
             && self.rename_chat.is_none()
@@ -2753,7 +2975,18 @@ impl eframe::App for Pui {
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
-            let central = if self.automation.open {
+            if self.files.is_open() {
+                context_capture::browser::invalidate_changed(self);
+                self.prepare_file_block_capture(ctx);
+                let capture_owner = self.review_comment_owner();
+                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
+                self.files
+                    .bind_browser_owner(&self.prefs.cwd, &capture_owner);
+            }
+            let side_chat_workspace = self.side_chat_workspace(ctx);
+            let central = if side_chat_workspace {
+                false
+            } else if self.automation.open {
                 self.automation_panel(ctx);
                 true
             } else if self.kanban.open {
@@ -2762,9 +2995,6 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
-                self.prepare_file_block_capture(ctx);
-                let capture_owner = self.review_comment_owner();
-                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {

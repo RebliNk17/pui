@@ -48,24 +48,36 @@ pub(crate) fn inspect(
         return Err("Symlinked target parents refuse recovery restore.".into());
     }
     let deadline = Instant::now() + DEADLINE;
-    let actual = line(
-        &run(root, &["rev-parse", "--show-toplevel"], cancel, deadline)?,
-        8192,
-        "root",
-    )?;
-    if Path::new(&actual) != root {
+    let paths = String::from_utf8(run(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-path",
+            "index",
+        ],
+        cancel,
+        deadline,
+    )?)
+    .map_err(|_| "Invalid Git paths.")?;
+    let mut path_lines = paths.lines();
+    let actual = path_lines.next().ok_or("Missing repository root.")?;
+    let index_raw = path_lines.next().ok_or("Missing index path.")?;
+    if path_lines.next().is_some()
+        || actual.is_empty()
+        || actual.len() > 8192
+        || actual.chars().any(char::is_control)
+        || index_raw.is_empty()
+        || index_raw.len() > 8192
+        || index_raw.chars().any(char::is_control)
+    {
+        return Err("Invalid Git path inventory.".into());
+    }
+    if Path::new(actual) != root {
         return Err("Repository root changed.".into());
     }
-    let index_path = PathBuf::from(line(
-        &run(
-            root,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            cancel,
-            deadline,
-        )?,
-        8192,
-        "index",
-    )?);
+    let index_path = PathBuf::from(index_raw);
     if recovery.parent() != index_path.parent() {
         return Err("Recovery is outside this repository's index directory.".into());
     }
@@ -91,7 +103,6 @@ pub(crate) fn apply(review: Review, cancel: &AtomicBool) -> Result<(), String> {
         }
         Ok(())
     };
-    validate()?;
     let lock_path = review.index_path.with_file_name("index.lock");
     let _lock = OpenOptions::new()
         .write(true)

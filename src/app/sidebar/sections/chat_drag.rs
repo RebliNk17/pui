@@ -24,11 +24,7 @@ enum Source {
 impl Source {
     fn membership(&self, app: &Pui) -> Option<String> {
         match self {
-            Self::Saved(path) => app
-                .prefs
-                .chats
-                .get(path)
-                .and_then(|meta| meta.section.clone()),
+            Self::Saved(path) => app.chat_prefs(path).and_then(|meta| meta.section.clone()),
             Self::Runtime(id) => app.section_view.unsaved.get(id).cloned(),
         }
     }
@@ -43,9 +39,7 @@ impl Source {
                         .any(|node| node.path.as_ref() == Some(path) && node.parent.is_some())
                     && !app.deletion.deleting_chat(path)
                     && app
-                        .prefs
-                        .chats
-                        .get(path)
+                        .chat_prefs(path)
                         .is_none_or(|meta| !meta.pinned && !meta.hidden && !meta.archived)
             }
             Self::Runtime(id) => {
@@ -394,6 +388,7 @@ impl Pui {
         {
             match drag.source {
                 Source::Saved(path) => {
+                    let path = self.chat_prefs_path(&path);
                     self.prefs.chats.entry(path).or_default().section = Some(section)
                 }
                 Source::Runtime(id) => self.set_unsaved_section(&id, Some(section)),

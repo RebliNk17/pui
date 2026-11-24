@@ -1,6 +1,8 @@
 //! Explicit current-chat resource reload, compatible with already-running adapters.
 use super::*;
 
+mod connector;
+
 #[derive(Default)]
 pub(super) struct Reload {
     confirming: bool,
@@ -10,10 +12,32 @@ pub(super) struct Reload {
     commands: bool,
     started: Option<std::time::Instant>,
     failed: bool,
+    connector_confirm: Option<(String, String)>,
+    connector_pending: Option<ConnectorRequest>,
+    reconnected: std::collections::BTreeSet<String>,
+    connector_error: Option<String>,
+}
+struct ConnectorRequest {
+    id: String,
+    name: String,
+    started: std::time::Instant,
+    confirmed: bool,
+    timed_out: bool,
 }
 impl Reload {
+    pub(super) fn connector_pending(&self) -> bool {
+        self.connector_pending.is_some()
+    }
+    pub(super) fn connector_connecting(&self, name: &str) -> bool {
+        self.connector_pending
+            .as_ref()
+            .is_some_and(|r| r.name == name)
+    }
+    pub(super) fn connector_reconnected(&self, name: &str) -> bool {
+        self.reconnected.contains(name)
+    }
     pub(super) fn confirming(&self) -> bool {
-        self.confirming
+        self.confirming || self.connector_confirm.is_some()
     }
     pub(super) fn pending(&self) -> bool {
         self.retiring.is_some() || self.starting
@@ -25,8 +49,8 @@ impl Pui {
         if self.demo || self.is_mirror() || self.agents.background {
             return Some("Open this chat in its owning Pui window to reload resources.");
         }
-        if self.resource_reload.pending() {
-            return Some("Resources are already reloading for this chat.");
+        if self.resource_reload.pending() || self.resource_reload.connector_pending() {
+            return Some("Resources or a connector are already reconnecting for this chat.");
         }
         if !self.connected || self.client.is_none() || self.state.session_file.is_none() {
             return Some("Connect to a saved chat before reloading resources.");
@@ -75,6 +99,12 @@ impl Pui {
     }
 
     pub(super) fn request_resource_reload(&mut self) {
+        if self.side_chat.rendering {
+            self.state.notice = Some(
+                "Expand this side chat before reloading its resources. Your draft was kept.".into(),
+            );
+            return;
+        }
         if let Some(reason) = self.resource_reload_blocked() {
             self.state.error = Some(reason.into());
             return;
@@ -89,6 +119,7 @@ impl Pui {
     }
 
     pub(super) fn resource_reload_dialog(&mut self, ctx: &egui::Context) {
+        self.connector_reconnect_dialog(ctx);
         if !self.resource_reload.confirming {
             return;
         }
@@ -151,6 +182,7 @@ impl Pui {
     }
 
     pub(super) fn poll_resource_reload(&mut self) {
+        self.poll_connector_reconnect();
         if self
             .resource_reload
             .retiring

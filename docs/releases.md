@@ -193,7 +193,7 @@ command tests do not certify Gatekeeper behavior or future CEF entitlement needs
 Manual local packaging (ad-hoc, no publication):
 
 ```sh
-./scripts/bundle-macos.sh          # --debug is still supported for local work
+./scripts/bundle-macos.sh --distribution  # production identity; still ad-hoc by default
 bash scripts/package-macos.sh
 python3 scripts/release.py prepare
 ```
@@ -215,6 +215,39 @@ is attempted. Private GitLab projects require authorized users for downloads;
 `CI_JOB_TOKEN` is never shipped in the
 application or release manifest. Public
 update discovery for a private project requires a separate distribution/auth design.
+
+## Local bundle identity and notification routing
+
+`./scripts/bundle-macos.sh` builds an optimized **Pui Dev** app with bundle ID
+`dev.pi.pui.dev`; `--debug` changes only the Cargo profile. Both still write
+`dist/Pui.app`. Browser helper IDs derive from the parent bundle ID, keeping
+local and distributed helper identities distinct too.
+
+`--distribution` explicitly selects the released **Pui** identity `dev.pi.pui`,
+independently of optimization (`--debug --distribution` is also accepted). The
+CI wrapper always uses `--distribution`, including unsigned/ad-hoc artifact
+builds; this flag does not enable Developer ID signing or notarization. Release
+packaging rejects development, missing or unrecognized bundle identities.
+
+macOS routes notifications by bundle identity, not just the running executable
+path. Using the production ID for a local build can make an installed app's
+notification open a repository build, or vice versa. New local builds avoid this collision and
+have their own **Pui Dev** notification permission in System Settings. The
+notification status includes the active bundle ID to help diagnose routing.
+Stable updates may still be checked/downloaded from Pui Dev, but automatic
+installation is offered only for the production identity; development and
+unrecognized bundles can reveal the downloaded stable app without replacing
+themselves. The installer rechecks both bundle identities before launching.
+
+**Existing copies are not migrated automatically.** A rebuild retains an old
+`dist/Pui.app` under `dist/Pui.previous.*/Pui.app`, without rewriting its old
+production ID, and does not touch other copies or `/Applications/Pui.app`. Quit
+old local production-ID builds and manually move/remove obsolete copies,
+including retained previous bundles, if they still compete with the installed
+app. Open the new Pui Dev bundle and enable its separate notification permission.
+Already-delivered production-ID notifications retain their old routing identity;
+use a fresh notification after rebuilding. No global LaunchServices reset or
+notification-permission reset is performed or recommended.
 
 ## Validation boundaries
 

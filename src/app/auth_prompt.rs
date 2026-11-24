@@ -363,14 +363,28 @@ impl Pui {
         if self.dismissed_auth_error.as_deref() == Some(prompt.key.as_str()) {
             return;
         }
+        let active_cloud = self.active_cloud_host();
         let colors = theme::palette(ui.ctx());
-        let (title, detail, primary_label) = match &prompt.kind {
-            CredentialKind::Subscription => (
-                format!("{} sign-in expired", prompt.display_name),
-                "Your subscription session could not be refreshed. Re-login to continue."
-                    .to_owned(),
-                "Re-login",
-            ),
+        let (title, detail, primary_label): (String, String, String) = match &prompt.kind {
+            CredentialKind::Subscription => {
+                if let Some(cfg) = &active_cloud {
+                    (
+                        format!("{} sign-in expired on {}", prompt.display_name, cfg.name),
+                        format!(
+                            "Anthropic OAuth tokens rotate per device. Sign in to create a dedicated session for {} (your Mac login stays untouched).",
+                            cfg.name
+                        ),
+                        format!("Sign in on {}", cfg.name),
+                    )
+                } else {
+                    (
+                        format!("{} sign-in expired", prompt.display_name),
+                        "Your subscription session could not be refreshed. Re-login to continue."
+                            .to_owned(),
+                        "Re-login".to_owned(),
+                    )
+                }
+            }
             CredentialKind::ApiKey => (
                 if prompt.missing_key {
                     format!("{} API key missing", prompt.display_name)
@@ -381,22 +395,22 @@ impl Pui {
                     "Re-submit your API key to continue using {}.",
                     prompt.display_name
                 ),
-                "Re-submit API key…",
+                "Re-submit API key…".to_owned(),
             ),
             CredentialKind::Vertex => (
                 "Google Vertex AI credentials rejected".to_owned(),
                 "Update your Vertex AI credentials to continue.".to_owned(),
-                "Update credentials…",
+                "Update credentials…".to_owned(),
             ),
             CredentialKind::CustomEndpoint(_) => (
                 format!("{} API key rejected", prompt.display_name),
                 "Update the API key for this custom endpoint to continue.".to_owned(),
-                "Update API key…",
+                "Update API key…".to_owned(),
             ),
             CredentialKind::Unknown => (
                 "Provider authentication failed".to_owned(),
                 "Re-login or update your API key in Providers settings.".to_owned(),
-                "Open Providers…",
+                "Open Providers…".to_owned(),
             ),
         };
         let dual_mode = prompt.base.as_deref() == Some("anthropic");
@@ -442,7 +456,7 @@ impl Pui {
                 );
                 ui.add_space(8.0);
                 ui.horizontal_wrapped(|ui| {
-                    if prompt_ui::button(ui, primary_label, prompt_ui::Button::Primary, true)
+                    if prompt_ui::button(ui, &primary_label, prompt_ui::Button::Primary, true)
                         .clicked()
                     {
                         primary = true;
@@ -477,7 +491,13 @@ impl Pui {
             match &prompt.kind {
                 CredentialKind::Subscription => {
                     if let Some(target) = prompt.provider.as_deref() {
-                        self.settings_view.providers.start_oauth_login(ctx, target);
+                        if let Some(cfg) = active_cloud {
+                            self.settings_view
+                                .providers
+                                .start_cloud_oauth_login(ctx, target, cfg);
+                        } else {
+                            self.settings_view.providers.start_oauth_login(ctx, target);
+                        }
                     } else {
                         self.settings_view.select("Providers");
                         self.settings_open = true;

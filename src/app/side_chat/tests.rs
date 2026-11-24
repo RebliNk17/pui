@@ -37,7 +37,11 @@ fn busy_main_approval_and_client_parked_independent_context_question_never_sent(
     app.draft = "/btw Explain ownership".into();
     app.agents.nodes.get_mut(&origin).unwrap().permission = Some(settings::PermissionMode::Plan);
     assert!(app.submit_command());
-    let side = app.agents.active.clone();
+    assert_eq!(app.agents.active, origin);
+    assert!(app.draft.is_empty());
+    let side = app.docked_side_chat_target().unwrap();
+    assert_eq!(app.agents.parked[&side].draft, "Explain ownership");
+    app.view_agent(&side);
     assert_ne!(origin, side);
     assert_eq!(app.draft, "Explain ownership");
     assert!(app.state.messages.is_empty());

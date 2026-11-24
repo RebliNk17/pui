@@ -126,6 +126,96 @@ pub(crate) fn pi_version() -> Option<String> {
 /// Marker written once Pui owns Pi's configuration and sessions.
 pub(crate) const MANAGED_MARKER: &str = ".pui-managed.json";
 static MANAGED_AGENT_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+static MANAGED_PATH_ALIAS: std::sync::RwLock<Option<(PathBuf, PathBuf)>> =
+    std::sync::RwLock::new(None);
+
+/// Display/navigation identity only. Ownership locks still resolve the filesystem
+/// afresh. Rebase the known managed root without case-folding session filenames
+/// or probing the filesystem in sidebar render loops.
+pub(crate) fn session_path_key(path: &Path) -> PathBuf {
+    #[cfg(test)]
+    if let Some(key) = TEST_PATH_ALIAS.with(|alias| {
+        alias
+            .borrow()
+            .as_ref()
+            .map(|(raw, canonical)| rebase_path(path, raw, canonical))
+    }) {
+        return key;
+    }
+    if let Ok(alias) = MANAGED_PATH_ALIAS.read() {
+        if let Some((raw, canonical)) = alias.as_ref() {
+            return rebase_path(path, raw, canonical);
+        }
+    }
+    rebase_path(path, Path::new(""), Path::new(""))
+}
+
+fn rebase_path(path: &Path, raw: &Path, canonical: &Path) -> PathBuf {
+    let path = if !raw.as_os_str().is_empty() {
+        path.strip_prefix(raw)
+            .map(|suffix| canonical.join(suffix))
+            .unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    #[cfg(target_os = "macos")]
+    if let Ok(suffix) = path.strip_prefix("/private/var") {
+        return PathBuf::from("/var").join(suffix);
+    }
+    path
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PATH_ALIAS: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_session_path_alias<T>(raw: &Path, canonical: &Path, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(PathBuf, PathBuf)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_PATH_ALIAS.with(|alias| *alias.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(
+        TEST_PATH_ALIAS
+            .with(|alias| alias.replace(Some((raw.to_path_buf(), canonical.to_path_buf())))),
+    );
+    f()
+}
+
+/// The other spelling of the known managed root, for saved preference lookups.
+/// Never case-fold arbitrary filenames or canonicalize on a render path.
+pub(crate) fn session_path_alias(path: &Path) -> Option<PathBuf> {
+    fn alias(path: &Path, raw: &Path, canonical: &Path) -> Option<PathBuf> {
+        if raw == canonical {
+            return None;
+        }
+        path.strip_prefix(raw)
+            .map(|suffix| canonical.join(suffix))
+            .ok()
+            .or_else(|| {
+                path.strip_prefix(canonical)
+                    .map(|suffix| raw.join(suffix))
+                    .ok()
+            })
+    }
+    #[cfg(test)]
+    if let Some(result) = TEST_PATH_ALIAS.with(|mapping| {
+        mapping
+            .borrow()
+            .as_ref()
+            .map(|(raw, canonical)| alias(path, raw, canonical))
+    }) {
+        return result;
+    }
+    MANAGED_PATH_ALIAS
+        .read()
+        .ok()?
+        .as_ref()
+        .and_then(|(raw, canonical)| alias(path, raw, canonical))
+}
 
 /// Pui's own Pi folder: providers, logins, models, defaults, resources, sessions.
 pub(crate) fn pui_agent_dir() -> Option<PathBuf> {
@@ -136,6 +226,15 @@ pub(crate) fn pui_agent_dir() -> Option<PathBuf> {
 /// Every Pi process Pui starts then uses it; `~/.pi/agent` is not consulted.
 pub(crate) fn load_managed_agent_dir() -> Option<PathBuf> {
     let dir = pui_agent_dir().filter(|dir| dir.join(MANAGED_MARKER).is_file());
+    // Refresh after successful setup/migration too; never cache an early missing
+    // directory forever. Preserve the configured spelling used by Pi and prefs.
+    if let Ok(mut alias) = MANAGED_PATH_ALIAS.write() {
+        *alias = dir.as_ref().and_then(|raw| {
+            raw.canonicalize()
+                .ok()
+                .map(|canonical| (raw.clone(), canonical))
+        });
+    }
     if let Ok(mut managed) = MANAGED_AGENT_DIR.write() {
         managed.clone_from(&dir);
     }
@@ -353,6 +452,43 @@ mod tests {
         assert!(!root.join("bin/pi").exists());
         assert_eq!(resolve_pi(None, Some(&root), None), root.join("bin/pi"));
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn managed_session_keys_rebase_only_the_known_root_and_preserve_forks_and_case() {
+        let raw = Path::new("/storage/pui/pi-agent");
+        let canonical = Path::new("/storage/Pui/pi-agent");
+        with_session_path_alias(raw, canonical, || {
+            assert_eq!(
+                session_path_key(&raw.join("sessions/chat.jsonl")),
+                canonical.join("sessions/chat.jsonl")
+            );
+            assert_eq!(
+                session_path_key(&canonical.join("sessions/chat.jsonl")),
+                canonical.join("sessions/chat.jsonl")
+            );
+            assert_ne!(
+                session_path_key(&raw.join("sessions/Chat.jsonl")),
+                session_path_key(&raw.join("sessions/chat.jsonl"))
+            );
+            assert_ne!(
+                session_path_key(&raw.join("sessions/fork.jsonl")),
+                session_path_key(&raw.join("sessions/chat.jsonl"))
+            );
+            let unrelated = Path::new("/storage/pui/pi-agent-other/sessions/chat.jsonl");
+            assert_eq!(session_path_key(unrelated), unrelated);
+        });
+        assert_eq!(
+            session_path_key(&raw.join("sessions/chat.jsonl")),
+            raw.join("sessions/chat.jsonl")
+        );
+        // A later successful setup can provide a mapping after an earlier miss.
+        with_session_path_alias(raw, canonical, || {
+            assert_eq!(
+                session_path_key(&raw.join("sessions/chat.jsonl")),
+                canonical.join("sessions/chat.jsonl")
+            );
+        });
     }
 
     #[test]

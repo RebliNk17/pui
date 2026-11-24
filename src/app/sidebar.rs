@@ -24,6 +24,42 @@ pub(super) struct ChatPrefs {
     pub(super) parent_session: Option<PathBuf>,
     pub(super) origin: Option<crate::remote::SessionOrigin>,
 }
+impl Pui {
+    pub(super) fn chat_prefs_path(&self, path: &std::path::Path) -> PathBuf {
+        let alias = crate::runtime::session_path_alias(path);
+        // A newly cached automatic title must not shadow the existing user
+        // settings under the other spelling. Keep user-owned metadata together
+        // so unhide/unpin/rename updates that same record instead of a copy.
+        let customized = |meta: &ChatPrefs| {
+            meta.title.is_some()
+                || meta.project.is_some()
+                || meta.pinned
+                || meta.archived
+                || meta.hidden
+                || meta.section.is_some()
+                || meta.parent_session.is_some()
+                || meta.origin.is_some()
+        };
+        let exact = self.prefs.chats.get(path);
+        if exact.is_some_and(customized) {
+            return path.to_path_buf();
+        }
+        if let Some(alias) = alias.as_ref() {
+            if self
+                .prefs
+                .chats
+                .get(alias)
+                .is_some_and(|meta| customized(meta) || exact.is_none())
+            {
+                return alias.clone();
+            }
+        }
+        path.to_path_buf()
+    }
+    pub(super) fn chat_prefs(&self, path: &std::path::Path) -> Option<&ChatPrefs> {
+        self.prefs.chats.get(&self.chat_prefs_path(path))
+    }
+}
 impl ChatPrefs {
     pub(super) fn is_empty(&self) -> bool {
         self.title.is_none()
@@ -453,6 +489,7 @@ impl Pui {
                         .set_title("Organize under project (does not change working directory)")
                         .pick_folder()
                     {
+                        let path = self.chat_prefs_path(&path);
                         self.prefs.chats.entry(path).or_default().project = Some(folder);
                     }
                 }
@@ -470,9 +507,11 @@ impl Pui {
                     }
                 }
                 Action::Hide(path) => {
+                    let path = self.chat_prefs_path(&path);
                     self.prefs.chats.entry(path).or_default().hidden = true;
                 }
                 Action::Restore(path) => {
+                    let path = self.chat_prefs_path(&path);
                     self.prefs.chats.entry(path).or_default().hidden = false;
                 }
                 _ => {}
@@ -499,9 +538,7 @@ impl Pui {
 
     fn begin_rename(&mut self, path: PathBuf) {
         self.rename_text = self
-            .prefs
-            .chats
-            .get(&path)
+            .chat_prefs(&path)
             .and_then(|m| m.title.clone())
             .or_else(|| {
                 self.sessions
@@ -799,7 +836,8 @@ impl Pui {
                             let mut contents = |ui: &mut egui::Ui| {
                                 theme::menu_controls(ui);
                                 if let Some(path) = &branch.path {
-                                    let meta = self.prefs.chats.entry(path.clone()).or_default();
+                                    let prefs_path = self.chat_prefs_path(path);
+                                    let meta = self.prefs.chats.entry(prefs_path).or_default();
                                     if ui
                                         .button(if meta.pinned { "Unpin" } else { "Pin" })
                                         .clicked()
@@ -1006,9 +1044,7 @@ impl Pui {
                     .and_then(|chat| chat.state.chat_title())
             }
         };
-        self.prefs
-            .chats
-            .get(&session.path)
+        self.chat_prefs(&session.path)
             .and_then(|meta| meta.title.clone().or_else(|| meta.initial_title.clone()))
             .or_else(live_title)
             .unwrap_or_else(|| session.title.clone())
@@ -1041,6 +1077,7 @@ impl Pui {
                 .is_some_and(|p| sidebar_tree::same_path(p, &path))
         });
         let shared = self.other_window_status(&path).map(str::to_owned);
+        let cloud_meta = self.cloud_session_meta.get(&path).cloned();
         let (status, status_color) = if deleting {
             ("Deleting…", colors.red)
         } else if selected {
@@ -1056,17 +1093,27 @@ impl Pui {
                     colors.accent
                 },
             )
+        } else if let Some(cm) = cloud_meta.as_ref() {
+            let color = if cm.has_pending_dialog {
+                colors.amber
+            } else if cm.busy {
+                colors.accent
+            } else if cm.status == "Idle" {
+                colors.green
+            } else {
+                colors.dim
+            };
+            (cm.status.as_str(), color)
         } else {
             ("Saved · status unknown", colors.dim)
         };
         let title = self.session_title(s);
         let row_origin = self
-            .prefs
-            .chats
-            .get(&path)
+            .chat_prefs(&path)
             .and_then(|m| m.origin.clone())
             .or_else(|| sessions::origin_for(&path));
-        let meta = self.prefs.chats.entry(path.clone()).or_default();
+        let prefs_path = self.chat_prefs_path(&path);
+        let meta = self.prefs.chats.entry(prefs_path).or_default();
         let editing = !deleting && self.rename_chat.as_ref() == Some(&path);
         let mut renamed = None;
         let compact = !self.prefs.sidebar_view.metadata || self.projects;
@@ -1159,11 +1206,44 @@ impl Pui {
                 self.rename_chat = None;
             }
         } else {
+            let is_cloud = cloud_meta.is_some() || node.is_some_and(|n| n.cloud_host.is_some());
             let show_origin = row_origin.as_ref().is_some_and(|o| o.platform.is_remote());
-            let title_left = if show_origin { 46.0 } else { 32.0 };
-            if let Some(origin) = row_origin.as_ref().filter(|o| o.platform.is_remote()) {
+            let mut title_left = 32.0;
+            if is_cloud {
                 let icon_rect = egui::Rect::from_center_size(
-                    rect.min + egui::vec2(34.0, if compact { rect.height() / 2.0 } else { 15.0 }),
+                    rect.min
+                        + egui::vec2(
+                            title_left + 2.0,
+                            if compact { rect.height() / 2.0 } else { 15.0 },
+                        ),
+                    Vec2::splat(13.0),
+                );
+                icons::draw(ui, icon_rect, Icon::Cloud, colors.accent);
+                let cloud_tip = match (
+                    &cloud_meta,
+                    row_origin.as_ref().filter(|o| o.platform.is_remote()),
+                ) {
+                    (Some(cm), Some(origin)) => {
+                        format!("Cloud · {} · {}", cm.host.name, origin.badge_tooltip())
+                    }
+                    (Some(cm), None) => format!("Cloud · {}", cm.host.name),
+                    (None, Some(origin)) => format!("Cloud · {}", origin.badge_tooltip()),
+                    (None, None) => "Cloud session".to_owned(),
+                };
+                ui.interact(
+                    icon_rect.expand(3.0),
+                    ui.make_persistent_id(("chat-cloud", &path)),
+                    Sense::hover(),
+                )
+                .on_hover_text(cloud_tip);
+                title_left += 15.0;
+            } else if let Some(origin) = row_origin.as_ref().filter(|o| o.platform.is_remote()) {
+                let icon_rect = egui::Rect::from_center_size(
+                    rect.min
+                        + egui::vec2(
+                            title_left + 2.0,
+                            if compact { rect.height() / 2.0 } else { 15.0 },
+                        ),
                     Vec2::splat(13.0),
                 );
                 let origin_icon = if origin.platform == crate::remote::OriginPlatform::Web {
@@ -1178,7 +1258,9 @@ impl Pui {
                     Sense::hover(),
                 )
                 .on_hover_text(origin.badge_tooltip());
+                title_left += 14.0;
             }
+            let _ = show_origin;
             let elided = paint_text(
                 ui,
                 &title,
@@ -1210,12 +1292,22 @@ impl Pui {
             );
         }
         if !compact {
+            let prefix = if let Some(cm) = cloud_meta.as_ref() {
+                format!("{} · {}", cm.host.name, sessions::project_name(&s.project))
+            } else {
+                sessions::project_name(&s.project)
+            };
             paint_text(
                 ui,
                 &format!(
                     "{} · {}",
-                    sessions::project_name(&s.project),
-                    if deleting || selected || node.is_some() || shared.is_some() {
+                    prefix,
+                    if deleting
+                        || selected
+                        || node.is_some()
+                        || shared.is_some()
+                        || cloud_meta.is_some()
+                    {
                         status.to_owned()
                     } else {
                         format!("Saved · {}", sessions::age(s.modified))

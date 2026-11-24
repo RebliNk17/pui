@@ -10,11 +10,17 @@ impl Pui {
     pub(super) fn agent_settings(&self, id: &str) -> settings::Settings {
         let mut settings = self.prefs.settings.clone();
         if let Some(node) = self.agents.nodes.get(id) {
-            if node.access == "read-only" {
+            if node.cloud_host.is_some()
+                || (id == self.agents.active && self.active_cloud_host().is_some())
+            {
+                settings.permission = PermissionMode::Auto;
+            } else if node.access == "read-only" {
                 settings.permission = PermissionMode::Plan;
             } else if let Some(permission) = node.permission {
                 settings.permission = permission;
             }
+        } else if id == self.agents.active && self.active_cloud_host().is_some() {
+            settings.permission = PermissionMode::Auto;
         }
         settings
     }
@@ -44,7 +50,9 @@ impl Pui {
                 .unwrap()
                 .permission = Some(mode);
             self.prefs.agent_tree = self.agent_records();
-            self.task_apply_settings();
+            if !self.side_chat.rendering {
+                self.task_apply_settings();
+            }
             if self.client.is_some() {
                 self.send(json!({"type":"prompt","message":format!("/pui-settings {}",self.agent_settings(&self.agents.active).payload())}));
             }
@@ -62,6 +70,9 @@ impl Pui {
             && !self.readonly_worker()
             && !self.is_mirror();
         self.set_permission(mode);
+        if self.side_chat.rendering {
+            return;
+        }
         if writable_local && self.active_permission() == mode {
             self.remember_default_permission(mode);
             self.prefs.agent_tree = self.agent_records();

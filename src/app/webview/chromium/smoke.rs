@@ -1,6 +1,8 @@
 //! Opt-in debug-only diagnostics. No disk writes, screenshots or timers unless requested.
 use super::*;
+mod completion_probe;
 mod picker_probe;
+pub(super) mod privacy_probe;
 use serde::Serialize;
 use std::sync::{OnceLock, mpsc};
 
@@ -10,6 +12,7 @@ pub(super) struct Diagnostics {
     captured: bool,
     observer: Option<Registration>,
     probe: picker_probe::Probe,
+    completion: completion_probe::Probe,
 }
 #[derive(Clone, PartialEq, Serialize)]
 struct Bounds {
@@ -95,6 +98,10 @@ wrap_dev_tools_message_observer! {
     }
 }
 pub(super) fn observe(tab: &mut Tab) {
+    completion_probe::Probe::tick(tab);
+    if std::env::var_os("PUI_BROWSER_COMPLETION_SMOKE").is_some() {
+        return;
+    }
     picker_probe::Probe::tick(tab);
     let Some(writer) = writer() else {
         return;

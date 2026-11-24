@@ -12,15 +12,21 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
+mod error;
+#[cfg(test)]
+mod git_activity_tests;
 mod inline_cards;
 mod new_messages;
 mod progress;
+#[cfg(test)]
+mod rtl_tests;
 pub use progress::Progress;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptAction {
     Open(String),
     ViewSource(String),
+    Continue(usize),
     OpenVisual {
         id: String,
         title: String,
@@ -75,7 +81,10 @@ pub struct Transcript {
     pub progress: Option<Progress>,
     pub message_action: Option<(usize, MessageAction)>,
     pub message_actions_enabled: bool,
+    pub continue_enabled: bool,
     pub task_output: bool,
+    /// Same chat rendering with smaller gutters inside a companion pane.
+    pub embedded: bool,
     pub pending_messages: Vec<crate::protocol::PendingMessage>,
     pub find: Option<FindTarget>,
     progress_phase: Option<(Progress, f64)>,
@@ -296,8 +305,9 @@ impl Transcript {
         self.gallery.poll(ui.ctx());
         self.visuals.poll(ui.ctx());
         let rect = ui.available_rect_before_wrap();
-        let rail = Rect::from_min_size(rect.min, Vec2::new(24.0, rect.height()));
-        let content = Rect::from_min_max(rect.min + egui::vec2(24.0, 0.0), rect.max);
+        let rail_width = if self.embedded { 0.0 } else { 24.0 };
+        let rail = Rect::from_min_size(rect.min, Vec2::new(rail_width, rect.height()));
+        let content = Rect::from_min_max(rect.min + egui::vec2(rail_width, 0.0), rect.max);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(content)
@@ -307,8 +317,10 @@ impl Transcript {
         child.spacing_mut().item_spacing.y = 4.0;
         child.spacing_mut().interact_size.y = 22.0;
         child.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
-        let column = (content.width() - 64.0).clamp(180.0, 736.0);
-        let padding = ((content.width() - column) / 2.0).max(12.0);
+        let gutter = if self.embedded { 16.0 } else { 64.0 };
+        let column = (content.width() - gutter).clamp(120.0, 736.0);
+        let padding =
+            ((content.width() - column) / 2.0).max(if self.embedded { 8.0 } else { 12.0 });
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("transcript-v2", session))
             .auto_shrink([false, false])
@@ -397,6 +409,7 @@ impl Transcript {
                     }
                 }
                 self.message_actions_enabled.hash(&mut hasher);
+                (self.continue_enabled, index == messages.len()).hash(&mut hasher);
                 (busy && index == messages.len()).hash(&mut hasher);
                 let signature = hasher.finish();
                 let cached = self
@@ -455,6 +468,7 @@ impl Transcript {
                                             view,
                                         ),
                                         task_output,
+                                        (index == messages.len()).then_some(self.continue_enabled),
                                         gallery,
                                         Some(visuals),
                                         cwd,
@@ -825,17 +839,7 @@ fn user_bubble(
         .max(footer_width.min(available))
         .max(140.0)
         .min(available);
-    let mut job = egui::text::LayoutJob::simple(
-        text.to_owned(),
-        FontId::proportional(14.0),
-        colors.text,
-        max - 34.0,
-    );
-    if let Some(section) = job.sections.first_mut() {
-        section.format.line_height = Some(23.0);
-    }
-    let active_find = markdown::highlight_job(ui, &mut job);
-    let galley = ui.fonts(|f| f.layout_job(job));
+    let galley = crate::app::composer_text::message_galley(ui.ctx(), text, (max - 34.0).max(1.0));
     let width = (galley.size().x + 34.0)
         .max(footer_width.min(max))
         .max(if message.images.is_empty() {
@@ -872,16 +876,7 @@ fn user_bubble(
                             ui.add_space(6.0);
                         }
                         if !text.is_empty() {
-                            let response =
-                                ui.add(egui::Label::new(galley.clone()).selectable(true));
-                            if let Some(byte_start) = active_find {
-                                markdown::record_find_match_rect(
-                                    ui,
-                                    &galley,
-                                    response.rect.left_top(),
-                                    byte_start,
-                                );
-                            }
+                            crate::app::composer_text::show_message(ui, text);
                         }
                     });
             });
@@ -948,6 +943,7 @@ fn assistant(
         thinking,
         flags,
         task_output,
+        Some(flags.2),
         gallery,
         None,
         None,
@@ -966,6 +962,7 @@ fn assistant_with_media(
     thinking: &str,
     flags: (bool, bool, bool, View),
     task_output: bool,
+    continue_enabled: Option<bool>,
     gallery: &mut crate::media::Gallery,
     mut visuals: Option<&mut crate::inline_visual::InlineVisualHost>,
     cwd: Option<&std::path::Path>,
@@ -1193,7 +1190,9 @@ fn assistant_with_media(
     // supersedes them. While Pi is still working it may retry or compact first.
     if !running {
         if let Some(error) = messages.last().and_then(|message| message.error.as_ref()) {
-            ui.colored_label(colors.red, error);
+            if error::row(ui, error, continue_enabled) {
+                *action = Some(TranscriptAction::Continue(start + messages.len() - 1));
+            }
         }
     }
     let images: Vec<_> = messages
@@ -1506,7 +1505,8 @@ fn activity(
             );
             let toggle_left = ui
                 .interact(toggle_left_rect, id.with("header"), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(summary.label());
             let toggle_right = if shown_thumbs > 0 {
                 Some(
                     ui.interact(

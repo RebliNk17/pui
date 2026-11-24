@@ -6,6 +6,36 @@ fn style(source: &str, needle: &str) -> Style {
 }
 
 #[test]
+fn rtl_composer_aligns_wrapped_prose_but_not_fenced_source() {
+    let ctx = egui::Context::default();
+    theme::install(&ctx);
+    let source = "שלום **עולם** עם `DNS 123` ועוד מילים בעברית כדי לבדוק גלישה\n\nEnglish שלום\n\n```text\nשלום\n```";
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        mode.apply(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let galley = super::galley(ctx, source, 240.0);
+            assert_eq!(galley.job.text, source);
+            assert!(galley.rows.len() > source.lines().count());
+            let mut index = 0;
+            for row in &galley.rows {
+                let start = byte_index(source, index);
+                let end = byte_index(source, index + row.char_count_excluding_newline());
+                if row.bidi.as_ref().is_some_and(|bidi| bidi.base_rtl) {
+                    if start > source.find("```text").unwrap() {
+                        assert_eq!(row.pos.x, 12.0, "Fenced code stays left");
+                    } else {
+                        assert!((row.rect().right() - 228.0).abs() < 0.1);
+                    }
+                } else if source[start..end].starts_with("English") {
+                    assert_eq!(row.pos.x, 0.0);
+                }
+                index += row.char_count_including_newline();
+            }
+        });
+    }
+}
+
+#[test]
 fn inline_markdown_is_rich_and_editing_reveals_its_syntax() {
     let source = "**bold** *italic* `code` [Pi](https://pi.dev) https://example.com";
     assert!(style(source, "bold").bold);

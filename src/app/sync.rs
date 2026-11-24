@@ -1116,7 +1116,13 @@ impl Pui {
                         index_endpoint(&mut self.sync.endpoints, endpoint);
                     }
                     if self.client.is_none() {
-                        if let Some(path) = self.state.session_file.as_ref().map(PathBuf::from) {
+                        if let Some(path) = self
+                            .state
+                            .session_file
+                            .as_deref()
+                            .map(Path::new)
+                            .map(identity)
+                        {
                             let changed = self
                                 .sync
                                 .endpoints
@@ -1767,6 +1773,15 @@ mod tests {
             1,
             "Mirrored paths must be deduplicated"
         );
+        let alias_root = directory.join("configured-root");
+        crate::runtime::with_session_path_alias(&alias_root, &directory, || {
+            observer.state.session_file = Some(alias_root.join("chat.jsonl").display().to_string());
+            assert_eq!(
+                observer.board_cards().len(),
+                1,
+                "managed-root aliases must not duplicate board cards"
+            );
+        });
         owner.state.dialogs.clear();
         owner.state.busy = false;
         owner.state.error = Some("Provider disconnected".into());
@@ -1802,6 +1817,94 @@ mod tests {
                 .collect(),
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn registry_uses_canonical_mirror_identity_after_aliased_snapshot() {
+        let (directory, path) = location();
+        let alias = directory.join("alias.jsonl");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let mut app = app(&directory, &alias);
+        // Replace live threads with deterministic channels. No network/model call.
+        app.sync = WindowSync::new(&app.ctx, true);
+        let (events, rx) = mpsc::channel();
+        let (tx, work) = mpsc::channel();
+        app.sync.rx = rx;
+        app.sync.tx = tx;
+        app.sync.mirror = Some(path.clone());
+        app.sync.revisions.insert(path.clone(), 1);
+        app.draft = "keep my draft".into();
+        app.sync.unsent.push(run_status::WaitingMessage {
+            text: "uncertain; never replay".into(),
+            ..Default::default()
+        });
+        let mut peer = endpoint([path.clone()]);
+        peer.paths[0].revision = 2;
+        events
+            .send(ResultEvent::Registry(vec![peer.clone()], false, 0))
+            .unwrap();
+        app.poll_window_sync();
+        assert!(app.connected, "an aliased path is not an owner exit");
+        assert!(app.state.error.is_none());
+        assert!(matches!(work.try_recv().unwrap(), Work::Fetch(ref p, _, 2) if p == &path));
+        let snapshot = Snapshot {
+            revision: 2,
+            state: State {
+                session_file: Some(alias.display().to_string()),
+                ..Default::default()
+            },
+            manual_title: None,
+            waiting: Vec::new(),
+            settings: app.prefs.settings.clone(),
+            access: None,
+            worktree: None,
+            notifications: app.prefs.notifications,
+            attention: None,
+            ultra: false,
+            ready: true,
+            cwd: directory.clone(),
+            label: "Idle".into(),
+        };
+        events
+            .send(ResultEvent::Snapshot(path.clone(), 2, Box::new(snapshot)))
+            .unwrap();
+        app.poll_window_sync();
+        events
+            .send(ResultEvent::Registry(vec![peer], false, 1))
+            .unwrap();
+        app.poll_window_sync();
+        assert!(app.connected);
+        assert!(app.state.error.is_none());
+        assert!(
+            work.try_recv().is_err(),
+            "same revision must not refetch or replay"
+        );
+        app.sync.act(&alias, Action::Remove(0)).unwrap();
+        assert!(
+            matches!(work.try_recv().unwrap(), Work::Act(ref p, _, 2, Action::Remove(0)) if p == &path)
+        );
+        events
+            .send(ResultEvent::Registry(Vec::new(), true, 2))
+            .unwrap();
+        app.poll_window_sync();
+        assert!(!app.connected, "a genuine owner exit still disconnects");
+        assert!(
+            app.state
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("owning Pui window closed")
+        );
+        assert_eq!(app.draft, "keep my draft");
+        assert_eq!(app.sync.unsent.len(), 1);
+        assert_eq!(app.sync.unsent[0].text, "uncertain; never replay");
+        assert!(
+            work.try_recv().is_err(),
+            "owner loss never replays queued work"
+        );
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn endpoint_index_and_queued_work_share_one_paths_allocation() {
         let (directory, path) = location();
@@ -2372,6 +2475,13 @@ mod tests {
             a.waiting[&path].is_empty() && b.draft == "queued by second window"
         });
         assert!(owner.draft.is_empty());
+        // Let the mirror finish fetching the owner's post-edit revision while the
+        // owner is still polled. Otherwise teardown waits out the owner's 8s ack
+        // deadline for a fetch issued after the assertions were already satisfied.
+        spin(&mut owner, &mut mirror, |a, b| {
+            b.sync.pending.is_empty()
+                && b.sync.revisions.get(&path) == Some(&a.sync.owned[&path].revision)
+        });
     }
     #[test]
     fn owner_switching_chats_still_serves_original_without_changing_visible_chat() {

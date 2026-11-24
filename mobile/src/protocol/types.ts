@@ -82,6 +82,10 @@ export interface SessionSummary {
   parent_session?: string | null;
   pinned?: boolean;
   is_active: boolean;
+  /** Populated client-side when merging sessions across multiple paired hosts (e.g. Mac + Cloud). */
+  host_id?: string;
+  host_name?: string;
+  host_kind?: 'cloud' | 'local';
 }
 
 export interface MediaAttachment {

@@ -319,7 +319,13 @@ export default function NewChatScreen() {
 
       if (res.path) {
         void refreshSessions();
-        router.replace(`/chat/${encodeURIComponent(res.path)}`);
+        router.replace({
+          pathname: '/chat/[id]',
+          params: {
+            id: encodeURIComponent(res.path),
+            ...(activeHost?.id ? { hostId: activeHost.id } : {}),
+          },
+        });
         return;
       }
 
@@ -334,7 +340,13 @@ export default function NewChatScreen() {
           );
           if (newest?.path) {
             void refreshSessions();
-            router.replace(`/chat/${encodeURIComponent(newest.path)}`);
+            router.replace({
+              pathname: '/chat/[id]',
+              params: {
+                id: encodeURIComponent(newest.path),
+                ...(activeHost?.id ? { hostId: activeHost.id } : {}),
+              },
+            });
             return;
           }
         } catch {

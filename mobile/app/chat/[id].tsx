@@ -39,20 +39,29 @@ type Tab = 'chat' | 'artifacts' | 'files' | 'changes';
 export default function ChatScreen() {
   const colors = usePalette();
   const { prefs, updatePrefs } = usePreferences();
-  const params = useLocalSearchParams<{ id: string }>();
+  const params = useLocalSearchParams<{ id: string; hostId?: string }>();
   const sessionPath = decodeURIComponent(params.id ?? '');
 
   const {
     detailsByPath,
     sessions,
-    hostInfo,
-    transport,
+    getTransportForHost,
+    getHostInfoForHost,
     clientOrigin,
-    loadSessionDetail,
+    loadSessionDetail: loadSessionDetailFromStore,
     setActiveChatPath,
     pendingShare,
     setPendingShare,
   } = usePui();
+
+  const summary = sessions.find((s) => s.path === sessionPath);
+  const resolvedHostId = params.hostId || summary?.host_id || null;
+  const transport = getTransportForHost(resolvedHostId);
+  const hostInfo = getHostInfoForHost(resolvedHostId);
+  const loadSessionDetail = useCallback(
+    (path: string) => loadSessionDetailFromStore(path, resolvedHostId),
+    [loadSessionDetailFromStore, resolvedHostId],
+  );
 
   useEffect(() => {
     setActiveChatPath(sessionPath || null);
@@ -60,7 +69,6 @@ export default function ChatScreen() {
   }, [sessionPath, setActiveChatPath]);
 
   const detail = detailsByPath[sessionPath];
-  const summary = sessions.find((s) => s.path === sessionPath);
   const [tab, setTab] = useState<Tab>('chat');
   const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
@@ -214,9 +222,14 @@ export default function ChatScreen() {
         </Pressable>
 
         <View style={styles.titleCenter}>
-          <Text numberOfLines={1} style={[styles.title, { color: colors.text }]}>
-            {title}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, maxWidth: '100%' }}>
+            {(summary?.host_kind === 'cloud' || hostInfo?.pui_version?.toLowerCase().includes('cloud')) ? (
+              <Ionicons name="cloud-outline" size={14} color={colors.accent} />
+            ) : null}
+            <Text numberOfLines={1} style={[styles.title, { color: colors.text, flexShrink: 1 }]}>
+              {title}
+            </Text>
+          </View>
           <Text numberOfLines={1} style={[styles.subText, { color: colors.muted }]}>
             {projectLabel}
             {tab !== 'chat'
@@ -264,7 +277,10 @@ export default function ChatScreen() {
                 void transport?.openSession(child.path).catch(() => {});
                 router.push({
                   pathname: '/chat/[id]',
-                  params: { id: encodeURIComponent(child.path) },
+                  params: {
+                    id: encodeURIComponent(child.path),
+                    ...(resolvedHostId ? { hostId: resolvedHostId } : {}),
+                  },
                 });
               }}
               style={[

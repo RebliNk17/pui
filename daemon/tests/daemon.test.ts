@@ -308,6 +308,20 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(isAllowedCloudWorktreeGitAction(`git push -u origin ${wt.branch}`, wt.branch), true);
       assert.equal(isAllowedCloudWorktreeGitAction(`git push origin HEAD:${wt.branch}`, wt.branch), true);
       assert.equal(isAllowedCloudWorktreeGitAction('gh pr create --fill', wt.branch), true);
+      assert.equal(
+        isAllowedCloudWorktreeGitAction(
+          `gh pr create --base master --head ${wt.branch} --title "feat(usage): ring" --body "## Summary\n- Replace \\\`Usage::footer\\\` (amber >= 75%, red >= 90%)\n## Verification\n- 6/6 passed."`,
+          wt.branch,
+        ),
+        true,
+      );
+      assert.equal(
+        isAllowedCloudWorktreeGitAction('git commit -m "feat: line 1\n\n- details with > sign"', wt.branch),
+        true,
+      );
+      assert.equal(isAllowedCloudWorktreeGitAction('gh pr create --title "$(whoami)" --body "x"', wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction('gh pr create --title "`whoami`" --body "x"', wt.branch), false);
+      assert.equal(isAllowedCloudWorktreeGitAction('gh pr create --head main --title "x" --body "y"', wt.branch), false);
       assert.equal(isAllowedCloudWorktreeGitAction('git push origin main', wt.branch), false);
       assert.equal(isAllowedCloudWorktreeGitAction(`git push --force origin ${wt.branch}`, wt.branch), false);
       assert.equal(isAllowedCloudWorktreeGitAction(`git push -u origin ${wt.branch} && rm -rf /`, wt.branch), false);

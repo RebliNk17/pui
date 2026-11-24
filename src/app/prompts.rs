@@ -172,7 +172,7 @@ impl Pui {
                                 .desired_width(f32::INFINITY)
                                 .desired_rows(if method == "editor" { 4 } else { 2 }),
                         );
-                        if new {
+                        if new && prompt_ui::keyboard_available(ui) {
                             edit.request_focus();
                             self.focus_composer = false;
                         }

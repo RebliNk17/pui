@@ -94,6 +94,22 @@ pub(super) struct Chat {
     pending_dialog: Option<String>,
 }
 impl Chat {
+    #[cfg(test)]
+    pub(super) fn open_test_gallery(&mut self, image: crate::media::Attachment) {
+        self.transcript.gallery.open(&[image], 0);
+    }
+    #[cfg(test)]
+    pub(super) fn gallery_open(&self) -> bool {
+        self.transcript.gallery.is_open()
+    }
+    pub(super) fn show_galleries(&mut self, ctx: &egui::Context) -> bool {
+        let open = self.transcript.gallery.is_open() || self.images.gallery.is_open();
+        if open {
+            self.transcript.gallery.viewer(ctx);
+            self.images.gallery.viewer(ctx);
+        }
+        open
+    }
     pub(super) fn search_state(&self) -> Option<&State> {
         // Restored placeholders have a path but no loaded transcript. Loaded
         // empty branches are authoritative and must not fall back to disk.
@@ -103,6 +119,7 @@ impl Chat {
     pub(super) fn deletion_busy(&self) -> bool {
         self.loading
             || self.resource_reload.pending()
+            || self.resource_reload.connector_pending()
             || self.resource_reload.confirming()
             || self.history_pending.is_some()
             || self.interrupt.is_some()
@@ -471,6 +488,11 @@ impl Pui {
         let id = format!("agent-{}", self.agents.next);
         self.bind_navigation_agent(&id);
         self.agents.active = id.clone();
+        let initial_path = self.state.session_file.as_ref().map(PathBuf::from);
+        let initial_cloud = initial_path
+            .as_ref()
+            .and_then(|p| self.cloud_session_meta.get(p))
+            .cloned();
         self.agents.nodes.insert(
             id.clone(),
             Node {
@@ -480,10 +502,15 @@ impl Pui {
                     .state
                     .chat_title()
                     .unwrap_or_else(|| "New conversation".into()),
-                cwd: self.prefs.cwd.clone(),
-                path: self.state.session_file.as_ref().map(PathBuf::from),
+                cwd: initial_cloud
+                    .as_ref()
+                    .map(|m| PathBuf::from(&m.cwd))
+                    .unwrap_or_else(|| self.prefs.cwd.clone()),
+                path: initial_path,
                 access: "workspace".into(),
-                permission: None,
+                permission: initial_cloud
+                    .as_ref()
+                    .map(|_| settings::PermissionMode::Auto),
                 status: "Connecting".into(),
                 last_activity: None,
                 // Opening saved history must not make it look newly created.
@@ -499,8 +526,8 @@ impl Pui {
                 task: String::new(),
                 depends: Vec::new(),
                 setup: None,
-                worktree: None,
-                cloud_host: None,
+                worktree: initial_cloud.as_ref().map(|m| PathBuf::from(&m.cwd)),
+                cloud_host: initial_cloud.map(|m| m.host),
                 cloud_repo: None,
             },
         );
@@ -780,7 +807,8 @@ impl Pui {
         else {
             return false;
         };
-        if node.parent.is_some()
+        if self.is_side_chat_companion(id)
+            || node.parent.is_some()
             || !node.children.is_empty()
             || node.setup_pending()
             || node.needs_report
@@ -869,6 +897,7 @@ impl Pui {
             || chat.preview.is_some()
             || chat.history_pending.is_some()
             || chat.resource_reload.pending()
+            || chat.resource_reload.connector_pending()
             || !chat.deliveries.is_empty()
         {
             return true;

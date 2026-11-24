@@ -1,4 +1,4 @@
-name: macOS CI
+name: CI
 
 on:
   push:
@@ -12,13 +12,9 @@ on:
       - 'docs/**'
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  # No path filter: the required "CI result" check must report on every PR.
+  # Unaffected suites are skipped by the changes job instead.
   pull_request:
-    paths-ignore:
-      - 'mobile/**'
-      - 'daemon/**'
-      - '.github/workflows/android.yml'
-      - 'README.md'
-      - 'docs/**'
 
 permissions:
   contents: read
@@ -28,7 +24,35 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
+  # Pull requests run only the suites whose inputs changed; pushes and tags
+  # (empty base) run everything, including the app bundle.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.affected.outputs.rust }}
+      node: ${{ steps.affected.outputs.node }}
+      python: ${{ steps.affected.outputs.python }}
+      package: ${{ steps.affected.outputs.package }}
+      toolchain: ${{ steps.affected.outputs.toolchain }}
+      mobile: ${{ steps.affected.outputs.mobile }}
+      daemon: ${{ steps.affected.outputs.daemon }}
+      macos: ${{ steps.affected.outputs.macos }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select affected suites
+        id: affected
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+        run: python3 scripts/ci/affected.py "$BASE_SHA" | tee -a "$GITHUB_OUTPUT"
+
   macos-build:
+    needs: changes
+    if: needs.changes.outputs.macos == 'true'
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -58,6 +82,7 @@ jobs:
 
       - name: Restore Rust toolchain
         id: restore-toolchain
+        if: needs.changes.outputs.toolchain == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
@@ -80,6 +105,7 @@ jobs:
 
       - name: Restore compiled Rust and CEF outputs
         id: restore-compiled
+        if: needs.changes.outputs.toolchain == 'true'
         uses: actions/cache/restore@v4
         with:
           path: |
@@ -92,18 +118,24 @@ jobs:
 
       # No secret context: cached executables stay in this ad-hoc build job.
       # Publication runs separately without these caches or Apple credentials.
-      - name: Validate and package Apple Silicon app
+      - name: Validate affected suites (and package on push/tag)
+        env:
+          PUI_CI_RUST: ${{ needs.changes.outputs.rust }}
+          PUI_CI_NODE: ${{ needs.changes.outputs.node }}
+          PUI_CI_PYTHON: ${{ needs.changes.outputs.python }}
+          PUI_CI_PACKAGE: ${{ needs.changes.outputs.package }}
         run: bash scripts/ci/github-macos.sh
 
       - name: Save Rust toolchain even if checks fail
-        if: always() && steps.restore-toolchain.outputs.cache-hit != 'true'
+        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-toolchain.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/.rustup/toolchains/1.88.0-aarch64-apple-darwin
           key: rust-toolchain-v1-arm64-${{ steps.cache-keys.outputs.toolchain }}
 
+      # Skipped for Python/Node-only runs so a cache without CEF is never saved.
       - name: Save downloads even if checks fail
-        if: always() && steps.restore-downloads.outputs.cache-hit != 'true'
+        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-downloads.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -115,7 +147,7 @@ jobs:
           key: downloads-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}
 
       - name: Save compiled outputs (at most one snapshot per day)
-        if: always() && steps.restore-compiled.outputs.cache-hit != 'true'
+        if: always() && needs.changes.outputs.toolchain == 'true' && steps.restore-compiled.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -124,12 +156,72 @@ jobs:
           key: compiled-v2-arm64-${{ github.ref_name }}-${{ steps.cache-keys.outputs.dependencies }}-${{ steps.cache-keys.outputs.day }}
 
       - name: Upload macOS release artifacts
+        if: needs.changes.outputs.package == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
           path: dist/releases/*
           if-no-files-found: error
           retention-days: 14
+
+  mobile-validate:
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  daemon-validate:
+    needs: changes
+    if: needs.changes.outputs.daemon == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: daemon/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  # Single required status check for branch protection. Always reports, so
+  # docs-only PRs (macOS job skipped) can merge, and any failure blocks.
+  ci-result:
+    name: CI result
+    needs: [changes, macos-build, mobile-validate, daemon-validate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require success or an intentional skip
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = {job: value["result"] for job, value in json.loads(os.environ["RESULTS"]).items()}
+          print(results)
+          ok = results.get("changes") == "success" and all(r in ("success", "skipped") for r in results.values())
+          sys.exit(0 if ok else 1)
+          PY
 
   github-release:
     needs: macos-build

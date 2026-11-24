@@ -22,43 +22,49 @@ fn git(root: &Path, args: &[&str]) -> Vec<u8> {
     crate::workspace::tests::git(root, args)
 }
 fn fixture() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("pui-resolve-seed-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        git(&root, &["init", "--template=", "-b", "main"]);
+        git(&root, &["config", "user.name", "Fixture"]);
+        git(&root, &["config", "user.email", "fixture@example.invalid"]);
+        for value in ["base\n", "theirs\n", "ours\n"] {
+            if value == "theirs\n" {
+                git(&root, &["switch", "-c", "other"]);
+            }
+            if value == "ours\n" {
+                git(&root, &["switch", "main"]);
+            }
+            for name in ["file.txt", "second.txt"] {
+                fs::write(root.join(name), value).unwrap();
+            }
+            git(&root, &["add", "--all"]);
+            git(
+                &root,
+                &["-c", "commit.gpgsign=false", "commit", "-qm", value],
+            );
+        }
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "--no-edit",
+                "other",
+            ])
+            .output()
+            .unwrap()
+            .status;
+        assert!(!status.success());
+        root
+    });
     let root = std::env::temp_dir().join(format!("pui-resolve-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&root).unwrap();
-    let root = fs::canonicalize(root).unwrap();
-    git(&root, &["init", "--template=", "-b", "main"]);
-    git(&root, &["config", "user.name", "Fixture"]);
-    git(&root, &["config", "user.email", "fixture@example.invalid"]);
-    for value in ["base\n", "theirs\n", "ours\n"] {
-        if value == "theirs\n" {
-            git(&root, &["switch", "-c", "other"]);
-        }
-        if value == "ours\n" {
-            git(&root, &["switch", "main"]);
-        }
-        for name in ["file.txt", "second.txt"] {
-            fs::write(root.join(name), value).unwrap();
-        }
-        git(&root, &["add", "--all"]);
-        git(
-            &root,
-            &["-c", "commit.gpgsign=false", "commit", "-qm", value],
-        );
-    }
-    let status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "merge",
-            "--no-edit",
-            "other",
-        ])
-        .output()
-        .unwrap()
-        .status;
-    assert!(!status.success());
-    root
+    crate::workspace::tests::copy_tree(seed, &root);
+    fs::canonicalize(root).unwrap()
 }
 fn inspect_file(root: &Path) -> Review {
     inspect(root, "file.txt", &AtomicBool::new(false)).unwrap()

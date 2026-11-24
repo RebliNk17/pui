@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(test)]
+mod continue_tests;
+#[cfg(test)]
 #[path = "send_now_tests.rs"]
 mod send_now_tests;
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -44,6 +46,32 @@ pub(super) struct Interrupt {
     queue_index: usize,
 }
 impl Pui {
+    pub(super) fn can_continue_after_error(&self) -> bool {
+        self.history_ready()
+            && !self.deletion.confirming()
+            && self
+                .state
+                .messages
+                .last()
+                .is_some_and(|message| message.role == "assistant" && message.error.is_some())
+    }
+
+    pub(super) fn continue_after_error(&mut self, index: usize) {
+        // Recheck at dispatch: an old error must never restart a newer turn.
+        if !self.can_continue_after_error()
+            || index.checked_add(1) != Some(self.state.messages.len())
+        {
+            return;
+        }
+        self.deliver_message(
+            WaitingMessage {
+                text: "Continue from where you stopped before the error. Use the existing conversation and completed work; do not restart the task or repeat completed actions.".into(),
+                ..Default::default()
+            },
+            "prompt",
+        );
+    }
+
     fn pending_receipt(
         &mut self,
         id: String,

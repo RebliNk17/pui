@@ -62,6 +62,7 @@ impl Pui {
         self.transcript.gallery.release_textures();
         self.transcript.visuals.release_textures();
         self.draft_images.gallery.release_textures();
+        self.files.cancel_browser_intents();
         self.files.hide_web();
         self.files.begin_frame();
         self.workspace_rx = None;

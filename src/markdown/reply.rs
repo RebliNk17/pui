@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct Item {
     marker: String,
     gutter: f32,
+    rtl: bool,
 }
 
 impl Item {
@@ -38,18 +39,26 @@ impl Item {
         // Keep marker and body in ONE selectable label. Only move placed rows:
         // bytes, sections, bidi cursors and baseline boxes survive unchanged.
         let galley_mut = Arc::make_mut(&mut galley);
-        let mut rect = egui::Rect::ZERO;
         for (index, row) in galley_mut.rows.iter_mut().enumerate() {
-            if index > 0 {
+            if row.bidi.as_ref().is_some_and(|bidi| bidi.base_rtl) {
+                let width = ui.available_width()
+                    + if index == 0 || !self.rtl {
+                        self.gutter
+                    } else {
+                        0.0
+                    };
+                row.pos.x = (width - row.size.x).max(0.0);
+            } else if index > 0 && !self.rtl {
                 row.pos.x += self.gutter;
             }
-            rect |= row.rect();
         }
-        galley_mut.rect = rect;
-        galley_mut.mesh_bounds.max.x += self.gutter;
+        theme::text_direction::update_bounds(galley_mut);
+        if self.rtl {
+            galley_mut.rect.max.x = ui.available_width() + self.gutter;
+        }
         let rect = egui::Rect::from_min_max(
-            ui.cursor().min - egui::vec2(self.gutter, 0.0),
-            ui.max_rect().max,
+            ui.cursor().min - egui::vec2(if self.rtl { 0.0 } else { self.gutter }, 0.0),
+            ui.max_rect().max + egui::vec2(if self.rtl { self.gutter } else { 0.0 }, 0.0),
         );
         let mut label_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         show_galley_with_find(&mut label_ui, galley, links, active);
@@ -57,6 +66,7 @@ impl Item {
         // causing every later paragraph and nested list to lose its inset.
         let mut used = label_ui.min_rect();
         used.min.x = ui.max_rect().left();
+        used.max.x = ui.max_rect().right();
         ui.advance_cursor_after_rect(used);
         links.clear();
         self.marker.clear();
@@ -66,11 +76,42 @@ impl Item {
 struct List {
     number: Option<u64>,
     siblings: usize,
-    indent: f32,
+    indent: egui::Vec2,
 }
 struct ActiveItem {
     marker: String,
     gutter: f32,
+    rtl: bool,
+}
+
+// Resolve each item's own first prose paragraph, not a sibling, fenced code or
+// nested child. Assemble inline events before detecting direction so Unicode
+// isolates keep their state across bold/link/code boundaries.
+fn item_rtl(events: &[Event<'static>]) -> bool {
+    let mut depth = 0usize;
+    let mut code = false;
+    let mut text = String::new();
+    for event in events {
+        match event {
+            Event::Start(Tag::List(_)) => depth += 1,
+            Event::End(TagEnd::List(_)) => depth = depth.saturating_sub(1),
+            Event::End(TagEnd::Item) if depth == 0 => break,
+            Event::Start(Tag::CodeBlock(_)) => code = true,
+            Event::End(TagEnd::CodeBlock) => code = false,
+            Event::Text(value) | Event::Code(value) if depth == 0 && !code => text.push_str(value),
+            Event::SoftBreak if depth == 0 && !code => text.push(' '),
+            Event::HardBreak | Event::End(TagEnd::Paragraph | TagEnd::Heading(_))
+                if depth == 0 && !code =>
+            {
+                if let Some(rtl) = theme::text_direction::rtl(&text) {
+                    return rtl;
+                }
+                text.clear();
+            }
+            _ => {}
+        }
+    }
+    theme::text_direction::rtl(&text).unwrap_or(false)
 }
 
 pub(super) fn list(ui: &mut Ui, events: &[Event<'static>], top_level: bool) {
@@ -107,8 +148,14 @@ pub(super) fn list(ui: &mut Ui, events: &[Event<'static>], top_level: bool) {
         }
         match event {
             Event::Start(Tag::List(number)) => {
-                let indent = lists.last().map_or(0.0, |list| list.indent)
-                    + items.last().map_or(0.0, |item| item.gutter);
+                let mut indent = lists.last().map_or(egui::Vec2::ZERO, |list| list.indent);
+                if let Some(item) = items.last() {
+                    if item.rtl {
+                        indent.y += item.gutter;
+                    } else {
+                        indent.x += item.gutter;
+                    }
+                }
                 lists.push(List {
                     number: *number,
                     siblings: 0,
@@ -140,7 +187,11 @@ pub(super) fn list(ui: &mut Ui, events: &[Event<'static>], top_level: bool) {
                         .size()
                         .x
                 });
-                items.push(ActiveItem { marker, gutter });
+                items.push(ActiveItem {
+                    marker,
+                    gutter,
+                    rtl: item_rtl(&events[index + 1..]),
+                });
             }
             Event::End(TagEnd::Item) => {
                 items.pop();
@@ -155,17 +206,27 @@ pub(super) fn list(ui: &mut Ui, events: &[Event<'static>], top_level: bool) {
     }
 }
 
-fn render_block(ui: &mut Ui, events: &[Event<'static>], item: &mut ActiveItem, indent: f32) {
+fn render_block(
+    ui: &mut Ui,
+    events: &[Event<'static>],
+    item: &mut ActiveItem,
+    mut indent: egui::Vec2,
+) {
     if events.is_empty() && item.marker.is_empty() {
         return;
     }
-    let indent = indent.min((ui.available_width() - 80.0).max(0.0));
+    // Keep each ancestor's gutter on its original side, even when a child
+    // changes direction. Scale both insets together once a list gets too deep.
+    let total = indent.x + indent.y;
+    if total > 0.0 {
+        indent *= ((ui.available_width() - 80.0).max(0.0) / total).min(1.0);
+    }
     let gutter = item
         .gutter
-        .min((ui.available_width() - indent - 64.0).max(0.0));
+        .min((ui.available_width() - indent.x - indent.y - 64.0).max(0.0));
     let rect = egui::Rect::from_min_max(
-        ui.cursor().min + egui::vec2(indent + gutter, 0.0),
-        ui.max_rect().max,
+        ui.cursor().min + egui::vec2(indent.x + if item.rtl { 0.0 } else { gutter }, 0.0),
+        ui.max_rect().max - egui::vec2(indent.y + if item.rtl { gutter } else { 0.0 }, 0.0),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         show_events(
@@ -175,6 +236,7 @@ fn render_block(ui: &mut Ui, events: &[Event<'static>], item: &mut ActiveItem, i
             Some(Item {
                 marker: std::mem::take(&mut item.marker),
                 gutter,
+                rtl: item.rtl,
             }),
         );
     });

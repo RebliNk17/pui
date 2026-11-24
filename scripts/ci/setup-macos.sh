@@ -21,30 +21,33 @@ if ! node --input-type=module -e 'import { stripTypeScriptTypes } from "node:mod
   brew install node@22
   export PATH="$(brew --prefix node@22)/bin:$PATH"
 fi
-export PATH="$HOME/.cargo/bin:$PATH"
-# An exact cached toolchain works without bootstrapping rustup on every VM.
-toolchain="$HOME/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin/bin"
-if [[ -x "$toolchain/cargo" && -x "$toolchain/rustfmt" && -x "$toolchain/cargo-clippy" ]]; then
-  echo "Reusing cached Rust $RUST_VERSION."
-else
-  # CI images may already contain rustup. Otherwise use Homebrew rather
-  # than curl-pipe-shell, without its redundant default-toolchain postinstall.
-  if ! command -v rustup >/dev/null; then
-    brew install --skip-post-install rustup
-    export PATH="$(brew --prefix rustup)/bin:$PATH"
+# Python/Node-only pull requests skip the Rust toolchain and pinned CEF runtime.
+if [[ "${PUI_CI_NEEDS_RUST:-true}" == true ]]; then
+  export PATH="$HOME/.cargo/bin:$PATH"
+  # An exact cached toolchain works without bootstrapping rustup on every VM.
+  toolchain="$HOME/.rustup/toolchains/$RUST_VERSION-aarch64-apple-darwin/bin"
+  if [[ -x "$toolchain/cargo" && -x "$toolchain/rustfmt" && -x "$toolchain/cargo-clippy" ]]; then
+    echo "Reusing cached Rust $RUST_VERSION."
+  else
+    # CI images may already contain rustup. Otherwise use Homebrew rather
+    # than curl-pipe-shell, without its redundant default-toolchain postinstall.
+    if ! command -v rustup >/dev/null; then
+      brew install --skip-post-install rustup
+      export PATH="$(brew --prefix rustup)/bin:$PATH"
+    fi
+    echo "Installing Rust $RUST_VERSION..."
+    rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
+    toolchain=$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)")
   fi
-  echo "Installing Rust $RUST_VERSION..."
-  rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
-  toolchain=$(dirname "$(rustup which --toolchain "$RUST_VERSION" cargo)")
+  export RUSTUP_TOOLCHAIN="$RUST_VERSION"
+  export PATH="$toolchain:$PATH"
+  # Do not let a global CARGO_BUILD_TARGET produce binaries the native bundler cannot find.
+  unset CARGO_BUILD_TARGET
+  export MACOSX_DEPLOYMENT_TARGET=12.0
+  export CEF_PATH
+  CEF_PATH=$(python3 scripts/fetch-chromium-macos.py "$CARGO_TARGET_DIR/cef-runtime")
+  rustc --version
+  cargo --version
 fi
-export RUSTUP_TOOLCHAIN="$RUST_VERSION"
-export PATH="$toolchain:$PATH"
-# Do not let a global CARGO_BUILD_TARGET produce binaries the native bundler cannot find.
-unset CARGO_BUILD_TARGET
-export MACOSX_DEPLOYMENT_TARGET=12.0
-export CEF_PATH
-CEF_PATH=$(python3 scripts/fetch-chromium-macos.py "$CARGO_TARGET_DIR/cef-runtime")
-rustc --version
-cargo --version
 node --version
 python3 --version

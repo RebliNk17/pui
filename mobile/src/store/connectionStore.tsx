@@ -41,6 +41,11 @@ function tokenKey(id: string): string {
   return `pui_host_token_${id.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 }
 
+function isCloudHostEntry(host: SavedHost, info?: HostInfo | null): boolean {
+  if (info?.pui_version?.toLowerCase().includes('cloud')) return true;
+  return host.name.toLowerCase().includes('cloud');
+}
+
 /**
  * Uses Android Keystore / iOS Keychain on native devices, with localStorage fallback on Web
  * so `expo start --web` works cleanly without throwing.
@@ -88,22 +93,30 @@ export interface PuiContextValue {
   deviceName: string;
   setDeviceName: (name: string) => Promise<void>;
   hostInfo: HostInfo | null;
+  /** Unified list of sessions across all paired hosts (Mac + Cloud), tagged with host_id/host_kind. */
   sessions: SessionSummary[];
   detailsByPath: Record<string, SessionDetail>;
   transport: PuiTransport | null;
+  getTransportForHost: (hostId?: string | null) => PuiTransport | null;
+  getHostInfoForHost: (hostId?: string | null) => HostInfo | null;
   clientOrigin: () => SessionOrigin;
   saveHost: (host: Omit<SavedHost, 'id'> & { id?: string }) => Promise<SavedHost>;
   removeHost: (id: string) => Promise<void>;
   selectHost: (id: string) => Promise<void>;
   retryConnection: () => void;
   refreshSessions: () => Promise<void>;
-  loadSessionDetail: (path: string) => Promise<SessionDetail | null>;
+  loadSessionDetail: (path: string, hostId?: string | null) => Promise<SessionDetail | null>;
   setActiveChatPath: (path: string | null) => void;
   pendingShare: SharedPayload | null;
   setPendingShare: (payload: SharedPayload | null) => void;
 }
 
 const PuiContext = createContext<PuiContextValue | null>(null);
+
+interface LiveHostEntry {
+  sig: string;
+  transport: PuiTransport;
+}
 
 export function PuiProvider({ children }: { children: React.ReactNode }) {
   const { prefs } = usePreferences();
@@ -118,14 +131,16 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const [deviceName, setDeviceNameState] = useState<string>(
     Device.deviceName ?? Device.modelName ?? (Platform.OS === 'ios' ? 'iPhone' : 'Android Phone'),
   );
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+
+  const [stateByHost, setStateByHost] = useState<Record<string, ConnectionState>>({});
+  const [errorByHost, setErrorByHost] = useState<Record<string, string | null>>({});
+  const [hostInfoByHost, setHostInfoByHost] = useState<Record<string, HostInfo>>({});
+  const [sessionsByHost, setSessionsByHost] = useState<Record<string, SessionSummary[]>>({});
   const [detailsByPath, setDetailsByPath] = useState<Record<string, SessionDetail>>({});
-  const [transport, setTransport] = useState<PuiTransport | null>(null);
+  const [transportVersion, setTransportVersion] = useState(0);
   const [pendingShare, setPendingShare] = useState<SharedPayload | null>(null);
 
+  const liveHostsRef = useRef<Map<string, LiveHostEntry>>(new Map());
   const appStateRef = useRef<string>(AppState.currentState || 'active');
   const activeChatPathRef = useRef<string | null>(null);
   const seenNotificationIdsRef = useRef<Set<string>>(new Set());
@@ -177,7 +192,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const activeHost = useMemo(
-    () => hosts.find((h) => h.id === activeHostId) ?? null,
+    () => hosts.find((h) => h.id === activeHostId) ?? hosts[0] ?? null,
     [hosts, activeHostId],
   );
 
@@ -192,9 +207,9 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     };
   }, [deviceName]);
 
-  const handleWsEvent = useCallback((event: WsServerEvent) => {
+  const handleHostWsEvent = useCallback((hostId: string, event: WsServerEvent) => {
     if (event.type === 'sessions_updated') {
-      setSessions(event.sessions);
+      setSessionsByHost((prev) => ({ ...prev, [hostId]: event.sessions }));
     } else if (event.type === 'session_updated') {
       setDetailsByPath((prev) => ({ ...prev, [event.path]: event.detail }));
     } else if (event.type === 'notification') {
@@ -220,94 +235,87 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Keep Android background foreground-service in sync with active host & user preference.
+  // Keep live transports connected for ALL paired hosts simultaneously (Mac + pui-cloud)
+  // so both local and remote cloud sessions stay synced in one unified list.
   useEffect(() => {
-    let cancelled = false;
-    if (
-      activeHost &&
-      prefs.notificationsEnabled &&
-      prefs.keepAliveInBackground &&
-      connectionState === 'connected'
-    ) {
-      void getNotificationPermissionStatus().then((status) => {
-        if (!cancelled && status === 'granted') {
-          startBackgroundKeepAlive(hostInfo?.host_name || activeHost.name);
-        }
-      });
-    } else {
-      stopBackgroundKeepAlive();
-    }
-    return () => {
-      cancelled = true;
-      if (!activeHost) stopBackgroundKeepAlive();
-    };
-  }, [
-    activeHost,
-    hostInfo?.host_name,
-    prefs.notificationsEnabled,
-    prefs.keepAliveInBackground,
-    connectionState,
-  ]);
+    const live = liveHostsRef.current;
+    const desiredIds = new Set(hosts.map((h) => h.id));
+    let changed = false;
 
-  // Connect transport whenever the active host changes.
-  useEffect(() => {
-    setHostInfo(null);
-    setSessions([]);
-    setDetailsByPath({});
-    setConnectionError(null);
-
-    if (!activeHost) {
-      setTransport(null);
-      setConnectionState('disconnected');
-      return;
+    for (const [id, entry] of live.entries()) {
+      if (!desiredIds.has(id)) {
+        entry.transport.disconnect();
+        live.delete(id);
+        changed = true;
+      }
     }
 
-    let disposed = false;
-    const callbacks = {
-      onStateChange: (state: ConnectionState, err?: string | null) => {
-        if (disposed) return;
-        setConnectionState(state);
-        if (err !== undefined) {
-          setConnectionError(err);
-        }
-      },
-      onEvent: (event: WsServerEvent) => {
-        if (!disposed) handleWsEvent(event);
-      },
-    };
-
-    const nextTransport: PuiTransport =
-      activeHost.transport === 'cloud_relay'
-        ? new CloudRelayTransport(activeHost, callbacks)
-        : new DirectTransport(activeHost, callbacks);
-
-    setTransport(nextTransport);
     const platform = Platform.OS === 'ios' ? 'ios' : 'android';
-    nextTransport.connect(deviceName, platform);
+    for (const h of hosts) {
+      const sig = `${h.host}:${h.port}:${h.tls ? 1 : 0}:${h.token}:${h.transport}:${h.relayUrl ?? ''}:${deviceName}`;
+      const existing = live.get(h.id);
+      if (existing && existing.sig === sig) continue;
+      if (existing) {
+        existing.transport.disconnect();
+        live.delete(h.id);
+      }
 
-    nextTransport
-      .getInfo()
-      .then((info) => {
-        if (!disposed) setHostInfo(info);
-      })
-      .catch((err: unknown) => {
-        if (!disposed) {
-          setConnectionError(err instanceof Error ? err.message : 'Failed to reach Pui host');
-        }
-      });
+      const hostId = h.id;
+      const callbacks = {
+        onStateChange: (state: ConnectionState, err?: string | null) => {
+          setStateByHost((prev) => (prev[hostId] === state ? prev : { ...prev, [hostId]: state }));
+          if (err !== undefined) {
+            setErrorByHost((prev) => ({ ...prev, [hostId]: err }));
+          }
+        },
+        onEvent: (event: WsServerEvent) => {
+          handleHostWsEvent(hostId, event);
+        },
+      };
 
-    nextTransport
-      .listSessions()
-      .then((res) => {
-        if (!disposed) setSessions(res.sessions);
-      })
-      .catch(() => {});
+      const nextTransport: PuiTransport =
+        h.transport === 'cloud_relay'
+          ? new CloudRelayTransport(h, callbacks)
+          : new DirectTransport(h, callbacks);
 
+      live.set(hostId, { sig, transport: nextTransport });
+      changed = true;
+
+      nextTransport.connect(deviceName, platform);
+      nextTransport
+        .getInfo()
+        .then((info) => {
+          setHostInfoByHost((prev) => ({ ...prev, [hostId]: info }));
+        })
+        .catch((err: unknown) => {
+          setErrorByHost((prev) => ({
+            ...prev,
+            [hostId]: err instanceof Error ? err.message : 'Failed to reach Pui host',
+          }));
+        });
+      nextTransport
+        .listSessions()
+        .then((res) => {
+          setSessionsByHost((prev) => ({ ...prev, [hostId]: res.sessions }));
+        })
+        .catch(() => {});
+    }
+
+    if (changed) {
+      setTransportVersion((v) => v + 1);
+    }
+  }, [hosts, deviceName, handleHostWsEvent]);
+
+  // Clean up all host transports on unmount.
+  useEffect(() => {
+    const live = liveHostsRef.current;
     return () => {
-      disposed = true;
-      nextTransport.disconnect();
+      for (const entry of live.values()) {
+        entry.transport.disconnect();
+      }
+      live.clear();
     };
-  }, [activeHost, deviceName, handleWsEvent]);
+  }, []);
 
   const persistHosts = useCallback(async (next: SavedHost[], nextActiveId: string | null) => {
     const metas: StoredHostMeta[] = next.map(({ token: _token, ...meta }) => meta);
@@ -341,8 +349,8 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   );
 
   /**
-   * Adds (or refreshes the token of) hosts advertised by the connected host — e.g. the Mac's
-   * paired cloud host — without switching the active host, so they appear as environments.
+   * Adds (or refreshes the token of) hosts advertised by any connected host — e.g. the Mac's
+   * paired cloud host — without switching the active host, so they appear in the unified list.
    */
   const adoptLinkedHosts = useCallback(
     async (linked: LinkedHostInfo[] | undefined) => {
@@ -384,8 +392,12 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   );
 
   useEffect(() => {
-    void adoptLinkedHosts(hostInfo?.linked_hosts).catch(() => {});
-  }, [hostInfo, adoptLinkedHosts]);
+    for (const info of Object.values(hostInfoByHost)) {
+      if (info?.linked_hosts?.length) {
+        void adoptLinkedHosts(info.linked_hosts).catch(() => {});
+      }
+    }
+  }, [hostInfoByHost, adoptLinkedHosts]);
 
   const removeHost = useCallback(
     async (id: string) => {
@@ -393,6 +405,16 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
       const remaining = hostsRef.current.filter((h) => h.id !== id);
       hostsRef.current = remaining;
       setHosts(remaining);
+      setSessionsByHost((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setHostInfoByHost((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       const nextActive = activeHostId === id ? (remaining[0]?.id ?? null) : activeHostId;
       setActiveHostId(nextActive);
       await persistHosts(remaining, nextActive);
@@ -411,40 +433,140 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     await storageSet(DEVICE_NAME_KEY, cleaned);
   }, []);
 
-  const retryConnection = useCallback(() => {
-    if (!transport) return;
-    setConnectionError(null);
-    transport.reconnectNow();
-    transport
-      .getInfo()
-      .then((info) => setHostInfo(info))
-      .catch((err: unknown) => {
-        setConnectionError(err instanceof Error ? err.message : 'Failed to reach Pui host');
+  const hostInfo = activeHost ? (hostInfoByHost[activeHost.id] ?? null) : null;
+  const connectionState: ConnectionState = activeHost
+    ? (stateByHost[activeHost.id] ?? 'disconnected')
+    : 'disconnected';
+  const connectionError: string | null = activeHost
+    ? (errorByHost[activeHost.id] ?? null)
+    : null;
+
+  const transport = useMemo(() => {
+    void transportVersion;
+    if (!activeHost) return null;
+    return liveHostsRef.current.get(activeHost.id)?.transport ?? null;
+  }, [activeHost, transportVersion]);
+
+  const getTransportForHost = useCallback(
+    (hostId?: string | null): PuiTransport | null => {
+      void transportVersion;
+      const targetId = hostId || activeHost?.id;
+      if (!targetId) return null;
+      return liveHostsRef.current.get(targetId)?.transport ?? null;
+    },
+    [activeHost?.id, transportVersion],
+  );
+
+  const getHostInfoForHost = useCallback(
+    (hostId?: string | null): HostInfo | null => {
+      const targetId = hostId || activeHost?.id;
+      if (!targetId) return null;
+      return hostInfoByHost[targetId] ?? null;
+    },
+    [activeHost?.id, hostInfoByHost],
+  );
+
+  // Unified sessions across all paired hosts (Mac + Cloud), deduped by path and sorted newest-first.
+  const sessions = useMemo(() => {
+    const byPath = new Map<string, SessionSummary>();
+    for (const h of hosts) {
+      const list = sessionsByHost[h.id] ?? [];
+      const info = hostInfoByHost[h.id];
+      const hostKind: 'cloud' | 'local' = isCloudHostEntry(h, info) ? 'cloud' : 'local';
+      const hostName = info?.host_name || h.name;
+      for (const s of list) {
+        const tagged: SessionSummary = {
+          ...s,
+          host_id: h.id,
+          host_name: hostName,
+          host_kind: hostKind,
+        };
+        const existing = byPath.get(s.path);
+        // Prefer cloud entry if same path somehow appears twice, else newest modified_ms.
+        if (!existing || (hostKind === 'cloud' && existing.host_kind !== 'cloud') || tagged.modified_ms > existing.modified_ms) {
+          byPath.set(s.path, tagged);
+        }
+      }
+    }
+    return Array.from(byPath.values()).sort((a, b) => b.modified_ms - a.modified_ms);
+  }, [hosts, sessionsByHost, hostInfoByHost]);
+
+  // Keep Android background foreground-service in sync when any paired host is connected.
+  const anyConnected = Object.values(stateByHost).some((s) => s === 'connected');
+  useEffect(() => {
+    let cancelled = false;
+    if (
+      activeHost &&
+      prefs.notificationsEnabled &&
+      prefs.keepAliveInBackground &&
+      anyConnected
+    ) {
+      void getNotificationPermissionStatus().then((status) => {
+        if (!cancelled && status === 'granted') {
+          startBackgroundKeepAlive(hostInfo?.host_name || activeHost.name);
+        }
       });
-    transport
-      .listSessions()
-      .then((res) => setSessions(res.sessions))
-      .catch(() => {});
-  }, [transport]);
+    } else {
+      stopBackgroundKeepAlive();
+    }
+    return () => {
+      cancelled = true;
+      if (!activeHost) stopBackgroundKeepAlive();
+    };
+  }, [
+    activeHost,
+    hostInfo?.host_name,
+    prefs.notificationsEnabled,
+    prefs.keepAliveInBackground,
+    anyConnected,
+  ]);
+
+  const retryConnection = useCallback(() => {
+    for (const [hostId, entry] of liveHostsRef.current.entries()) {
+      setErrorByHost((prev) => ({ ...prev, [hostId]: null }));
+      entry.transport.reconnectNow();
+      entry.transport
+        .getInfo()
+        .then((info) => setHostInfoByHost((prev) => ({ ...prev, [hostId]: info })))
+        .catch((err: unknown) => {
+          setErrorByHost((prev) => ({
+            ...prev,
+            [hostId]: err instanceof Error ? err.message : 'Failed to reach Pui host',
+          }));
+        });
+      entry.transport
+        .listSessions()
+        .then((res) => setSessionsByHost((prev) => ({ ...prev, [hostId]: res.sessions })))
+        .catch(() => {});
+    }
+  }, []);
 
   const refreshSessions = useCallback(async () => {
-    if (!transport) return;
-    const [info, list] = await Promise.all([
-      transport.getInfo().catch(() => null),
-      transport.listSessions(),
-    ]);
-    if (info) setHostInfo(info);
-    setSessions(list.sessions);
-  }, [transport]);
+    await Promise.all(
+      Array.from(liveHostsRef.current.entries()).map(async ([hostId, entry]) => {
+        const [info, list] = await Promise.all([
+          entry.transport.getInfo().catch(() => null),
+          entry.transport.listSessions().catch(() => null),
+        ]);
+        if (info) {
+          setHostInfoByHost((prev) => ({ ...prev, [hostId]: info }));
+        }
+        if (list) {
+          setSessionsByHost((prev) => ({ ...prev, [hostId]: list.sessions }));
+        }
+      }),
+    );
+  }, []);
 
   const loadSessionDetail = useCallback(
-    async (path: string): Promise<SessionDetail | null> => {
-      if (!transport) return null;
-      const detail = await transport.getSessionDetail(path);
+    async (path: string, hostId?: string | null): Promise<SessionDetail | null> => {
+      const targetTransport = getTransportForHost(hostId);
+      if (!targetTransport) return null;
+      const detail = await targetTransport.getSessionDetail(path);
       setDetailsByPath((prev) => ({ ...prev, [path]: detail }));
       return detail;
     },
-    [transport],
+    [getTransportForHost],
   );
 
   const value: PuiContextValue = {
@@ -458,6 +580,8 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     sessions,
     detailsByPath,
     transport,
+    getTransportForHost,
+    getHostInfoForHost,
     clientOrigin,
     saveHost,
     removeHost,
