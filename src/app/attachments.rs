@@ -19,6 +19,7 @@ pub(super) struct Item {
 pub(super) struct DraftImages {
     items: Vec<Item>,
     next: u64,
+    revision: u64,
     limit_notice: bool,
     tx: mpsc::Sender<(u64, Result<Attachment, String>)>,
     rx: Receiver<(u64, Result<Attachment, String>)>,
@@ -30,6 +31,7 @@ impl Default for DraftImages {
         Self {
             items: Vec::new(),
             next: 0,
+            revision: 0,
             limit_notice: false,
             tx,
             rx,
@@ -38,6 +40,37 @@ impl Default for DraftImages {
     }
 }
 impl DraftImages {
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(super) fn append_reviewed(
+        &mut self,
+        name: String,
+        image: Attachment,
+    ) -> Result<(), String> {
+        if self.items.len() >= MAX_ATTACHMENTS {
+            return Err("Up to 8 attachments; nothing added.".into());
+        }
+        if image.file.is_some()
+            || image.local_path.is_some()
+            || image.data.len() > 12 * 1024 * 1024
+            || !matches!(
+                image.mime.as_str(),
+                "image/png" | "image/jpeg" | "image/webp"
+            )
+        {
+            return Err("Unsupported bounded browser image.".into());
+        }
+        self.next = self.next.checked_add(1).ok_or("Attachment ID exhausted")?;
+        self.revision = self.revision.wrapping_add(1);
+        self.items.push(Item {
+            id: self.next,
+            name,
+            image: Some(image),
+            error: None,
+        });
+        Ok(())
+    }
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -45,6 +78,7 @@ impl DraftImages {
         !self.items.is_empty() && self.items.iter().all(|i| i.image.is_some())
     }
     pub fn clear(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
         self.items.clear();
         self.limit_notice = false;
     }
@@ -78,6 +112,7 @@ impl DraftImages {
             return;
         }
         self.next += 1;
+        self.revision = self.revision.wrapping_add(1);
         let id = self.next;
         self.items.push(Item {
             id,
@@ -128,6 +163,7 @@ impl DraftImages {
     pub fn poll(&mut self, ctx: &egui::Context) {
         for (id, result) in self.rx.try_iter() {
             if let Some(item) = self.items.iter_mut().find(|i| i.id == id) {
+                self.revision = self.revision.wrapping_add(1);
                 match result {
                     Ok(image) => item.image = Some(image),
                     Err(error) => item.error = Some(error),
@@ -192,6 +228,7 @@ impl DraftImages {
             }
         });
         if let Some(id) = remove {
+            self.revision = self.revision.wrapping_add(1);
             self.items.retain(|i| i.id != id);
             self.limit_notice = false;
         }

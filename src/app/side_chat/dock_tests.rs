@@ -141,6 +141,15 @@ fn split_keeps_details_files_and_browser_above_chat_in_themes_and_zoom() {
                     let main_editor = ctx.read_response(egui::Id::new("composer")).unwrap();
                     assert!(!main_editor.interact_rect.intersects(editor.interact_rect));
                     if mode != 0 {
+                        let (root, owner, _) = ctx
+                            .data(|data| {
+                                data.get_temp::<(PathBuf, String, u64)>(egui::Id::new(
+                                    "pui-file-capture-owner",
+                                ))
+                            })
+                            .expect("docked Files prepares browser/file capture ownership too");
+                        assert_eq!(root, app.prefs.cwd);
+                        assert_eq!(owner, app.review_comment_owner());
                         let pane = ctx
                             .data(|data| {
                                 data.get_temp::<egui::Rect>(egui::Id::new("btw-workspace-rect"))

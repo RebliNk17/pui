@@ -2734,6 +2734,14 @@ impl eframe::App for Pui {
             if self.terminals.focused(ctx) {
                 self.focus_composer = false;
             }
+            if self.files.is_open() {
+                context_capture::browser::invalidate_changed(self);
+                self.prepare_file_block_capture(ctx);
+                let capture_owner = self.review_comment_owner();
+                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
+                self.files
+                    .bind_browser_owner(&self.prefs.cwd, &capture_owner);
+            }
             let side_chat_workspace = self.side_chat_workspace(ctx);
             let central = if side_chat_workspace {
                 false
@@ -2746,9 +2754,6 @@ impl eframe::App for Pui {
             } else if terminal_expanded {
                 true
             } else if self.files.is_open() {
-                self.prepare_file_block_capture(ctx);
-                let capture_owner = self.review_comment_owner();
-                context_capture::bind_file_owner(ctx, &self.prefs.cwd, &capture_owner);
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.inspector_panel {

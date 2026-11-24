@@ -1,5 +1,6 @@
 //! Explicit context actions append bounded excerpts to the draft, never directly to Pi.
 use super::*;
+pub(in crate::app) mod browser;
 mod chips;
 mod diff;
 mod file_blocks;
@@ -17,6 +18,7 @@ pub(super) use source::{demo as demo_source, offer as offer_source_selection};
 pub(super) fn clear_source(ctx: &egui::Context) {
     source::clear(ctx);
     file_blocks::clear(ctx);
+    browser::clear(ctx);
     ctx.data_mut(|data| {
         data.remove::<Snippet>(egui::Id::new("pui-context-capture"));
         data.remove::<(PathBuf, String)>(egui::Id::new("pui-review-capture-owner"));
@@ -128,6 +130,7 @@ pub(crate) fn queue_parts<'a>(
 impl Pui {
     pub(super) fn prepare_file_block_capture(&mut self, ctx: &egui::Context) {
         file_blocks::prepare(self, ctx);
+        browser::prepare(self, ctx);
     }
     /// Runtime owner for local review: an unsaved chat is not the shared string "new".
     pub(super) fn review_comment_owner(&mut self) -> String {
@@ -138,6 +141,7 @@ impl Pui {
     }
     pub(super) fn collect_context_capture(&mut self) {
         file_blocks::collect(self);
+        browser::collect(self);
         source::finish(&self.ctx);
         let snippet = self
             .ctx
