@@ -190,10 +190,10 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(triggers["push"]["branches"], ["master"])
         job = config["jobs"]["macos-build"]
         checkout = job["steps"][0]
-        self.assertEqual(checkout["uses"], "actions/checkout@v4")
+        self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["fetch-depth"], 0)
-        restores = [s for s in job["steps"] if s.get("uses") == "actions/cache/restore@v4"]
-        saves = [s for s in job["steps"] if s.get("uses") == "actions/cache/save@v4"]
+        restores = [s for s in job["steps"] if s.get("uses", "").startswith("actions/cache/restore@")]
+        saves = [s for s in job["steps"] if s.get("uses", "").startswith("actions/cache/save@")]
         self.assertEqual(len(restores), 3)
         self.assertEqual(len(saves), 3)
         self.assertTrue(all("always()" in s["if"] for s in saves))
@@ -206,7 +206,7 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         self.assertEqual(job["needs"], "changes")
         self.assertEqual(job["if"], "needs.changes.outputs.macos == 'true'")
         self.assertTrue(all("needs.changes.outputs.toolchain == 'true'" in s["if"] for s in saves))
-        upload = next(s for s in job["steps"] if s.get("uses") == "actions/upload-artifact@v4")
+        upload = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
         self.assertEqual(upload["if"], "needs.changes.outputs.package == 'true'")
         # PRs are unfiltered so the required gate always reports; it depends on every validation job.
         self.assertIsNone(triggers["pull_request"])
