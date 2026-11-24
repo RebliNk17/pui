@@ -16,6 +16,11 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 - Per-host Claude sign-in on the cloud host, and an Auto mode indicator for cloud chats.
 - **Settings:** Remote & Mobile moved under App; a new Cloud Host dashboard with a phone pairing QR code.
 - **Chat:** continue work from the latest agent error; docked side chats now use the regular transcript and composer.
+- **Message actions** are now compact icons (Copy, Edit, Rewind, Fork, Quote) with descriptive tooltips; Copy briefly shows a check mark.
+- **Quote & ask:** selecting text in a reply opens a small popover — click the quote icon to just quote it, or type a question and press ↵ to send the quote with your question (⌥↵ adds both to your draft instead).
+- Sent quotes appear as a compact block in your message, with **Jump ↑** to scroll to the quoted reply.
+- **Composer context cards:** quotes and captured source, diff, terminal, console and browser excerpts now show as removable cards above the composer instead of raw text in the input. Long pastes collapse into a **Pasted text** card; hover to read it.
+- **Sidebar:** the usage meter is a circular percentage ring.
 - **Git:** reviewed abort, stash and recovery copies for in-progress Git operations; Git actions are summarized as compact activity lines.
 - **Browser:** scoped element inspection, reviewed captures and temporary tab groups.
 
@@ -36,6 +41,7 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 ### Development
 
 - Pull requests run only the affected test suites and skip packaging; the Rust suite runs about 3x faster on CI.
+- CI builds the app bundle only for release tags and manual runs, and pull requests reuse `master` caches.
 - `master` is protected (pull request, review and a required **CI result** check); Dependabot and a contributing guide were added.
 
 ## [1.0.1] - 2026-11-24
