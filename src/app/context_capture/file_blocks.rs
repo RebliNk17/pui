@@ -461,6 +461,7 @@ fn selected(selection: &Selection) -> Result<Snippet, &'static str> {
         // The exact (bounded) path is body provenance, not the chip's compact label.
         label: format!("Markdown preview · {count} explicit rendered blocks (not source lines)"),
         text,
+        ask: None,
     })
 }
 

@@ -149,3 +149,62 @@ fn markdown_file_preview_capture_labels_rendered_origin_without_claiming_source_
     assert!(app.draft.ends_with("\nchosen link literal\n[/Context]"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), REPLY);
 }
+
+/// Selecting text (no right-click) opens the quote popover; typing a question and Enter
+/// quotes + sends when the draft was empty, ⌥Enter only fills the draft, and an existing
+/// draft is never sent implicitly.
+#[test]
+fn selection_popover_asks_sends_or_fills_draft() {
+    fn select(ctx: &egui::Context, app: &mut Pui) {
+        let output = frame(ctx, app, vec![]);
+        let needle = "Prefix chosen link literal suffix.";
+        let range = range_in(&text(&output, needle).galley.job.text, "chosen");
+        let start = position(&output, needle, range.start);
+        let end = position(&output, needle, range.end);
+        frame(ctx, app, pointer(start, egui::PointerButton::Primary, true));
+        frame(ctx, app, vec![egui::Event::PointerMoved(end)]);
+        frame(ctx, app, pointer(end, egui::PointerButton::Primary, false));
+        for _ in 0..2 {
+            frame(ctx, app, vec![]);
+        }
+    }
+    for (draft, alt, expect_send) in [("", false, true), ("", true, false), ("Keep", false, false)]
+    {
+        let (ctx, mut app) = setup(true);
+        app.demo = false;
+        app.connected = true;
+        app.ultracode_ready = true;
+        app.state.busy = false;
+        app.state.session_file = Some("/fixture/chat.jsonl".into());
+        app.client = Some(rpc::Client::stub());
+        app.draft = draft.into();
+        select(&ctx, &mut app);
+        assert!(
+            egui::Popup::is_any_open(&ctx),
+            "selection opens the popover"
+        );
+        frame(&ctx, &mut app, vec![egui::Event::Text("Why?".into())]);
+        let modifiers = if alt {
+            egui::Modifiers::ALT
+        } else {
+            egui::Modifiers::NONE
+        };
+        frame(&ctx, &mut app, vec![key(egui::Key::Enter, modifiers)]);
+        for _ in 0..2 {
+            frame(&ctx, &mut app, vec![]);
+        }
+        let quoted = "[Context: Assistant reply · selected rendered text (not Markdown source)]\nchosen\n[/Context]\n\nWhy?";
+        if expect_send {
+            assert_eq!(app.deliveries.len(), 1, "Enter with a question sends");
+            assert_eq!(app.deliveries[0].message.text, quoted);
+            assert!(app.draft.is_empty());
+        } else {
+            assert!(
+                app.deliveries.is_empty(),
+                "nothing sent (alt={alt}, draft={draft:?})"
+            );
+            assert!(app.draft.ends_with(quoted), "draft: {:?}", app.draft);
+            assert!(app.draft.starts_with(draft));
+        }
+    }
+}

@@ -239,7 +239,14 @@ pub(super) fn collect(app: &mut Pui) {
                 Err("Browser context exceeds the whole-excerpt bound.".into())
             } else {
                 app.context_chips
-                    .append(&mut app.draft, Snippet { label, text: body })
+                    .append(
+                        &mut app.draft,
+                        Snippet {
+                            label,
+                            text: body,
+                            ask: None,
+                        },
+                    )
                     .map_err(str::to_owned)
             }
         }

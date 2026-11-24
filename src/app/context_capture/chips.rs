@@ -91,6 +91,18 @@ impl Draft {
         self.bind(draft);
         Ok(())
     }
+    /// Append the quote popover's follow-up question after the captures, keeping them attached.
+    pub(super) fn append_question(&mut self, draft: &mut String, question: &str) {
+        self.validate(draft);
+        if question.is_empty() || draft.len() + question.len() + 2 > MAX_DRAFT_BYTES {
+            return;
+        }
+        if !draft.is_empty() {
+            draft.push_str("\n\n");
+        }
+        draft.push_str(question);
+        self.bind(draft);
+    }
     fn remove(&mut self, draft: &mut String, id: u64) -> bool {
         self.validate(draft);
         let Some(index) = self.chips.iter().position(|chip| chip.id == id) else {

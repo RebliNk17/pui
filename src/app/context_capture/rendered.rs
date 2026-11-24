@@ -45,6 +45,7 @@ fn selected(text: &str, range: Range<usize>, label: &str) -> Option<Snippet> {
     Some(Snippet {
         label: format!("{label} · selected rendered text (not Markdown source)"),
         text: source::bounded(&text[start..end]),
+        ask: None,
     })
 }
 

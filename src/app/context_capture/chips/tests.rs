@@ -7,6 +7,7 @@ fn append(state: &mut Draft, draft: &mut String, label: &str, text: &str) -> u64
             Snippet {
                 label: label.into(),
                 text: text.into(),
+                ask: None,
             },
         )
         .unwrap();
@@ -74,7 +75,8 @@ fn count_and_total_draft_budget_include_exact_wrappers_separators_and_unicode_la
                 &mut draft,
                 Snippet {
                     label: "extra".into(),
-                    text: "body".into()
+                    text: "body".into(),
+                    ask: None,
                 }
             )
             .unwrap_err()
