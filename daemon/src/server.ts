@@ -3,6 +3,12 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { LiveAgent, type NotificationEvent, type SessionDetail } from './agent.ts';
+import {
+  cloneRepoIntoWorkspace,
+  getAdminStatus,
+  setupCloudGit,
+  writePiAuth,
+} from './admin.ts';
 import { discoverProjects, type DaemonConfig } from './config.ts';
 import {
   gitChanges,
@@ -403,6 +409,67 @@ export class PuiDaemonServer {
             platform: c.platform,
             device: c.device,
           })),
+        });
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/v1/admin/status') {
+        sendJson(res, 200, {
+          ...getAdminStatus(),
+          projects: this.projects(),
+          workspaces_dir: this.config.workspaces_dir,
+        });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/admin/sync-auth') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const auth = body.auth;
+        if (!auth || typeof auth !== 'object' || Array.isArray(auth)) {
+          sendJson(res, 400, { error: 'Missing auth object.' });
+          return;
+        }
+        const merge = body.merge !== false;
+        const result = writePiAuth(auth as Record<string, unknown>, merge);
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/admin/git-setup') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const result = setupCloudGit({
+          userName: typeof body.user_name === 'string' ? body.user_name : undefined,
+          userEmail: typeof body.user_email === 'string' ? body.user_email : undefined,
+          regenerateKey: Boolean(body.regenerate_key),
+        });
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/v1/projects/clone') {
+        const body = JSON.parse((await readBody(req)).toString('utf8') || '{}') as Record<
+          string,
+          unknown
+        >;
+        const repoUrl = typeof body.url === 'string' ? body.url : '';
+        if (!repoUrl.trim()) {
+          sendJson(res, 400, { error: 'Missing repository url.' });
+          return;
+        }
+        const result = cloneRepoIntoWorkspace(this.config, repoUrl, {
+          name: typeof body.name === 'string' ? body.name : undefined,
+          branch: typeof body.branch === 'string' ? body.branch : undefined,
+        });
+        sendJson(res, result.already_exists ? 200 : 201, {
+          ok: true,
+          ...result,
+          projects: this.projects(),
         });
         return;
       }

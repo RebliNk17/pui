@@ -1,6 +1,7 @@
 //! Opt-in Pui Remote HTTP + WebSocket server for mobile companion apps.
 //! Phase 1 binds directly (Tailscale-first); the JSON protocol is transport-agnostic
 //! so Phase 2 E2EE Cloud Relay can reuse the exact same frames.
+pub mod cloud;
 pub mod files;
 pub mod http;
 pub mod origin;
@@ -90,6 +91,9 @@ pub struct RemoteConfig {
     pub use_tls_in_qr: bool,
     /// Optional explicit hostname override for QR pairing (e.g. `my-mac.tail1234.ts.net`).
     pub public_host: String,
+    /// Optional paired headless `pui-daemon` cloud host (e.g. Oracle Cloud over Tailscale).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_host: Option<cloud::CloudHostConfig>,
 }
 
 impl Default for RemoteConfig {
@@ -102,6 +106,7 @@ impl Default for RemoteConfig {
             host_name: tailscale::default_host_name(),
             use_tls_in_qr: false,
             public_host: String::new(),
+            cloud_host: None,
         }
     }
 }

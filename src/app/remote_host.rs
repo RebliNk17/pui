@@ -1135,6 +1135,323 @@ impl Pui {
         if self.prefs.remote != before_adv && !self.demo {
             self.remote.apply_config(self.prefs.remote.clone());
         }
+
+        ui.add_space(18.0);
+        self.cloud_host_settings_ui(ui);
+    }
+
+    fn cloud_host_settings_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::remote::cloud;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct CloudUiState {
+            pair_draft: String,
+            busy: bool,
+            notice: Option<String>,
+            error: Option<String>,
+            status: Option<cloud::CloudAdminStatus>,
+            auto_fetched: bool,
+        }
+
+        let state_id = egui::Id::new("pui_cloud_host_ui_state");
+        let shared: Arc<Mutex<CloudUiState>> = ui.ctx().data_mut(|d| {
+            d.get_temp_mut_or_insert_with(state_id, || {
+                Arc::new(Mutex::new(CloudUiState::default()))
+            })
+            .clone()
+        });
+
+        let colors = crate::theme::palette(ui.ctx());
+        ui.label(
+            RichText::new("Cloud host (24/7 headless daemon)")
+                .size(14.0)
+                .strong()
+                .color(colors.text),
+        );
+        ui.add_space(3.0);
+        ui.label(
+            RichText::new(
+                "Connect Pui Desktop to a headless `pui-daemon` over Tailscale (for example on Oracle Cloud Always Free) to sync provider logins, provision a dedicated revocable GitHub SSH key, and clone repositories.",
+            )
+            .size(12.0)
+            .color(colors.muted),
+        );
+        ui.add_space(10.0);
+
+        let existing = self.prefs.remote.cloud_host.clone();
+
+        // Auto-fetch status once when opening Settings with a configured cloud host.
+        if let Some(cfg) = existing.clone() {
+            let should_fetch = shared
+                .lock()
+                .map(|mut s| {
+                    if !s.auto_fetched && !s.busy {
+                        s.auto_fetched = true;
+                        s.busy = true;
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+            if should_fetch {
+                let s_clone = shared.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let res = cloud::fetch_status(&cfg);
+                    if let Ok(mut st) = s_clone.lock() {
+                        st.busy = false;
+                        match res {
+                            Ok(status) => {
+                                st.status = Some(status);
+                                st.error = None;
+                            }
+                            Err(e) => st.error = Some(e),
+                        }
+                    }
+                    ctx.request_repaint();
+                });
+            }
+        }
+
+        settings::page_card(ui, |ui| {
+            if let Some(cfg) = existing {
+                let (busy, status_opt, notice, error) = shared
+                    .lock()
+                    .map(|s| (s.busy, s.status.clone(), s.notice.clone(), s.error.clone()))
+                    .unwrap_or((false, None, None, None));
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(&cfg.name)
+                            .size(13.5)
+                            .strong()
+                            .color(colors.text),
+                    );
+                    ui.label(
+                        RichText::new(format!("{}:{}", cfg.host, cfg.port))
+                            .size(12.0)
+                            .monospace()
+                            .color(colors.muted),
+                    );
+                    if busy {
+                        status_pill(ui, "Working…", colors.amber);
+                    } else if let Some(ref st) = status_opt {
+                        status_pill(ui, "Connected", colors.green);
+                        if st.has_pi_auth {
+                            status_pill(
+                                ui,
+                                &format!("Providers ({})", st.pi_auth_providers.len()),
+                                colors.green,
+                            );
+                        } else {
+                            status_pill(ui, "No provider logins", colors.amber);
+                        }
+                        if st.has_git_ssh_key {
+                            status_pill(ui, "Git SSH ready", colors.green);
+                        } else {
+                            status_pill(ui, "Git SSH not set", colors.muted);
+                        }
+                    } else if error.is_some() {
+                        status_pill(ui, "Unreachable", colors.red);
+                    }
+                });
+
+                if let Some(ref st) = status_opt {
+                    if !st.projects.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!("Cloud workspaces: {}", st.projects.join(", ")))
+                                .size(11.5)
+                                .color(colors.muted),
+                        );
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_enabled_ui(!busy, |ui| {
+                        if accent_button(ui, "Sync Provider Logins").clicked() {
+                            if let Ok(mut st) = shared.lock() {
+                                st.busy = true;
+                                st.notice = None;
+                                st.error = None;
+                            }
+                            let cfg_c = cfg.clone();
+                            let s_clone = shared.clone();
+                            let ctx = ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let sync_res = cloud::sync_pi_auth(&cfg_c);
+                                let status_res = cloud::fetch_status(&cfg_c).ok();
+                                if let Ok(mut st) = s_clone.lock() {
+                                    st.busy = false;
+                                    if let Some(fresh) = status_res {
+                                        st.status = Some(fresh);
+                                    }
+                                    match sync_res {
+                                        Ok(provs) => {
+                                            st.notice = Some(format!(
+                                                "Synced {} provider login(s) to {} (chmod 600).",
+                                                provs.len(),
+                                                cfg_c.name
+                                            ));
+                                        }
+                                        Err(e) => st.error = Some(e),
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+
+                        if secondary_button(ui, "Setup Git & GitHub Key").clicked() {
+                            if let Ok(mut st) = shared.lock() {
+                                st.busy = true;
+                                st.notice = None;
+                                st.error = None;
+                            }
+                            let cfg_c = cfg.clone();
+                            let s_clone = shared.clone();
+                            let ctx = ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let git_res = cloud::setup_git_and_register_github(&cfg_c);
+                                let status_res = cloud::fetch_status(&cfg_c).ok();
+                                if let Ok(mut st) = s_clone.lock() {
+                                    st.busy = false;
+                                    if let Some(fresh) = status_res {
+                                        st.status = Some(fresh);
+                                    }
+                                    match git_res {
+                                        Ok(res) => {
+                                            if !res.registered_on_github {
+                                                ctx.copy_text(res.public_key.clone());
+                                            }
+                                            st.notice = Some(res.detail);
+                                        }
+                                        Err(e) => st.error = Some(e),
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+
+                        if secondary_button(ui, "Clone Current Project").clicked() {
+                            if let Ok(mut st) = shared.lock() {
+                                st.busy = true;
+                                st.notice = None;
+                                st.error = None;
+                            }
+                            let cfg_c = cfg.clone();
+                            let cwd = self.prefs.cwd.clone();
+                            let s_clone = shared.clone();
+                            let ctx = ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let clone_res = cloud::clone_current_repo_to_cloud(&cfg_c, &cwd);
+                                let status_res = cloud::fetch_status(&cfg_c).ok();
+                                if let Ok(mut st) = s_clone.lock() {
+                                    st.busy = false;
+                                    if let Some(fresh) = status_res {
+                                        st.status = Some(fresh);
+                                    }
+                                    match clone_res {
+                                        Ok(msg) => st.notice = Some(msg),
+                                        Err(e) => st.error = Some(e),
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+
+                        if ghost_button(ui, "Refresh", Some(Icon::Refresh)).clicked() {
+                            if let Ok(mut st) = shared.lock() {
+                                st.busy = true;
+                                st.error = None;
+                            }
+                            let cfg_c = cfg.clone();
+                            let s_clone = shared.clone();
+                            let ctx = ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let res = cloud::fetch_status(&cfg_c);
+                                if let Ok(mut st) = s_clone.lock() {
+                                    st.busy = false;
+                                    match res {
+                                        Ok(fresh) => {
+                                            st.status = Some(fresh);
+                                            st.error = None;
+                                        }
+                                        Err(e) => st.error = Some(e),
+                                    }
+                                }
+                                ctx.request_repaint();
+                            });
+                        }
+
+                        if ghost_button(ui, "Disconnect", None).clicked() {
+                            self.prefs.remote.cloud_host = None;
+                            if let Ok(mut st) = shared.lock() {
+                                *st = CloudUiState::default();
+                            }
+                        }
+                    });
+                });
+
+                if let Some(msg) = notice {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(msg).size(12.0).color(colors.green));
+                }
+                if let Some(err) = error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(err).size(12.0).color(colors.red));
+                }
+            } else {
+                let mut draft = shared
+                    .lock()
+                    .map(|s| s.pair_draft.clone())
+                    .unwrap_or_default();
+                let err = shared.lock().ok().and_then(|s| s.error.clone());
+
+                settings::page_row(
+                    ui,
+                    "Pair cloud daemon",
+                    "Paste the `pui://pair?...` link printed by `pui-daemon` (run `npm run pair` on your server).",
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 90.0).clamp(160.0, 320.0);
+                            ui.add_sized(
+                                [w, theme::CONTROL_HEIGHT],
+                                theme::text_field(&mut draft, "pui://pair?v=1&host=100.x.y.z..."),
+                            );
+                            if accent_button(ui, "Connect").clicked() {
+                                match cloud::parse_pairing_uri(&draft) {
+                                    Ok(cfg) => {
+                                        self.prefs.remote.cloud_host = Some(cfg);
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.pair_draft.clear();
+                                            st.error = None;
+                                            st.auto_fetched = false;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Ok(mut st) = shared.lock() {
+                                            st.error = Some(e);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    },
+                );
+                if let Ok(mut st) = shared.lock() {
+                    if self.prefs.remote.cloud_host.is_none() {
+                        st.pair_draft = draft;
+                    }
+                }
+                if let Some(e) = err {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(e).size(12.0).color(colors.red));
+                }
+            }
+        });
     }
 }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { inferRepoDirName, validateGitCloneUrl } from '../src/admin.ts';
 import { buildPairingUri, isTailscaleIpv4, type DaemonConfig } from '../src/config.ts';
 import { PuiDaemonServer } from '../src/server.ts';
 import { createEmptySessionFile } from '../src/sessions.ts';
@@ -113,6 +114,32 @@ describe('pui-daemon v1 remote server', () => {
         { headers: authHeaders },
       );
       assert.equal(escapeRes.status, 404);
+
+      // Admin status + auth sync + git URL validation work cleanly.
+      const st0 = (await (
+        await fetch(`${base}/v1/admin/status`, { headers: authHeaders })
+      ).json()) as { has_pi_auth: boolean; projects: string[] };
+      assert.equal(st0.has_pi_auth, false);
+
+      const syncRes = await fetch(`${base}/v1/admin/sync-auth`, {
+        method: 'POST',
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth: { anthropic: { type: 'api_key', key: 'sk-test' } } }),
+      });
+      assert.equal(syncRes.status, 200);
+      const st1 = (await (
+        await fetch(`${base}/v1/admin/status`, { headers: authHeaders })
+      ).json()) as { has_pi_auth: boolean; pi_auth_providers: string[] };
+      assert.equal(st1.has_pi_auth, true);
+      assert.deepEqual(st1.pi_auth_providers, ['anthropic']);
+
+      assert.equal(
+        validateGitCloneUrl('git@github.com:RebliNk17/pui.git'),
+        'git@github.com:RebliNk17/pui.git',
+      );
+      assert.equal(inferRepoDirName('https://github.com/RebliNk17/pui.git'), 'pui');
+      assert.throws(() => validateGitCloneUrl('--upload-pack=evil'));
+      assert.throws(() => validateGitCloneUrl('file:///etc/passwd'));
     } finally {
       await srv.close();
       fs.rmSync(tmp, { recursive: true, force: true });

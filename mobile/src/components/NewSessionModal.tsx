@@ -1,11 +1,14 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import type { PermissionModeOption } from '../protocol/types';
+import type { PermissionModeOption, SavedHost } from '../protocol/types';
 import { usePalette } from '../theme/colors';
 
 interface Props {
   visible: boolean;
+  hosts?: SavedHost[];
+  activeHostId?: string | null;
+  onSelectHost?: (hostId: string) => Promise<void>;
   projects: string[];
   permissionModes: PermissionModeOption[];
   deviceLabel: string;
@@ -15,6 +18,9 @@ interface Props {
 
 export function NewSessionModal({
   visible,
+  hosts = [],
+  activeHostId,
+  onSelectHost,
   projects,
   permissionModes,
   deviceLabel,
@@ -27,6 +33,12 @@ export function NewSessionModal({
   const [permissionMode, setPermissionMode] = useState(permissionModes[0]?.key ?? 'auto');
   const [prompt, setPrompt] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (projects.length > 0 && !projects.includes(selectedCwd)) {
+      setSelectedCwd(projects[0]);
+    }
+  }, [projects, selectedCwd]);
 
   const effectiveCwd = customCwd.trim() || selectedCwd || projects[0] || '';
 
@@ -61,7 +73,48 @@ export function NewSessionModal({
             Origin will be tagged as: {deviceLabel}
           </Text>
 
-          <ScrollView style={{ maxHeight: 420 }}>
+          <ScrollView style={{ maxHeight: 440 }}>
+            {hosts.length > 1 && onSelectHost ? (
+              <View style={{ marginBottom: 12 }}>
+                <Text style={[styles.label, { color: colors.muted }]}>Where to run</Text>
+                <View style={styles.hostGrid}>
+                  {hosts.map((h) => {
+                    const active = h.id === activeHostId;
+                    const isCloud = h.name.toLowerCase().includes('cloud');
+                    return (
+                      <Pressable
+                        key={h.id}
+                        onPress={() => void onSelectHost(h.id)}
+                        style={[
+                          styles.hostPill,
+                          {
+                            backgroundColor: active ? colors.accentBg : colors.surfaceElevated,
+                            borderColor: active ? colors.accent : colors.border,
+                          },
+                        ]}
+                      >
+                        <Ionicons
+                          name={isCloud ? 'cloud-outline' : 'laptop-outline'}
+                          size={14}
+                          color={active ? colors.accent : colors.muted}
+                        />
+                        <Text
+                          numberOfLines={1}
+                          style={{
+                            color: active ? colors.accent : colors.text,
+                            fontSize: 12.5,
+                            fontWeight: '600',
+                          }}
+                        >
+                          {h.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+
             <Text style={[styles.label, { color: colors.muted }]}>Project folder</Text>
             <View style={styles.list}>
               {projects.map((p) => {
@@ -213,6 +266,20 @@ const styles = StyleSheet.create({
   list: {
     gap: 6,
     marginBottom: 8,
+  },
+  hostGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  hostPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
   },
   projectRow: {
     flexDirection: 'row',

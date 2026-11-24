@@ -37,7 +37,9 @@ export default function SessionsScreen() {
   const colors = usePalette();
   const { prefs, updatePrefs } = usePreferences();
   const {
+    hosts,
     activeHost,
+    selectHost,
     connectionState,
     connectionError,
     hostInfo,
@@ -686,6 +688,9 @@ export default function SessionsScreen() {
 
       <NewSessionModal
         visible={newOpen}
+        hosts={hosts}
+        activeHostId={activeHost?.id}
+        onSelectHost={selectHost}
         projects={hostInfo?.projects ?? []}
         permissionModes={defaultPermissionModes}
         deviceLabel={`${clientOrigin().platform === 'ios' ? 'iOS' : 'Android'} · ${deviceName}`}
