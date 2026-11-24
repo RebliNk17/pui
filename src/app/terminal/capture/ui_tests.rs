@@ -8,6 +8,7 @@ fn setup() -> (egui::Context, Pui) {
     app.terminals.toggle(&ctx, &root, true);
     app.state.busy = true;
     app.draft = "Keep me".into();
+    app.context_chips.clear_quotes();
     app.prefs.hide_inspector = true;
     for _ in 0..3 {
         frame(&ctx, &mut app, vec![]);
@@ -65,11 +66,11 @@ fn native_terminal_toolbar_capture_keeps_chat_shell_and_selection_and_releases_s
         .center();
     click(&ctx, &mut app, target);
     assert!(
-        app.draft
+        app.outgoing_text()
             .starts_with("Keep me\n\n[Context: Terminal selection")
     );
-    assert!(app.draft.contains("SELECTED"));
-    assert!(!app.draft.contains("CHANGED"));
+    assert!(app.outgoing_text().contains("SELECTED"));
+    assert!(!app.outgoing_text().contains("CHANGED"));
     assert!(app.state.busy && app.terminals.is_open());
     assert_eq!(app.state.messages.len(), messages);
     assert_eq!(
@@ -105,7 +106,7 @@ fn snapshot_cancellation_hide_and_project_switch_release_context_without_retarge
     app.prefs.cwd = root.join("src");
     frame(&ctx, &mut app, vec![]);
     assert!(ctx.data(|data| data.get_temp::<Capture>(key()).is_none()));
-    assert_eq!(app.draft, "Keep me");
+    assert_eq!(app.outgoing_text(), "Keep me");
     assert!(app.state.busy);
     assert_eq!(app.terminals.projects.len(), 2);
 }
@@ -133,13 +134,13 @@ fn capture_menu_keyboard_activation_does_not_answer_pending_permission() {
     );
     assert_eq!(app.state.dialogs.len(), 1);
     assert!(app.pending_dialog.is_none());
-    assert_eq!(app.draft, "Keep me");
+    assert_eq!(app.outgoing_text(), "Keep me");
     frame(
         &ctx,
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert!(app.draft.contains("Terminal visible output"));
+    assert!(app.outgoing_text().contains("Terminal visible output"));
     assert_eq!(app.state.dialogs.len(), 1);
     assert!(app.pending_dialog.is_none());
     assert!(commands.try_recv().is_err());
@@ -162,7 +163,7 @@ fn early_menu_escape_never_stops_busy_pi_after_terminal_loses_focus() {
     };
     frame(&ctx, &mut app, vec![escape]);
     assert!(app.state.busy);
-    assert_eq!(app.draft, "Keep me");
+    assert_eq!(app.outgoing_text(), "Keep me");
     assert!(!egui::Popup::is_any_open(&ctx));
     assert!(commands.try_recv().is_err());
     assert!(ctx.data(|data| data.get_temp::<Capture>(key()).is_none()));

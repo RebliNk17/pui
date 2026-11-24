@@ -72,8 +72,11 @@ fn maximum_viewport_capture_is_bounded_and_does_not_join_full_scrollback() {
     context_capture::queue(&ctx, &captured.label, &captured.text);
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
-    assert!(app.draft.contains("Context excerpt limited to 24 KiB"));
-    assert!(app.draft.len() < LIMIT + 1024);
+    assert!(
+        app.outgoing_text()
+            .contains("Context excerpt limited to 24 KiB")
+    );
+    assert!(app.outgoing_text().len() < LIMIT + 1024);
 }
 
 fn frame(
@@ -207,16 +210,17 @@ fn real_toolbar_and_context_menu_capture_frozen_text_once_without_terminal_input
             );
             let mut app = crate::app::files::tests::app(&ctx);
             app.draft = "Keep draft".into();
+            app.context_chips.clear_quotes();
             app.state.busy = true;
             let messages = app.state.messages.len();
             app.collect_context_capture();
-            assert!(app.draft.starts_with("Keep draft\n\n"));
-            assert!(app.draft.contains("original"));
-            assert!(!app.draft.contains("CHANGED"));
-            assert!(app.draft.contains("Terminal selection"));
-            let draft = app.draft.clone();
+            assert!(app.outgoing_text().starts_with("Keep draft\n\n"));
+            assert!(app.outgoing_text().contains("original"));
+            assert!(!app.outgoing_text().contains("CHANGED"));
+            assert!(app.outgoing_text().contains("Terminal selection"));
+            let draft = app.outgoing_text().clone();
             app.collect_context_capture();
-            assert_eq!(app.draft, draft);
+            assert_eq!(app.outgoing_text(), draft);
             assert!(app.state.busy);
             assert_eq!(app.state.messages.len(), messages);
         }
@@ -330,8 +334,9 @@ fn empty_visible_output_disables_capture_and_reopen_refreshes_frozen_snapshot() 
     );
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "unchanged".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
-    assert_eq!(app.draft, "unchanged");
+    assert_eq!(app.outgoing_text(), "unchanged");
     clear(&ctx);
     terminal.process(b"New visible output");
     click(
@@ -363,7 +368,7 @@ fn empty_visible_output_disables_capture_and_reopen_refreshes_frozen_snapshot() 
         true,
     );
     app.collect_context_capture();
-    assert!(app.draft.contains("New visible output"));
+    assert!(app.outgoing_text().contains("New visible output"));
     assert!(ctx.data(|data| data.get_temp::<Capture>(super::key()).is_none()));
 }
 

@@ -184,7 +184,7 @@ pub(super) fn capture(root: &Path, target: Option<&Path>) -> Result<String, Stri
                 .map_err(|e| e.to_string())?;
         }
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex::lower(hash.finalize()))
 }
 
 #[cfg(test)]

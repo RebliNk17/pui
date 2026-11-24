@@ -465,7 +465,7 @@ pub fn fingerprint(root: &Path) -> Result<String, String> {
     if paths(root)? != initial_paths {
         return Err("Source paths changed during fingerprinting.".into());
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex::lower(hash.finalize()))
 }
 
 #[cfg(test)]

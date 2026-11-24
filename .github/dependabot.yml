@@ -36,6 +36,14 @@ updates:
       - dependency-name: react-native
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: react
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: react-dom
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # Expo SDK 58 expects typescript ~6.0.x (`npx expo install --check` rejects 7.x).
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # Node types track the Node 22 toolchain used by CI and the test runner.
+      - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
@@ -46,6 +54,10 @@ updates:
     groups:
       daemon-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Node types track the Node 22 runtime (Dockerfile node:22, systemd unit, CI).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

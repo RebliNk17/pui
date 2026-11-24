@@ -94,6 +94,7 @@ impl Pui {
         let cwd = self.prefs.cwd.clone();
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.completions = Default::default();
         self.state.error = None;
         self.new_chat = false;

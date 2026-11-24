@@ -5,6 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
+# Fixture seeds are copied while other test processes run. Git's detached
+# auto-maintenance can add/remove lock files in a seed mid-copy (NotFound), so
+# no test Git process may start it. Real Git behavior is otherwise unchanged.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0
+export GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false
 # /usr/bin/git is a macOS developer-tool launcher, not the Git executable.
 # Avoid repeating launcher resolution for every subprocess in bounded real-Git
 # fixtures. Preserve explicitly selected Git installs and all production limits.

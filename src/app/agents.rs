@@ -77,7 +77,7 @@ pub(super) struct Chat {
     preview: Option<Receiver<Result<crate::history::Preview, String>>>,
     partial: bool,
     pub(super) draft: String,
-    context_chips: context_capture::Draft,
+    pub(super) context_chips: context_capture::Draft,
     recall: composer_history::Recall,
     completions: completions::View,
     images: attachments::DraftImages,

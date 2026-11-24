@@ -1139,6 +1139,9 @@ impl Pui {
                 {
                     self.transcript.jump_to_message(idx);
                 }
+                if let Some(idx) = self.take_quote_jump(ctx) {
+                    self.transcript.jump_to_message(idx);
+                }
                 self.transcript.find = self.chat_find.target();
                 self.transcript.task_output = matches!(
                     self.task_session(&self.state),

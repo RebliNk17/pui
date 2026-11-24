@@ -10,15 +10,17 @@ GitHub Actions provides the active Apple Silicon build via `.github/workflows/ma
   toolchain, Cargo/npm downloads plus pinned CEF runtime, and compiled Rust/CEF
   debug/release output. Final ZIP/DMG files and credentials are never cached.
 - Cache keys include architecture, Xcode build, macOS version, Rust pin, Cargo
-  lock/manifest, CEF pin, runtime pins/npm lock/notices, CI scripts and vendored Rust. Dependency/build caches
-  are branch-isolated with fallback to `master`; Cargo still checks source fingerprints before reuse.
-  App-source changes can reuse compatible compiled dependencies.
-- Caches save **even after validation failures** (`if: always()`), so repairs do not rebuild
-  everything. Compiled snapshots are capped at **one per branch/environment per
-  UTC day** with a compatible fallback. Bump
-  key prefixes to invalidate caches. Signed release jobs must use a separate
-  trusted namespace—these executable caches are for ad-hoc builds only.
-- Workflow runs on `master` pushes, pull requests, and stable version tags (`vX.Y.Z`).
+  lock/manifest, CEF pin, runtime pins/npm lock/notices, CI scripts and vendored Rust.
+  Caches are **written only from `master`** (pushes and manual runs); pull requests and tags
+  restore them read-only, so they never evict `master`'s caches under GitHub's 10 GB limit.
+  Restores fall back to any older snapshot; Cargo fingerprints rebuild only changed crates.
+- Toolchain/download caches save even after validation failures. Compiled test (`target/debug`)
+  and bundle (`target/release`) snapshots save **only after a fully successful run**, at most
+  one test snapshot per UTC day. Bump key prefixes to invalidate caches. Signed release jobs
+  must use a separate trusted namespace—these executable caches are for ad-hoc builds only.
+- Workflow runs on `master` pushes and pull requests (affected suites only), stable version
+  tags (`vX.Y.Z`) and manual dispatch (every suite plus the app bundle). Run it manually on
+  `master` before tagging to refresh the shared release-build cache.
 - Rust tests all remain required via `scripts/test-rust.sh`: bounded bulk tests,
   serial cross-window sync/table projection/table export groups, then the
   automation restart/OS-lock regression separately. No test groups are omitted
@@ -187,7 +189,7 @@ command tests do not certify Gatekeeper behavior or future CEF entitlement needs
 4. Review/commit/push through your normal process. After the default-branch checks
    pass, an authorized maintainer creates and pushes the matching protected
    `vX.Y.Z` tag. **No tag, commit, push or upload is performed by local scripts.**
-5. Inspect the GitHub Actions tag workflow (`macos-build` → `github-release`) and GitHub Release. Verify `SHA256SUMS`, download/mount
+5. Inspect the GitHub Actions tag workflow (`macos-tests`, which also builds the app for tags, → `github-release`) and GitHub Release. Verify `SHA256SUMS`, download/mount
    the DMG, and launch from a clean Mac, including Browser and DevTools.
 
 Manual local packaging (ad-hoc, no publication):

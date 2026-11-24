@@ -19,11 +19,14 @@ fn explicit_rectangle_to_draft_is_exact_once_bounded_and_never_sent() {
     for _ in 0..2 {
         frame(&ctx, &mut app, vec![]);
     }
-    assert!(app.draft.starts_with("Kept draft"));
-    assert!(app.draft.contains("Beta\t=1+2\nAlpha\tשלום\n"));
-    assert_eq!(app.draft.matches("Beta").count(), 1);
-    assert!(!app.draft.contains("Name\tNote"));
-    assert!(app.draft.contains("applied view rows 2–3, columns 1–2"));
+    assert!(app.outgoing_text().starts_with("Kept draft"));
+    assert!(app.outgoing_text().contains("Beta\t=1+2\nAlpha\tשלום\n"));
+    assert_eq!(app.outgoing_text().matches("Beta").count(), 1);
+    assert!(!app.outgoing_text().contains("Name\tNote"));
+    assert!(
+        app.outgoing_text()
+            .contains("applied view rows 2–3, columns 1–2")
+    );
     assert!(commands.try_recv().is_err());
     assert!(app.state.busy);
 }
@@ -37,9 +40,9 @@ fn rectangle_capture_native_keyboard_new_question_and_removed_range_keep_scope()
         let output = frame(&ctx, &mut app, vec![key(activation, egui::Modifiers::NONE)]);
         assert!(output.platform_output.commands.is_empty());
         frame(&ctx, &mut app, vec![]);
-        assert!(app.draft.contains("Beta"));
+        assert!(app.outgoing_text().contains("Beta"));
         assert_eq!(app.state.dialogs.len(), 1);
-        let draft = app.draft.clone();
+        let draft = app.outgoing_text().clone();
         let path = app.files.tabs[0].path.clone();
         let Some(Ok(Content::Table(preview))) = &mut app.files.tabs[0].content else {
             panic!()
@@ -51,14 +54,15 @@ fn rectangle_capture_native_keyboard_new_question_and_removed_range_keep_scope()
             &mut app,
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         );
-        assert_eq!(app.draft, draft);
+        assert_eq!(app.outgoing_text(), draft);
     }
 }
 #[test]
 fn capture_total_draft_limit_rejects_whole_and_owner_change_before_collection_refuses() {
     let (ctx, mut app) = super::selection_tests::selected();
     app.draft = "x".repeat(256 * 1024);
-    let before = app.draft.clone();
+    app.context_chips.clear_quotes();
+    let before = app.outgoing_text().clone();
     let id = control(&ctx, 8);
     ctx.memory_mut(|memory| memory.request_focus(id));
     frame(
@@ -66,9 +70,10 @@ fn capture_total_draft_limit_rejects_whole_and_owner_change_before_collection_re
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert_eq!(app.draft, before);
+    assert_eq!(app.outgoing_text(), before);
     assert!(app.state.error.as_ref().unwrap().contains("too large"));
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     let owner = app.review_comment_owner();
     context_capture::bind_file_owner(&ctx, &app.prefs.cwd, &owner);
     assert!(context_capture::queue_file_selection(
@@ -78,7 +83,7 @@ fn capture_total_draft_limit_rejects_whole_and_owner_change_before_collection_re
     ));
     app.state.session_file = Some("/different/session.jsonl".into());
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     assert!(
         app.state
             .error
@@ -122,7 +127,7 @@ fn capture_stale_pass_owner_and_oversized_ui_never_queue_partial_values() {
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     let Some(Ok(Content::Table(preview))) = &app.files.tabs[0].content else {
         panic!()
     };
@@ -166,10 +171,13 @@ fn capture_headerless_filtered_ragged_provenance_and_foreign_modal_are_truthful(
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert!(app.draft.contains("short\t\"\"\n"));
-    assert!(app.draft.contains("applied view rows 1–1, columns 1–2"));
-    assert!(!app.draft.contains("Beta"));
-    let draft = app.draft.clone();
+    assert!(app.outgoing_text().contains("short\t\"\"\n"));
+    assert!(
+        app.outgoing_text()
+            .contains("applied view rows 1–1, columns 1–2")
+    );
+    assert!(!app.outgoing_text().contains("Beta"));
+    let draft = app.outgoing_text().clone();
     super::ui_tests::open_copy(&ctx, &mut app);
     let id = control(&ctx, 8);
     ctx.memory_mut(|memory| memory.request_focus(id));
@@ -197,7 +205,7 @@ fn capture_headerless_filtered_ragged_provenance_and_foreign_modal_are_truthful(
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert_eq!(app.draft, draft);
+    assert_eq!(app.outgoing_text(), draft);
 }
 #[test]
 fn capture_exact_preflight_refuses_oversize_without_excerpt_fallback() {

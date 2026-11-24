@@ -51,6 +51,7 @@ fn actual_wrapped_unicode_selection_omits_soft_breaks_and_preserves_live_approva
     app.prefs.hide_sidebar = true;
     app.prefs.hide_inspector = true;
     app.draft = "Kept draft".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     let permission = json!({"id":"wrap-permission","method":"confirm","title":"Allow bash?","message":"Run\n{\"command\":\"echo example\"}\n\nApprove this call only."});
     assert!(prompts::approval(&permission).is_some());
@@ -109,19 +110,20 @@ fn actual_wrapped_unicode_selection_omits_soft_breaks_and_preserves_live_approva
         vec![key(egui::Key::Enter, egui::Modifiers::COMMAND)],
     );
     assert_eq!(app.state.dialogs.len(), 1);
-    assert_eq!(app.draft, "Kept draft");
+    assert_eq!(app.outgoing_text(), "Kept draft");
     frame(
         &ctx,
         &mut app,
         vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
     );
-    assert!(app.draft.starts_with(
+    assert!(app.outgoing_text().starts_with(
         "Kept draft\n\n[Context: src/wrapped.rs · Working tree vs HEAD · diff rows 3–3"
     ));
     assert!(
-        app.draft.ends_with(&format!("\n{chosen}\n[/Context]")),
+        app.outgoing_text()
+            .ends_with(&format!("\n{chosen}\n[/Context]")),
         "{}",
-        app.draft
+        app.outgoing_text()
     );
     assert_eq!(app.changes.review.as_ref().unwrap().1, diff);
     assert!(app.state.busy);
@@ -163,6 +165,7 @@ fn changing_wrap_clears_stale_selection_without_quoting_or_sending() {
         false,
     );
     app.draft = "Keep".into();
+    app.context_chips.clear_quotes();
     for _ in 0..4 {
         frame(&ctx, &mut app, vec![]);
     }
@@ -196,7 +199,7 @@ fn changing_wrap_clears_stale_selection_without_quoting_or_sending() {
     }
     assert!(app.changes.review.as_ref().unwrap().2.wrap());
     assert!(!egui::text_selection::LabelSelectionState::load(&ctx).has_selection());
-    assert_eq!(app.draft, "Keep");
+    assert_eq!(app.outgoing_text(), "Keep");
     assert!(
         app.changes.review.as_ref().unwrap().2.owns_focus(&ctx),
         "focus after wrap: {:?}",

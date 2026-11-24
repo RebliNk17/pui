@@ -9,9 +9,17 @@ pub(crate) fn file(path: &str) -> FileChange {
     }
 }
 
+// Fixture repositories are seeds copied by concurrent test processes. Git's
+// detached auto-maintenance (after add/commit) can create and delete lock files
+// in a seed while another process copies it, so fixtures never start it.
+pub(crate) const NO_AUTO_MAINTENANCE: [&str; 4] =
+    ["-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+
 pub(crate) fn git(root: &Path, args: &[&str]) -> Vec<u8> {
     let (bytes, status) = read_only::run(
-        read_only::command(root).args(args),
+        read_only::command(root)
+            .args(NO_AUTO_MAINTENANCE)
+            .args(args),
         &AtomicBool::new(false),
         Instant::now() + DEADLINE,
         1024 * 1024,
@@ -136,6 +144,10 @@ pub(crate) fn history_fixture() -> PathBuf {
                     root.to_str().unwrap(),
                     "-c",
                     "core.hooksPath=/dev/null",
+                    "-c",
+                    "gc.auto=0",
+                    "-c",
+                    "maintenance.auto=false",
                     "-c",
                     "commit.gpgsign=false",
                     "-c",

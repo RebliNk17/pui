@@ -76,7 +76,7 @@ fn requests_at(root: &Path, scope: &str, selection: usize) -> Result<Vec<Value>,
                 return Err("Pui's bundled engineering skills changed; rebuild the app before enabling them.".into());
             }
             Ok(json!({"action":"register", "kind":"skills", "scope":scope,
-                "source":path, "contentHash":format!("{:x}", Sha256::digest(&content))}))
+                "source":path, "contentHash":crate::hex::lower(Sha256::digest(&content))}))
         })
         .collect()
 }

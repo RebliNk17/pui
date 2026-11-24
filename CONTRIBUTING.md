@@ -24,8 +24,8 @@ Run what your change touches (CI does the same, selecting suites from the diff):
 | Mobile (`mobile/`) | `npm run typecheck && npm test` in `mobile/` |
 | Daemon (`daemon/`) | `npm run typecheck && npm test` in `daemon/` |
 
-Pull requests run only the affected suites and skip the app bundle, so builds stay fast.
-Pushes to `master` and release tags run everything and package the app.
+Pull requests (and pushes to `master`) run only the affected suites. The app bundle is built
+only for release tags (`vX.Y.Z`) or a manual **Actions → CI → Run workflow**, which also run every suite.
 
 ## Code rules
 

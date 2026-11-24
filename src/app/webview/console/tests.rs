@@ -203,6 +203,7 @@ fn actual_console_action_appends_only_that_message_once_without_send_or_cef() {
             "Console rows must be left aligned"
         );
         app.draft = "Keep draft".into();
+        app.context_chips.clear_quotes();
         app.state.busy = true;
         let count = app.state.messages.len();
         let (client, _events, commands) = rpc::Client::stub_with_records();
@@ -212,17 +213,17 @@ fn actual_console_action_appends_only_that_message_once_without_send_or_cef() {
             frame(&ctx, &state, &mut browser, pointer(target, pressed), key);
         }
         app.collect_context_capture();
-        assert!(app.draft.starts_with(
+        assert!(app.outgoing_text().starts_with(
             "Keep draft\n\n[Context: Browser console error · http://localhost/current"
         ));
         assert!(
-            app.draft
+            app.outgoing_text()
                 .contains("CHOSEN error 世界\nSource: http://localhost/a.js:4")
         );
-        assert!(!app.draft.contains("OTHER"));
-        let draft = app.draft.clone();
+        assert!(!app.outgoing_text().contains("OTHER"));
+        let draft = app.outgoing_text().clone();
         app.collect_context_capture();
-        assert_eq!(app.draft, draft);
+        assert_eq!(app.outgoing_text(), draft);
         assert!(app.state.busy);
         assert_eq!(app.state.messages.len(), count);
         assert!(commands.try_recv().is_err());
@@ -267,6 +268,7 @@ fn focused_console_action_keyboard_add_is_not_an_approval_shortcut() {
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     let focus = ctx
         .data(|data| {
             data.get_temp::<egui::Id>(egui::Id::new((
@@ -292,7 +294,7 @@ fn focused_console_action_keyboard_add_is_not_an_approval_shortcut() {
         key,
     );
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     ctx.memory_mut(|memory| memory.request_focus(focus));
     frame(
         &ctx,
@@ -302,8 +304,9 @@ fn focused_console_action_keyboard_add_is_not_an_approval_shortcut() {
         key,
     );
     app.collect_context_capture();
-    assert!(app.draft.contains("Keyboard message"));
+    assert!(app.outgoing_text().contains("Keyboard message"));
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     let permission = json!({"id":"console-permission", "method":"confirm", "title":"Allow bash?", "message":"Run\n{\"command\":\"echo example\"}\n\nApprove this call only."});
     assert!(prompts::approval(&permission).is_some());
     app.state.dialogs.push_back(permission);
@@ -327,7 +330,7 @@ fn focused_console_action_keyboard_add_is_not_an_approval_shortcut() {
         },
     );
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     assert!(app.pending_dialog.is_none());
     assert_eq!(app.state.dialogs.len(), 1);
     assert!(commands.try_recv().is_err());
@@ -373,9 +376,11 @@ fn identical_messages_and_rotating_bounded_queue_do_not_retarget_pointer_actions
     );
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
     assert_eq!(
-        app.draft, "Kept",
+        app.outgoing_text(),
+        "Kept",
         "A removed row cannot transfer its press to another message"
     );
 }

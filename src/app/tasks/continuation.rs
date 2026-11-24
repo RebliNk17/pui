@@ -46,10 +46,9 @@ impl Pui {
             id: uuid::Uuid::new_v4().to_string(),
             boundary,
             fingerprint: task.latest().unwrap().fingerprint.clone().unwrap(),
-            confirmed_record: format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_vec(&expected).unwrap())
-            ),
+            confirmed_record: crate::hex::lower(Sha256::digest(
+                serde_json::to_vec(&expected).unwrap(),
+            )),
             created: domain::now(),
         });
         let (reply, rx) = mpsc::channel();
@@ -103,7 +102,7 @@ impl Pui {
             .find(|current| current.id == task.id)
             .is_some_and(|current| {
                 use sha2::{Digest, Sha256};
-                format!("{:x}", Sha256::digest(serde_json::to_vec(current).unwrap()))
+                crate::hex::lower(Sha256::digest(serde_json::to_vec(current).unwrap()))
                     == task.continuations.last().unwrap().confirmed_record
             });
         let owner_valid = self
