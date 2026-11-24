@@ -13,8 +13,11 @@ pub(crate) mod fetch;
 pub(crate) mod history;
 pub(crate) mod index_action;
 pub(crate) mod initialize;
+pub(crate) mod operation;
 pub(crate) mod push;
 pub(crate) mod read_only;
+pub(crate) mod recovery_manager;
+pub(crate) mod stash;
 use read_only::DEADLINE;
 
 pub(crate) const MAX_FILES: usize = 256;
