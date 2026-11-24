@@ -94,10 +94,15 @@ impl Pui {
                         self.request_apply(task, plan);
                     }
                     for change in &plan.changes {
+                        let mode_note = match (change.before_mode, change.after_mode) {
+                            (Some(a), Some(b)) if a != b => format!(" · {a:04o}→{b:04o}"),
+                            (None, Some(0o755)) => " · 0755".into(),
+                            _ => String::new(),
+                        };
                         crate::section::Section::new(&change.path)
                             .id_salt((&task.id, "net-preview", &change.path))
                             .summary(format!(
-                                "{:?}{}{}",
+                                "{:?}{mode_note}{}{}",
                                 change.kind,
                                 if change.conflict { " · conflict" } else { "" },
                                 if change.unsupported.is_some() {
@@ -110,9 +115,21 @@ impl Pui {
                                 if let Some(reason) = &change.unsupported {
                                     ui.add(egui::Label::new(reason).wrap());
                                 }
-                                for (label, value) in [
-                                    ("Preparation baseline", &change.before),
-                                    ("Candidate snapshot", &change.after),
+                                for (label, value, raw, hash, mode) in [
+                                    (
+                                        "Preparation baseline",
+                                        &change.before,
+                                        &change.before_bytes,
+                                        &change.before_hash,
+                                        change.before_mode,
+                                    ),
+                                    (
+                                        "Candidate snapshot",
+                                        &change.after,
+                                        &change.after_bytes,
+                                        &change.after_hash,
+                                        change.after_mode,
+                                    ),
                                 ] {
                                     ui.label(theme::caption(ui, label));
                                     if let Some(text) = value {
@@ -128,6 +145,24 @@ impl Pui {
                                                 "Preview excerpt truncated.",
                                             ));
                                         }
+                                    } else if let Some(bytes) = raw {
+                                        ui.label(theme::small(
+                                            ui,
+                                            format!(
+                                                "Binary content ({} bytes{}{})",
+                                                bytes.len(),
+                                                mode.map(|m| format!(" · mode {m:04o}"))
+                                                    .unwrap_or_default(),
+                                                hash.as_deref()
+                                                    .map(|h| {
+                                                        format!(
+                                                            " · sha256:{}",
+                                                            &h[..12.min(h.len())]
+                                                        )
+                                                    })
+                                                    .unwrap_or_default(),
+                                            ),
+                                        ));
                                     } else {
                                         ui.label(theme::small(ui, "Absent or non-text content."));
                                     }

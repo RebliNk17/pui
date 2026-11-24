@@ -480,14 +480,8 @@ pub(super) fn transact(
     for (i, change) in plan.changes.iter().enumerate() {
         name(change.path.as_bytes())?;
         let p = parent(&plan.identity.original, &change.path)?;
-        let before = change.before.as_ref().map(|s| FileState {
-            bytes: s.as_bytes().into(),
-            mode: change.before_mode.unwrap(),
-        });
-        let after = change.after.as_ref().map(|s| FileState {
-            bytes: s.as_bytes().into(),
-            mode: change.after_mode.unwrap(),
-        });
+        let before = change.before_state()?;
+        let after = change.after_state()?;
         if at_state(&p, &p.leaf)? != before {
             return Err(format!("Target changed before apply: {}", change.path));
         }
@@ -739,7 +733,7 @@ fn load_journal(directory: &Path, task: &Task, id: &str) -> Result<Journal, Stri
     let mut total = 0u64;
     for (i, op) in journal.operations.iter().enumerate() {
         name(op.path.as_bytes())?;
-        if !paths.insert(op.path.to_ascii_lowercase())
+        if !paths.insert(op.path.to_lowercase())
             || op.stage != format!(".pui-apply-{id}-{i}-new")
             || op.backup != format!(".pui-apply-{id}-{i}-old")
             || op.before == op.after
@@ -750,21 +744,13 @@ fn load_journal(directory: &Path, task: &Task, id: &str) -> Result<Journal, Stri
             total = total
                 .checked_add(state.bytes.len() as u64)
                 .ok_or("Recovery bytes overflow")?;
+            let is_text = !state.bytes.contains(&0) && std::str::from_utf8(&state.bytes).is_ok();
             if !matches!(state.mode, 0o644 | 0o755)
-                || state.bytes.contains(&0)
-                || std::str::from_utf8(&state.bytes).is_err()
+                || (!is_text && state.bytes.len() > MAX_BINARY_FILE_BYTES)
                 || total > 2 * MAX_BYTES
             {
                 return Err("Unsupported or oversized apply recovery content.".into());
             }
-        }
-        if op
-            .before
-            .as_ref()
-            .zip(op.after.as_ref())
-            .is_some_and(|(a, b)| a.mode != b.mode)
-        {
-            return Err("Unsupported apply recovery mode change.".into());
         }
     }
     Ok(journal)

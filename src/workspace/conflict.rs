@@ -70,13 +70,14 @@ fn entries(bytes: &[u8], path: &str) -> Result<[Option<(String, String)>; 3], St
     Ok(result)
 }
 pub(crate) fn inspect(root: &Path, path: &str, cancel: &AtomicBool) -> Result<Review, String> {
-    inspect_at(root, path, cancel, Instant::now() + DEADLINE)
+    inspect_at(root, path, cancel, Instant::now() + DEADLINE, false)
 }
 pub(super) fn inspect_at(
     root: &Path,
     path: &str,
     cancel: &AtomicBool,
     deadline: Instant,
+    verified_outer: bool,
 ) -> Result<Review, String> {
     if !root.is_absolute()
         || path.is_empty()
@@ -89,13 +90,14 @@ pub(super) fn inspect_at(
     {
         return Err("Invalid literal conflict path.".into());
     }
-    if run(
-        root,
-        &["rev-parse", "--show-toplevel"],
-        cancel,
-        deadline,
-        8193,
-    )? != format!("{}\n", root.display()).as_bytes()
+    if !verified_outer
+        && run(
+            root,
+            &["rev-parse", "--show-toplevel"],
+            cancel,
+            deadline,
+            8193,
+        )? != format!("{}\n", root.display()).as_bytes()
     {
         return Err("Exact repository root required.".into());
     }
@@ -129,7 +131,7 @@ pub(super) fn inspect_at(
             sides[index] = Some(Side { mode, oid, text });
         }
     }
-    if run(root, &args, cancel, deadline, 16384)? != raw {
+    if !verified_outer && run(root, &args, cancel, deadline, 16384)? != raw {
         return Err("Conflict stages changed during inspection; review again.".into());
     }
     Ok(Review {
