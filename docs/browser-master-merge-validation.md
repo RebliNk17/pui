@@ -11,4 +11,6 @@ Combined-source checks in private Cargo target `/tmp/pui-browser-completion-owne
 - Prompt architecture **3 passed** (`/tmp/pui-browser-merge-prompts.log`).
 - Feature diff whitespace checks pass. Whole-tree formatting check identifies pre-existing `src/app/views.rs` connector-row formatting on master; not silently rewritten as browser work.
 
+Master concurrently advanced to `aff58872151419b2cd543b6bbbd831899c9d5332` (Git activity summaries). Merged that tip normally into the prepared integration (`73f62943`), with no conflicts. Combined browser **99**, Git activity **11** and transcript activity **1** tests pass (`/tmp/pui-browser-master-final-{browser,activity,transcript}.log`). Original checkout's unrelated unstaged connector/message edits were not included.
+
 The complete browser validation, disposable actual CEF acceptance, and **11 existing Git-related full-suite failures** remain disclosed in `browser-completion-validation.md`. A new full suite on the combined master is not claimed; this merge does not fix those unrelated Git failures or incorporate another worktree's pending changes. No push, install, release or installed-app restart is authorized by this local merge request.
