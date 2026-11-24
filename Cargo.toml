@@ -19,7 +19,7 @@ fs2 = "0.4"
 libc = "0.2"
 notify = "8"
 uuid = { version = "1", features = ["v4"] }
-rfd = "0.15"
+rfd = "0.17"
 pulldown-cmark = "0.13"
 url = "2"
 unicode-bidi = "0.3"
