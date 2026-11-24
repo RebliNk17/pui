@@ -28,6 +28,11 @@ Git tags (`vX.Y.Z`). Only the selected version's section is published to GitLab.
 - Session identity is consistent, and development builds no longer steal notification clicks from the installed app.
 - Cloud: chunked HTTP responses, clone failures, GitHub key detection and Keychain `gh` tokens are handled correctly.
 
+### Security
+
+- Updated dependencies: `cookie` 0.18.3 and `url` 2.5.9 (RUSTSEC-2026-0594, RUSTSEC-2026-0592), and a mobile `minimatch` advisory (GHSA-g3hv-75wg-m249). The Linux file dialog no longer uses the unmaintained `zbus` crates.
+- Upgraded `sha2` 0.11, `dirs` 7, `base64` 0.23 and `rfd` 0.17, the daemon's TypeScript 7, and the CI GitHub Actions.
+
 ### Development
 
 - Pull requests run only the affected test suites and skip packaging; the Rust suite runs about 3x faster on CI.
