@@ -165,23 +165,35 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
             self.assertIn(expected, paths)
         for forbidden in ("dist", "~/.ssh", "~/.npmrc"):
             self.assertNotIn(forbidden, paths)
-        # Affected-suite selection precedes caches; partial runs never seed caches or upload.
-        ids = [s.get("id") for s in job["steps"]]
-        self.assertLess(ids.index("affected"), ids.index("restore-toolchain"))
-        self.assertTrue(all("steps.affected.outputs.toolchain == 'true'" in s["if"] for s in saves))
+        # Affected-suite selection gates the macOS job; partial runs never seed caches or upload.
+        self.assertEqual(job["needs"], "changes")
+        self.assertEqual(job["if"], "needs.changes.outputs.macos == 'true'")
+        self.assertTrue(all("needs.changes.outputs.toolchain == 'true'" in s["if"] for s in saves))
         upload = next(s for s in job["steps"] if s.get("uses") == "actions/upload-artifact@v4")
-        self.assertEqual(upload["if"], "steps.affected.outputs.package == 'true'")
+        self.assertEqual(upload["if"], "needs.changes.outputs.package == 'true'")
+        # PRs are unfiltered so the required gate always reports; it depends on every validation job.
+        self.assertIsNone(triggers["pull_request"])
+        gate = config["jobs"]["ci-result"]
+        self.assertEqual(gate["name"], "CI result")
+        self.assertEqual(gate["if"], "always()")
+        self.assertEqual(set(gate["needs"]), {"changes", "macos-build", "mobile-validate", "daemon-validate"})
 
     def test_affected_selects_only_changed_suites_and_fails_safe(self):
         spec = importlib.util.spec_from_file_location("affected", ROOT / "scripts/ci/affected.py")
         affected = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(affected)
-        everything = dict.fromkeys(affected.SUITES, True)
+        everything = {**dict.fromkeys(affected.SUITES, True), "toolchain": True, "macos": True}
 
         def only(*suites):
-            return {suite: suite in suites for suite in affected.SUITES}
+            result = {suite: suite in suites for suite in affected.SUITES}
+            result["toolchain"] = result["rust"] or result["package"]
+            result["macos"] = any(result[s] for s in ("rust", "node", "python", "package"))
+            return result
 
-        self.assertEqual(affected.select(["README.md", "docs/x.md", "mobile/App.tsx", "daemon/src/a.ts"]), only())
+        self.assertEqual(affected.select(["README.md", "docs/x.md", ".github/workflows/android.yml"]), only())
+        self.assertEqual(affected.select(["mobile/App.tsx", "mobile/README.md"]), only("mobile"))
+        self.assertEqual(affected.select(["daemon/src/a.ts"]), only("daemon"))
+        self.assertFalse(affected.select(["mobile/App.tsx", "daemon/src/a.ts"])["macos"])
         self.assertEqual(affected.select(["src/app/views.rs"]), only("rust"))
         self.assertEqual(affected.select(["tests/prompt_design.rs", "vendor/egui/src/lib.rs"]), only("rust"))
         self.assertEqual(affected.select(["scripts/permissions.ts", "tests/permissions.test.mjs"]), only("node"))
@@ -197,7 +209,8 @@ if [[ "$1" == which ]]; then echo "$FAKE_TOOLCHAIN/cargo"; fi
         script = str(ROOT / "scripts/ci/affected.py")
         for args in ([], ["0000000000000000000000000000000000000000"]):
             output = subprocess.run(["python3", script, *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
-            self.assertEqual(output.split(), ["rust=true", "node=true", "python=true", "package=true", "toolchain=true"])
+            self.assertEqual(output.split(), ["rust=true", "node=true", "python=true", "package=true", "mobile=true",
+                                              "daemon=true", "toolchain=true", "macos=true"])
 
     def test_pull_request_runs_only_selected_suites(self):
         with tempfile.TemporaryDirectory() as temp:

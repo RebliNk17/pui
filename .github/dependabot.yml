@@ -1,0 +1,56 @@
+version: 2
+# Weekly, grouped updates keep PR noise low; security updates are not delayed.
+# packaging/runtime is intentionally absent: its Pi SDK is pinned together with
+# pins.json integrity hashes and notices, and must be updated via the release flow.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # egui/epaint are vendored with bidi patches ([patch.crates-io]); eframe must match them.
+      - dependency-name: eframe
+      - dependency-name: egui
+      - dependency-name: epaint
+      # Exact pins: CEF must match the verified runtime archive; resvg/svgtypes are pinned for SVG notices.
+      - dependency-name: cef
+      - dependency-name: resvg
+      - dependency-name: svgtypes
+
+  - package-ecosystem: npm
+    directory: /mobile
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      mobile-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Expo SDK / React Native majors need a coordinated upgrade (expo install --fix).
+      - dependency-name: expo
+        update-types: ["version-update:semver-major"]
+      - dependency-name: react-native
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: react
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: npm
+    directory: /daemon
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      daemon-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
