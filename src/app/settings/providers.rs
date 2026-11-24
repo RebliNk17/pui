@@ -716,6 +716,8 @@ pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredMod
         let raw_id = item["id"]
             .as_str()
             .or_else(|| item["name"].as_str())
+            .or_else(|| item["model_name"].as_str())
+            .or_else(|| item["model_group"].as_str())
             .or_else(|| item["model"].as_str())
             .map(str::trim)
             .unwrap_or_default();
@@ -745,9 +747,13 @@ pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredMod
             .trim()
             .to_owned();
         let lower = id.to_ascii_lowercase();
+        let info = &item["model_info"];
         let reasoning = item["reasoning"]
             .as_bool()
+            .or_else(|| item["supports_reasoning"].as_bool())
             .or_else(|| item["thinking"].as_bool())
+            .or_else(|| info["supports_reasoning"].as_bool())
+            .or_else(|| info["reasoning"].as_bool())
             .unwrap_or_else(|| {
                 lower.contains("r1")
                     || lower.contains("qwq")
@@ -758,34 +764,87 @@ pub(in crate::app) fn parse_discovered_models(data: &Value) -> Vec<DiscoveredMod
                     || lower.contains("o4")
                     || lower.contains("claude-3-7")
                     || lower.contains("claude-4")
-                    || lower.contains("claude-sonnet-4")
-                    || lower.contains("claude-opus-4")
+                    || ["claude-sonnet-", "claude-opus-", "claude-haiku-"]
+                        .iter()
+                        .any(|prefix| {
+                            lower.split_once(prefix).is_some_and(|(_, version)| {
+                                version
+                                    .split(['-', '.'])
+                                    .next()
+                                    .and_then(|major| major.parse::<u32>().ok())
+                                    .is_some_and(|major| major >= 4)
+                            })
+                        })
                     || lower.contains("gpt-5")
+                    || lower.contains("gpt-6")
+                    || lower.contains("gpt-oss")
+                    || lower.contains("glm-4.7")
+                    || lower.contains("glm-5")
+                    || lower.contains("minimax-m2")
+                    || lower.contains("kimi-k")
+                    || lower.contains("deepseek-v4")
+                    || lower.contains("grok-4")
                     || lower.contains("gemini-2.5")
                     || lower.contains("gemini-3")
                     || lower.contains("gemini-4")
             });
-        let vision = lower.contains("vl")
-            || lower.contains("vision")
-            || lower.contains("gpt-4o")
-            || lower.contains("gpt-5")
-            || lower.contains("claude")
-            || lower.contains("gemini")
-            || lower.contains("pixtral")
-            || lower.contains("gemma-3")
-            || lower.contains("gemma-4");
-        let context_window = item["context_window"]
-            .as_u64()
-            .or_else(|| item["context_length"].as_u64())
-            .or_else(|| item["max_model_len"].as_u64())
-            .or_else(|| item["inputTokenLimit"].as_u64())
-            .map(|v| (v as u32).clamp(4096, 2_000_000))
+        let vision = item["supports_vision"]
+            .as_bool()
+            .or_else(|| item["vision"].as_bool())
+            .or_else(|| info["supports_vision"].as_bool())
+            .or_else(|| {
+                item["input"]
+                    .as_array()
+                    .map(|input| input.iter().any(|kind| kind.as_str() == Some("image")))
+            })
+            .unwrap_or_else(|| {
+                lower.contains("vl")
+                    || lower.contains("vision")
+                    || lower.contains("gpt-4o")
+                    || lower.contains("gpt-5")
+                    || lower.contains("gpt-6")
+                    || lower.contains("claude")
+                    || lower.contains("gemini")
+                    || lower.contains("pixtral")
+                    || lower.contains("gemma-3")
+                    || lower.contains("gemma-4")
+                    || lower.contains("grok-4.6")
+                    || lower.contains("grok-4.7")
+                    || lower.contains("kimi-k3")
+                    || lower.contains("deepseek-v4.1")
+            });
+        // LiteLLM exposes limits directly or inside model_info. Prefer explicit
+        // input/output limits over its ambiguous legacy max_tokens field, and
+        // preserve reported values instead of silently clamping model metadata.
+        let limit = |source: &Value, fields: &[&str]| {
+            fields.iter().find_map(|field| {
+                source[*field]
+                    .as_f64()
+                    .filter(|v| {
+                        v.is_finite() && *v > 0.0 && *v <= u32::MAX as f64 && v.fract() == 0.0
+                    })
+                    .map(|v| v as u32)
+            })
+        };
+        let context_fields = [
+            "context_window",
+            "context_length",
+            "max_model_len",
+            "inputTokenLimit",
+            "max_input_tokens",
+        ];
+        let output_fields = [
+            "max_output_tokens",
+            "max_completion_tokens",
+            "outputTokenLimit",
+        ];
+        let context_window = limit(item, &context_fields)
+            .or_else(|| limit(&item["model_info"], &context_fields))
+            .or_else(|| limit(&item["model_info"], &["max_tokens"]))
             .unwrap_or(128_000);
-        let max_tokens = item["max_tokens"]
-            .as_u64()
-            .or_else(|| item["max_completion_tokens"].as_u64())
-            .or_else(|| item["outputTokenLimit"].as_u64())
-            .map(|v| (v as u32).clamp(1024, 128_000))
+        let max_tokens = limit(item, &output_fields)
+            .or_else(|| limit(&item["model_info"], &output_fields))
+            .or_else(|| limit(item, &["max_tokens"]))
             .unwrap_or(16_384);
         models.push(DiscoveredModel {
             id: id.to_owned(),
@@ -826,27 +885,7 @@ fn discover_models_from_endpoint(
     } else {
         None
     };
-    let script = r#"
-const [primaryUrl, fallbackUrl, apiKey] = process.argv.slice(-3);
-async function tryFetch(target) {
-  const headers = { 'Accept': 'application/json' };
-  let url = target;
-  if (apiKey && !apiKey.startsWith('$') && !apiKey.startsWith('!')) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
-    headers['x-api-key'] = apiKey;
-    headers['x-goog-api-key'] = apiKey;
-  }
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, body: text };
-}
-let result = await tryFetch(primaryUrl).catch(e => ({ ok: false, status: 0, error: String(e.message || e) }));
-if (!result.ok && fallbackUrl) {
-  const second = await tryFetch(fallbackUrl).catch(() => null);
-  if (second && second.ok) result = second;
-}
-process.stdout.write(JSON.stringify(result));
-"#;
+    let script = include_str!("../../../scripts/discover-models.mjs");
     let mut command = std::process::Command::new(crate::runtime::node_binary());
     command
         .args(["--input-type=module", "--eval", script])
@@ -2841,6 +2880,124 @@ mod tests {
         assert!(!models[0].reasoning);
         assert!(models[1].reasoning);
         assert!(models[2].vision);
+    }
+
+    #[test]
+    fn parses_litellm_model_limits_without_defaults_or_clamping() {
+        let models = parse_discovered_models(&json!({"data": [
+            {"id": "large-context", "max_input_tokens": 4_000_000,
+             "max_output_tokens": 200_000, "max_tokens": 4096},
+            {"id": "small-context", "max_input_tokens": 2048,
+             "max_output_tokens": 512},
+            {"model_name": "gateway-alias", "model_info": {
+                "id": "internal-deployment-id", "max_input_tokens": 1_048_576,
+                "max_output_tokens": 65_536, "max_tokens": 8192}},
+            {"model_name": "legacy-info", "model_info": {"max_tokens": 200_000}}
+        ]}));
+        assert_eq!(models.len(), 4);
+        assert_eq!(
+            (models[0].context_window, models[0].max_tokens),
+            (4_000_000, 200_000)
+        );
+        assert_eq!(
+            (models[1].context_window, models[1].max_tokens),
+            (2048, 512)
+        );
+        assert_eq!(models[2].id, "gateway-alias");
+        assert_eq!(
+            (models[2].context_window, models[2].max_tokens),
+            (1_048_576, 65_536)
+        );
+        assert_eq!(
+            (models[3].context_window, models[3].max_tokens),
+            (200_000, 16_384)
+        );
+    }
+
+    #[test]
+    fn discovery_limits_skip_invalid_values_and_preserve_explicit_context() {
+        let models = parse_discovered_models(&json!([
+            {"id": "explicit", "context_window": 32_768, "max_input_tokens": 8192,
+             "max_tokens": 4096, "model_info": {"max_input_tokens": 65_536}},
+            {"id": "invalid", "context_window": 0, "context_length": 4_294_967_296_u64,
+             "max_input_tokens": null, "max_output_tokens": -1,
+             "model_info": {"max_input_tokens": 262_144, "max_output_tokens": 8192}},
+            {"id": "missing", "max_input_tokens": "unknown", "max_tokens": 0},
+            {"id": "fractional", "max_input_tokens": 8192.5, "max_output_tokens": 1024.5}
+        ]));
+        assert_eq!(
+            (models[0].context_window, models[0].max_tokens),
+            (32_768, 4096)
+        );
+        assert_eq!(
+            (models[1].context_window, models[1].max_tokens),
+            (262_144, 8192)
+        );
+        assert_eq!(
+            (models[2].context_window, models[2].max_tokens),
+            (128_000, 16_384)
+        );
+        assert_eq!(
+            (models[3].context_window, models[3].max_tokens),
+            (128_000, 16_384)
+        );
+    }
+
+    #[test]
+    fn discovery_capability_fallbacks_match_current_catalog_families() {
+        for (id, reasoning, vision) in [
+            ("claude-opus-5-5", true, true),
+            ("claude-sonnet-5", true, true),
+            ("claude-haiku-4-5", true, true),
+            ("claude-3-haiku", false, true),
+            ("gpt-6.1-sol-runtime", true, true),
+            ("gpt-oss-120b", true, false),
+            ("glm-5.2", true, false),
+            ("glm-4.7-flash", true, false),
+            ("minimax-m2.5", true, false),
+            ("kimi-k3", true, true),
+            ("deepseek-v4-pro", true, false),
+            ("deepseek-v4.1-flash", true, true),
+            ("grok-4.7", true, true),
+            ("qwen3-coder-next", false, false),
+            ("standard", false, false),
+        ] {
+            let models = parse_discovered_models(&json!([{"id": id}]));
+            assert_eq!(
+                (models[0].reasoning, models[0].vision),
+                (reasoning, vision),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_explicit_capabilities_override_name_inference() {
+        let models = parse_discovered_models(&json!([
+            {"id": "gpt-6", "supports_reasoning": false, "supports_vision": false},
+            {"id": "alias", "model_info": {"supports_reasoning": true, "supports_vision": true}},
+            {"id": "claude-opus-5", "model_info": {"supports_reasoning": false, "supports_vision": false}},
+            {"id": "gemini-3", "reasoning": false, "input": ["text"]},
+            {"id": "alias-2", "reasoning": true, "input": ["text", "image"]},
+            {"model_group": "standard", "supports_reasoning": true, "supports_vision": true,
+             "max_input_tokens": 1_048_576.0, "max_output_tokens": 65_536.0}
+        ]));
+        assert_eq!(models.len(), 6);
+        assert_eq!(models[5].id, "standard");
+        assert_eq!(
+            (models[5].context_window, models[5].max_tokens),
+            (1_048_576, 65_536)
+        );
+        for (model, expected) in models.iter().zip([
+            (false, false),
+            (true, true),
+            (false, false),
+            (false, false),
+            (true, true),
+            (true, true),
+        ]) {
+            assert_eq!((model.reasoning, model.vision), expected, "{}", model.id);
+        }
     }
 
     #[test]
