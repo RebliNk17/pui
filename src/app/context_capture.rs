@@ -230,7 +230,7 @@ impl Pui {
         let draft_was_empty = self.draft.trim().is_empty()
             && self.draft_images.is_empty()
             && !self.context_chips.has_quotes();
-        if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
+        if let Err(error) = self.context_chips.append(&self.draft, snippet) {
             self.state.error = Some(error.into());
             return;
         }

@@ -400,7 +400,7 @@ fn whole_or_reject_chip_and_draft_limits_apply_and_preview_is_draft_only_in_demo
                 f.app
                     .context_chips
                     .append(
-                        &mut f.app.outgoing_text(),
+                        &f.app.draft,
                         Snippet {
                             label: "old".into(),
                             text: "keep".into(),

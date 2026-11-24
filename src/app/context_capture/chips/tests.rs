@@ -14,7 +14,7 @@ fn captures_live_outside_the_draft_and_compose_after_typed_text() {
     let mut draft = String::from("Can I hide it?");
     state
         .append(
-            &mut draft,
+            &draft,
             snippet("src/a.rs:1–2 · selected source", "fn a() {}"),
         )
         .unwrap();

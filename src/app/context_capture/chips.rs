@@ -114,11 +114,7 @@ impl Draft {
         Ok(())
     }
     /// Every capture becomes a card; the typed draft is never modified.
-    pub(super) fn append(
-        &mut self,
-        draft: &mut String,
-        snippet: Snippet,
-    ) -> Result<(), &'static str> {
+    pub(super) fn append(&mut self, draft: &str, snippet: Snippet) -> Result<(), &'static str> {
         self.add_with_draft(draft.len(), snippet)
     }
     /// Append the quote popover's follow-up question to the typed draft.
@@ -219,7 +215,7 @@ impl Pui {
                     text,
                     ask: None,
                 };
-                if let Err(error) = self.context_chips.append(&mut self.draft, snippet) {
+                if let Err(error) = self.context_chips.append(&self.draft, snippet) {
                     self.state.error = Some(error.into());
                 }
                 self.focus_composer = true;

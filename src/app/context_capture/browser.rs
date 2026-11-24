@@ -240,7 +240,7 @@ pub(super) fn collect(app: &mut Pui) {
             } else {
                 app.context_chips
                     .append(
-                        &mut app.draft,
+                        &app.draft,
                         Snippet {
                             label,
                             text: body,
