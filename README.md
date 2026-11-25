@@ -77,6 +77,16 @@ Control Pui from your Android phone over your private [Tailscale](https://tailsc
 3. In **Pui Desktop**, open **Settings → Remote & Mobile** and turn on **Enable remote access** (defaults to *Tailscale only* on port `4817`).
 4. Open **Pui** on your phone, tap **Pair with Pui Desktop**, and scan the QR code shown in Desktop settings (or paste the pairing link / enter your Tailscale IP and token manually).
 
+## Cloud agents
+
+Run agents 24/7 on your own always-on Linux host (for example a free Oracle Cloud VM) with the headless Pui cloud daemon, reachable only over Tailscale.
+
+- **Start cloud chats from Desktop or your phone.** Pick a repo from the unified Org/Repo dropdown; the host clones it on demand, and cloud chats appear alongside local ones in **Sessions** with a cloud icon.
+- **Isolated work.** Each cloud agent runs in its own `pui_agent/<slug>-<id>` worktree under Auto mode and can commit, push and open a PR.
+- **Sync to Cloud.** Choose which providers, Git/SSH credentials, MCP servers, skills and repos to share with the host from **Settings → App → Cloud Host**.
+
+Set it up with the [cloud host guide](docs/cloud-host-oracle.md).
+
 ## Install
 
 1. Download the latest **Pui.dmg** (Apple Silicon) from [Releases](https://github.com/RebliNk17/pui/releases).
@@ -122,7 +132,8 @@ Tests: `scripts/test-rust.sh` and `node --test tests/*.test.mjs`. See [test exec
 
 ## Learn more
 
-- [Mobile companion guide](mobile/README.md), [Oracle Cloud always-free host guide](docs/cloud-host-oracle.md), and [remote protocol spec](docs/mobile-remote-protocol.md)
+- [Cloud agents host guide](docs/cloud-host-oracle.md)
+- [Mobile companion guide](mobile/README.md), and [remote protocol spec](docs/mobile-remote-protocol.md)
 - [Full reference](docs/reference.md): every feature and design decision in detail
 - [Bundled runtime](docs/bundled-runtime.md): what ships inside the app and how providers are set up
 - [Releases and CI](docs/releases.md): how builds are signed and published

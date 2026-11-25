@@ -135,6 +135,7 @@ pub fn write_close(stream: &mut impl Write) -> io::Result<()> {
 }
 
 /// Encodes a client-to-server masked RFC 6455 frame.
+#[cfg_attr(test, allow(dead_code))] // Used by the non-test rpc::run_cloud.
 pub fn encode_client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(payload.len() + 14);
     frame.push(0x80 | (opcode & 0x0F));
@@ -165,23 +166,27 @@ pub fn encode_client_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+#[cfg_attr(test, allow(dead_code))] // Used by the non-test rpc::run_cloud.
 pub fn write_client_text(stream: &mut impl Write, text: &str) -> io::Result<()> {
     stream.write_all(&encode_client_frame(0x1, text.as_bytes()))?;
     stream.flush()
 }
 
+#[cfg_attr(test, allow(dead_code))] // Used by the non-test rpc::run_cloud.
 pub fn write_client_pong(stream: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     let bounded = &payload[..payload.len().min(125)];
     stream.write_all(&encode_client_frame(0xA, bounded))?;
     stream.flush()
 }
 
+#[cfg_attr(test, allow(dead_code))] // Used by the non-test rpc::run_cloud.
 pub fn write_client_close(stream: &mut impl Write) -> io::Result<()> {
     stream.write_all(&encode_client_frame(0x8, &[]))?;
     stream.flush()
 }
 
 /// Performs an RFC 6455 client HTTP Upgrade handshake over an existing TCP stream.
+#[cfg_attr(test, allow(dead_code))] // Used by the non-test rpc::run_cloud.
 pub fn connect_client(
     host: &str,
     port: u16,

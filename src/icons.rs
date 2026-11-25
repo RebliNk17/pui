@@ -48,6 +48,9 @@ pub enum Icon {
     Check,
     Mic,
     Play,
+    Quote,
+    Agents,
+    Trash,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -401,12 +404,45 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
             line((3.0, -5.0), (7.0, 0.0));
             line((7.0, 0.0), (3.0, 5.0));
         }
+        Icon::Quote => {
+            // Two filled quotation marks: a round head with a short curved tail.
+            for dx in [-3.6_f32, 3.6] {
+                p.circle_filled(pt(dx, 1.6), 2.6 * scale, color);
+                p.add(egui::Shape::line(
+                    vec![
+                        pt(dx - 2.4, 1.2),
+                        pt(dx - 2.2, -2.0),
+                        pt(dx - 0.4, -4.4),
+                        pt(dx + 1.6, -5.4),
+                    ],
+                    s,
+                ));
+            }
+        }
         Icon::Play => {
             p.add(egui::Shape::convex_polygon(
                 vec![pt(-3.5, -5.5), pt(5.5, 0.0), pt(-3.5, 5.5)],
                 Color32::TRANSPARENT,
                 Stroke::new(s.width, color),
             ));
+        }
+        Icon::Agents => {
+            // Overlapping diamonds (background tasks / subagents), matching quiet line weight.
+            p.add(egui::Shape::closed_line(
+                vec![pt(-2.0, -5.0), pt(2.5, 0.0), pt(-2.0, 5.0), pt(-6.5, 0.0)],
+                s,
+            ));
+            line((1.5, -4.5), (6.0, 0.0));
+            line((6.0, 0.0), (1.5, 4.5));
+        }
+        Icon::Trash => {
+            line((-5.5, -4.0), (5.5, -4.0));
+            line((-2.0, -6.0), (2.0, -6.0));
+            line((-2.0, -6.0), (-2.0, -4.0));
+            line((2.0, -6.0), (2.0, -4.0));
+            outline(-4.5, -4.0, 9.0, 10.0, 1);
+            line((-1.5, -1.5), (-1.5, 3.5));
+            line((1.5, -1.5), (1.5, 3.5));
         }
         Icon::Mic => {
             // Microphone capsule
@@ -517,6 +553,90 @@ pub fn labeled_button(ui: &mut Ui, icon: Icon, label: &str, enabled: bool) -> Re
         });
         response.on_hover_cursor(egui::CursorIcon::PointingHand)
     })
+}
+
+/// Icon-only footer action (24px hit target) with a two-line rich tooltip:
+/// a title and a short explanation. Use for compact message action bars.
+pub fn action(ui: &mut Ui, icon: Icon, title: &str, detail: &str, enabled: bool) -> Response {
+    action_with_state(ui, icon, title, detail, enabled, false)
+}
+
+/// Like [`action`], with an optional "active" state that tints the icon (e.g. Copied ✓).
+pub fn action_with_state(
+    ui: &mut Ui,
+    icon: Icon,
+    title: &str,
+    detail: &str,
+    enabled: bool,
+    active: bool,
+) -> Response {
+    let colors = crate::theme::palette(ui.ctx());
+    let response = ui.add_enabled(enabled, |ui: &mut Ui| {
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+        let hot = (response.hovered() || response.has_focus()) && ui.is_enabled();
+        if hot {
+            ui.painter().rect_filled(rect, 6, colors.hover);
+        }
+        let color = if active {
+            colors.accent
+        } else if hot {
+            colors.text
+        } else {
+            colors.dim
+        };
+        draw_scaled(
+            ui,
+            Rect::from_center_size(rect.center(), Vec2::splat(14.0)),
+            icon,
+            color,
+            14.0 / 16.0,
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title)
+        });
+        #[cfg(test)]
+        {
+            let pass = ui.ctx().cumulative_pass_nr();
+            ui.ctx().data_mut(|d| {
+                let list = d.get_temp_mut_or_default::<Vec<(u64, Rect)>>(action_test_id(title));
+                list.retain(|(p, _)| *p == pass);
+                list.push((pass, rect));
+            });
+        }
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    });
+    let tip = |ui: &mut Ui| {
+        ui.set_max_width(240.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.label(egui::RichText::new(title).size(12.5).color(colors.text));
+        if !detail.is_empty() {
+            ui.add(
+                egui::Label::new(egui::RichText::new(detail).size(11.0).color(colors.muted)).wrap(),
+            );
+        }
+    };
+    response.on_hover_ui(tip)
+}
+
+#[cfg(test)]
+pub fn action_test_id(title: &str) -> egui::Id {
+    egui::Id::new("icon-action-rect").with(title)
+}
+
+/// Test helper: last painted rect of the icon action with `title`.
+#[cfg(test)]
+pub fn action_rect(ctx: &egui::Context, title: &str) -> Option<Rect> {
+    action_rects(ctx, title).last().copied()
+}
+
+/// Test helper: every rect painted for `title` during the latest pass that drew it.
+#[cfg(test)]
+pub fn action_rects(ctx: &egui::Context, title: &str) -> Vec<Rect> {
+    ctx.data(|d| d.get_temp::<Vec<(u64, Rect)>>(action_test_id(title)))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect()
 }
 
 pub fn inline(ui: &mut Ui, icon: Icon, color: Color32) {

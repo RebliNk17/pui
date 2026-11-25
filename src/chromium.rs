@@ -9,7 +9,7 @@ mod pump;
 pub(crate) use privacy::{context_handler, context_settings};
 
 #[cfg(target_os = "macos")]
-pub use mac::{Runtime, prepare_application};
+pub use mac::{Runtime, bundle_unchanged, prepare_application};
 
 // CEF supports exactly one initialize/shutdown cycle per process: calling
 // `cef_initialize` again after `cef_shutdown` (or after unloading the

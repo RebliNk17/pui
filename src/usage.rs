@@ -449,10 +449,14 @@ impl Usage {
             Some((name, _)) if !self.providers.is_empty() => name.clone(),
             _ => "Local account".into(),
         };
+        let ring_center =
+            rect.right_center() - egui::vec2(FOOTER_RING_RADIUS + FOOTER_RING_STROKE, 0.0);
+        let title_right =
+            (ring_center.x - FOOTER_RING_RADIUS - FOOTER_RING_STROKE - 8.0).max(rect.left() + 32.0);
         let title = p.layout_no_wrap(title, FontId::proportional(11.0), colors.text);
         let clip = egui::Rect::from_min_max(
             rect.left_top() + egui::vec2(32.0, 0.0),
-            egui::pos2(rect.right() - 70.0, rect.bottom()),
+            egui::pos2(title_right, rect.bottom()),
         );
         p.with_clip_rect(clip).galley(
             egui::pos2(clip.left(), rect.center().y - title.size().y / 2.0),
@@ -460,31 +464,13 @@ impl Usage {
             colors.text,
         );
         let ratio = headline.map(|(_, ratio)| ratio);
-        let label = ratio
-            .map(|ratio| format!("{:.0}%", ratio * 100.0))
-            .unwrap_or_else(|| "—".into());
-        p.text(
-            rect.right_center() - egui::vec2(39.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            label,
-            FontId::proportional(10.0),
-            colors.muted,
+        ring(
+            ui,
+            ring_center,
+            FOOTER_RING_RADIUS,
+            FOOTER_RING_STROKE,
+            ratio,
         );
-        let track = egui::Rect::from_center_size(
-            rect.right_center() - egui::vec2(17.0, 0.0),
-            egui::vec2(28.0, 3.0),
-        );
-        p.rect_filled(track, 2, colors.border);
-        if let Some(ratio) = ratio {
-            p.rect_filled(
-                egui::Rect::from_min_size(
-                    track.min,
-                    egui::vec2(track.width() * ratio.clamp(0.0, 1.0), 3.0),
-                ),
-                2,
-                level(colors, ratio),
-            );
-        }
         if response.clicked() && !demo {
             self.refresh(ui.ctx(), false);
         }
@@ -559,7 +545,7 @@ impl Usage {
             }
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
-                ring(ui, rect.center(), 22.0, data.ratio());
+                ring(ui, rect.center(), 22.0, 2.5, data.ratio());
                 ui.vertical(|ui| {
                     ui.label(
                         RichText::new(format!(
@@ -810,29 +796,44 @@ fn provider_section(ui: &mut egui::Ui, provider: &ProviderUsage, now: f64) {
         ui.label(RichText::new(error).size(10.0).color(colors.muted));
     }
 }
-fn ring(ui: &egui::Ui, center: egui::Pos2, radius: f32, ratio: Option<f32>) {
+const FOOTER_RING_RADIUS: f32 = 11.0;
+const FOOTER_RING_STROKE: f32 = 2.0;
+
+fn ring(ui: &egui::Ui, center: egui::Pos2, radius: f32, stroke: f32, ratio: Option<f32>) {
     let colors = crate::theme::palette(ui.ctx());
     let p = ui.painter();
-    p.circle_stroke(center, radius, Stroke::new(2.5, colors.border));
+    p.circle_stroke(center, radius, Stroke::new(stroke, colors.border));
     if let Some(ratio) = ratio {
-        let points = (0..=32)
-            .map(|i| {
-                let a = -std::f32::consts::FRAC_PI_2
-                    + i as f32 / 32.0 * std::f32::consts::TAU * ratio.clamp(0.0, 1.0);
-                center + egui::vec2(a.cos(), a.sin()) * radius
-            })
-            .collect();
-        p.add(egui::Shape::line(points, Stroke::new(2.5, colors.accent)));
+        let fraction = ratio.clamp(0.0, 1.0);
+        if fraction > 0.005 {
+            let sweep = fraction * std::f32::consts::TAU;
+            let segments = (fraction * 40.0).ceil().max(4.0) as usize;
+            let start = -std::f32::consts::FRAC_PI_2;
+            let points = (0..=segments)
+                .map(|i| {
+                    let a = start + sweep * i as f32 / segments as f32;
+                    center + egui::vec2(a.cos(), a.sin()) * radius
+                })
+                .collect();
+            p.add(egui::Shape::line(
+                points,
+                Stroke::new(stroke, level(colors, ratio)),
+            ));
+        }
     }
-    p.text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        ratio
-            .map(|n| format!("{:.0}%", n * 100.0))
-            .unwrap_or_else(|| "—".into()),
-        FontId::proportional(9.0),
-        colors.muted,
-    );
+    let label = ratio
+        .map(|n| format!("{:.0}%", n * 100.0))
+        .unwrap_or_else(|| "—".into());
+    let mut size = 9.0;
+    let max_width = (radius - stroke) * 2.0 - 2.0;
+    let galley = loop {
+        let galley = p.layout_no_wrap(label.clone(), FontId::proportional(size), colors.muted);
+        if galley.size().x <= max_width || size <= 6.5 {
+            break galley;
+        }
+        size -= 0.5;
+    };
+    p.galley(center - galley.size() / 2.0, galley, colors.muted);
 }
 pub(crate) fn sdk() -> Option<PathBuf> {
     crate::runtime::sdk()
@@ -1151,5 +1152,135 @@ mod tests {
 
         usage.providers[0].windows[0].used = 79.0;
         assert!(usage.warning_banner_at("anthropic", now).is_none());
+    }
+
+    #[test]
+    fn footer_shows_ring_with_percentage_inside_in_both_themes_and_states() {
+        fn walk(
+            shape: &egui::Shape,
+            labels: &mut Vec<(String, egui::Rect)>,
+            circles: &mut Vec<egui::epaint::CircleShape>,
+            paths: &mut Vec<egui::epaint::PathShape>,
+            rects: &mut Vec<egui::epaint::RectShape>,
+        ) {
+            match shape {
+                egui::Shape::Text(text) => labels.push((
+                    text.galley.text().to_owned(),
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                egui::Shape::Circle(circle) => circles.push(*circle),
+                egui::Shape::Path(path) => paths.push(path.clone()),
+                egui::Shape::Rect(rect) => rects.push(rect.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, labels, circles, paths, rects);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let cases: [(Option<f64>, &str, bool); 6] = [
+            (None, "—", false),
+            (Some(0.0), "0%", false),
+            (Some(1.0), "1%", true),
+            (Some(50.0), "50%", true),
+            (Some(80.0), "80%", true),
+            (Some(100.0), "100%", true),
+        ];
+        for theme in [crate::theme::Theme::Dark, crate::theme::Theme::Light] {
+            for width in [196.0, 260.0] {
+                for zoom in [1.0, 1.5] {
+                    for (pct, expected_label, expects_arc) in cases {
+                        let ctx = egui::Context::default();
+                        crate::theme::install(&ctx);
+                        theme.apply(&ctx);
+                        ctx.set_zoom_factor(zoom);
+                        let mut usage = match pct {
+                            Some(used) => Usage {
+                                providers: vec![ProviderUsage {
+                                    id: "antigravity".into(),
+                                    name: "Google Antigravity".into(),
+                                    models: vec![demo_window("Gemini 3 Pro", used, DEMO_NOW)],
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            },
+                            None => Usage::default(),
+                        };
+                        let mut labels = Vec::new();
+                        let mut circles = Vec::new();
+                        let mut paths = Vec::new();
+                        let mut rects = Vec::new();
+                        for _ in 0..2 {
+                            let output = ctx.run(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        Vec2::new(width, 60.0),
+                                    )),
+                                    ..Default::default()
+                                },
+                                |ctx| {
+                                    egui::CentralPanel::default()
+                                        .show(ctx, |ui| usage.footer(ui, true));
+                                },
+                            );
+                            labels.clear();
+                            circles.clear();
+                            paths.clear();
+                            rects.clear();
+                            for shape in &output.shapes {
+                                walk(
+                                    &shape.shape,
+                                    &mut labels,
+                                    &mut circles,
+                                    &mut paths,
+                                    &mut rects,
+                                );
+                            }
+                        }
+                        let ring_circle = circles
+                            .iter()
+                            .find(|c| (c.radius - FOOTER_RING_RADIUS).abs() < 0.01)
+                            .expect("footer usage ring");
+                        let ring_bounds = egui::Rect::from_center_size(
+                            ring_circle.center,
+                            Vec2::splat(FOOTER_RING_RADIUS * 2.0),
+                        );
+                        let pct_rect = labels
+                            .iter()
+                            .find(|(text, _)| text == expected_label)
+                            .unwrap_or_else(|| {
+                                panic!("missing label {expected_label:?} in {labels:?}")
+                            })
+                            .1;
+                        assert!(
+                            ring_bounds.contains_rect(pct_rect),
+                            "label {expected_label:?} must sit inside the ring at theme={theme:?} width={width} zoom={zoom}: {pct_rect:?} not in {ring_bounds:?}"
+                        );
+                        let colors = crate::theme::palette(&ctx);
+                        let expected_color = pct.map(|u| level(colors, (u / 100.0) as f32));
+                        let matching_arcs = paths
+                            .iter()
+                            .filter(|p| {
+                                expected_color.is_some_and(|c| {
+                                    p.stroke.color == egui::epaint::ColorMode::Solid(c)
+                                })
+                            })
+                            .count();
+                        assert_eq!(
+                            matching_arcs,
+                            usize::from(expects_arc),
+                            "unexpected arc count for pct={pct:?}"
+                        );
+                        assert!(
+                            !rects.iter().any(|r| (r.rect.height() - 3.0).abs() < 0.1),
+                            "horizontal progress bar should be replaced by the ring"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

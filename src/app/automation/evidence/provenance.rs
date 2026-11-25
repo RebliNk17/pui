@@ -302,7 +302,7 @@ thread_local! {
 fn digest(bytes: &[u8]) -> String {
     #[cfg(test)]
     COLLECTIONS.with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex::lower(Sha256::digest(bytes))
 }
 fn valid_digest(value: &str) -> bool {
     value.len() == 64

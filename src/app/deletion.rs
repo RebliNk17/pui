@@ -697,6 +697,7 @@ impl Pui {
             self.preview_rx = None;
             self.transcript.clear();
             self.context_chips.clear();
+            self.context_chips.clear_quotes();
             self.draft.clear();
             self.draft_images.clear();
             self.image_picker_rx = None;

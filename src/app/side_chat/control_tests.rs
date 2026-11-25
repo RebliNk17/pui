@@ -22,6 +22,7 @@ fn main_enter_cannot_answer_side_request_or_pending_bypass_or_send_its_draft() {
     app.state.run_observed = false;
     app.ultracode_ready = true;
     app.draft = "main only".into();
+    app.context_chips.clear_quotes();
     app.side_chat.ui_owner = side.clone();
     app.view_agent(&side);
     app.swap_side_chat_ui();
@@ -113,7 +114,7 @@ fn main_capture_stays_main_and_side_permission_change_keeps_window_default() {
     }
     context_capture::queue(&ctx, "Main quote", "Never transfer to side");
     frame(&ctx, &mut app, vec![]);
-    assert!(app.draft.contains("Never transfer to side"));
+    assert!(app.outgoing_text().contains("Never transfer to side"));
     assert!(
         !app.agents.parked[&side]
             .draft

@@ -84,7 +84,10 @@ fn discard_recovery_name(path: &str, content: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(path.as_bytes());
     digest.update(Sha256::digest(content));
-    format!("pui-discard-recovery-{:x}", digest.finalize())
+    format!(
+        "pui-discard-recovery-{}",
+        crate::hex::lower(digest.finalize())
+    )
 }
 
 fn conflict_recovery_name(path: &str, content: &[u8]) -> String {
@@ -93,7 +96,10 @@ fn conflict_recovery_name(path: &str, content: &[u8]) -> String {
     digest.update(path.as_bytes());
     digest.update(b"\0");
     digest.update(content);
-    format!("pui-conflict-recovery-{:x}", digest.finalize())
+    format!(
+        "pui-conflict-recovery-{}",
+        crate::hex::lower(digest.finalize())
+    )
 }
 
 fn parse_recovery_filename(name: &str) -> Option<(Kind, &str)> {

@@ -137,8 +137,8 @@ fn backward_unicode_link_selection_quotes_without_opening_url_or_merging_another
     );
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
-    assert!(app.draft.ends_with("\n世界 e\u{301}\n[/Context]"));
-    assert!(!app.draft.contains("Other reply"));
+    assert!(app.outgoing_text().ends_with("\n世界 e\u{301}\n[/Context]"));
+    assert!(!app.outgoing_text().contains("Other reply"));
 }
 
 #[test]
@@ -169,7 +169,8 @@ fn native_demo_fixture_has_explicit_synthetic_snapshot_and_no_provider() {
             pointer(target, egui::PointerButton::Primary, pressed),
         );
     }
-    assert!(app.draft.ends_with("\nchosen reply\n[/Context]"));
+    assert_eq!(app.draft, "Keep this draft");
+    assert!(app.outgoing_text().contains("\nchosen reply\n[/Context]"));
 }
 
 #[test]
@@ -261,16 +262,20 @@ fn actual_rendered_paragraph_code_cell_and_alert_quote_only_displayed_selection(
             let messages = app.state.messages.len();
             app.collect_context_capture();
             assert_eq!(
-                app.draft,
+                app.draft, "Keep draft",
+                "typed text is untouched by quoting"
+            );
+            assert_eq!(
+                app.outgoing_text(),
                 format!(
                     "Keep draft\n\n[Context: Assistant reply · selected rendered text (not Markdown source)]\n{chosen}\n[/Context]"
                 )
             );
             assert!(app.state.busy);
             assert_eq!(app.state.messages.len(), messages);
-            let draft = app.draft.clone();
+            let draft = app.outgoing_text();
             app.collect_context_capture();
-            assert_eq!(app.draft, draft);
+            assert_eq!(app.outgoing_text(), draft);
         }
     }
 }

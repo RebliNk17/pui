@@ -39,6 +39,52 @@ fn capture(app: &mut Pui) -> Vec<Checkpoint> {
 }
 
 #[test]
+fn context_and_paste_cards_restore_exactly_separate_from_typed_text() {
+    let mut source = app();
+    source.draft = "  literal [Context: typed]\nnot a card\n[/Context]  \n".into();
+    let card_payload = json!([
+        {"label":"Pasted text · exact", "text":"  before\n[/Context]\n[Context: nested]\n🦀  "},
+        {"label":"Assistant reply · quoted", "text":"verbatim\n\n"}
+    ]);
+    let cards =
+        serde_json::from_value::<Vec<context_capture::SavedCard>>(card_payload.clone()).unwrap();
+    source.context_chips.restore_cards(&cards);
+    let mut restored = app();
+    restored.restart_pending = capture(&mut source);
+    restored.restore_blank_checkpoint();
+    assert_eq!(restored.draft, source.draft);
+    assert_eq!(
+        serde_json::to_value(restored.context_chips.saved_cards()).unwrap(),
+        card_payload
+    );
+    let id = source.restore_composer_agent(
+        Some("agent-17"),
+        "Cards only",
+        "/fixture".as_ref(),
+        None,
+        true,
+    );
+    source
+        .agents
+        .parked
+        .get_mut(&id)
+        .unwrap()
+        .context_chips
+        .restore_cards(&cards);
+    restored.restart_pending = capture(&mut source);
+    restored.restore_parked_composers();
+    let chat = &restored.agents.parked[&id];
+    assert!(chat.draft.is_empty());
+    assert!(!chat.composer_is_empty());
+    assert_eq!(
+        serde_json::to_value(chat.context_chips.saved_cards()).unwrap(),
+        card_payload
+    );
+    assert!(restored.client.is_none());
+    assert!(restored.waiting.is_empty());
+}
+
+#[test]
 fn legacy_checkpoint_defaults_and_exact_large_composer_payloads_round_trip() {
     let legacy: Checkpoint = serde_json::from_value(json!({
         "cwd": "/fixture", "draft": "legacy", "notice": "interrupted"

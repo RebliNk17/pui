@@ -256,7 +256,7 @@ fn failed_upgrade_keeps_readonly_access_and_original_workspace() {
     app.shutdown_agents();
 }
 #[test]
-fn bypass_is_never_remembered_as_the_default_for_new_chats_or_workers() {
+fn bypass_is_remembered_as_the_default_for_new_chats_but_not_workers() {
     let (mut app, parent, _child, sibling) = fixture();
     app.view_agent(&sibling);
     app.choose_permission(PermissionMode::Manual);
@@ -265,38 +265,9 @@ fn bypass_is_never_remembered_as_the_default_for_new_chats_or_workers() {
     app.choose_permission(PermissionMode::Bypass);
     assert!(app.active_permission() == PermissionMode::Bypass);
     assert!(
-        app.prefs.settings.permission == PermissionMode::Manual,
-        "Bypass must not become the default"
+        app.prefs.settings.permission == PermissionMode::Bypass,
+        "the last explicit choice becomes the new-chat default"
     );
     assert!(app.agent_settings(&parent).permission == PermissionMode::Auto);
     app.shutdown_agents();
-}
-#[test]
-fn saved_bypass_default_is_reset_to_auto_while_existing_chats_keep_bypass() {
-    let mut prefs = Preferences::default();
-    prefs.settings.permission = PermissionMode::Bypass;
-    for (id, access, permission) in [
-        ("agent-1", "workspace", None),
-        ("agent-2", "read-only", None),
-        ("agent-3", "worktree", Some(PermissionMode::Manual)),
-    ] {
-        prefs.agent_tree.push(agents::AgentRecord {
-            id: id.into(),
-            parent: None,
-            name: id.into(),
-            cwd: PathBuf::new(),
-            path: PathBuf::new(),
-            access: access.into(),
-            permission,
-            worktree: None,
-        });
-    }
-    prefs.normalize_default_permission();
-    assert!(prefs.settings.permission == PermissionMode::Auto);
-    assert!(prefs.agent_tree[0].permission == Some(PermissionMode::Bypass));
-    assert!(
-        prefs.agent_tree[1].permission.is_none(),
-        "read-only stays read-only"
-    );
-    assert!(prefs.agent_tree[2].permission == Some(PermissionMode::Manual));
 }

@@ -460,6 +460,7 @@ impl Pui {
         self.state = State::default();
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.draft_images.clear();
         self.recall = Default::default();
         let id = self.ensure_agent();

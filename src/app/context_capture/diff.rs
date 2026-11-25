@@ -154,6 +154,7 @@ fn selected(diff: &str, range: Range<usize>, path: &str, recorded: bool) -> Opti
     Some(Snippet {
         label: format!("{path} · {kind} · diff rows {first_row}–{last_row} · {coordinates}"),
         text,
+        ask: None,
     })
 }
 

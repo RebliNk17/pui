@@ -31,7 +31,7 @@ fn character_ranges_are_unicode_safe_exact_and_line_numbered() {
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
     assert_eq!(
-        app.draft
+        app.outgoing_text()
             .matches("Context excerpt limited to 24 KiB")
             .count(),
         1
@@ -185,18 +185,19 @@ fn real_drag_secondary_menu_captures_only_selected_text_in_both_directions() {
             }
             let mut app = crate::app::files::tests::app(&ctx);
             app.draft = "Keep draft".into();
+            app.context_chips.clear_quotes();
             app.state.busy = true;
             let count = app.state.messages.len();
             app.collect_context_capture();
             assert_eq!(
-                app.draft,
+                app.outgoing_text(),
                 "Keep draft\n\n[Context: source.rs:1–1 · selected source]\nliteral \"quote\"\n[/Context]"
             );
             assert!(app.state.busy);
             assert_eq!(count, app.state.messages.len());
-            let draft = app.draft.clone();
+            let draft = app.outgoing_text().clone();
             app.collect_context_capture();
-            assert_eq!(app.draft, draft);
+            assert_eq!(app.outgoing_text(), draft);
             assert!(ctx.data(|data| data.get_temp::<SourceMenu>(key()).is_none()));
         }
     }
@@ -242,9 +243,10 @@ fn unicode_crlf_source_selection_uses_real_character_cursors_and_keyboard_add() 
     );
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
     assert_eq!(
-        app.draft,
+        app.outgoing_text(),
         "Kept\n\n[Context: source.rs:2–2 · selected source]\n世界 e\u{301}\n[/Context]"
     );
 }
@@ -285,8 +287,9 @@ fn no_selection_disables_exact_action_but_explicit_excerpt_still_works() {
     }
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
-    assert_eq!(app.draft, "Kept");
+    assert_eq!(app.outgoing_text(), "Kept");
     // A disabled-row click closes the standard menu; reopen explicitly for the excerpt action.
     for pressed in [true, false] {
         frame(
@@ -315,7 +318,7 @@ fn no_selection_disables_exact_action_but_explicit_excerpt_still_works() {
     }
     app.collect_context_capture();
     assert_eq!(
-        app.draft,
+        app.outgoing_text(),
         "Kept\n\n[Context: source.rs:1 · file excerpt]\nwhole file excerpt\n[/Context]"
     );
 }
@@ -353,6 +356,7 @@ fn selection_in_another_widget_cannot_capture_and_cancel_never_queues() {
     assert!(!egui::Popup::is_any_open(&ctx));
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "unchanged".into();
+    app.context_chips.clear_quotes();
     app.collect_context_capture();
-    assert_eq!(app.draft, "unchanged");
+    assert_eq!(app.outgoing_text(), "unchanged");
 }

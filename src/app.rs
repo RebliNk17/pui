@@ -5,6 +5,7 @@ mod attachments;
 mod attention;
 mod auth_prompt;
 mod automation;
+mod background_tasks;
 mod catalog;
 mod changes;
 mod chat_find;
@@ -132,19 +133,6 @@ struct Preferences {
 }
 
 impl Preferences {
-    /// Bypass is confirmed per chat and is never a default for new chats or
-    /// workers. Existing chats that inherited it keep it explicitly.
-    fn normalize_default_permission(&mut self) {
-        if self.settings.permission != settings::PermissionMode::Bypass {
-            return;
-        }
-        for record in &mut self.agent_tree {
-            if record.permission.is_none() && record.access != "read-only" {
-                record.permission = Some(settings::PermissionMode::Bypass);
-            }
-        }
-        self.settings.permission = settings::PermissionMode::Auto;
-    }
     fn startup_session(&self, options: &Options) -> Option<PathBuf> {
         if options.demo {
             return None;
@@ -170,6 +158,12 @@ pub(super) struct CloudSessionMeta {
     pub(super) repo_name: String,
     pub(super) branch: Option<String>,
 }
+
+/// Cloud session list refresh: sessions plus per-session cloud metadata.
+type CloudSessionsUpdate = (
+    Vec<Session>,
+    std::collections::HashMap<PathBuf, CloudSessionMeta>,
+);
 
 pub struct Pui {
     prefs: Preferences,
@@ -239,6 +233,8 @@ pub struct Pui {
     spotlight: search::Search,
     projects: bool,
     model_picker_open: bool,
+    /// Picker request awaiting Pi's acknowledgement before it becomes the default.
+    model_default_pending: Option<(String, Value)>,
     effort_picker_open: bool,
     effort_anchor: Option<(egui::Rect, egui::LayerId)>,
     effort_picker_focus: bool,
@@ -262,12 +258,7 @@ pub struct Pui {
     local_sessions: Vec<Session>,
     cloud_sessions: Vec<Session>,
     cloud_session_meta: std::collections::HashMap<PathBuf, CloudSessionMeta>,
-    cloud_sessions_rx: Option<
-        Receiver<(
-            Vec<Session>,
-            std::collections::HashMap<PathBuf, CloudSessionMeta>,
-        )>,
-    >,
+    cloud_sessions_rx: Option<Receiver<CloudSessionsUpdate>>,
     cloud_sessions_last_poll: Option<std::time::Instant>,
     session_rx: Option<Receiver<Vec<Session>>>,
     session_watch: Option<sessions::Watch>,
@@ -280,6 +271,7 @@ pub struct Pui {
     pulls: crate::pulls::Pulls,
     output_revision: u64,
     inspector_panel: bool,
+    background_tasks: background_tasks::BackgroundTasks,
     files: files::Browser,
     preview_opens: Vec<String>,
     session_layouts: session_layout::SessionLayouts,
@@ -323,7 +315,6 @@ impl Pui {
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
         prefs.settings.normalize_update_preferences();
-        prefs.normalize_default_permission();
         // Before any Pi process or session discovery: adopt or offer Pui's Pi folder.
         let pi_folder = if options.demo || cfg!(test) {
             pi_folder::PiFolder::default()
@@ -443,6 +434,7 @@ impl Pui {
             spotlight: Default::default(),
             projects,
             model_picker_open: false,
+            model_default_pending: None,
             effort_picker_open: false,
             effort_anchor: None,
             effort_picker_focus: false,
@@ -489,6 +481,7 @@ impl Pui {
             pulls: Default::default(),
             output_revision: u64::MAX,
             inspector_panel: false,
+            background_tasks: Default::default(),
             files: Default::default(),
             preview_opens: Vec::new(),
             session_layouts: Default::default(),
@@ -576,6 +569,14 @@ impl Pui {
                 app.draft = "Keep this draft".into();
                 app.prefs.hide_inspector = true;
                 for (label, text) in [
+                    (
+                        "Assistant reply · selected rendered text (not Markdown source)",
+                        "It comes back the next time the phone connects to the Mac.",
+                    ),
+                    (
+                        "Pasted text · 9 lines · 812 chars",
+                        "The spy plane now works the way you described; the attached frames show one full pass:\n\nThe plane: it's a twin-propeller recon plane in your colour, not a jet.\nFlying in: it appears beyond the map edge and flies over the fog.\nSpying: along the strip it shows the ground with the scanner ring.\nFlying out: it keeps going straight over the fog and off the far edge.\n\nYour side now waits a few seconds for the plane to reach the strip.\nThe full suite is running now.",
+                    ),
                     (
                         "src/main.rs:4–5 · selected source",
                         "let chosen = \"frozen literal\";",
@@ -1209,6 +1210,7 @@ impl Pui {
         self.workspace_rx = None;
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.draft_images.clear();
         self.state.restart_notice.clear();
         if reuse {
@@ -1316,6 +1318,7 @@ impl Pui {
         self.poll_rpc();
         self.poll_history();
         self.poll_other_agents();
+        self.poll_background_tasks();
         self.poll_automation();
         self.poll_views();
         self.publish_live();
@@ -1488,6 +1491,11 @@ impl Pui {
                         && record["message"]["role"] == "user";
                     let was_compacting = self.state.compacting;
                     self.state.apply(record);
+                    if kind == "response"
+                        && matches!(command.as_str(), "set_model" | "set_thinking_level")
+                    {
+                        self.remember_model_default(&command, success);
+                    }
                     if kind == "response"
                         && success
                         && matches!(
@@ -1871,7 +1879,7 @@ impl Pui {
             self.queue_draft_mode(mode);
             return;
         }
-        if (self.draft.trim().is_empty() && self.draft_images.is_empty())
+        if (self.outgoing_text().trim().is_empty() && self.draft_images.is_empty())
             || (!self.draft_images.is_empty() && !self.draft_images.ready())
             || !self.state.ready()
             || self.demo
@@ -1902,7 +1910,7 @@ impl Pui {
             return;
         }
         let message = run_status::WaitingMessage {
-            text: self.draft.trim().to_owned(),
+            text: self.outgoing_text().trim().to_owned(),
             images: self.draft_images.images(),
             mode,
         };
@@ -1914,6 +1922,7 @@ impl Pui {
         self.draft_images.clear();
         self.draft.clear();
         self.context_chips.clear();
+        self.context_chips.clear_quotes();
         self.recall = Default::default();
         self.focus_composer = true;
     }
@@ -2245,7 +2254,9 @@ impl Pui {
                         let enabled = !self.loading_chat
                             && self.history_pending.is_none()
                             && !self.restoring_code()
-                            && (!self.draft.trim().is_empty() || self.draft_images.ready())
+                            && (!self.draft.trim().is_empty()
+                                || self.context_chips.has_quotes()
+                                || self.draft_images.ready())
                             && (self.draft_images.is_empty() || self.draft_images.ready())
                             && !self.demo;
                         let (rect, response) =
@@ -3038,6 +3049,8 @@ impl eframe::App for Pui {
             } else if self.files.is_open() {
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
+            } else if self.background_tasks.open {
+                self.background_tasks_panel(ctx)
             } else if self.inspector_panel {
                 let review_owner = self.review_comment_owner();
                 self.changes.show(

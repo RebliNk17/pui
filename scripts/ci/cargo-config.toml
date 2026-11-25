@@ -1,0 +1,10 @@
+# CI-only Cargo config, installed as $CARGO_HOME/config.toml by github-macos.sh.
+# Optimized dependencies make CPU-bound UI/render/SVG tests ~2.4x faster
+# (bulk 150s -> 61s locally); they compile once and are cached. The app crate
+# itself stays unoptimized, and line tables keep panic backtraces readable.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

@@ -29,10 +29,12 @@ test('current Pi JSON event encoding replays without transient doubled words', a
   const dir = await mkdtemp(join(tmpdir(), 'pui-wire-replay-'));
   const file = join(dir, 'events.json');
   await writeFile(file, JSON.stringify(records));
+  // Fallback only: a caller's cargo (CI pins 1.88) must win, or a different
+  // compiler would rebuild the whole crate (~5 minutes on CI runners).
   const toolchain = join(process.env.HOME, '.rustup/toolchains/stable-aarch64-apple-darwin/bin');
-  const env = { ...process.env, PUI_STREAM_FIXTURE: file, PATH: `${toolchain}:${process.env.PATH}` };
+  const env = { ...process.env, PUI_STREAM_FIXTURE: file, PATH: `${process.env.PATH}:${toolchain}` };
   delete env.CARGO_HTTP_PROXY_CAINFO;
-  const replay = spawnSync('cargo', ['test', '--offline', 'replay_current_pi_wire_fixture'], { env, encoding: 'utf8' });
+  const replay = spawnSync('cargo', ['test', '--offline', '--bin', 'pui', 'replay_current_pi_wire_fixture'], { env, encoding: 'utf8' });
   assert.equal(replay.status, 0, `${replay.stdout}\n${replay.stderr}`);
   assert.match(replay.stdout, /1 passed/);
 });

@@ -1352,6 +1352,8 @@ pub fn fetch_cloud_repos(
 /// Creates a new session on the cloud daemon (auto-cloning the selected Git repo
 /// into `~/workspaces/<repo>` on demand if it isn't already cloned) and returns the remote
 /// session `.jsonl` path.
+// Only the non-test cloud transport (rpc::run_cloud) calls this.
+#[cfg_attr(test, allow(dead_code))]
 pub fn create_cloud_session(
     cfg: &CloudHostConfig,
     local_cwd: &Path,

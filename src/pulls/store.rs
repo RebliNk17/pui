@@ -10,7 +10,10 @@ use std::{
 const MAX_RECORD: u64 = 64 * 1024;
 
 fn path(home: &Path, url: &str) -> PathBuf {
-    home.join(format!("{:x}.json", Sha256::digest(url.as_bytes())))
+    home.join(format!(
+        "{}.json",
+        crate::hex::lower(Sha256::digest(url.as_bytes()))
+    ))
 }
 
 pub(super) fn load(home: &Path, url: &str) -> Option<CachedStatus> {

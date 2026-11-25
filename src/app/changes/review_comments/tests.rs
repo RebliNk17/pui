@@ -166,6 +166,7 @@ fn queue_owner_is_checked_at_collection_without_draft_chat_permission_or_rpc_cha
     let ctx = egui::Context::default();
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "keep".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     let (client, _, commands) = rpc::Client::stub_with_records();
     app.client = Some(client);
@@ -178,7 +179,7 @@ fn queue_owner_is_checked_at_collection_without_draft_chat_permission_or_rpc_cha
         "note",
     );
     app.collect_context_capture();
-    assert_eq!(app.draft, "keep");
+    assert_eq!(app.outgoing_text(), "keep");
     assert!(
         app.state
             .error
@@ -189,7 +190,10 @@ fn queue_owner_is_checked_at_collection_without_draft_chat_permission_or_rpc_cha
     let owner = app.review_comment_owner();
     context_capture::queue_review(&ctx, &app.prefs.cwd, &owner, "Local review", "note");
     app.collect_context_capture();
-    assert!(app.draft.starts_with("keep\n\n[Context: Local review]"));
+    assert!(
+        app.outgoing_text()
+            .starts_with("keep\n\n[Context: Local review]")
+    );
     assert_eq!(app.state.messages.len(), count);
     assert!(app.state.busy);
     assert!(commands.try_recv().is_err());

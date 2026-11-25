@@ -643,6 +643,7 @@ impl Engine {
             self.close(key);
         }
         if !self.tabs.contains_key(key) {
+            crate::chromium::bundle_unchanged()?;
             let state = Arc::new(Mutex::new(PageState::default()));
             let recorder = history.recorder(context);
             let events = Events {

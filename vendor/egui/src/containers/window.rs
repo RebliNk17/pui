@@ -699,9 +699,9 @@ fn paint_resize_corner(
         ((2.0_f32.sqrt() * (1.0 + radius) - radius) * 45.0_f32.to_radians().cos()).max(2.0);
 
     let stroke = if corner_response.drag {
-        ui.visuals().widgets.active.fg_stroke
+        Stroke::new(ui.visuals().widgets.active.fg_stroke.width, ui.visuals().selection.stroke.color)
     } else if corner_response.hover {
-        ui.visuals().widgets.hovered.fg_stroke
+        Stroke::new(ui.visuals().widgets.hovered.fg_stroke.width, ui.visuals().selection.stroke.color)
     } else {
         window_frame.stroke
     };

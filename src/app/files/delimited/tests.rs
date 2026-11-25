@@ -153,6 +153,7 @@ fn opening_and_source_toggle_preserve_original_bytes_draft_and_file_access_polic
     let source = b"Name,Note\r\nAlpha,\"two, values\"\r\nBeta,=1+2\r\n";
     fs::write(&path, source).unwrap();
     app.draft = "Keep my draft".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     let messages = app.state.messages.len();
     app.files
@@ -177,7 +178,7 @@ fn opening_and_source_toggle_preserve_original_bytes_draft_and_file_access_polic
     assert!(app.files.tabs[0].source);
     assert!(app.files.saved_layout().source_paths.contains(&path));
     assert_eq!(fs::read(&path).unwrap(), source);
-    assert_eq!(app.draft, "Keep my draft");
+    assert_eq!(app.outgoing_text(), "Keep my draft");
     assert!(app.state.busy);
     assert_eq!(app.state.messages.len(), messages);
     fs::write(root.join(".env.csv"), b"secret,value").unwrap();
@@ -198,6 +199,7 @@ fn cell_context_actions_copy_and_quote_without_changing_file_or_sending() {
         let mut preview = Preview::new("name,note\nAlpha,\"two, values\"\n".into(), b',');
         let mut draft_app = super::super::tests::app(&ctx);
         draft_app.draft = "Existing draft".into();
+        draft_app.context_chips.clear_quotes();
         let messages = draft_app.state.messages.len();
         let mut draw = |events| {
             ctx.run(
@@ -262,9 +264,13 @@ fn cell_context_actions_copy_and_quote_without_changing_file_or_sending() {
             assert!(commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == "two, values")));
         } else {
             draft_app.collect_context_capture();
-            assert!(draft_app.draft.starts_with("Existing draft\n\n"));
-            assert!(draft_app.draft.contains("sample.csv · record 2, column 2"));
-            assert!(draft_app.draft.contains("two, values"));
+            assert!(draft_app.outgoing_text().starts_with("Existing draft\n\n"));
+            assert!(
+                draft_app
+                    .outgoing_text()
+                    .contains("sample.csv · record 2, column 2")
+            );
+            assert!(draft_app.outgoing_text().contains("two, values"));
         }
         assert_eq!(draft_app.state.messages.len(), messages);
         assert_eq!(

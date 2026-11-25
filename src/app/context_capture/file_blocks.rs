@@ -461,6 +461,7 @@ fn selected(selection: &Selection) -> Result<Snippet, &'static str> {
         // The exact (bounded) path is body provenance, not the chip's compact label.
         label: format!("Markdown preview · {count} explicit rendered blocks (not source lines)"),
         text,
+        ask: None,
     })
 }
 
@@ -507,7 +508,7 @@ pub(super) fn collect(app: &mut Pui) {
                 },
                 Action::Capture => {
                     if let Some(snippet) = selection.reviewed.take() {
-                        if let Err(error) = app.context_chips.append(&mut app.draft, snippet) {
+                        if let Err(error) = app.context_chips.append(&app.draft, snippet) {
                             app.state.error = Some(error.into());
                         } else {
                             app.focus_composer = true;

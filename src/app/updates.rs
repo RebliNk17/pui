@@ -383,7 +383,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::hex::lower(hasher.finalize()))
 }
 
 fn download_url_to_file(

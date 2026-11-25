@@ -51,6 +51,7 @@ impl Pui {
             || rpc::retiring()
             || self.tasks.update_restart_blocked()
             || self.terminals.running()
+            || self.background_tasks.update_restart_blocked()
             || self.automation.update_restart_blocked()
             || self.remote.is_running()
             || self.deletion.in_progress()
@@ -120,6 +121,7 @@ impl Pui {
                 || self.tasks.open
                 || self.automation.open
                 || self.kanban.open
+                || self.background_tasks.open
                 || egui::Popup::is_any_open(ctx)
                 || ctx.memory(|m| m.top_modal_layer().is_some())
             {

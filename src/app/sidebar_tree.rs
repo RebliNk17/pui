@@ -136,6 +136,9 @@ fn stamp(app: &Pui) -> u64 {
     hash_state(&app.state, &mut h);
     app.agents.nodes.len().hash(&mut h);
     for node in app.agents.nodes.values() {
+        if node.background {
+            continue;
+        }
         node.id.hash(&mut h);
         node.parent.hash(&mut h);
         node.name.hash(&mut h);
@@ -318,6 +321,9 @@ pub(super) fn forest(app: &Pui) -> Vec<Branch> {
     // Reuse discovered session rows for known agents rather than duplicating a
     // second "agent workflows" list. Unsaved/queued workers still get a row.
     for node in app.agents.nodes.values() {
+        if node.background {
+            continue;
+        }
         let key = agent_key(app, &node.id).unwrap();
         if !rows.contains_key(&key) {
             let mut row = empty(

@@ -54,6 +54,29 @@ define_class! {
 /// Outcome of loading the bundled framework; written once on the main thread
 /// by `prepare_application`, before any other thread exists.
 static FRAMEWORK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+/// Device/inode of the bundled helper when this process started.
+static HELPER_IDENTITY: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+
+fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Chromium launches helpers by path. If the app bundle is replaced while Pui
+/// runs (e.g. a rebuild of `dist/Pui.app`), new renderers come from a different
+/// signed build, macOS denies their IPC rendezvous, and pages never paint.
+/// Detect that before creating a browser instead of timing out silently.
+pub fn bundle_unchanged() -> Result<(), String> {
+    let Some(launched) = HELPER_IDENTITY.get() else {
+        return Ok(());
+    };
+    let (_, helper) = framework_paths()?;
+    if file_identity(&helper).as_ref() == Some(launched) {
+        Ok(())
+    } else {
+        Err("Pui was updated or rebuilt on disk while running. Restart Pui to render visuals and web pages.".into())
+    }
+}
 
 fn framework_paths() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -79,6 +102,9 @@ fn load_framework() -> Result<(), String> {
     }
     // Never unload: the framework installs process-wide malloc zones.
     std::mem::forget(library);
+    if let Some(identity) = file_identity(&helper) {
+        let _ = HELPER_IDENTITY.set(identity);
+    }
     Ok(())
 }
 

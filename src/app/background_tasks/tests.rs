@@ -1,0 +1,480 @@
+use super::*;
+use std::time::Instant;
+
+fn test_app() -> (egui::Context, Pui) {
+    let ctx = egui::Context::default();
+    let mut app = Pui::new(
+        &eframe::CreationContext::_new_kittest(ctx.clone()),
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.ultracode_ready = true;
+    let root = app.ensure_agent();
+    app.agents.nodes.get_mut(&root).unwrap().permission = Some(settings::PermissionMode::Bypass);
+    app.state.provider = "anthropic".into();
+    app.state.model = "claude-opus-5-5".into();
+    (ctx, app)
+}
+
+fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
+    match shape {
+        egui::Shape::Text(t) => out.push(t.galley.job.text.clone()),
+        egui::Shape::Vec(shapes) => {
+            for s in shapes {
+                collect_texts(s, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn stopped_background_shell_blocks_update_until_process_completion_is_observed() {
+    let (_, mut app) = test_app();
+    let owner = app.agents.active.clone();
+    let (tx, rx) = mpsc::channel();
+    app.background_tasks.shells.push(ShellTask {
+        id: "bg-shell-update-test".into(),
+        owner: owner.clone(),
+        root: owner,
+        title: "Retiring shell".into(),
+        command: "fixture only".into(),
+        cwd: app.prefs.cwd.clone(),
+        started: SystemTime::now(),
+        finished: None,
+        status: ShellStatus::Stopped,
+        output: String::new(),
+        truncated: false,
+        error: None,
+        cancel: Arc::new(AtomicBool::new(true)),
+        rx: Some(rx),
+        notified: true,
+    });
+    assert!(app.background_tasks.update_restart_blocked());
+    app.clear_finished_background_tasks();
+    assert_eq!(
+        app.background_tasks.shells.len(),
+        1,
+        "don't forget a stopped but unreaped shell"
+    );
+    tx.send(ShellEvent::Done {
+        exit_code: None,
+        error: None,
+        stopped: true,
+    })
+    .unwrap();
+    app.poll_background_tasks();
+    assert!(!app.background_tasks.update_restart_blocked());
+    app.clear_finished_background_tasks();
+    assert!(app.background_tasks.shells.is_empty());
+}
+
+#[test]
+fn sidebar_child_sessions_and_background_subagents_are_strictly_separated() {
+    let (_ctx, mut app) = test_app();
+    let root = app.agents.active.clone();
+
+    // 1. Spawn a sidebar child session (`pui_spawn_agent`).
+    let session_res = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "spawn",
+                "name": "Fix North Korea tank gun alignment",
+                "task": "Fix the turret alignment on a dedicated branch.",
+                "access": "read-only"
+            }),
+        )
+        .expect("spawn sidebar child session");
+    let session_id = session_res["agent_id"].as_str().unwrap().to_owned();
+    assert_eq!(session_res["kind"], "session");
+    assert!(!app.agents.nodes[&session_id].background);
+
+    // 2. Spawn a lightweight background subagent (`pui_background_agent`).
+    let bg_res = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "spawn_background",
+                "name": "Groups: left order column + groups popup",
+                "task": "Implement the mobile left order column.",
+                "model": "anthropic/claude-sonnet-4-6"
+            }),
+        )
+        .expect("spawn background subagent");
+    let bg_id = bg_res["agent_id"].as_str().unwrap().to_owned();
+    assert_eq!(bg_res["kind"], "background");
+    assert_eq!(bg_res["access"], "workspace");
+    assert_eq!(bg_res["model"], "anthropic/claude-sonnet-4-6");
+    assert!(app.agents.nodes[&bg_id].background);
+
+    // 3. Add an unrelated top-level chat in `agents.nodes` to ensure it never leaks.
+    let other_id = "agent-999".to_owned();
+    app.agents.nodes.insert(
+        other_id.clone(),
+        agents::Node {
+            id: other_id.clone(),
+            parent: None,
+            name: "Unrelated other project chat".into(),
+            cwd: app.prefs.cwd.clone(),
+            path: None,
+            access: "workspace".into(),
+            permission: Some(settings::PermissionMode::Auto),
+            status: "Working".into(),
+            last_activity: None,
+            created: Some(SystemTime::now()),
+            children: Vec::new(),
+            stopped: false,
+            reported: true,
+            needs_report: false,
+            settled: false,
+            launch: None,
+            failure: None,
+            result: None,
+            task: String::new(),
+            depends: Vec::new(),
+            setup: None,
+            worktree: None,
+            cloud_host: None,
+            cloud_repo: None,
+            background: false,
+            model: None,
+            finished_at: None,
+        },
+    );
+
+    // Sidebar listing contains the child session, NEVER the background subagent.
+    let (pinned, rows) = sidebar_tree::listing(&app);
+    let mut titles = Vec::new();
+    fn walk(branches: &[sidebar_tree::Branch], out: &mut Vec<String>) {
+        for b in branches {
+            out.push(b.title.clone());
+            walk(&b.children, out);
+        }
+    }
+    walk(&pinned, &mut titles);
+    walk(&rows, &mut titles);
+    assert!(
+        titles
+            .iter()
+            .any(|t| t == "Fix North Korea tank gun alignment"),
+        "sidebar child session must appear in sidebar: {titles:?}"
+    );
+    assert!(
+        !titles
+            .iter()
+            .any(|t| t == "Groups: left order column + groups popup"),
+        "background subagent must never clutter the left sidebar: {titles:?}"
+    );
+
+    // Kanban board excludes background subagents.
+    let board = app.board_cards();
+    assert!(
+        !board
+            .iter()
+            .any(|c| matches!(&c.target, kanban::Target::Agent(id) if id == &bg_id)),
+        "background subagent should not appear on the Kanban board"
+    );
+
+    // Background counts include ONLY the 1 background subagent (not the sidebar child, not the unrelated chat).
+    assert_eq!(app.active_background_counts(), (1, 0));
+
+    // Clicking/viewing a background subagent opens the Background tasks detail view,
+    // without switching `agents.active`.
+    app.view_agent(&bg_id);
+    assert_eq!(app.agents.active, root);
+    assert!(app.background_tasks.open);
+    assert_eq!(
+        app.background_tasks.selected_agent.as_deref(),
+        Some(bg_id.as_str())
+    );
+
+    // Ephemeral background subagents are not persisted into `agent_records()`.
+    let records = app.agent_records();
+    assert!(!records.iter().any(|r| r.id == bg_id));
+}
+
+#[test]
+fn background_shell_runs_captures_output_handles_failure_and_stops_cleanly() {
+    let (_ctx, mut app) = test_app();
+    let root = app.agents.active.clone();
+
+    // 1. Successful background shell.
+    let ok_res = app
+        .background_tasks_control(
+            &root,
+            &json!({
+                "action": "bg_bash",
+                "command": "echo hello_bg && echo stderr_line >&2",
+                "description": "Echo greeting"
+            }),
+        )
+        .expect("spawn ok background shell");
+    let ok_id = ok_res["task_id"].as_str().unwrap().to_owned();
+
+    // 2. Failing background shell.
+    let fail_res = app
+        .background_tasks_control(
+            &root,
+            &json!({
+                "action": "bg_bash",
+                "command": "echo fail_msg; exit 7",
+                "description": "Failing check"
+            }),
+        )
+        .expect("spawn failing background shell");
+    let fail_id = fail_res["task_id"].as_str().unwrap().to_owned();
+
+    // Wait for both quick commands to finish via poll_background_tasks.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        app.poll_background_tasks();
+        let both_done = app
+            .background_tasks
+            .shells
+            .iter()
+            .filter(|s| s.id == ok_id || s.id == fail_id)
+            .all(|s| !s.status.is_running());
+        if both_done {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let ok_out = app
+        .background_tasks_control(
+            &root,
+            &json!({ "action": "bg_tasks", "operation": "output", "task_id": ok_id }),
+        )
+        .expect("read ok shell output");
+    assert_eq!(ok_out["status"], "completed");
+    assert_eq!(ok_out["exit_code"], 0);
+    assert!(ok_out["output"].as_str().unwrap().contains("hello_bg"));
+    assert!(ok_out["output"].as_str().unwrap().contains("stderr_line"));
+
+    let fail_out = app
+        .background_tasks_control(
+            &root,
+            &json!({ "action": "bg_tasks", "operation": "output", "task_id": fail_id }),
+        )
+        .expect("read fail shell output");
+    assert_eq!(fail_out["status"], "failed");
+    assert_eq!(fail_out["exit_code"], 7);
+
+    // 3. Long-running background shell stopped explicitly.
+    let slow_res = app
+        .background_tasks_control(
+            &root,
+            &json!({
+                "action": "bg_bash",
+                "command": "sleep 30",
+                "description": "Long sleep"
+            }),
+        )
+        .expect("spawn slow shell");
+    let slow_id = slow_res["task_id"].as_str().unwrap().to_owned();
+    assert!(app.background_tasks.has_running_shells());
+    assert_eq!(app.active_background_counts(), (1, 2));
+
+    let stop_res = app
+        .background_tasks_control(
+            &root,
+            &json!({ "action": "bg_tasks", "operation": "stop", "task_id": slow_id }),
+        )
+        .expect("stop slow shell");
+    assert_eq!(stop_res["stopped"], true);
+    assert!(!app.background_tasks.has_running_shells());
+    assert_eq!(app.active_background_counts(), (0, 3));
+
+    // Plan mode blocks background shells.
+    app.agents.nodes.get_mut(&root).unwrap().permission = Some(settings::PermissionMode::Plan);
+    assert!(
+        app.background_tasks_control(
+            &root,
+            &json!({ "action": "bg_bash", "command": "echo nope" })
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn nested_child_tasks_roll_up_and_ui_renders_list_and_detail_views_cleanly() {
+    let (ctx, mut app) = test_app();
+    let root = app.agents.active.clone();
+
+    let bg_res = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "spawn_background",
+                "name": "Build 3 real in-game bar layouts",
+                "task": "Build three responsive control-group bar layouts and verify them with headless renders.",
+                "model": "claude-sonnet-4-6"
+            }),
+        )
+        .unwrap();
+    let bg_id = bg_res["agent_id"].as_str().unwrap().to_owned();
+
+    // Populate tool calls & assistant reply on the parked background subagent.
+    if let Some(chat) = app.agents.parked.get_mut(&bg_id) {
+        chat.state.model_name = "Claude Sonnet 4.6".into();
+        chat.state.messages.push(protocol::Message {
+            role: "assistant".into(),
+            text: "Waiting for the test run to finish.".into(),
+            tools: vec![
+                protocol::Tool {
+                    id: "t1".into(),
+                    name: "bash".into(),
+                    command: "cargo test".into(),
+                    finished: true,
+                    duration_ms: Some(1500),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "t2".into(),
+                    name: "read".into(),
+                    path: "src/app.rs".into(),
+                    finished: true,
+                    duration_ms: Some(12),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "t3".into(),
+                    name: "write".into(),
+                    path: "src/new_layout.rs".into(),
+                    finished: true,
+                    failed: true,
+                    duration_ms: Some(25),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+    }
+
+    // Attach two child background shells owned by the background subagent (1 completed, 1 failed).
+    let now = SystemTime::now();
+    app.background_tasks.shells.push(ShellTask {
+        id: "bg-shell-10".into(),
+        owner: bg_id.clone(),
+        root: root.clone(),
+        title: "Run unit tests".into(),
+        command: "cargo test".into(),
+        cwd: app.prefs.cwd.clone(),
+        started: now - Duration::from_secs(12),
+        finished: Some(now),
+        status: ShellStatus::Completed,
+        output: "all passed".into(),
+        truncated: false,
+        error: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        rx: None,
+        notified: true,
+    });
+    app.background_tasks.shells.push(ShellTask {
+        id: "bg-shell-11".into(),
+        owner: bg_id.clone(),
+        root: root.clone(),
+        title: "Render layout preview".into(),
+        command: "godot --headless".into(),
+        cwd: app.prefs.cwd.clone(),
+        started: now - Duration::from_secs(5),
+        finished: Some(now),
+        status: ShellStatus::Failed(Some(1)),
+        output: "shader error".into(),
+        truncated: false,
+        error: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        rx: None,
+        notified: true,
+    });
+
+    assert_eq!(app.background_child_counts(&bg_id), (2, 0, 1));
+    let summary = summarize_agent_tools(&app.agents.parked[&bg_id].state);
+    assert_eq!(
+        summary.line,
+        "Ran 1 command, read 1 file, created a file, 1 failed"
+    );
+
+    // 1. Render dedicated Background tasks pane (list view) in dark & light themes + narrow width.
+    app.background_tasks.open_list();
+    for (width, dark) in [(1100.0, true), (640.0, false)] {
+        ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.background_tasks_panel(ctx);
+            },
+        );
+        let mut texts = Vec::new();
+        for s in &out.shapes {
+            collect_texts(&s.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|t| t == "Background tasks"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Build 3 real in-game bar layouts"))
+        );
+        assert!(texts.iter().any(|t| t == "2 tasks"));
+        assert!(texts.iter().any(|t| t.contains("1 failed")));
+    }
+
+    // 2. Render Detail View for the background subagent.
+    app.background_tasks.open_agent(bg_id.clone());
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 800.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            app.background_tasks_panel(ctx);
+        },
+    );
+    let mut texts = Vec::new();
+    for s in &out.shapes {
+        collect_texts(&s.shape, &mut texts);
+    }
+    assert!(texts.iter().any(|t| t == "Model Claude Sonnet 4.6"));
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Ran 1 command, read 1 file"))
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "Waiting for the test run to finish.")
+    );
+
+    // 3. Mark agent settled & verify Clear finished cleans up finished items without touching running ones.
+    if let Some(node) = app.agents.nodes.get_mut(&bg_id) {
+        node.settled = true;
+        node.reported = true;
+        node.needs_report = false;
+        node.status = "Idle".into();
+        node.finished_at = Some(now);
+    }
+    assert_eq!(app.active_background_counts(), (0, 1));
+    app.clear_finished_background_tasks();
+    assert_eq!(app.active_background_counts(), (0, 0));
+    assert!(!app.agents.nodes.contains_key(&bg_id));
+    assert!(app.background_tasks.shells.is_empty());
+    assert!(app.background_tasks.selected_agent.is_none());
+}

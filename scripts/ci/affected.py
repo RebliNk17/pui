@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Select the macOS CI suites a pull request actually affects.
+"""Select the CI suites a change actually affects.
 
-Usage: affected.py BASE_SHA  (writes rust/node/python/package/toolchain=true|false lines)
+Usage: affected.py BASE_SHA   pull requests (PR base) and master pushes (previous head)
+       affected.py --release  release tags / manual builds: every suite plus the app bundle
 
-Pushes, tags and any failure to compute the diff run everything. Pull requests
-run a suite only when its inputs changed. Paths matching no rule are treated as
-unknown and also run everything, so new directories fail safe rather than skip.
+The app bundle is built only with --release. Otherwise a suite runs only when
+its inputs changed. A missing/unknown base, a failed diff, shared build inputs or
+paths matching no rule run every test suite, so new directories fail safe.
 """
 import fnmatch
 import subprocess
 import sys
 
-SUITES = ("rust", "node", "python", "package")
+SUITES = ("rust", "node", "python", "mobile", "daemon")
 
 # Shared build/CI inputs: any change re-validates every suite and the bundle.
 FULL = (
@@ -20,16 +21,17 @@ FULL = (
 )
 # Documentation and other workflows' sources: nothing to run on macOS.
 NONE = (
-    "*.md", "docs/*", "mobile/*", "daemon/*", ".github/workflows/android.yml",
+    "*.md", "docs/*", ".github/workflows/android.yml", ".github/dependabot.yml",
     ".gitignore", ".gitattributes", "LICENSE*", "dist/*",
 )
 RULES = {
     "rust": ("src/*", "vendor/*", "tests/*.rs", "build.rs", "assets/*", "scripts/test-rust.sh"),
     "node": ("scripts/*.ts", "scripts/*.mjs", "scripts/*.cjs", "scripts/*.swift", "tests/*.mjs", "tests/fixtures/*"),
+    # Packaging scripts are covered by their unit tests; the bundle itself is built on release.
     "python": ("scripts/*.py", "scripts/*.sh", "tests/*.py", "tests/fixtures/*", "CHANGELOG.md"),
-    # Bundle/package/smoke only when the packaging pipeline itself changed.
-    "package": ("scripts/bundle-*", "scripts/package-*", "scripts/smoke-*", "scripts/sign-*",
-                "scripts/notarize-*", "scripts/fetch-chromium-*", "scripts/release.py", "assets/*"),
+    # Validated on Linux by their own jobs; never wake the macOS runner.
+    "mobile": ("mobile/*",),
+    "daemon": ("daemon/*",),
 }
 
 
@@ -37,18 +39,31 @@ def matches(path, patterns):
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
+def derive(selected, package=False):
+    selected["package"] = package
+    # Rust and the bundle need the toolchain, pinned CEF and compiled caches.
+    selected["toolchain"] = selected["rust"] or package
+    # Docs/mobile/daemon-only changes skip the macOS job entirely.
+    selected["macos"] = any(selected[suite] for suite in ("rust", "node", "python")) or package
+    return selected
+
+
+def everything(package=False):
+    return derive(dict.fromkeys(SUITES, True), package)
+
+
 def select(paths):
     selected = dict.fromkeys(SUITES, False)
     for path in paths:
         if matches(path, FULL):
-            return dict.fromkeys(SUITES, True)
+            return everything()
         hit = False
         for suite, patterns in RULES.items():
             if matches(path, patterns):
                 selected[suite] = hit = True
         if not hit and not matches(path, NONE):
-            return dict.fromkeys(SUITES, True)
-    return selected
+            return everything()
+    return derive(selected)
 
 
 def changed_files(base):
@@ -58,13 +73,16 @@ def changed_files(base):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else ""
-    try:
-        selected = select(changed_files(base)) if base else dict.fromkeys(SUITES, True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        print(f"Could not diff against {base!r} ({error}); running everything.", file=sys.stderr)
-        selected = dict.fromkeys(SUITES, True)
-    # Rust and the bundle need the toolchain, pinned CEF and compiled caches.
-    selected["toolchain"] = selected["rust"] or selected["package"]
+    if base == "--release":
+        selected = everything(package=True)
+    elif not base or set(base) == {"0"}:  # new branch push: no previous head
+        selected = everything()
+    else:
+        try:
+            selected = select(changed_files(base))
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f"Could not diff against {base!r} ({error}); running every suite.", file=sys.stderr)
+            selected = everything()
     for suite, value in selected.items():
         print(f"{suite}={'true' if value else 'false'}")
 

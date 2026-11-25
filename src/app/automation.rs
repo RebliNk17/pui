@@ -184,6 +184,21 @@ impl Automation {
             });
         jobs.chain(mail).chain(reconnect).min()
     }
+    pub(super) fn active_chat_jobs(&self, agent_id: &str) -> Vec<(String, String, String)> {
+        self.jobs
+            .iter()
+            .filter(|j| j.enabled && !j.completed && j.creator.id == agent_id)
+            .map(|j| {
+                let schedule = match &j.trigger {
+                    Trigger::Monitor {
+                        interval_seconds, ..
+                    } => format!("every {interval_seconds}s"),
+                    Trigger::Cron { schedule } => schedule.clone(),
+                };
+                (j.id.clone(), j.name.clone(), schedule)
+            })
+            .collect()
+    }
     pub(super) fn has_chat_jobs(&self, id: &str, path: Option<&std::path::Path>) -> bool {
         self.jobs
             .iter()
@@ -440,7 +455,7 @@ impl Pui {
             json!({"job":result,"note":"Runs only while Pui is open. Active jobs reconnect their creator on restart without a provider call. Cron uses UTC and skips missed occurrences. Monitor exit 0 triggers once; exit 1 keeps waiting. Only a delivered message wakes the model."}),
         )
     }
-    fn change_job(&mut self, id: &str, operation: &str) -> Result<(), String> {
+    pub(super) fn change_job(&mut self, id: &str, operation: &str) -> Result<(), String> {
         if !self.automation.writable() {
             return Err("Manage jobs in the scheduler's owning Pui window.".into());
         }

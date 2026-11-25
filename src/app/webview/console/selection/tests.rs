@@ -106,6 +106,7 @@ fn actual_forward_and_reverse_drag_add_only_selected_console_message_text_to_dra
             theme.apply(&ctx);
             let mut app = crate::app::files::tests::app(&ctx);
             app.draft = "keep".into();
+            app.context_chips.clear_quotes();
             let line = ConsoleLine::new(true, "prefix chosen suffix", "source.js", 3);
             select(
                 &ctx,
@@ -125,12 +126,14 @@ fn actual_forward_and_reverse_drag_add_only_selected_console_message_text_to_dra
                 );
             }
             app.collect_context_capture();
-            assert!(app.draft.starts_with("keep\n\n"));
+            assert!(app.outgoing_text().starts_with("keep\n\n"));
             assert!(
-                app.draft
+                app.outgoing_text()
                     .contains("\nchosen\nSource: source.js:3\n[/Context]")
             );
-            assert!(!app.draft.contains("prefix") && !app.draft.contains("suffix"));
+            assert!(
+                !app.outgoing_text().contains("prefix") && !app.outgoing_text().contains("suffix")
+            );
             assert!(!egui::Popup::is_any_open(&ctx));
         }
     }
@@ -141,6 +144,7 @@ fn console_selection_menu_owns_approval_chords_and_escape_without_sending() {
     theme::install(&ctx);
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "keep".into();
+    app.context_chips.clear_quotes();
     app.state.busy = true;
     app.state.dialogs.push_back(json!({"id":"console-selection","method":"confirm","title":"Allow bash?","message":"Run\n{\"command\":\"echo safe\"}\n\nApprove this call only."}));
     let (client, _, commands) = rpc::Client::stub_with_records();
@@ -171,7 +175,7 @@ fn console_selection_menu_owns_approval_chords_and_escape_without_sending() {
         );
     }
     app.collect_context_capture();
-    assert_eq!(app.draft, "keep");
+    assert_eq!(app.outgoing_text(), "keep");
     assert!(app.state.busy);
     assert_eq!(app.state.dialogs.len(), 1);
     assert!(commands.try_recv().is_err());
@@ -184,6 +188,7 @@ fn newly_arrived_structured_question_cannot_reuse_console_popup_activation_or_te
         theme::install(&ctx);
         let mut app = crate::app::files::tests::app(&ctx);
         app.draft = "keep".into();
+        app.context_chips.clear_quotes();
         app.state.busy = true;
         let (client, _, commands) = rpc::Client::stub_with_records();
         app.client = Some(client);
@@ -224,12 +229,12 @@ fn newly_arrived_structured_question_cannot_reuse_console_popup_activation_or_te
         let (label, text) = selected(&line, "https://example.test/", 7..13).unwrap();
         let captured = format!("keep\n\n[Context: {label}]\n{text}\n[/Context]");
         assert!(
-            app.draft == "keep" || app.draft == captured,
+            app.outgoing_text() == "keep" || app.outgoing_text() == captured,
             "unexpected draft: {:?}",
-            app.draft
+            app.outgoing_text()
         );
         if code == egui::Key::Num1 {
-            assert_eq!(app.draft, "keep");
+            assert_eq!(app.outgoing_text(), "keep");
         }
     }
 }
@@ -249,6 +254,7 @@ fn secondary_opening_frame_cannot_approve_or_deny_pending_permission() {
         let mut app = crate::app::files::tests::app(&ctx);
         app.state.busy = true;
         app.draft = "keep".into();
+        app.context_chips.clear_quotes();
         app.state.dialogs.push_back(json!({"id":"console-opening","method":"confirm","title":"Allow bash?","message":"Run\n{\"command\":\"echo safe\"}\n\nApprove this call only."}));
         let (client, _, commands) = rpc::Client::stub_with_records();
         app.client = Some(client);
@@ -282,7 +288,7 @@ fn secondary_opening_frame_cannot_approve_or_deny_pending_permission() {
         assert_eq!(app.state.dialogs.len(), 1);
         assert!(app.pending_dialog.is_none());
         assert!(commands.try_recv().is_err());
-        assert_eq!(app.draft, "keep");
+        assert_eq!(app.outgoing_text(), "keep");
         assert!(app.state.busy);
     }
 }
@@ -320,7 +326,10 @@ fn empty_selection_is_disabled_and_new_message_id_cannot_retarget_frozen_excerpt
     let mut app = crate::app::files::tests::app(&ctx);
     app.collect_context_capture();
     assert!(!egui::Popup::is_any_open(&ctx));
-    assert!(!app.draft.contains("chosen") && !app.draft.contains("different message"));
+    assert!(
+        !app.outgoing_text().contains("chosen")
+            && !app.outgoing_text().contains("different message")
+    );
     for _ in 0..3 {
         frame(&ctx, &replacement, vec![]);
     }

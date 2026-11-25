@@ -30,6 +30,8 @@ after agent/task/automation polling and UI actions. Unknown/unhealthy/disabled
 window coordination fails closed. Other windows, approvals, queues, terminal
 shells, active tasks, automation deliveries/commands, imports, dictation,
 permission/workspace changes and other unsafe transitions defer installation.
+New background shells also defer restart through their completion receiver, even
+when already marked stopped; clearing/eviction cannot forget an unreaped shell.
 Open settings, files/browser panes, forms and modals also defer unattended
 restart. Remote hosting conservatively defers restart while enabled. Explicit
 Install & Relaunch may close settled idle clients without waiting for sleep;
@@ -40,8 +42,11 @@ image/file attachments and unsent history-draft shelves. Active/parked/blank
 composers are retained without the old 128-record cap. Default startup hydrates
 parked composers without launching processes; recovered side chats are ordinary
 chats, not recreated dock pairs. Explicit command-line cwd/session overrides keep
-existing selection semantics. Context capture bodies remain plain draft text;
-no chip associations, approvals, tool operations or messages are replayed. Failed
+existing selection semantics. After integrating newer master changes, quote,
+paste and context cards are checkpointed as exact separate label/body payloads
+with fresh UI identities on restore; typed text is never composed, trimmed or
+reparsed for persistence. Legacy checkpoint text remains literal. No approvals,
+tool operations or messages are replayed. Failed
 or unfinished attachment imports block update restart rather than disappearing.
 
 `restart/recovery.rs` captures preferences/composers, attention and checked local
@@ -74,11 +79,21 @@ parked/blank/side composers, >128 retention, pending navigation and placeholder
 protection; failed and repeated durable saves; late active/parked editor RPC;
 shared/exclusive window guards; and replacement rollback.
 
-- Complete final `bash scripts/test-rust.sh`: **2,393 passed, 0 failed, 2 existing
+- Pre-integration `bash scripts/test-rust.sh`: **2,393 passed, 0 failed, 2 existing
   ignored**, all 24 runner groups included once. Log:
   `/tmp/pui-automatic-updates-final-rust.log`.
-- `cargo clippy --offline --locked --all-targets`: completed with existing
-  cloud/remote warnings, no new updater warnings.
+- Remote master advanced 40 commits during implementation (through `09349fa8`),
+  including dependency upgrades, separate composer cards and background tasks.
+  Integration preserves these changes and adds exact-card and retiring-shell
+  regressions. Final integrated complete runner: **2,391 passed, 0 failed,
+  2 existing ignored**, all 25 groups included once using the runner's supported
+  `PUI_SERIAL_LANES=1` option. Log:
+  `/tmp/pui-automatic-updates-integrated-rust.log`.
+- Pre-integration ordinary Clippy completed with existing cloud/remote warnings.
+  Final integrated `cargo clippy --offline --locked --all-targets -- -D warnings`:
+  **passed** after collapsing one pre-existing nested else-if in newly integrated
+  background-task polling; its four focused tests passed afterward. Log:
+  `/tmp/pui-automatic-updates-integrated-clippy.log`.
 - Targeted rustfmt for every changed Rust file and `git diff --check`: passed.
 - Existing prompt-design guard: three tests passed; modal layout/input regressions
   pass in both themes and multiple widths/zoom levels.

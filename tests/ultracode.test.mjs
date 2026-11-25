@@ -192,3 +192,40 @@ test('agent mailbox still wakes idle recipients', async () => {
   assert.equal(h.messages.length,1);
   assert.deepEqual(h.messages[0][1], {triggerTurn:true,deliverAs:'steer'});
 });
+test('background subagent and background shell tools route to host and enforce permission boundaries', async () => {
+  const h = await host();
+  Object.assign(h.ctx, { cwd: tmpdir(), hasUI: true });
+  assert.ok(h.active().includes('pui_background_agent'));
+  assert.ok(h.active().includes('pui_background_bash'));
+  assert.ok(h.active().includes('pui_background_tasks'));
+
+  await h.tools.get('pui_background_agent').execute('call', { name: 'Investigate layout', task: 'Inspect layout code', model: 'claude-sonnet-4-6' }, undefined, null, h.ctx);
+  const bgReq = JSON.parse(h.requests.at(-1)[1]);
+  assert.equal(bgReq.action, 'spawn_background');
+  assert.equal(bgReq.model, 'claude-sonnet-4-6');
+
+  await h.tools.get('pui_background_bash').execute('call', { command: 'cargo test', description: 'Run suite' }, undefined, null, h.ctx);
+  const shReq = JSON.parse(h.requests.at(-1)[1]);
+  assert.equal(shReq.action, 'bg_bash');
+  assert.equal(shReq.command, 'cargo test');
+  assert.equal(shReq.description, 'Run suite');
+
+  await h.tools.get('pui_background_tasks').execute('call', { operation: 'list' }, undefined, null, h.ctx);
+  assert.equal(JSON.parse(h.requests.at(-1)[1]).action, 'bg_tasks');
+
+  // Unmanaged agent launch inside pui_background_bash is blocked even in bypass mode.
+  h.commands.get('pui-settings').handler(JSON.stringify({ permission: 'bypassPermissions', compactPercent: 85, keepRecentTokens: 20000 }), h.ctx);
+  assert.equal((await h.events.get('tool_call')({ toolName: 'pui_background_bash', input: { command: 'claude -p "hi"' } }, h.ctx)).block, true);
+
+  // Plan mode blocks pui_background_bash and pui_background_agent, allows read-only pui_background_tasks list/output.
+  h.commands.get('pui-settings').handler(JSON.stringify({ permission: 'plan', compactPercent: 85, keepRecentTokens: 20000 }), h.ctx);
+  assert.equal((await h.events.get('tool_call')({ toolName: 'pui_background_bash', input: { command: 'cargo test' } }, h.ctx)).block, true);
+  assert.equal((await h.events.get('tool_call')({ toolName: 'pui_background_agent', input: { name: 'a', task: 'b' } }, h.ctx)).block, true);
+  assert.equal(await h.events.get('tool_call')({ toolName: 'pui_background_tasks', input: { operation: 'list' } }, h.ctx), undefined);
+  assert.equal((await h.events.get('tool_call')({ toolName: 'pui_background_tasks', input: { operation: 'stop', task_id: 'bg-shell-1' } }, h.ctx)).block, true);
+
+  // Read-only workers cannot launch background agents or background shells.
+  const ro = await host(true);
+  await assert.rejects(() => ro.tools.get('pui_background_agent').execute('call', { name: 'a', task: 'b' }, undefined, null, ro.ctx), /cannot create subagents/);
+  await assert.rejects(() => ro.tools.get('pui_background_bash').execute('call', { command: 'echo hi' }, undefined, null, ro.ctx), /cannot run background shell/);
+});

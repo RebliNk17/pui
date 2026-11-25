@@ -45,6 +45,7 @@ fn real_markdown_file_modal_captures_once_and_rejects_refreshed_or_closed_docume
         .unwrap();
     settle(&mut app.files);
     app.draft = "Original".into();
+    app.context_chips.clear_quotes();
     let messages = app.state.messages.len();
     let (client, _events, commands) = crate::rpc::Client::stub_with_commands();
     app.client = Some(client);
@@ -67,27 +68,27 @@ fn real_markdown_file_modal_captures_once_and_rejects_refreshed_or_closed_docume
     frame(&ctx, &mut app, vec![egui::Event::Text("y".into())]);
     assert!(app.pending_dialog.is_none());
     assert_eq!(app.state.dialogs.front(), Some(&permission));
-    assert_eq!(app.draft, "Original");
+    assert_eq!(app.outgoing_text(), "Original");
     click(&ctx, &mut app, control(&ctx, "action"));
     draw(&ctx, &mut app);
     assert!(
-        app.draft
+        app.outgoing_text()
             .contains("[Rendered block 1 · lines 1–1 within this block]\nFirst שלום.")
     );
     assert!(
-        app.draft
+        app.outgoing_text()
             .contains("[Rendered block 3 · lines 1–3 within this block]\n世界\n\nlast\n")
     );
-    assert!(!app.draft.contains("Omitted middle"));
-    assert_eq!(app.draft.matches("[Context:").count(), 1);
+    assert!(!app.outgoing_text().contains("Omitted middle"));
+    assert_eq!(app.outgoing_text().matches("[Context:").count(), 1);
     assert_eq!(app.state.messages.len(), messages);
     assert!(
         commands.try_recv().is_err(),
         "no provider or permission command"
     );
-    let captured = app.draft.clone();
+    let captured = app.outgoing_text().clone();
     draw(&ctx, &mut app);
-    assert_eq!(app.draft, captured);
+    assert_eq!(app.outgoing_text(), captured);
 
     start(&ctx, &mut app);
     // Refresh allocates a fresh load identity even when path/text are unchanged.
@@ -97,14 +98,14 @@ fn real_markdown_file_modal_captures_once_and_rejects_refreshed_or_closed_docume
     assert_ne!(old, app.files.tabs[0]._budget.document());
     draw(&ctx, &mut app);
     click(&ctx, &mut app, control(&ctx, "action"));
-    assert_eq!(app.draft, captured);
+    assert_eq!(app.outgoing_text(), captured);
 
     start(&ctx, &mut app);
     // Replacing the loaded document text in the same tab cannot reuse review.
     app.files.tabs[0].content = Some(Ok(Content::Text("Replacement body".into())));
     draw(&ctx, &mut app);
     click(&ctx, &mut app, control(&ctx, "action"));
-    assert_eq!(app.draft, captured);
+    assert_eq!(app.outgoing_text(), captured);
     click(&ctx, &mut app, control(&ctx, "cancel"));
     draw(&ctx, &mut app);
     app.files.refresh(&ctx);
@@ -112,7 +113,7 @@ fn real_markdown_file_modal_captures_once_and_rejects_refreshed_or_closed_docume
     start(&ctx, &mut app);
     app.files.close_tab(0);
     draw(&ctx, &mut app);
-    assert_eq!(app.draft, captured);
+    assert_eq!(app.outgoing_text(), captured);
     assert_eq!(fs::read_to_string(&path).unwrap(), source);
     assert_eq!(app.state.dialogs.front(), Some(&permission));
     assert!(app.pending_dialog.is_none());

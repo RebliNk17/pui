@@ -99,7 +99,7 @@ impl Pui {
         let mut digest = Sha256::new();
         digest.update(protocol::string(&record, "message").as_bytes());
         digest.update(format!("\0{images}").as_bytes());
-        let request = format!("{:x}", digest.finalize());
+        let request = crate::hex::lower(digest.finalize());
         self.state.title_request = Some(request.clone());
         let data = json!({"version":1,"sessionFile":path,"sessionId":session_id,"initialRequest":request,"title":title});
         self.send(json!({"type":"prompt","message":format!("/pui-initial-title {data}")}));

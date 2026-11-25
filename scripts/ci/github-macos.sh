@@ -7,6 +7,8 @@ cd "$(dirname "$0")/../.."
 export CI_PROJECT_DIR="$PWD"
 export CARGO_HOME="$PWD/.cargo-ci"
 export CARGO_TARGET_DIR="$PWD/target"
+mkdir -p "$CARGO_HOME"
+cp scripts/ci/cargo-config.toml "$CARGO_HOME/config.toml"
 export CI_COMMIT_SHA="${GITHUB_SHA:?Missing GitHub Actions revision}"
 [[ "$(git rev-parse HEAD)" == "$CI_COMMIT_SHA" ]] || { echo "Checkout does not match the GitHub Actions revision." >&2; exit 1; }
 export CI_COMMIT_TAG=""

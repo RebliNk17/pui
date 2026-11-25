@@ -117,7 +117,10 @@ impl Pui {
             sidebar: !self.prefs.hide_sidebar,
             agents_board: !self.settings_open && self.kanban.open,
             automation: !self.settings_open && self.automation.open,
-            inspector: !self.prefs.hide_inspector && !self.files.is_open() && !self.inspector_panel,
+            inspector: !self.prefs.hide_inspector
+                && !self.files.is_open()
+                && !self.inspector_panel
+                && !self.background_tasks.open,
             inspector_available: ctx.screen_rect().width() > 1110.0,
             files: self.files.files_open(),
             browser: self.files.browser_open(),
@@ -300,6 +303,7 @@ impl Pui {
                 let shown = self.menu_state(ctx).inspector;
                 self.files.close();
                 self.inspector_panel = false;
+                self.background_tasks.open = false;
                 self.prefs.hide_inspector = shown;
             }
             Terminal => {
@@ -316,6 +320,7 @@ impl Pui {
                 self.settings_open = false;
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
+                self.background_tasks.open = false;
             }
             Browser => {
                 self.diff_rx = None;
@@ -324,12 +329,14 @@ impl Pui {
                 self.settings_open = false;
                 self.files.toggle_browser(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
+                self.background_tasks.open = false;
             }
             Changes => {
                 self.kanban.open = false;
                 self.automation.open = false;
                 self.settings_open = false;
                 self.files.close();
+                self.background_tasks.open = false;
                 self.inspector_panel = !self.inspector_panel;
                 self.prefs.hide_inspector = false;
                 if self.inspector_panel {

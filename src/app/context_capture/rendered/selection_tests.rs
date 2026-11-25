@@ -83,8 +83,18 @@ fn streaming_rendered_replacement_keeps_open_snapshot_and_no_selection_has_no_fa
     let mut app = crate::app::files::tests::app(&ctx);
     app.draft = "Kept".into();
     app.collect_context_capture();
-    assert!(app.draft.ends_with("\nchosen text\n[/Context]"));
-    assert!(!app.draft.contains("REPLACED"));
+    let out = app.outgoing_text();
+    assert!(out.contains("\nchosen text\n[/Context]"));
+    assert!(
+        out.starts_with(
+            "Kept
+
+[Context:"
+        ),
+        "draft first, then the quote block"
+    );
+    assert_eq!(app.draft, "Kept");
+    assert!(!out.contains("REPLACED"));
     let output = frame(&ctx, "Unselected text", true, vec![]);
     let target = position(&output, "Unselected text", 5);
     for pressed in [true, false] {
@@ -107,9 +117,9 @@ fn streaming_rendered_replacement_keeps_open_snapshot_and_no_selection_has_no_fa
             pointer(target, egui::PointerButton::Primary, pressed),
         );
     }
-    let draft = app.draft.clone();
+    let draft = app.outgoing_text();
     app.collect_context_capture();
-    assert_eq!(app.draft, draft);
+    assert_eq!(app.outgoing_text(), draft);
 }
 
 #[test]

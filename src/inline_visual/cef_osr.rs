@@ -534,6 +534,7 @@ fn create_browser(
     state: Arc<Mutex<CaptureState>>,
     frame_rate: i32,
 ) -> Result<(Browser, Option<Registration>), String> {
+    crate::chromium::bundle_unchanged()?;
     let initial = format!(
         "data:text/html;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(html.as_bytes())

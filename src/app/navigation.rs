@@ -608,9 +608,19 @@ impl Pui {
                 ui.close();
             }
             self.prefs.transcript_view.menu(ui);
+            if ui.button("Background tasks").clicked() {
+                self.settings_open = false;
+                self.kanban.open = false;
+                self.automation.open = false;
+                self.files.close();
+                self.inspector_panel = false;
+                self.background_tasks.open = !self.background_tasks.open;
+                ui.close();
+            }
             if ui.button("Session details").clicked() {
                 self.files.close();
                 self.inspector_panel = false;
+                self.background_tasks.open = false;
                 self.prefs.hide_inspector = !self.prefs.hide_inspector;
                 ui.close();
             }

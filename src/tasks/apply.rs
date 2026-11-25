@@ -430,7 +430,7 @@ fn capture(
         frame(&mut hash, path.as_bytes());
         hash_file(&mut hash, file.as_ref());
     }
-    Ok((tree, format!("{:x}", hash.finalize())))
+    Ok((tree, crate::hex::lower(hash.finalize())))
 }
 fn frame(hash: &mut Sha256, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_le_bytes());
@@ -449,7 +449,7 @@ fn payload(changes: &[Change]) -> String {
     serde_json::json!({"format":"pui-full-file-apply-v2","changes":changes}).to_string()
 }
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::hex::lower(Sha256::digest(bytes))
 }
 fn all_paths(identity: &Identity) -> Result<BTreeSet<String>, String> {
     let mut paths: BTreeSet<_> = entries(
@@ -497,7 +497,7 @@ fn inventory(identity: &Identity) -> Result<String, String> {
             &git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?,
         );
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(crate::hex::lower(hash.finalize()))
 }
 /// Read-only exact builder net-change plan against the durable pre-builder receipt.
 /// Later unrelated source edits are preserved; changed source target paths conflict.

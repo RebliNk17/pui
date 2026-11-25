@@ -13,6 +13,7 @@ pub(super) struct Checkpoint {
     path: Option<PathBuf>,
     cwd: PathBuf,
     draft: String,
+    cards: Vec<context_capture::SavedCard>,
     notice: String,
     images: Vec<crate::media::Attachment>,
     history_drafts: Vec<run_status::WaitingMessage>,
@@ -67,7 +68,10 @@ impl Checkpoint {
     }
 
     fn has_composer(&self) -> bool {
-        !self.draft.is_empty() || !self.images.is_empty() || !self.history_drafts.is_empty()
+        !self.draft.is_empty()
+            || !self.cards.is_empty()
+            || !self.images.is_empty()
+            || !self.history_drafts.is_empty()
     }
 
     fn same_chat(&self, other: &Self) -> bool {
@@ -115,12 +119,14 @@ impl Pui {
             .get(&self.agents.active)
             .map(|n| n.name.clone())
             .unwrap_or_else(|| self.state.chat_title().unwrap_or_default());
+        active.cards = self.context_chips.saved_cards();
         active.images = self.draft_images.images();
         active.history_drafts = self.history_drafts.clone();
         let mut checkpoints = Vec::new();
         // A save before startup hydration must not replace a retained attachment
         // or recovery shelf with an empty placeholder.
         if !(self.draft.is_empty()
+            && !self.context_chips.has_quotes()
             && self.draft_images.is_empty()
             && self.history_drafts.is_empty()
             && self.restart_pending.iter().any(|c| c.same_chat(&active)))
@@ -141,6 +147,7 @@ impl Pui {
                     // Mirror drafts are local; their owner's activity is not.
                     !(chat.client.is_none() && chat.connected),
                 );
+                checkpoint.cards = chat.context_chips.saved_cards();
                 checkpoint.agent_id = Some(id.clone());
                 checkpoint.name = node.name.clone();
                 checkpoint.blank = checkpoint.path.is_none();
@@ -222,6 +229,7 @@ impl Pui {
                         &checkpoint.images,
                         &checkpoint.history_drafts,
                     );
+                    chat.context_chips.restore_cards(&checkpoint.cards);
                     if chat.state.restart_notice.is_empty() {
                         chat.state.restart_notice.clone_from(&checkpoint.notice);
                     }
@@ -252,6 +260,7 @@ impl Pui {
 
     fn restore_checkpoint_for(&mut self, path: Option<PathBuf>) {
         if !self.draft.is_empty()
+            || self.context_chips.has_quotes()
             || !self.draft_images.is_empty()
             || !self.history_drafts.is_empty()
             || self.image_picker_rx.is_some()
@@ -265,7 +274,7 @@ impl Pui {
             self.prefs
                 .restart_checkpoints
                 .retain(|c| !c.same_chat(&checkpoint));
-            self.context_chips.clear();
+            self.context_chips.restore_cards(&checkpoint.cards);
             checkpoint.apply(&mut self.state, &mut self.draft);
             self.draft_images.set_images(checkpoint.images);
             self.history_drafts = checkpoint.history_drafts;
