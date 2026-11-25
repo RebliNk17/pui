@@ -404,9 +404,15 @@ impl SidePanel {
 
         {
             let stroke = if is_resizing {
-                ui.style().visuals.widgets.active.fg_stroke // highly visible
+                {
+                    let v = &ui.style().visuals;
+                    Stroke::new(v.widgets.active.fg_stroke.width, v.selection.stroke.color) // accent
+                }
             } else if resize_hover {
-                ui.style().visuals.widgets.hovered.fg_stroke // highly visible
+                {
+                    let v = &ui.style().visuals;
+                    Stroke::new(v.widgets.hovered.fg_stroke.width, v.selection.stroke.color) // accent
+                }
             } else if show_separator_line {
                 // TODO(emilk): distinguish resizable from non-resizable
                 ui.style().visuals.widgets.noninteractive.bg_stroke // dim
@@ -958,9 +964,15 @@ impl TopBottomPanel {
 
         {
             let stroke = if is_resizing {
-                ui.style().visuals.widgets.active.fg_stroke // highly visible
+                {
+                    let v = &ui.style().visuals;
+                    Stroke::new(v.widgets.active.fg_stroke.width, v.selection.stroke.color) // accent
+                }
             } else if resize_hover {
-                ui.style().visuals.widgets.hovered.fg_stroke // highly visible
+                {
+                    let v = &ui.style().visuals;
+                    Stroke::new(v.widgets.hovered.fg_stroke.width, v.selection.stroke.color) // accent
+                }
             } else if show_separator_line {
                 // TODO(emilk): distinguish resizable from non-resizable
                 ui.style().visuals.widgets.noninteractive.bg_stroke // dim
