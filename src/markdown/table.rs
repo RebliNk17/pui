@@ -1,4 +1,4 @@
-use super::{Link, show_galley};
+use super::{Link, pr_capsule, show_galley};
 use crate::theme;
 use eframe::egui::{self, Ui, text::LayoutJob};
 use pulldown_cmark::Alignment;
@@ -80,7 +80,9 @@ impl Table {
         let mut widths = vec![80.0_f32; columns];
         for row in &self.rows {
             for (column, cell) in row.iter().enumerate().take(columns) {
-                let width = ui.fonts(|fonts| fonts.layout_job(cell.job.clone()).size().x);
+                let width = pr_capsule::layout(ui, cell.job.clone(), &cell.links)
+                    .size()
+                    .x;
                 widths[column] = widths[column].max(width.min(320.0));
             }
         }
@@ -116,7 +118,7 @@ impl Table {
                                 Alignment::Right => egui::Align::Max,
                                 _ => egui::Align::Min,
                             };
-                            let galley = ui.fonts(|fonts| fonts.layout_job(job));
+                            let galley = pr_capsule::layout(ui, job, &cell.links);
                             row_height = row_height.max(galley.size().y);
                             (galley, cell.links.clone())
                         })

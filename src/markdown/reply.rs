@@ -35,7 +35,7 @@ impl Item {
         marked.align_baseline = true;
         *job = LayoutJob::default();
         let active = highlight_job(ui, &mut marked);
-        let mut galley = ui.fonts(|fonts| fonts.layout_job(marked));
+        let mut galley = pr_capsule::layout(ui, marked, links);
         // Keep marker and body in ONE selectable label. Only move placed rows:
         // bytes, sections, bidi cursors and baseline boxes survive unchanged.
         let galley_mut = Arc::make_mut(&mut galley);

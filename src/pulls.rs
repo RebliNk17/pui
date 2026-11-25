@@ -452,17 +452,12 @@ fn pull_row(ui: &mut egui::Ui, pull: &Pull, status: Option<&Status>) -> egui::Re
             }
         })
 }
-pub fn symbol(ctx: &egui::Context, url: &str) -> Option<&'static str> {
-    let url = parse_url(url)?.url;
+pub(crate) fn reference(ctx: &egui::Context, url: &str) -> Option<(Pull, Option<Status>)> {
+    let pull = parse_url(url)?;
     let status = ctx
         .data(|d| d.get_temp::<BTreeMap<String, Status>>(egui::Id::new("pull-status-cache")))
-        .and_then(|m| m.get(&url).cloned());
-    Some(match status {
-        Some(s) if s.checks == "Checks failed" => "×",
-        Some(s) if s.checks == "Checks passed" => "✓",
-        Some(s) if s.state == "Merged" => "●",
-        _ => "○",
-    })
+        .and_then(|m| m.get(&pull.url).cloned());
+    Some((pull, status))
 }
 
 pub fn inline(ctx: &egui::Context, url: &str) -> Option<String> {
