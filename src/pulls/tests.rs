@@ -216,6 +216,119 @@ fn only_non_merged_statuses_expire_after_thirty_seconds() {
 }
 
 #[test]
+fn merged_ci_keeps_polling_until_checks_finish_including_after_restart() {
+    let home = std::env::temp_dir().join(format!("pui-pulls-{}", uuid::Uuid::new_v4()));
+    let links = vec![pull("a/b", 210)];
+    let url = &links[0].url;
+    let mut cache = Cache {
+        home: Some(home.clone()),
+        ..Default::default()
+    };
+    let mut running = status(Some(100));
+    running.checks = "Checks running".into();
+    cache.record(url.clone(), running, 10_000);
+    let mut restarted = Cache {
+        home: Some(home.clone()),
+        ..Default::default()
+    };
+    restarted.load(url);
+    assert!(!restarted.due(url, 39_999));
+    assert!(restarted.due(url, 40_000));
+    assert_eq!(
+        restarted.next_refresh(&links, 39_000),
+        Some(Duration::from_secs(1))
+    );
+    assert_eq!(
+        restarted.schedule(links.iter().collect(), 40_000),
+        [url.clone()]
+    );
+    restarted.in_flight.remove(url);
+    restarted.record(
+        url.clone(),
+        Status {
+            state: "Unavailable".into(),
+            error: Some("Offline".into()),
+            ..Default::default()
+        },
+        40_000,
+    );
+    assert_eq!(restarted.entries[url].status.state, "Merged");
+    assert_eq!(restarted.entries[url].status.checks, "Checks running");
+    assert!(restarted.due(url, 70_000));
+    restarted.record(url.clone(), status(Some(200)), 70_000);
+    assert_eq!(restarted.entries[url].status.checks, "Checks passed");
+    assert!(restarted.entries[url].status.error.is_none());
+    assert!(!restarted.due(url, i64::MAX));
+    assert_eq!(restarted.next_refresh(&links, 70_000), None);
+    assert_eq!(
+        store::load(&home, url).unwrap().status.checks,
+        "Checks passed"
+    );
+    // The pre-completion window cannot overwrite the completed disk snapshot.
+    cache.record(
+        url.clone(),
+        Status {
+            checks: "Checks running".into(),
+            ..status(Some(100))
+        },
+        60_000,
+    );
+    assert_eq!(cache.entries[url].status.checks, "Checks passed");
+    restarted.refresh(&links);
+    assert!(restarted.due(url, 70_001));
+    restarted.record(
+        url.clone(),
+        Status {
+            checks: "Checks running".into(),
+            ..status(Some(300))
+        },
+        80_000,
+    );
+    assert_eq!(restarted.entries[url].status.checks, "Checks running");
+    assert!(restarted.due(url, 110_000));
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn merged_unavailable_checks_keep_refreshing_but_terminal_checks_can_rest() {
+    for checks in [
+        "",
+        "Checks unavailable",
+        "Checks running",
+        "Checks passed",
+        "Checks failed",
+        "No checks",
+    ] {
+        let mut cached = status(None);
+        cached.checks = checks.into();
+        let expected = matches!(checks, "" | "Checks unavailable" | "Checks running");
+        assert_eq!(cached.needs_refresh(), expected, "{checks}");
+        cached.error = Some("Offline".into());
+        assert!(cached.needs_refresh());
+    }
+}
+
+#[test]
+fn merged_does_not_imply_checks_passed_and_mixed_jobs_keep_refreshing() {
+    for state in ["OPEN", "MERGED"] {
+        let raw = serde_json::json!({
+            "state": state,
+            "statusCheckRollup": [
+                {"status": "COMPLETED", "conclusion": "FAILURE"},
+                {"status": "IN_PROGRESS", "conclusion": null}
+            ]
+        });
+        let running = from_json(&raw);
+        assert_eq!(running.checks, "Checks running");
+        assert!(running.needs_refresh());
+        let mut completed = raw;
+        completed["statusCheckRollup"][1] =
+            serde_json::json!({"status": "COMPLETED", "conclusion": "SUCCESS"});
+        assert_eq!(from_json(&completed).checks, "Checks failed");
+    }
+}
+
+#[test]
 fn polling_is_bounded_deduplicated_and_prioritizes_unseen_then_oldest() {
     let links: Vec<_> = (1..=9).map(|number| pull("a/b", number)).collect();
     let mut cache = Cache::default();
@@ -267,7 +380,7 @@ fn repaint_deadline_tracks_the_next_expiry_instead_of_delaying_each_frame() {
 }
 
 #[test]
-fn manual_refresh_preserves_visible_status_and_never_rechecks_merged_prs() {
+fn manual_refresh_preserves_visible_status_and_rechecks_merged_prs() {
     let links = vec![pull("a/b", 1), pull("a/b", 2)];
     let mut cache = Cache::default();
     cache.record(links[0].url.clone(), status(None), 10_000);
@@ -275,7 +388,7 @@ fn manual_refresh_preserves_visible_status_and_never_rechecks_merged_prs() {
     open.state = "Open".into();
     cache.record(links[1].url.clone(), open, 10_000);
     cache.refresh(&links);
-    assert!(!cache.due(&links[0].url, 10_001));
+    assert!(cache.due(&links[0].url, 10_001));
     assert!(cache.due(&links[1].url, 10_001));
     assert_eq!(cache.entries[&links[0].url].status.state, "Merged");
     assert_eq!(cache.entries[&links[1].url].status.state, "Open");

@@ -56,10 +56,12 @@ pub(super) fn save(home: &Path, url: &str, entry: &CachedStatus) -> io::Result<C
     }
     let lock = options.open(lock_path)?;
     lock.lock_exclusive()?;
-    // A stale result from another window must never overwrite a merged PR.
+    // Merge is permanent; its check results may advance. Reject stale writers
+    // without freezing the first post-merge CI snapshot forever.
     if let Some(previous) = load(home, url)
-        && (previous.status.state == "Merged"
-            || (entry.status.state != "Merged" && previous.checked_at > entry.checked_at))
+        && ((previous.status.state == "Merged" && entry.status.state != "Merged")
+            || ((previous.status.state == "Merged" || entry.status.state != "Merged")
+                && previous.checked_at > entry.checked_at))
     {
         return Ok(previous);
     }

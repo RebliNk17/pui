@@ -35,6 +35,17 @@ pub struct Status {
     pub updated_at: Option<i64>,
     pub error: Option<String>,
 }
+impl Status {
+    fn needs_refresh(&self) -> bool {
+        self.state != "Merged"
+            || self.error.is_some()
+            || !matches!(
+                self.checks.as_str(),
+                "Checks passed" | "Checks failed" | "No checks"
+            )
+    }
+}
+
 #[derive(Default)]
 pub struct Pulls {
     pub links: Vec<Pull>,
@@ -68,7 +79,7 @@ impl Cache {
     fn due(&self, url: &str, now: i64) -> bool {
         !self.in_flight.contains(url)
             && self.entries.get(url).is_none_or(|entry| {
-                entry.status.state != "Merged"
+                (entry.checked_at == i64::MIN || entry.status.needs_refresh())
                     && !(0..REFRESH_INTERVAL.as_millis() as i64)
                         .contains(&now.saturating_sub(entry.checked_at))
             })
@@ -92,7 +103,7 @@ impl Cache {
             .iter()
             .filter(|pull| !self.in_flight.contains(&pull.url))
             .filter_map(|pull| self.entries.get(&pull.url))
-            .filter(|entry| entry.status.state != "Merged")
+            .filter(|entry| entry.checked_at == i64::MIN || entry.status.needs_refresh())
             .map(|entry| {
                 let elapsed = now.saturating_sub(entry.checked_at).max(0) as u64;
                 REFRESH_INTERVAL.saturating_sub(Duration::from_millis(elapsed))
@@ -102,7 +113,11 @@ impl Cache {
 
     fn record(&mut self, url: String, mut status: Status, now: i64) {
         if let Some(previous) = self.entries.get(&url) {
-            if previous.status.state == "Merged" {
+            // Merge is permanent, but checks can finish (or be rerun) later.
+            if previous.status.state == "Merged"
+                && status.state != "Merged"
+                && status.error.is_none()
+            {
                 return;
             }
             // A transient auth/network failure must not erase a known state.
@@ -127,9 +142,8 @@ impl Cache {
 
     fn refresh(&mut self, links: &[Pull]) {
         for pull in links {
-            if let Some(entry) = self.entries.get_mut(&pull.url)
-                && entry.status.state != "Merged"
-            {
+            if let Some(entry) = self.entries.get_mut(&pull.url) {
+                // Explicit refresh may discover check reruns even after completion.
                 entry.checked_at = i64::MIN;
             }
         }
@@ -538,16 +552,17 @@ fn from_json(raw: &Value) -> Status {
             if checks.is_empty() {
                 "No checks"
             } else if checks.iter().any(|c| {
+                c["status"].as_str().is_some_and(|s| s != "COMPLETED") || c["state"] == "PENDING"
+            }) {
+                // A failed job does not mean the remaining jobs have finished.
+                "Checks running"
+            } else if checks.iter().any(|c| {
                 matches!(
                     c["conclusion"].as_str().or(c["state"].as_str()),
                     Some("FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED")
                 )
             }) {
                 "Checks failed"
-            } else if checks.iter().any(|c| {
-                c["status"].as_str().is_some_and(|s| s != "COMPLETED") || c["state"] == "PENDING"
-            }) {
-                "Checks running"
             } else {
                 "Checks passed"
             }
