@@ -564,6 +564,10 @@ impl WindowSync {
         }
         this
     }
+    pub(super) fn has_unsent(&self) -> bool {
+        !self.unsent.is_empty()
+    }
+
     pub fn enabled(&self) -> bool {
         self.directory.is_some()
     }

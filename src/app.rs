@@ -58,6 +58,7 @@ mod sync;
 mod tasks;
 mod terminal;
 mod updates;
+pub(crate) use updates::install_staged_update;
 mod views;
 mod webview;
 
@@ -114,6 +115,8 @@ struct Preferences {
     model_catalogs: Vec<model_cache::Catalog>,
     hidden_models: std::collections::BTreeSet<String>,
     restart_checkpoints: Vec<restart::Checkpoint>,
+    /// Acknowledges the synchronous pre-update recovery snapshot after normal save.
+    update_recovery_id: Option<String>,
     usage_cache: Option<crate::usage::CachedUsage>,
     /// Models from providers registered by Pui's Pi extension (e.g.
     /// Antigravity accounts), learned from Pi and kept app-wide so Settings
@@ -175,6 +178,9 @@ pub struct Pui {
     menu: menu::Menu,
     navigation: navigation::Navigation,
     updates: updates::Updates,
+    update_install_requested: bool,
+    update_idle: updates::Idle,
+    update_recovery: Option<restart::Recovery>,
     /// App-level model catalog and Pi defaults; never tied to a chat.
     catalog: catalog::AppCatalog,
     pi_folder: pi_folder::PiFolder,
@@ -298,10 +304,25 @@ pub struct Pui {
 impl Pui {
     pub fn new(cc: &eframe::CreationContext<'_>, options: Options) -> Self {
         theme::install(&cc.egui_ctx);
-        let mut prefs: Preferences = cc
-            .storage
+        let (recovery, recovery_error) = if options.demo || cfg!(test) {
+            (None, None)
+        } else {
+            match restart::Recovery::location()
+                .map(|path| restart::Recovery::load(&path, cc.storage))
+                .transpose()
+            {
+                Ok(recovery) => (recovery.flatten(), None),
+                Err(error) => (None, Some(error)),
+            }
+        };
+        let storage = recovery
+            .as_ref()
+            .map(|s| s as &dyn eframe::Storage)
+            .or(cc.storage);
+        let mut prefs: Preferences = storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        prefs.settings.normalize_update_preferences();
         prefs.normalize_default_permission();
         // Before any Pi process or session discovery: adopt or offer Pui's Pi folder.
         let pi_folder = if options.demo || cfg!(test) {
@@ -318,6 +339,7 @@ impl Pui {
             prefs.theme = theme;
         }
         let session = prefs.startup_session(&options);
+        let restore_composers = options.cwd.is_none() && options.session.is_none() && !options.demo;
         let restore_blank = session.is_none() && options.cwd.is_none() && !options.demo;
         let projects = prefs.projects_view;
         let closed_projects = prefs.closed_projects.clone();
@@ -355,11 +377,14 @@ impl Pui {
             menu: menu::Menu::new(&cc.egui_ctx),
             navigation: Default::default(),
             updates: Default::default(),
+            update_install_requested: false,
+            update_idle: Default::default(),
+            update_recovery: recovery.clone(),
             catalog: Default::default(),
             pi_folder,
             completion_run: Default::default(),
             attention: attention::Attention::restore(
-                cc.storage
+                storage
                     .and_then(|s| eframe::get_value::<attention::Stored>(s, "attention-v1"))
                     .unwrap_or_default()
                     .0,
@@ -490,7 +515,7 @@ impl Pui {
         }
         // Dedicated, corruption-isolated local data; restores no review/editor/action.
         if !app.demo {
-            app.changes.review_comments.restore_checkpoint(cc.storage);
+            app.changes.review_comments.restore_checkpoint(storage);
         }
         if app.demo {
             app.load_demo();
@@ -825,6 +850,9 @@ impl Pui {
         } else {
             app.notifications.initialize(&cc.egui_ctx);
             app.restore_agents();
+            if restore_composers {
+                app.restore_parked_composers();
+            }
             app.refresh_sessions();
             app.refresh_workspace();
             if let Some(id) = session.as_deref().and_then(|path| app.agent_for_path(path)) {
@@ -852,6 +880,9 @@ impl Pui {
             }
         } else if options.browser_console {
             let _ = app.files.configure_browser("responsive", true);
+        }
+        if let Some(error) = recovery_error {
+            app.state.error = Some(error);
         }
         app.remember_navigation();
         app
@@ -1244,6 +1275,8 @@ impl Pui {
         self.updates
             .maybe_auto_check(&self.ctx, self.prefs.settings.auto_check_updates, self.demo);
         self.updates.poll();
+        self.updates
+            .maybe_auto_download(&self.ctx, &mut self.prefs.settings, self.demo);
         self.settings_view.resources.poll();
         self.settings_view.providers.poll();
         if let Some(host_name) = self.settings_view.providers.take_cloud_auth_completed() {
@@ -2754,6 +2787,14 @@ impl Pui {
 
 impl eframe::App for Pui {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_idle.observe(ctx);
+        // Apply recovered conditional keys to real storage, not just startup reads.
+        if let Some(recovery) = self.update_recovery.take() {
+            if let Some(storage) = frame.storage_mut() {
+                recovery.copy_to(storage);
+            }
+            // The snapshot is deleted only at a later launch after disk acknowledgement.
+        }
         crate::chromium::Runtime::pump(ctx);
         self.files.begin_frame();
         let side_keyboard = self.side_chat_owns_keyboard(ctx);
@@ -3068,6 +3109,7 @@ impl eframe::App for Pui {
         self.remember_navigation();
         self.refresh_menu(ctx);
         self.update_attention_dock();
+        self.maybe_install_update(ctx, frame);
         if self.screenshot.is_some() && self.frames == 25 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }

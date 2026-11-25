@@ -189,6 +189,17 @@ impl Automation {
             .iter()
             .any(|job| job.creator.id == id || path.is_some_and(|path| job.creator.path == path))
     }
+    pub(super) fn update_restart_blocked(&self) -> bool {
+        !self.running.is_empty()
+            || !self.mail.is_empty()
+            || !self.reconnect_at.is_empty()
+            || self.precheck.is_some()
+            || self.deleting.is_some()
+            || self.create.is_some()
+            || self.reschedule.is_some()
+            || self.jobs.iter().any(|job| job.pending.is_some())
+    }
+
     pub(super) fn active_count(&self) -> usize {
         self.jobs
             .iter()

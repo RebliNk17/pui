@@ -114,6 +114,9 @@ pub(super) struct Settings {
     pub keep_recent_tokens: u32,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_download_updates: bool,
+    pub auto_install_updates: bool,
     /// Runtime-only: the models the picker shows (configured providers minus
     /// hidden models). Auto's classifier never selects anything outside it.
     #[serde(skip)]
@@ -136,11 +139,20 @@ impl Default for Settings {
             compact_percent: 85,
             keep_recent_tokens: 20000,
             auto_check_updates: true,
+            auto_download_updates: true,
+            auto_install_updates: false,
             model_scope: None,
         }
     }
 }
 impl Settings {
+    /// Disabling downloads revokes installation consent, not just its visibility.
+    pub(super) fn normalize_update_preferences(&mut self) {
+        if !self.auto_download_updates {
+            self.auto_install_updates = false;
+        }
+    }
+
     pub fn payload(&self) -> Value {
         let mut payload = json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)});
         if let Some(scope) = &self.model_scope {
@@ -181,6 +193,31 @@ pub(super) use page::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn updater_defaults_migrate_and_download_disable_revokes_install_consent() {
+        for mut settings in [Settings::default(), serde_json::from_str("{}").unwrap()] {
+            assert!(settings.auto_check_updates);
+            assert!(settings.auto_download_updates);
+            assert!(!settings.auto_install_updates);
+            settings.auto_install_updates = true;
+            settings.auto_download_updates = false;
+            settings.normalize_update_preferences();
+            assert!(!settings.auto_install_updates);
+            settings.auto_download_updates = true;
+            settings.normalize_update_preferences();
+            assert!(!settings.auto_install_updates);
+        }
+        let mut settings: Settings = serde_json::from_value(
+            json!({"auto_download_updates":false,"auto_install_updates":true}),
+        )
+        .unwrap();
+        settings.normalize_update_preferences();
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert!(!restored.auto_download_updates);
+        assert!(!restored.auto_install_updates);
+    }
+
     #[test]
     fn auto_classifier_override_roundtrips_and_reaches_runtime() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();

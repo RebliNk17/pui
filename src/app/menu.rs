@@ -82,6 +82,7 @@ fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 impl Pui {
     pub(super) fn menu_commands(&mut self, ctx: &egui::Context) {
         for command in self.menu.take() {
+            self.update_idle.touch();
             self.menu_command(ctx, command);
         }
         // Native accelerators are consumed by AppKit. These also make the
@@ -533,8 +534,12 @@ impl Pui {
         }
     }
     pub(super) fn menu_windows(&mut self, ctx: &egui::Context) {
-        self.updates
-            .show_with_preference(ctx, &mut self.prefs.settings.auto_check_updates);
+        if self
+            .updates
+            .show_with_preference(ctx, &mut self.prefs.settings)
+        {
+            self.update_install_requested = true;
+        }
         about::show(ctx, &mut self.menu.about);
         self.resource_reload_dialog(ctx);
     }

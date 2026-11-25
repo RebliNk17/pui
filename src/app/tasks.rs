@@ -446,6 +446,29 @@ impl Tasks {
             }
         }
     }
+    pub(super) fn update_restart_blocked(&self) -> bool {
+        !self.processes.is_empty()
+            || self.running()
+            || self.setup.is_some()
+            || self.dispatch.is_some()
+            || self.job.is_some()
+            || self.start.is_some()
+            || !self.requests.is_empty()
+            || !self.waits.is_empty()
+            || self.revalidate_claim.is_some()
+            || self.operations.busy()
+            || self.attachment_confirming()
+            || self.attachment.pending_id().is_some()
+            || self
+                .retiring
+                .iter()
+                .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
+            || self
+                .records
+                .iter()
+                .any(|task| task.phase.active() || task.phase == domain::Phase::AwaitingApproval)
+    }
+
     pub fn running(&self) -> bool {
         self.live_task().is_some_and(|t| t.phase.active())
     }

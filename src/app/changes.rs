@@ -85,6 +85,17 @@ pub(super) struct Changes {
 }
 
 impl Changes {
+    pub(super) fn update_restart_blocked(&self, ctx: &egui::Context) -> bool {
+        // Git workers share a permit across reads and mutations. Do not abandon
+        // a hook, signer, clone, index action or utility editor during restart.
+        self.repo_sheet.is_some()
+            || self.review.is_some()
+            || self.commit_has_status()
+            || self.review_comments.update_restart_blocked()
+            || git_files::workspace_worker_busy(ctx)
+            || branches::permit(ctx).is_none()
+    }
+
     #[cfg(test)]
     pub(super) fn test_diff(&mut self, path: &str, content: &str) {
         self.diffs.insert(

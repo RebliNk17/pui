@@ -27,6 +27,7 @@ mod terminal;
 mod theme;
 mod tool_view;
 mod transcript;
+mod update_gate;
 mod usage;
 mod workspace;
 
@@ -118,6 +119,9 @@ fn app_icon() -> eframe::egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--install-staged")) {
+        std::process::exit(app::install_staged_update());
+    }
     // Diagnostics only: no GUI, agent prompt, network or provider credentials.
     if std::env::args().nth(1).as_deref() == Some("--runtime-check") {
         if let Err(error) = runtime::check() {
@@ -416,6 +420,19 @@ fn main() -> eframe::Result {
             }
         }
     }
+    // No GUI/persistence is opened while an installer holds the exclusive lock.
+    // Kept until after eframe destruction and Chromium shutdown below.
+    let _update_guard = if options.demo {
+        None
+    } else {
+        match update_gate::enter() {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(());
+            }
+        }
+    };
     chromium::prepare_application();
     let native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
