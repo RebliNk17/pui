@@ -175,6 +175,9 @@ impl Pui {
         let mut cards = Vec::new();
         let current = !self.agents.active.is_empty();
         for node in self.agents.nodes.values() {
+            if node.background {
+                continue;
+            }
             let active = node.id == self.agents.active;
             let state = if active {
                 &self.state

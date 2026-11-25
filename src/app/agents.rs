@@ -19,16 +19,22 @@ pub(super) struct Node {
     pub stopped: bool,
     pub reported: bool,
     pub needs_report: bool,
-    settled: bool,
+    pub settled: bool,
     pub(super) launch: Option<rpc::Launch>,
-    failure: Option<String>,
-    result: Option<String>,
-    task: String,
-    depends: Vec<String>,
-    setup: Option<Receiver<Result<PathBuf, String>>>,
+    pub failure: Option<String>,
+    pub result: Option<String>,
+    pub task: String,
+    pub(super) depends: Vec<String>,
+    pub(super) setup: Option<Receiver<Result<PathBuf, String>>>,
     pub(super) worktree: Option<PathBuf>,
     pub(super) cloud_host: Option<crate::remote::CloudHostConfig>,
     pub(super) cloud_repo: Option<crate::remote::cloud::CloudRepoItem>,
+    /// True for lightweight non-sidebar background subagents (`pui_background_agent`).
+    pub background: bool,
+    /// Optional explicit model override (`provider/id` or `id`) for this worker.
+    pub model: Option<String>,
+    /// Recorded when a background subagent settles, stops, or fails.
+    pub finished_at: Option<std::time::SystemTime>,
 }
 impl Node {
     pub(super) fn setup_pending(&self) -> bool {
@@ -149,7 +155,7 @@ pub(super) struct Agents {
     pub(super) permission_workers: Vec<std::thread::JoinHandle<()>>,
     mail: BTreeMap<String, (String, Option<String>)>,
     waits: Vec<AgentWait>,
-    retiring: Vec<Receiver<()>>,
+    pub(super) retiring: Vec<Receiver<()>>,
     pub(super) idle: idle::Idle,
 }
 impl Pui {
@@ -308,6 +314,9 @@ impl Pui {
                     worktree: record.worktree,
                     cloud_host: None,
                     cloud_repo: None,
+                    background: false,
+                    model: None,
+                    finished_at: None,
                 },
             );
         }
@@ -399,18 +408,23 @@ impl Pui {
             .cloned()
             .map(|record| (record.id.clone(), record))
             .collect::<BTreeMap<_, _>>();
-        let live = self.agents.nodes.values().filter_map(|n| {
-            n.path.clone().map(|path| AgentRecord {
-                id: n.id.clone(),
-                parent: n.parent.clone(),
-                name: n.name.clone(),
-                cwd: n.cwd.clone(),
-                path,
-                access: n.access.clone(),
-                permission: n.permission,
-                worktree: n.worktree.clone(),
-            })
-        });
+        let live = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| !n.background)
+            .filter_map(|n| {
+                n.path.clone().map(|path| AgentRecord {
+                    id: n.id.clone(),
+                    parent: n.parent.clone(),
+                    name: n.name.clone(),
+                    cwd: n.cwd.clone(),
+                    path,
+                    access: n.access.clone(),
+                    permission: n.permission,
+                    worktree: n.worktree.clone(),
+                })
+            });
         for record in live {
             retained.insert(record.id.clone(), record);
         }
@@ -529,6 +543,9 @@ impl Pui {
                 worktree: initial_cloud.as_ref().map(|m| PathBuf::from(&m.cwd)),
                 cloud_host: initial_cloud.map(|m| m.host),
                 cloud_repo: None,
+                background: false,
+                model: None,
+                finished_at: None,
             },
         );
         id
@@ -548,6 +565,10 @@ impl Pui {
         self.kanban.open = false;
         self.automation.open = false;
         self.tasks.open = false;
+        if self.agents.nodes.get(id).is_some_and(|n| n.background) {
+            self.open_background_tasks_panel(Some(id.to_owned()), None);
+            return;
+        }
         if id == self.agents.active || !self.agents.parked.contains_key(id) {
             return;
         }
@@ -918,7 +939,7 @@ impl Pui {
             .get(&self.agents.active)
             .is_some_and(|n| n.parent.is_some() || !n.children.is_empty())
     }
-    fn descendants(&self, parent: &str, target: &str) -> bool {
+    pub(super) fn descendants(&self, parent: &str, target: &str) -> bool {
         let mut cursor = Some(target);
         let mut visited = std::collections::BTreeSet::new();
         while let Some(id) = cursor {
@@ -1013,9 +1034,13 @@ impl Pui {
             }
             if record["type"] == "agent_start" {
                 node.settled = false;
+                node.finished_at = None;
             }
             if record["type"] == "agent_settled" {
                 node.settled = true;
+                if node.background {
+                    node.finished_at = Some(std::time::SystemTime::now());
+                }
             }
         }
     }
@@ -1076,12 +1101,15 @@ impl Pui {
         );
         true
     }
-    fn agent_control(&mut self, source: &str, request: &Value) -> Result<Value, String> {
-        match protocol::string(request, "action") {
+    pub(super) fn agent_control(&mut self, source: &str, request: &Value) -> Result<Value, String> {
+        let action = protocol::string(request, "action");
+        match action {
             "automation_create" | "automation_list" | "automation_update" => {
                 self.automation_control(source, request)
             }
-            "spawn" => {
+            "bg_bash" | "bg_tasks" => self.background_tasks_control(source, request),
+            "spawn" | "spawn_background" => {
+                let background = action == "spawn_background";
                 if self.agent_settings(source).permission == settings::PermissionMode::Plan {
                     return Err("Plan mode cannot create workers".into());
                 }
@@ -1090,15 +1118,41 @@ impl Pui {
                 }
                 let name = protocol::string(request, "name").trim();
                 let task = protocol::string(request, "task").trim();
-                let access = protocol::string(request, "access");
+                let raw_access = protocol::string(request, "access");
+                let access = if background && raw_access.is_empty() {
+                    "workspace"
+                } else {
+                    raw_access
+                };
+                let valid_access = if background {
+                    matches!(access, "workspace" | "read-only" | "worktree")
+                } else {
+                    matches!(access, "read-only" | "worktree")
+                };
                 if name.is_empty()
                     || name.len() > 320
                     || task.is_empty()
                     || task.len() > 96000
-                    || !matches!(access, "read-only" | "worktree")
+                    || !valid_access
                 {
                     return Err("Invalid worker task/name/access".into());
                 }
+                let model = match request.get("model") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(m)) => {
+                        let m = m.trim();
+                        if m.is_empty() {
+                            None
+                        } else if m.len() > 160
+                            || m.chars().any(|c| c.is_control() || c.is_whitespace())
+                        {
+                            return Err("Invalid worker model".into());
+                        } else {
+                            Some(m.to_owned())
+                        }
+                    }
+                    Some(_) => return Err("Invalid worker model".into()),
+                };
                 let depends: Vec<String> = request["depends_on"]
                     .as_array()
                     .map(|a| {
@@ -1131,10 +1185,16 @@ impl Pui {
                 if unfinished >= 128 {
                     return Err("128 unfinished workers reached. Wait for completion or explicitly stop unneeded workers; retained history does not count. No chat or worktree was deleted.".into());
                 }
+                let base_cwd = self
+                    .agents
+                    .nodes
+                    .get(source)
+                    .map(|n| n.cwd.clone())
+                    .unwrap_or_else(|| self.prefs.cwd.clone());
                 let cwd = match request.get("cwd") {
-                    None => self.prefs.cwd.clone(),
+                    None => base_cwd,
                     Some(Value::String(path)) if !path.trim().is_empty() && path.len() <= 16384 => {
-                        let path = self.prefs.cwd.join(path);
+                        let path = base_cwd.join(path);
                         let path = std::fs::canonicalize(path)
                             .map_err(|_| "Worker cwd must be an existing local directory")?;
                         if !path.is_dir() {
@@ -1192,6 +1252,9 @@ impl Pui {
                     worktree: None,
                     cloud_host: None,
                     cloud_repo: None,
+                    background,
+                    model: model.clone(),
+                    finished_at: None,
                 };
                 if access == "worktree" {
                     let (tx, rx) = mpsc::channel();
@@ -1213,9 +1276,20 @@ impl Pui {
                     .children
                     .push(id.clone());
                 self.agents.parked.insert(id.clone(), chat);
-                Ok(
-                    json!({"agent_id":id,"state":"queued","access":access,"permission":permission.key(),"context":"fresh task brief only","note":"Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."}),
-                )
+                Ok(json!({
+                    "agent_id": id,
+                    "kind": if background { "background" } else { "session" },
+                    "state": "queued",
+                    "access": access,
+                    "model": model,
+                    "permission": permission.key(),
+                    "context": "fresh task brief only",
+                    "note": if background {
+                        "Running in Background tasks (not in sidebar). One concise result is sent on completion; use pui_wait_agents or pui_background_tasks as needed."
+                    } else {
+                        "Use pui_agents for status, explicit messages for clarification; one concise result is sent on completion."
+                    }
+                }))
             }
             "list" => {
                 let unfinished = self
@@ -1232,7 +1306,7 @@ impl Pui {
                     .count();
                 let retained = self.agents.nodes.len().saturating_sub(unfinished);
                 Ok(json!({
-                    "agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"name":n.name,"status":n.status,"access":n.access,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>(),
+                    "agents":self.agents.nodes.values().filter(|n|n.id==source||self.descendants(source,&n.id)||self.agents.nodes[source].parent.as_deref()==Some(n.id.as_str())).map(|n|json!({"agent_id":n.id,"parent_id":n.parent,"kind":if n.background {"background"} else {"session"},"name":n.name,"status":n.status,"access":n.access,"model":n.model,"session":n.path,"cwd":n.cwd})).collect::<Vec<_>>(),
                     "capacity":{"unfinished_workers":unfinished,"max_unfinished_workers":128,"retained_history":retained,"concurrency_ceiling":self.prefs.agent_concurrency.clamp(1,16)}
                 }))
             }
@@ -1378,6 +1452,7 @@ impl Pui {
             .filter(|n| self.descendants(id, n))
             .cloned()
             .collect();
+        self.background_tasks.stop_shells_for_agents(&ids);
         for id in ids {
             if self.agents.permission_changes.contains_key(&id) {
                 self.state.notice = Some(
@@ -1411,6 +1486,9 @@ impl Pui {
                 node.stopped = true;
                 node.needs_report = false;
                 node.status = "Stopped".into();
+                if node.finished_at.is_none() {
+                    node.finished_at = Some(std::time::SystemTime::now());
+                }
             }
             if id == self.agents.active {
                 self.completion_run.cancel();
@@ -1681,6 +1759,7 @@ impl Pui {
                         node.status = format!("Failed: {error}");
                         node.stopped = true;
                         node.settled = true;
+                        node.finished_at = Some(std::time::SystemTime::now());
                     }
                 }
             }
@@ -1714,7 +1793,7 @@ impl Pui {
                 continue;
             }
             let parent = node.parent.as_ref().unwrap();
-            let (model, thinking) = if parent == &self.agents.active {
+            let (parent_model, thinking) = if parent == &self.agents.active {
                 (
                     format!("{}/{}", self.state.provider, self.state.model),
                     self.state.thinking.clone(),
@@ -1727,12 +1806,20 @@ impl Pui {
             } else {
                 continue;
             };
+            let chosen_model = node
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .unwrap_or(&parent_model);
             let mut launch = worker_launch(
                 node.access == "read-only",
                 &node.name,
-                Some(&model),
+                Some(chosen_model),
                 Some(&thinking),
             );
+            if node.background {
+                launch.args.push("--no-session".into());
+            }
             launch.settings = self.agent_settings(&id).payload();
             let name = node.name.clone();
             let task = node.task.clone();
@@ -1845,6 +1932,9 @@ impl Pui {
                     worktree: None,
                     cloud_host: None,
                     cloud_repo: None,
+                    background: false,
+                    model: None,
+                    finished_at: None,
                 },
             );
             self.agents.parked.insert(
@@ -1900,6 +1990,9 @@ impl Pui {
                     worktree: None,
                     cloud_host: None,
                     cloud_repo: None,
+                    background: false,
+                    model: None,
+                    finished_at: None,
                 },
             );
             let mut state = State {
@@ -1921,6 +2014,7 @@ impl Pui {
         }
     }
     pub(super) fn shutdown_agents(&mut self) {
+        self.background_tasks.stop_all_shells();
         // Hold WindowSync ownership until access relocation and old writers finish.
         for worker in std::mem::take(&mut self.agents.permission_workers) {
             let _ = worker.join();
@@ -1947,6 +2041,7 @@ impl Pui {
         let running = !self.agents.permission_changes.is_empty()
             || self.tasks.running()
             || self.terminals.running()
+            || self.background_tasks.has_running_shells()
             || (!self.is_mirror() && !self.state.ready())
             || self
                 .agents
@@ -1989,6 +2084,7 @@ impl Pui {
                 Some(confirmations::Choice::Confirm) => {
                     self.checkpoint_chats();
                     self.agents.exiting = true;
+                    self.background_tasks.stop_all_shells();
                     self.tasks.stop();
                     let roots: Vec<_> = self
                         .agents

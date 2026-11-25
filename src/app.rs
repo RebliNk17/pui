@@ -5,6 +5,7 @@ mod attachments;
 mod attention;
 mod auth_prompt;
 mod automation;
+mod background_tasks;
 mod catalog;
 mod changes;
 mod chat_find;
@@ -264,6 +265,7 @@ pub struct Pui {
     pulls: crate::pulls::Pulls,
     output_revision: u64,
     inspector_panel: bool,
+    background_tasks: background_tasks::BackgroundTasks,
     files: files::Browser,
     preview_opens: Vec<String>,
     session_layouts: session_layout::SessionLayouts,
@@ -454,6 +456,7 @@ impl Pui {
             pulls: Default::default(),
             output_revision: u64::MAX,
             inspector_panel: false,
+            background_tasks: Default::default(),
             files: Default::default(),
             preview_opens: Vec::new(),
             session_layouts: Default::default(),
@@ -1282,6 +1285,7 @@ impl Pui {
         self.poll_rpc();
         self.poll_history();
         self.poll_other_agents();
+        self.poll_background_tasks();
         self.poll_automation();
         self.poll_views();
         self.publish_live();
@@ -3004,6 +3008,8 @@ impl eframe::App for Pui {
             } else if self.files.is_open() {
                 self.files
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
+            } else if self.background_tasks.open {
+                self.background_tasks_panel(ctx)
             } else if self.inspector_panel {
                 let review_owner = self.review_comment_owner();
                 self.changes.show(

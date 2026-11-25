@@ -99,6 +99,7 @@ impl Pui {
                             self.diff_rx = None; // explicit navigation abandons the pending review open
                             self.files.toggle_browser(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
+                            self.background_tasks.open = false;
                         }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
                         #[cfg(test)]
@@ -119,6 +120,7 @@ impl Pui {
                             self.diff_rx = None;
                             self.files.toggle(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
+                            self.background_tasks.open = false;
                         }
                         let response = icons::button(
                             ui,
@@ -133,6 +135,7 @@ impl Pui {
                             self.kanban.open = false;
                             self.automation.open = false;
                             self.files.close();
+                            self.background_tasks.open = false;
                             self.inspector_panel = !self.inspector_panel;
                             self.prefs.hide_inspector = false;
                             if self.inspector_panel {
@@ -140,8 +143,39 @@ impl Pui {
                                 self.refresh_workspace();
                             }
                         }
+                        let (bg_running, bg_finished) = self.active_background_counts();
+                        let bg_tip = if bg_running > 0 {
+                            format!("Background tasks · {bg_running} running")
+                        } else if bg_finished > 0 {
+                            format!("Background tasks · {bg_finished} finished")
+                        } else {
+                            "Background tasks".into()
+                        };
+                        let response = icons::button(ui, Icon::Agents, &bg_tip);
+                        if self.background_tasks.open {
+                            ui.painter().rect_filled(response.rect, 7, colors.accent_bg);
+                            icons::draw(ui, response.rect, Icon::Agents, colors.text);
+                        } else if bg_running > 0 {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                7,
+                                Stroke::new(1.5, colors.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            self.kanban.open = false;
+                            self.automation.open = false;
+                            self.files.close();
+                            self.inspector_panel = false;
+                            self.background_tasks.open = !self.background_tasks.open;
+                            if !self.background_tasks.open {
+                                self.background_tasks.expanded = false;
+                            }
+                        }
                         let active = !self.prefs.hide_inspector
                             && !self.inspector_panel
+                            && !self.background_tasks.open
                             && !self.files.is_open();
                         let response = icons::button(ui, Icon::Details, "Session details · ⌘I");
                         if active {
@@ -160,6 +194,10 @@ impl Pui {
                                 self.prefs.hide_inspector = false;
                             } else if self.inspector_panel {
                                 self.inspector_panel = false;
+                                self.prefs.hide_inspector = false;
+                            } else if self.background_tasks.open {
+                                self.background_tasks.open = false;
+                                self.background_tasks.expanded = false;
                                 self.prefs.hide_inspector = false;
                             } else {
                                 self.prefs.hide_inspector = !self.prefs.hide_inspector;
@@ -223,19 +261,7 @@ impl Pui {
                             .unwrap_or("")
                             .to_owned();
                         let connectors = load_mcp_connectors(&self.prefs.cwd, &self.state.diagnostics);
-                        let active_bg_count = self
-                            .state
-                            .messages
-                            .iter()
-                            .flat_map(|m| &m.tools)
-                            .filter(|t| !t.finished)
-                            .count()
-                            + self
-                                .agents
-                                .nodes
-                                .values()
-                                .filter(|n| n.id != self.agents.active && n.status == "Working")
-                                .count();
+                        let (active_bg_count, finished_bg_count) = self.active_background_counts();
                         let summaries = [
                             status.to_owned(),
                             crate::context::usage_summary(&self.state),
@@ -250,6 +276,8 @@ impl Pui {
                             connectors.len().to_string(),
                             if active_bg_count > 0 {
                                 format!("{active_bg_count} running")
+                            } else if finished_bg_count > 0 {
+                                format!("{finished_bg_count} finished")
                             } else {
                                 "Idle".into()
                             },
@@ -269,7 +297,13 @@ impl Pui {
                         if workflow_id.is_none() {
                             layout.hidden.insert(Card::Workflow);
                         }
-                        let header_action = workflow_id.as_ref().map(|_| (Card::Workflow, "Open"));
+                        let header_action = workflow_id
+                            .as_ref()
+                            .map(|_| (Card::Workflow, "Open"))
+                            .or_else(|| {
+                                (active_bg_count > 0 || finished_bg_count > 0)
+                                    .then_some((Card::BackgroundTasks, "Open"))
+                            });
                         let action = inspector::stack(
                             ui,
                             &mut layout,
@@ -575,6 +609,8 @@ impl Pui {
                             if let Some(id) = workflow_id {
                                 self.open_task_from_board(id, None);
                             }
+                        } else if action == Some(Card::BackgroundTasks) {
+                            self.open_background_tasks_panel(None, None);
                         } else if action == Some(Card::Connectors) {
                             self.settings_view.select("Resources");
                             self.settings_open = true;
@@ -745,282 +781,6 @@ impl Pui {
                 self.request_connector_reconnect(&name);
             }
             ui.label(theme::small(ui, "Reconnect affects one connector, not the chat. Use /reload when idle to load configuration changes."));
-        }
-    }
-
-    fn background_tasks_card(&mut self, ui: &mut egui::Ui) {
-        let colors = crate::theme::palette(ui.ctx());
-        let mut stop_current = false;
-        let mut stop_agent_id: Option<String> = None;
-        let mut open_agent_id: Option<String> = None;
-
-        let active_tools: Vec<(String, String)> = self
-            .state
-            .messages
-            .iter()
-            .flat_map(|m| &m.tools)
-            .filter(|t| !t.finished)
-            .map(|t| {
-                let title = if !t.command.is_empty() {
-                    t.command
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or(&t.command)
-                        .trim()
-                        .to_owned()
-                } else if !t.path.is_empty() {
-                    format!("{} {}", t.name, t.path)
-                } else {
-                    t.name.clone()
-                };
-                (t.id.clone(), title)
-            })
-            .collect();
-
-        let running_agents: Vec<(String, String, Option<std::time::SystemTime>)> = self
-            .agents
-            .nodes
-            .values()
-            .filter(|n| n.id != self.agents.active && n.status == "Working")
-            .map(|n| (n.id.clone(), n.name.clone(), n.created))
-            .collect();
-
-        let finished_agents: Vec<(String, String, String)> = self
-            .agents
-            .nodes
-            .values()
-            .filter(|n| n.id != self.agents.active && n.status != "Working")
-            .map(|n| (n.id.clone(), n.name.clone(), n.status.clone()))
-            .collect();
-
-        let finished_tools: Vec<(String, Option<u64>, bool)> = self
-            .state
-            .messages
-            .iter()
-            .flat_map(|m| &m.tools)
-            .filter(|t| t.finished)
-            .rev()
-            .take(15)
-            .map(|t| {
-                let title = if !t.command.is_empty() {
-                    t.command
-                        .lines()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or(&t.command)
-                        .trim()
-                        .to_owned()
-                } else if !t.path.is_empty() {
-                    format!("{} {}", t.name, t.path)
-                } else {
-                    t.name.clone()
-                };
-                (title, t.duration_ms, t.failed)
-            })
-            .collect();
-
-        if active_tools.is_empty() && running_agents.is_empty() {
-            ui.label(theme::small(ui, "No active background tasks."));
-        } else {
-            let active_w = (ui.available_width() - 12.0).max(40.0);
-            for (id, title) in &active_tools {
-                ui.push_id(id, |ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(active_w, 20.0),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            ui.set_max_width(active_w);
-                            if icons::button(ui, Icon::Stop, "Stop running command").clicked() {
-                                stop_current = true;
-                            }
-                            ui.add_space(6.0);
-                            let left_w = ui.available_width().max(20.0);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(left_w, 20.0),
-                                Layout::left_to_right(Align::Center),
-                                |ui| {
-                                    ui.set_max_width(left_w);
-                                    icons::inline(ui, Icon::Terminal, colors.accent);
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(title).size(11.0).color(colors.text),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(title);
-                                },
-                            );
-                        },
-                    );
-                });
-            }
-            for (id, name, created) in &running_agents {
-                ui.push_id(id, |ui| {
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(active_w, 20.0),
-                        Layout::right_to_left(Align::Center),
-                        |ui| {
-                            ui.set_max_width(active_w);
-                            if icons::button(ui, Icon::Stop, "Stop background agent").clicked() {
-                                stop_agent_id = Some(id.clone());
-                            }
-                            if let Some(elapsed) = created.and_then(|t| t.elapsed().ok()) {
-                                ui.label(
-                                    RichText::new(format_elapsed(elapsed))
-                                        .size(10.0)
-                                        .color(colors.muted),
-                                );
-                            }
-                            ui.add_space(6.0);
-                            let left_w = ui.available_width().max(20.0);
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(left_w, 20.0),
-                                Layout::left_to_right(Align::Center),
-                                |ui| {
-                                    ui.set_max_width(left_w);
-                                    dot(ui, colors.accent);
-                                    if ui
-                                        .add(
-                                            egui::Button::new(
-                                                RichText::new(name).size(11.0).color(colors.text),
-                                            )
-                                            .truncate()
-                                            .frame(false),
-                                        )
-                                        .on_hover_text(name)
-                                        .clicked()
-                                    {
-                                        open_agent_id = Some(id.clone());
-                                    }
-                                },
-                            );
-                        },
-                    );
-                });
-            }
-            ui.ctx().request_repaint_after(Duration::from_secs(1));
-        }
-
-        let finished_count = finished_tools.len() + finished_agents.len();
-        if finished_count > 0 {
-            ui.add_space(4.0);
-            let id = ui.make_persistent_id("bg-tasks-finished");
-            let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-            let header = ui
-                .scope_builder(
-                    egui::UiBuilder::new()
-                        .id_salt("bg-tasks-finished-row")
-                        .max_rect(egui::Rect::from_min_size(
-                            ui.next_widget_position(),
-                            Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
-                        ))
-                        .layout(Layout::left_to_right(Align::Center))
-                        .sense(Sense::click()),
-                    |ui| {
-                        let (chev_rect, _) =
-                            ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                        icons::chevron(ui, chev_rect, open, colors.dim);
-                        ui.label(
-                            RichText::new(format!("{finished_count} finished"))
-                                .size(11.0)
-                                .color(colors.muted),
-                        );
-                    },
-                )
-                .response
-                .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if header.clicked() {
-                open = !open;
-                ui.ctx().data_mut(|d| d.insert_temp(id, open));
-            }
-            if open {
-                ui.indent("bg-finished-list", |ui| {
-                    // Reserve right clearance so the ScrollArea scrollbar never overlaps duration/status labels.
-                    let row_w = (ui.available_width() - 12.0).max(40.0);
-                    ui.set_max_width(row_w);
-                    for (id, name, status) in &finished_agents {
-                        ui.push_id(id, |ui| {
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(row_w, 18.0),
-                                Layout::right_to_left(Align::Center),
-                                |ui| {
-                                    ui.set_max_width(row_w);
-                                    ui.label(RichText::new(status).size(10.0).color(colors.dim));
-                                    ui.add_space(8.0);
-                                    let left_w = ui.available_width().max(20.0);
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(left_w, 18.0),
-                                        Layout::left_to_right(Align::Center),
-                                        |ui| {
-                                            ui.set_max_width(left_w);
-                                            if ui
-                                                .add(
-                                                    egui::Button::new(
-                                                        RichText::new(name)
-                                                            .size(10.5)
-                                                            .color(colors.muted),
-                                                    )
-                                                    .truncate()
-                                                    .frame(false),
-                                                )
-                                                .on_hover_text(name)
-                                                .clicked()
-                                            {
-                                                open_agent_id = Some(id.clone());
-                                            }
-                                        },
-                                    );
-                                },
-                            );
-                        });
-                    }
-                    for (title, duration_ms, failed) in &finished_tools {
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(row_w, 18.0),
-                            Layout::right_to_left(Align::Center),
-                            |ui| {
-                                ui.set_max_width(row_w);
-                                if let Some(ms) = duration_ms {
-                                    ui.label(
-                                        RichText::new(format_elapsed(Duration::from_millis(*ms)))
-                                            .size(10.0)
-                                            .color(colors.dim),
-                                    );
-                                    ui.add_space(8.0);
-                                }
-                                let left_w = ui.available_width().max(20.0);
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(left_w, 18.0),
-                                    Layout::left_to_right(Align::Center),
-                                    |ui| {
-                                        ui.set_max_width(left_w);
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(title).size(10.5).color(if *failed {
-                                                    colors.red
-                                                } else {
-                                                    colors.muted
-                                                }),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(title);
-                                    },
-                                );
-                            },
-                        );
-                    }
-                });
-            }
-        }
-
-        if stop_current {
-            self.stop();
-        }
-        if let Some(id) = stop_agent_id {
-            self.stop_agent_tree(&id);
-        }
-        if let Some(id) = open_agent_id {
-            self.view_agent(&id);
         }
     }
 
@@ -1322,17 +1082,6 @@ fn is_previewable_output(path: &str) -> bool {
         })
 }
 
-fn format_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs >= 3600 {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}s")
-    }
-}
-
 fn output_row(ui: &mut egui::Ui, path: &str, added: &str, removed: &str) -> egui::Response {
     let colors = crate::theme::palette(ui.ctx());
     let (rect, response) =
@@ -1625,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn expanding_finished_background_tasks_keeps_panel_width_and_aligns_durations() {
+    fn background_tasks_card_excludes_foreground_tools_and_shows_only_true_background_work() {
         fn collect_texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
             match shape {
                 egui::Shape::Text(t) => out.push((
@@ -1650,7 +1399,7 @@ mod tests {
         );
         app.prefs.cards.collapsed.extend(Card::ALL);
         app.prefs.cards.collapsed.remove(&Card::BackgroundTasks);
-        // Populate finished tools with short and very long commands + varying durations.
+        // Ordinary foreground tool calls must never appear in Background tasks.
         app.state.messages = vec![protocol::Message {
             role: "assistant".into(),
             tools: vec![
@@ -1664,121 +1413,42 @@ mod tests {
                 },
                 protocol::Tool {
                     id: "t2".into(),
-                    name: "bash".into(),
-                    command: "git add scripts/visual.ts scripts/ultracode.ts scripts/permissions.ts scripts/bundle-macos.sh src/inline_visual.rs src/transcript.rs".into(),
-                    finished: true,
-                    duration_ms: Some(400),
-                    ..Default::default()
-                },
-                protocol::Tool {
-                    id: "t3".into(),
-                    name: "bash".into(),
-                    command: "export PATH=\"$HOME/.cargo/bin:$PATH\"\ncargo test --offline --locked --bin pui".into(),
-                    finished: true,
-                    duration_ms: Some(217_000),
+                    name: "read".into(),
+                    path: "src/app.rs".into(),
+                    finished: false,
                     ..Default::default()
                 },
             ],
             ..Default::default()
         }];
 
-        let run = |app: &mut Pui, events: Vec<egui::Event>| {
-            let mut remaining = egui::Rect::NOTHING;
-            let out = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1000.0, 800.0),
-                    )),
-                    events,
-                    ..Default::default()
-                },
-                |ctx| {
-                    app.inspector(ctx);
-                    remaining = ctx.available_rect();
-                },
-            );
-            (out, 1000.0 - remaining.width())
-        };
-
-        // Measure inspector panel width while "3 finished" is collapsed.
-        let _ = run(&mut app, vec![]);
-        let (collapsed_out, width_before) = run(&mut app, vec![]);
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.inspector(ctx);
+            },
+        );
         let mut texts = Vec::new();
-        for clipped in &collapsed_out.shapes {
+        for clipped in &out.shapes {
             collect_texts(&clipped.shape, &mut texts);
         }
-        let toggle_pos = texts
-            .iter()
-            .find(|(t, _)| t == "3 finished")
-            .expect("finished disclosure visible")
-            .1
-            .center();
-
-        // Click "3 finished" to expand it.
-        let _ = run(
-            &mut app,
-            vec![
-                egui::Event::PointerMoved(toggle_pos),
-                egui::Event::PointerButton {
-                    pos: toggle_pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                },
-            ],
-        );
-        let _ = run(
-            &mut app,
-            vec![egui::Event::PointerButton {
-                pos: toggle_pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-        );
-        let (expanded_out, width_after) = run(&mut app, vec![]);
         assert!(
-            (width_after - width_before).abs() < 0.5,
-            "Inspector width changed when expanding finished tasks: before={width_before}, after={width_after}"
+            texts
+                .iter()
+                .any(|(t, _)| t == "No active background tasks."),
+            "foreground tools should not populate Background tasks: {texts:?}"
         );
-
-        let mut expanded_texts = Vec::new();
-        for clipped in &expanded_out.shapes {
-            collect_texts(&clipped.shape, &mut expanded_texts);
-        }
-        let duration_rects: Vec<_> = expanded_texts
-            .iter()
-            .filter(|(t, _)| t == "0s" || t == "3m 37s")
-            .collect();
-        assert_eq!(duration_rects.len(), 3, "expected all 3 duration labels");
-        let expected_right = duration_rects[0].1.right();
-        for (label, rect) in &duration_rects {
-            assert!(
-                (rect.right() - expected_right).abs() < 1.0,
-                "Duration '{label}' right edge {} misaligned with {expected_right}",
-                rect.right()
-            );
-            assert!(
-                rect.right() <= 1000.0 - 20.0,
-                "Duration '{label}' right edge {} leaves no scrollbar clearance (panel width_before={width_before}, width_after={width_after}, rect={rect:?})",
-                rect.right()
-            );
-        }
-        // Verify long truncated command text stays strictly to the left of its duration label.
-        let long_cmd = expanded_texts
-            .iter()
-            .find(|(t, _)| t.starts_with("git add scripts/"))
-            .expect("truncated long command visible");
-        let same_row_dur = duration_rects
-            .iter()
-            .find(|(_, r)| (r.center().y - long_cmd.1.center().y).abs() < 4.0)
-            .expect("matching duration on long command row");
         assert!(
-            long_cmd.1.right() + 4.0 <= same_row_dur.1.left(),
-            "Truncated command {:?} overlaps duration {:?}",
-            long_cmd.1,
-            same_row_dur.1
+            !texts
+                .iter()
+                .any(|(t, _)| t.contains("git status") || t.contains("src/app.rs")),
+            "foreground tool labels must never leak into Background tasks: {texts:?}"
         );
     }
 }

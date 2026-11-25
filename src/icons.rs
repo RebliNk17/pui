@@ -49,6 +49,8 @@ pub enum Icon {
     Mic,
     Play,
     Quote,
+    Agents,
+    Trash,
 }
 
 pub fn draw(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -423,6 +425,24 @@ fn draw_scaled(ui: &Ui, rect: Rect, icon: Icon, color: Color32, scale: f32) {
                 Color32::TRANSPARENT,
                 Stroke::new(s.width, color),
             ));
+        }
+        Icon::Agents => {
+            // Overlapping diamonds (background tasks / subagents), matching quiet line weight.
+            p.add(egui::Shape::closed_line(
+                vec![pt(-2.0, -5.0), pt(2.5, 0.0), pt(-2.0, 5.0), pt(-6.5, 0.0)],
+                s,
+            ));
+            line((1.5, -4.5), (6.0, 0.0));
+            line((6.0, 0.0), (1.5, 4.5));
+        }
+        Icon::Trash => {
+            line((-5.5, -4.0), (5.5, -4.0));
+            line((-2.0, -6.0), (2.0, -6.0));
+            line((-2.0, -6.0), (-2.0, -4.0));
+            line((2.0, -6.0), (2.0, -4.0));
+            outline(-4.5, -4.0, 9.0, 10.0, 1);
+            line((-1.5, -1.5), (-1.5, 3.5));
+            line((1.5, -1.5), (1.5, 3.5));
         }
         Icon::Mic => {
             // Microphone capsule
