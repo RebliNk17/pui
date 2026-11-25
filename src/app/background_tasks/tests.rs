@@ -40,6 +40,7 @@ fn stopped_background_shell_blocks_update_until_process_completion_is_observed()
         id: "bg-shell-update-test".into(),
         owner: owner.clone(),
         root: owner,
+        workflow_id: None,
         title: "Retiring shell".into(),
         command: "fixture only".into(),
         cwd: app.prefs.cwd.clone(),

@@ -164,6 +164,7 @@ impl BackgroundTasks {
         self.shells
             .iter()
             .any(|shell| shell.status.is_running() || shell.rx.is_some())
+            || self.workflows.iter().any(|w| w.status.is_running())
     }
 
     pub(super) fn has_running_shells(&self) -> bool {

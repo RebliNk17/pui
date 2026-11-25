@@ -398,6 +398,7 @@ impl Pui {
                 worktree: None,
                 cloud_host: None,
                 cloud_repo: None,
+                workflow_id: None,
             },
         );
         self.agents.parked.insert(
