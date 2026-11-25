@@ -1196,3 +1196,475 @@ pub(in crate::app) fn verified_task_cells(task: &crate::tasks::Task) -> Vec<Work
     }
     cells
 }
+
+impl Pui {
+    /// Populate an interactive, provider-free preview of Dynamic Workflows,
+    /// background subagents, background shells, and the inline transcript card.
+    pub(in crate::app) fn demo_workflow(&mut self) {
+        let root = self.ensure_agent();
+        let now = SystemTime::now();
+        let mut insert_bg_agent = |id: &str,
+                                   name: &str,
+                                   task: &str,
+                                   model: &str,
+                                   workflow_id: Option<&str>,
+                                   running: bool,
+                                   failed: Option<&str>,
+                                   elapsed_secs: u64,
+                                   reply: &str,
+                                   tools: Vec<protocol::Tool>| {
+            self.agents.nodes.insert(
+                id.to_owned(),
+                agents::Node {
+                    id: id.to_owned(),
+                    parent: Some(root.clone()),
+                    name: name.to_owned(),
+                    cwd: self.prefs.cwd.clone(),
+                    path: None,
+                    access: "workspace".into(),
+                    permission: Some(settings::PermissionMode::Auto),
+                    status: if let Some(err) = failed {
+                        format!("Failed: {err}")
+                    } else if running {
+                        "Working…".into()
+                    } else {
+                        "Idle".into()
+                    },
+                    last_activity: Some(now),
+                    created: Some(now - Duration::from_secs(elapsed_secs)),
+                    children: Vec::new(),
+                    stopped: false,
+                    reported: !running,
+                    needs_report: running,
+                    settled: !running,
+                    launch: None,
+                    failure: failed.map(str::to_owned),
+                    result: (!running).then(|| reply.to_owned()),
+                    task: task.to_owned(),
+                    depends: Vec::new(),
+                    setup: None,
+                    worktree: None,
+                    cloud_host: None,
+                    cloud_repo: None,
+                    background: true,
+                    workflow_id: workflow_id.map(str::to_owned),
+                    model: Some(model.to_owned()),
+                    finished_at: (!running).then_some(now),
+                },
+            );
+            let mut state = State {
+                session_name: name.to_owned(),
+                model_name: model.to_owned(),
+                busy: running,
+                ..Default::default()
+            };
+            state.messages.push(protocol::Message {
+                role: "assistant".into(),
+                text: reply.to_owned(),
+                tools,
+                ..Default::default()
+            });
+            let mut chat = agents::Chat::default();
+            chat.state = state;
+            chat.connected = true;
+            self.agents.parked.insert(id.to_owned(), chat);
+        };
+
+        // 1. Running 3-phase dynamic workflow (9 agents + 2 verification checks).
+        let wf1_id = "wf-1".to_owned();
+        insert_bg_agent(
+            "agent-wf-1",
+            "Inspect HUD bar",
+            "Inspect existing bottom HUD bar layout and order buttons in scenes/hud.gd.",
+            "Claude Sonnet 4.6",
+            Some(&wf1_id),
+            false,
+            None,
+            18,
+            "Mapped all 6 order buttons and the selection counter; no layout constraints conflict with a left-edge column.",
+            vec![
+                protocol::Tool {
+                    id: "dt1".into(),
+                    name: "read".into(),
+                    path: "scenes/hud.gd".into(),
+                    finished: true,
+                    duration_ms: Some(14),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "dt2".into(),
+                    name: "grep".into(),
+                    command: "order_buttons".into(),
+                    finished: true,
+                    duration_ms: Some(28),
+                    ..Default::default()
+                },
+            ],
+        );
+        insert_bg_agent(
+            "agent-wf-2",
+            "Implement left order column",
+            "Move the selection-count button and six order buttons into a vertical left-edge column on mobile viewports, keeping charge meters readable at the bottom.",
+            "Claude Opus 5.5",
+            Some(&wf1_id),
+            true,
+            None,
+            142,
+            "Updated mobile container anchors and wired the Groups popup toggle. Waiting for responsive render tests to finish.",
+            vec![
+                protocol::Tool {
+                    id: "dt3".into(),
+                    name: "read".into(),
+                    path: "scripts/ui/control_groups.gd".into(),
+                    finished: true,
+                    duration_ms: Some(18),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "dt4".into(),
+                    name: "edit".into(),
+                    path: "scripts/ui/control_groups.gd".into(),
+                    finished: true,
+                    duration_ms: Some(42),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "dt5".into(),
+                    name: "bash".into(),
+                    command: "godot --headless -s tests/run_hud_tests.gd".into(),
+                    finished: false,
+                    ..Default::default()
+                },
+            ],
+        );
+        insert_bg_agent(
+            "agent-wf-3",
+            "Responsive 375px phone check",
+            "Verify the mobile layout at 375×812 safe-area bounds.",
+            "Claude Sonnet 4.6",
+            Some(&wf1_id),
+            false,
+            Some("Groups popup overlaps bottom charge meter by 14px on 375px phone viewport"),
+            34,
+            "Overlap detected between group slot 9 and the bottom charge bar.",
+            vec![protocol::Tool {
+                id: "dt6".into(),
+                name: "bash".into(),
+                command: "godot --headless -s tests/phone_375_check.gd".into(),
+                finished: true,
+                failed: true,
+                duration_ms: Some(3400),
+                ..Default::default()
+            }],
+        );
+        insert_bg_agent(
+            "agent-wf-4",
+            "Wire tablet & desktop fallback",
+            "Preserve bottom bar layout on tablet and desktop breakpoints.",
+            "Claude Sonnet 4.6",
+            Some(&wf1_id),
+            true,
+            None,
+            95,
+            "Tablet and desktop breakpoints stay on the bottom bar; checking resize transitions now.",
+            vec![protocol::Tool {
+                id: "dt7".into(),
+                name: "edit".into(),
+                path: "scripts/ui/hud_breakpoints.gd".into(),
+                finished: true,
+                duration_ms: Some(31),
+                ..Default::default()
+            }],
+        );
+
+        let wf1 = DynamicWorkflow {
+            id: wf1_id.clone(),
+            owner: root.clone(),
+            name: "Audit & refactor control groups".into(),
+            objective: "Redesign the mobile control-group bar with a left-edge order column, popup group selector, and verified breakpoint tests.".into(),
+            phases: vec![
+                WorkflowPhase {
+                    index: 0,
+                    title: "Phase 1 · Explore".into(),
+                    launched: true,
+                    synthesis: Some("HUD layout, touch input, and existing test coverage mapped.".into()),
+                    agents: vec![
+                        WorkflowAgentSpec {
+                            label: "Inspect HUD bar".into(),
+                            task: "Inspect HUD bar".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: Some("agent-wf-1".into()),
+                            state: WorkflowCellState::Done,
+                            tokens: 14_200,
+                            duration_ms: Some(18_000),
+                            error: None,
+                            result: Some("Mapped all 6 order buttons.".into()),
+                        },
+                        WorkflowAgentSpec {
+                            label: "Inspect mobile input".into(),
+                            task: "Inspect touch handling".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: None,
+                            state: WorkflowCellState::Done,
+                            tokens: 11_800,
+                            duration_ms: Some(22_000),
+                            error: None,
+                            result: Some("Touch zones audited.".into()),
+                        },
+                        WorkflowAgentSpec {
+                            label: "Audit unit tests".into(),
+                            task: "Audit existing HUD tests".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: None,
+                            state: WorkflowCellState::Done,
+                            tokens: 9_400,
+                            duration_ms: Some(15_000),
+                            error: None,
+                            result: Some("Found 12 HUD test cases.".into()),
+                        },
+                    ],
+                },
+                WorkflowPhase {
+                    index: 1,
+                    title: "Phase 2 · Implement".into(),
+                    launched: true,
+                    synthesis: None,
+                    agents: vec![
+                        WorkflowAgentSpec {
+                            label: "Implement left order column".into(),
+                            task: "Move order buttons to left edge on mobile".into(),
+                            access: "workspace".into(),
+                            model: Some("Claude Opus 5.5".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Auto),
+                            agent_id: Some("agent-wf-2".into()),
+                            state: WorkflowCellState::Running,
+                            tokens: 38_500,
+                            duration_ms: Some(142_000),
+                            error: None,
+                            result: None,
+                        },
+                        WorkflowAgentSpec {
+                            label: "Wire tablet & desktop fallback".into(),
+                            task: "Keep bottom bar on tablet/desktop".into(),
+                            access: "workspace".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Auto),
+                            agent_id: Some("agent-wf-4".into()),
+                            state: WorkflowCellState::Running,
+                            tokens: 21_400,
+                            duration_ms: Some(95_000),
+                            error: None,
+                            result: None,
+                        },
+                        WorkflowAgentSpec {
+                            label: "Add groups popup drawer".into(),
+                            task: "Build 9-slot vertical groups popup".into(),
+                            access: "workspace".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Auto),
+                            agent_id: None,
+                            state: WorkflowCellState::Done,
+                            tokens: 19_600,
+                            duration_ms: Some(64_000),
+                            error: None,
+                            result: Some("Popup drawer implemented.".into()),
+                        },
+                        WorkflowAgentSpec {
+                            label: "Responsive 375px phone check".into(),
+                            task: "Check 375x812 safe-area bounds".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: Some("agent-wf-3".into()),
+                            state: WorkflowCellState::Error,
+                            tokens: 8_900,
+                            duration_ms: Some(34_000),
+                            error: Some("Groups popup overlaps bottom charge meter by 14px on 375px phone viewport".into()),
+                            result: None,
+                        },
+                    ],
+                },
+                WorkflowPhase {
+                    index: 2,
+                    title: "Phase 3 · Verify".into(),
+                    launched: false,
+                    synthesis: None,
+                    agents: vec![
+                        WorkflowAgentSpec {
+                            label: "Headless visual diff".into(),
+                            task: "Capture phone, tablet, and desktop HUD screenshots".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Sonnet 4.6".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: None,
+                            state: WorkflowCellState::Pending,
+                            tokens: 0,
+                            duration_ms: None,
+                            error: None,
+                            result: None,
+                        },
+                        WorkflowAgentSpec {
+                            label: "Integration review".into(),
+                            task: "Review diff for regressions and edge cases".into(),
+                            access: "read-only".into(),
+                            model: Some("Claude Opus 5.5".into()),
+                            cwd: None,
+                            permission: Some(settings::PermissionMode::Plan),
+                            agent_id: None,
+                            state: WorkflowCellState::Pending,
+                            tokens: 0,
+                            duration_ms: None,
+                            error: None,
+                            result: None,
+                        },
+                    ],
+                },
+            ],
+            checks: vec![
+                WorkflowCheckSpec {
+                    id: "hud-unit-tests".into(),
+                    description: "Run headless HUD unit tests".into(),
+                    command: "godot --headless -s tests/run_hud_tests.gd".into(),
+                    shell_id: None,
+                    state: WorkflowCellState::Pending,
+                    duration_ms: None,
+                    error: None,
+                },
+                WorkflowCheckSpec {
+                    id: "layout-snapshots".into(),
+                    description: "Verify mobile/desktop snapshot assertions".into(),
+                    command: "cargo test layout_snapshots".into(),
+                    shell_id: None,
+                    state: WorkflowCellState::Pending,
+                    duration_ms: None,
+                    error: None,
+                },
+            ],
+            checks_launched: false,
+            started: now - Duration::from_secs(218),
+            finished: None,
+            status: WorkflowStatus::Running,
+            current_phase: 1,
+            notified: false,
+            budget_dismissed: false,
+        };
+
+        // 2. Finished dynamic workflow in the Finished section.
+        let wf2 = DynamicWorkflow {
+            id: "wf-2".into(),
+            owner: root.clone(),
+            name: "Migrate auth middleware".into(),
+            objective: "Migrate token verification middleware across API services.".into(),
+            phases: vec![WorkflowPhase {
+                index: 0,
+                title: "Audit & migrate".into(),
+                launched: true,
+                synthesis: Some("All 4 services migrated cleanly.".into()),
+                agents: (1..=4)
+                    .map(|i| WorkflowAgentSpec {
+                        label: format!("Service {i} middleware"),
+                        task: format!("Migrate service {i}"),
+                        access: "workspace".into(),
+                        model: Some("Claude Sonnet 4.6".into()),
+                        cwd: None,
+                        permission: Some(settings::PermissionMode::Auto),
+                        agent_id: None,
+                        state: WorkflowCellState::Done,
+                        tokens: 12_000 + i as u64 * 1_800,
+                        duration_ms: Some(45_000 + i as u64 * 11_000),
+                        error: None,
+                        result: Some("Migrated and verified.".into()),
+                    })
+                    .collect(),
+            }],
+            checks: Vec::new(),
+            checks_launched: false,
+            started: now - Duration::from_secs(1240),
+            finished: Some(now - Duration::from_secs(988)),
+            status: WorkflowStatus::Completed,
+            current_phase: 0,
+            notified: true,
+            budget_dismissed: true,
+        };
+
+        self.background_tasks.workflows.push(wf1);
+        self.background_tasks.workflows.push(wf2);
+        self.background_tasks
+            .expanded_workflow_phases
+            .insert((wf1_id.clone(), 1));
+
+        // 3. Standalone running background shell + finished shell.
+        self.background_tasks.shells.push(ShellTask {
+            id: "bg-shell-1".into(),
+            owner: root.clone(),
+            root: root.clone(),
+            workflow_id: None,
+            title: "Full suite on feat/groups-bar".into(),
+            command: "scripts/test-rust.sh".into(),
+            cwd: self.prefs.cwd.clone(),
+            started: now - Duration::from_secs(84),
+            finished: None,
+            status: ShellStatus::Running,
+            output: "running 2362 tests\ntest app::background_tasks::tests::dynamic_workflow ... ok\ntest app::views::tests::background_tasks_card ... ok\nRunning serial groups…".into(),
+            truncated: false,
+            error: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+            notified: false,
+        });
+        self.background_tasks.shells.push(ShellTask {
+            id: "bg-shell-2".into(),
+            owner: root.clone(),
+            root: root.clone(),
+            workflow_id: None,
+            title: "Run combat tests in fire worktree".into(),
+            command: "cargo test combat".into(),
+            cwd: self.prefs.cwd.clone(),
+            started: now - Duration::from_secs(600),
+            finished: Some(now - Duration::from_secs(596)),
+            status: ShellStatus::Completed,
+            output: "test result: ok. 42 passed; 0 failed; finished in 3.8s".into(),
+            truncated: false,
+            error: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+            notified: true,
+        });
+
+        // 4. Add an inline transcript workflow card in the conversation so both
+        //    the inline card and the right-side Background tasks pane are visible!
+        self.sync_workflow_cards();
+        let mut wf_tool = protocol::Tool {
+            id: "demo-wf-tool".into(),
+            name: "pui_workflow".into(),
+            workflow_id: Some(wf1_id.clone()),
+            workflow_title: Some("Audit & refactor control groups".into()),
+            finished: true,
+            ..Default::default()
+        };
+        wf_tool
+            .set_workflow_result(&json!({ "details": { "workflow": { "workflow_id": wf1_id } } }));
+        self.state.messages.push(protocol::Message {
+            role: "assistant".into(),
+            text: "Started a 3-phase dynamic workflow to audit, refactor, and verify the control-group layouts across phone, tablet, and desktop breakpoints. Click the card below or inspect individual phases and agents in **Background tasks**.".into(),
+            tools: vec![wf_tool],
+            ..Default::default()
+        });
+        self.state.transcript_revision += 1;
+        self.background_tasks.open_list();
+    }
+}

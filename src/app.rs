@@ -606,6 +606,9 @@ impl Pui {
                     app.tasks.demo_proposal();
                 }
             }
+            if options.demo_workflow {
+                app.demo_workflow();
+            }
             if options.demo_working {
                 app.state.busy = true;
                 if let Some(last) = app.state.messages.last_mut() {
