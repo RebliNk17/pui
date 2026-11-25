@@ -819,3 +819,53 @@ fn idle_released_chat_can_change_models_instead_of_reporting_no_connection() {
     app.agents.idle.dormant.insert(id);
     assert_eq!(app.model_change_blocked(), None);
 }
+
+#[test]
+fn provider_filter_list_stays_above_the_model_picker() {
+    let ctx = egui::Context::default();
+    let mut app = app(&ctx);
+    live(&mut app);
+    app.state.models = ["alpha", "beta"]
+        .iter()
+        .flat_map(|provider| {
+            (0..6).map(move |i| protocol::Model {
+                id: format!("{provider}-{i}"),
+                name: format!("{provider} model {i}"),
+                provider: (*provider).into(),
+                context_window: 1000,
+                input_cost: 1.0,
+                output_cost: 2.0,
+            })
+        })
+        .collect();
+    app.model_picker_open = true;
+    settle(&ctx, &mut app);
+    let control = ctx
+        .data(|d| d.get_temp::<egui::Rect>(egui::Id::new("model-provider-control")))
+        .unwrap();
+    click(&ctx, &mut app, control.center());
+    settle(&ctx, &mut app);
+    assert!(egui::Popup::is_any_open(&ctx), "provider list opens");
+    // Close the list, click inside the picker (which raises the picker's layer),
+    // then reopen the list: egui only raises *new* areas, so it used to reopen underneath.
+    // Anything that raises the picker's layer (a press inside it, a frame where it was not
+    // visible) used to leave the already-open provider list underneath it.
+    let picker = ctx
+        .read_response(egui::Id::new("model-picker-dropdown"))
+        .unwrap()
+        .layer_id;
+    ctx.move_to_top(picker);
+    let output = settle(&ctx, &mut app);
+    assert!(egui::Popup::is_any_open(&ctx), "provider list is open");
+    let item = texts(&output)
+        .into_iter()
+        .filter(|(s, _)| s == "beta")
+        .map(|(_, r)| r.center())
+        .next()
+        .expect("provider list item painted");
+    let top = ctx.layer_id_at(item).unwrap();
+    assert_ne!(
+        top, picker,
+        "provider list must be drawn above the model picker"
+    );
+}

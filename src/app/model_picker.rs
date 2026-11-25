@@ -135,6 +135,14 @@ fn provider_filter(
                 }
             })
             .response;
+        // The list is its own Foreground area. egui raises the picker above it whenever the
+        // picker is pressed or re-shown, so pin the open list directly above its parent layer.
+        let list_layer = egui::LayerId::new(egui::Order::Foreground, response.id.with("popup"));
+        if egui::Popup::is_id_open(ui.ctx(), list_layer.id)
+            && ui.layer_id().order == list_layer.order
+        {
+            ui.ctx().set_sublayer(ui.layer_id(), list_layer);
+        }
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(egui::Id::new("model-provider-control"), response.rect)
