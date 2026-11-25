@@ -80,9 +80,9 @@ impl Pui {
     }
     fn remember_default_permission(&mut self, mode: PermissionMode) {
         let previous = self.prefs.settings.permission;
-        // Bypass stays with the chat that confirmed it; new chats and workers
-        // must never inherit it silently.
-        if previous == mode || mode == PermissionMode::Bypass {
+        // The last explicit choice (including Bypass) becomes the default for
+        // new chats. Workers inherit their parent chat's mode, not this default.
+        if previous == mode {
             return;
         }
         for node in self.agents.nodes.values_mut() {

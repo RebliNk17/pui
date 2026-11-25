@@ -621,7 +621,39 @@ impl Pui {
                 return;
             }
         }
+        self.model_default_pending = Some((self.agents.active.clone(), record.clone()));
         self.send(record);
+    }
+
+    /// Pi's RPC `set_model`/`set_thinking_level` no longer persist defaults,
+    /// so a confirmed picker choice becomes the default for new chats here.
+    pub(super) fn remember_model_default(&mut self, command: &str, success: bool) {
+        let Some((agent, request)) = self.model_default_pending.take() else {
+            return;
+        };
+        if !success || agent != self.agents.active || request["type"] != command {
+            if request["type"] != command {
+                self.model_default_pending = Some((agent, request));
+            }
+            return;
+        }
+        if self.demo || cfg!(test) {
+            return;
+        }
+        let result = match command {
+            "set_model" if !self.state.provider.is_empty() && !self.state.model.is_empty() => {
+                catalog::write_defaults(Some((&self.state.provider, &self.state.model)), None)
+            }
+            "set_thinking_level" => match request["level"].as_str() {
+                Some(level) => catalog::write_defaults(None, Some(level)),
+                None => return,
+            },
+            _ => return,
+        };
+        match result {
+            Ok(()) => self.catalog.defaults = catalog::read_defaults(),
+            Err(error) => self.state.notice = Some(format!("Could not save default: {error}")),
+        }
     }
 
     pub(super) fn close_model_popovers(&mut self) {

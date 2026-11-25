@@ -129,19 +129,6 @@ struct Preferences {
 }
 
 impl Preferences {
-    /// Bypass is confirmed per chat and is never a default for new chats or
-    /// workers. Existing chats that inherited it keep it explicitly.
-    fn normalize_default_permission(&mut self) {
-        if self.settings.permission != settings::PermissionMode::Bypass {
-            return;
-        }
-        for record in &mut self.agent_tree {
-            if record.permission.is_none() && record.access != "read-only" {
-                record.permission = Some(settings::PermissionMode::Bypass);
-            }
-        }
-        self.settings.permission = settings::PermissionMode::Auto;
-    }
     fn startup_session(&self, options: &Options) -> Option<PathBuf> {
         if options.demo {
             return None;
@@ -239,6 +226,8 @@ pub struct Pui {
     spotlight: search::Search,
     projects: bool,
     model_picker_open: bool,
+    /// Picker request awaiting Pi's acknowledgement before it becomes the default.
+    model_default_pending: Option<(String, Value)>,
     effort_picker_open: bool,
     effort_anchor: Option<(egui::Rect, egui::LayerId)>,
     effort_picker_focus: bool,
@@ -303,7 +292,6 @@ impl Pui {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
-        prefs.normalize_default_permission();
         // Before any Pi process or session discovery: adopt or offer Pui's Pi folder.
         let pi_folder = if options.demo || cfg!(test) {
             pi_folder::PiFolder::default()
@@ -419,6 +407,7 @@ impl Pui {
             spotlight: Default::default(),
             projects,
             model_picker_open: false,
+            model_default_pending: None,
             effort_picker_open: false,
             effort_anchor: None,
             effort_picker_focus: false,
@@ -1465,6 +1454,11 @@ impl Pui {
                         && record["message"]["role"] == "user";
                     let was_compacting = self.state.compacting;
                     self.state.apply(record);
+                    if kind == "response"
+                        && matches!(command.as_str(), "set_model" | "set_thinking_level")
+                    {
+                        self.remember_model_default(&command, success);
+                    }
                     if kind == "response"
                         && success
                         && matches!(
