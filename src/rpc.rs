@@ -255,6 +255,14 @@ pub(crate) fn child_path() -> Option<std::ffi::OsString> {
     let inherited = std::env::var_os("PATH").unwrap_or_default();
     let mut paths =
         crate::runtime::prepend_bundle_path(&inherited, crate::runtime::active_bundle().as_deref());
+    // Expose this exact app bundle's `pui` CLI (dev dist vs /Applications/Pui.app)
+    // to child processes so `pui mcp ...` works inside Pui without ambiguity.
+    if let Some(macos_dir) = crate::runtime::bundle_macos_dir() {
+        let insert_at = usize::from(crate::runtime::active_bundle().is_some());
+        if !paths.iter().any(|p| p == &macos_dir) {
+            paths.insert(insert_at.min(paths.len()), macos_dir);
+        }
+    }
     // Finder doesn't inherit shell startup files (nvm/Homebrew are often absent).
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".local/share/pi-node/current/bin"));

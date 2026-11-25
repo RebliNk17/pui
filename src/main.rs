@@ -4,6 +4,7 @@ mod accounts;
 mod activity;
 mod app;
 mod chromium;
+mod cli_link;
 mod context;
 mod file_watch;
 mod hex;
@@ -12,6 +13,7 @@ mod icons;
 mod inline_visual;
 mod inspector;
 mod markdown;
+mod mcp_cli;
 mod media;
 mod pi_migration;
 mod protocol;
@@ -140,6 +142,12 @@ fn main() -> eframe::Result {
     }
     if svg_preview::worker_requested() {
         std::process::exit(svg_preview::worker_main());
+    }
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(mcp_cli::run_from_env());
+    }
+    if std::env::args().nth(1).as_deref() == Some("install-cli") {
+        std::process::exit(cli_link::run_install_from_env());
     }
     let mut options = Options::default();
     let mut args = std::env::args().skip(1);
@@ -407,7 +415,12 @@ fn main() -> eframe::Result {
             "--screenshot" => options.screenshot = args.next().map(PathBuf::from),
             "--help" | "-h" => {
                 println!(
-                    "Pui — a native desktop UI for Pi\n\nUsage: pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n\nPackaged macOS apps include Pi and Node.js; configure your model provider to begin. Development builds need Pi and Node on PATH. Set PUI_PI_BIN (and PUI_PI_SDK when needed) to use an external Pi."
+                    "Pui — a native desktop UI for Pi\n\n\
+                     Usage:\n  \
+                       pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n  \
+                       pui mcp <add|add-json|remove|list|get|enable|disable|add-from-claude-desktop|login|logout> [options]\n  \
+                       pui install-cli [--dir PATH] [--target PATH] [--force]\n\n\
+                     Packaged macOS apps include Pi and Node.js; configure your model provider to begin. Development builds need Pi and Node on PATH. Set PUI_PI_BIN (and PUI_PI_SDK when needed) to use an external Pi."
                 );
                 return Ok(());
             }
@@ -416,6 +429,9 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
         }
+    }
+    if !options.demo && options.screenshot.is_none() {
+        cli_link::sync_on_startup();
     }
     chromium::prepare_application();
     let native = eframe::NativeOptions {

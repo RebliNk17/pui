@@ -14,7 +14,22 @@ fn bundled_at(exe: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn bundled() -> Option<PathBuf> {
-    bundled_at(&std::env::current_exe().ok()?)
+    let exe = std::env::current_exe().ok()?;
+    bundled_at(&exe).or_else(|| bundled_at(&exe.canonicalize().ok()?))
+}
+
+/// Directory containing the bundled `pui` executable (`<App>.app/Contents/MacOS`),
+/// when running from a macOS `.app` bundle (including via a CLI symlink).
+pub(crate) fn bundle_macos_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let resolved = if bundled_at(&exe).is_some() {
+        exe
+    } else {
+        let canon = exe.canonicalize().ok()?;
+        bundled_at(&canon)?;
+        canon
+    };
+    resolved.parent().map(Path::to_path_buf)
 }
 
 fn resolve_pi(
