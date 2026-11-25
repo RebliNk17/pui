@@ -1,6 +1,7 @@
 //! Selectable Markdown with tables, one consistent baseline and real link hit targets.
 mod capture;
 mod mermaid;
+mod pr_capsule;
 mod reply;
 #[cfg(test)]
 mod reply_tests;
@@ -188,6 +189,7 @@ type MarkdownCache = egui::cache::FrameCache<Arc<Vec<Event<'static>>>, ParseMark
 struct Link {
     range: std::ops::Range<usize>,
     url: String,
+    capsule: Option<pr_capsule::Capsule>,
 }
 
 fn scroll_heading_id() -> egui::Id {
@@ -432,7 +434,7 @@ fn flush(ui: &mut Ui, job: &mut LayoutJob, links: &mut Vec<Link>) {
     job.wrap.max_width = ui.available_width();
     job.align_baseline = true;
     let active = highlight_job(ui, job);
-    let mut galley = ui.fonts(|f| f.layout_job(std::mem::take(job)));
+    let mut galley = pr_capsule::layout(ui, std::mem::take(job), links);
     theme::text_direction::align(&mut galley, ui.available_width());
     show_galley_with_find(ui, galley, links, active);
     links.clear();
@@ -456,6 +458,7 @@ fn show_galley_with_find(
     if let Some(byte_start) = active_byte {
         record_find_match_rect(ui, &galley, origin, byte_start);
     }
+    pr_capsule::paint(ui, &galley, origin, links, response.hover_pos());
     if let Some(pos) = response.hover_pos() {
         let cursor = galley.cursor_from_pos(pos - origin);
         let byte = galley
@@ -472,11 +475,13 @@ fn show_galley_with_find(
             response
                 .clone()
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(format!(
-                    "{}{}",
-                    link.url,
-                    crate::pulls::inline(ui.ctx(), &link.url).unwrap_or_default()
-                ));
+                .on_hover_text(pr_capsule::tooltip(link).unwrap_or_else(|| {
+                    format!(
+                        "{}{}",
+                        link.url,
+                        crate::pulls::inline(ui.ctx(), &link.url).unwrap_or_default()
+                    )
+                }));
             if response.clicked() {
                 let mut target = link.url.clone();
                 if !target.contains(':') {
@@ -652,6 +657,7 @@ fn show_events_with_media(
     let mut links = Vec::new();
     let (mut bold, mut italic, mut heading) = (false, false, false);
     let mut link: Option<String> = None;
+    let mut capsule_link = false;
     let mut image_dest: Option<(String, String)> = None;
     let mut code = false;
     let mut code_text = String::new();
@@ -751,8 +757,22 @@ fn show_events_with_media(
                 heading = false;
                 ui.add_space(4.0);
             }
-            Event::Start(Tag::Link { dest_url, .. }) => link = Some(dest_url.into_string()),
-            Event::End(TagEnd::Link) => link = None,
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                capsule_link = false;
+                if let Some(capsule) = pr_capsule::Capsule::new(ui, &dest_url) {
+                    capsule.append(
+                        &mut job,
+                        &mut links,
+                        text_format(ui.ctx(), bold, italic, heading, false, true),
+                    );
+                    capsule_link = true;
+                }
+                link = Some(dest_url.into_string());
+            }
+            Event::End(TagEnd::Link) => {
+                link = None;
+                capsule_link = false;
+            }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 image_dest = Some((dest_url.into_string(), String::new()));
             }
@@ -794,6 +814,7 @@ fn show_events_with_media(
                             links.push(Link {
                                 range: start..job.text.len(),
                                 url: dest,
+                                capsule: None,
                             });
                         }
                     }
@@ -938,6 +959,7 @@ fn show_events_with_media(
                 }
             }
             Event::Text(text) if code => code_text.push_str(&text),
+            Event::Text(_) | Event::Code(_) if capsule_link => {}
             Event::Code(text) => {
                 let start = job.text.len();
                 job.append(
@@ -959,14 +981,28 @@ fn show_events_with_media(
                     links.push(Link {
                         range: start..job.text.len(),
                         url: url.into(),
+                        capsule: None,
                     });
                 }
             }
-            Event::Text(mut text) => {
-                if let Some(url) = &link {
-                    if let Some(symbol) = crate::pulls::symbol(ui.ctx(), url) {
-                        text = pulldown_cmark::CowStr::from(format!("{text} {symbol}"));
-                    }
+            Event::Text(text) => {
+                if link.is_none()
+                    && pr_capsule::append_bare(
+                        ui,
+                        &mut job,
+                        &mut links,
+                        &text,
+                        text_format(
+                            ui.ctx(),
+                            bold || table_header,
+                            italic,
+                            heading,
+                            false,
+                            false,
+                        ),
+                    )
+                {
+                    continue;
                 }
                 let start = job.text.len();
                 job.append(
@@ -985,6 +1021,7 @@ fn show_events_with_media(
                     links.push(Link {
                         range: start..job.text.len(),
                         url: url.clone(),
+                        capsule: None,
                     });
                 } else {
                     for (offset, word) in
@@ -1004,6 +1041,7 @@ fn show_events_with_media(
                             links.push(Link {
                                 range: start + offset..start + offset + url.len(),
                                 url: url.into(),
+                                capsule: None,
                             });
                         }
                     }
@@ -1077,6 +1115,7 @@ fn alert(ui: &mut Ui, kind: pulldown_cmark::BlockQuoteKind, events: &[Event<'sta
                             links.push(Link {
                                 range: start..job.text.len(),
                                 url: url.clone(),
+                                capsule: None,
                             });
                         }
                     }

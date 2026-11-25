@@ -190,6 +190,67 @@ fn hints_fit_without_overlap_in_light_dark_narrow_and_zoomed_composers() {
 }
 
 #[test]
+fn placeholder_matches_caret_and_typed_text_in_both_composer_scopes() {
+    for theme in [theme::Theme::Dark, theme::Theme::Light] {
+        for zoom in [0.8, 1.0, 1.5] {
+            for side_chat in [false, true] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                theme.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let mut app = app(&ctx);
+                app.state.busy = true;
+                app.side_chat.rendering = side_chat;
+                let owner = side_chat.then(|| "placeholder-alignment".to_owned());
+                let previous = composer_text::set_owner(owner);
+                for preview in [false, true] {
+                    app.demo = preview;
+                    app.focus_composer = true;
+                    let mut out = frame(&ctx, &mut app, 0.0, 420.0);
+                    for _ in 0..3 {
+                        out = frame(&ctx, &mut app, 0.0, 420.0);
+                    }
+                    let painted = texts(&out);
+                    let expected = if preview {
+                        "Start a real session to talk to Pi…"
+                    } else {
+                        "Ask a follow-up…"
+                    };
+                    let (_, hint) = painted.iter().find(|(text, _)| text == expected).unwrap();
+                    let hint = *hint;
+                    let caret = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(composer_text::widget_id(
+                                &ctx,
+                                "composer-caret-rect",
+                            ))
+                        })
+                        .unwrap();
+                    assert!(
+                        (hint.left() - caret.left()).abs() <= 1.0,
+                        "hint={hint:?} caret={caret:?}"
+                    );
+                    app.draft = "Hello".into();
+                    let out = frame(&ctx, &mut app, 0.0, 420.0);
+                    let painted = texts(&out);
+                    let (_, typed) = painted.iter().find(|(text, _)| text == "Hello").unwrap();
+                    assert!(
+                        (hint.left() - typed.left()).abs() <= 1.0,
+                        "hint={hint:?} typed={typed:?}"
+                    );
+                    assert!(
+                        (hint.top() - typed.top()).abs() <= 1.0,
+                        "hint={hint:?} typed={typed:?}"
+                    );
+                    app.draft.clear();
+                }
+                composer_text::set_owner(previous);
+            }
+        }
+    }
+}
+
+#[test]
 fn demo_and_disabled_animation_do_not_schedule_hint_rotation() {
     let ctx = egui::Context::default();
     let mut app = app(&ctx);

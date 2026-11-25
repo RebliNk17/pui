@@ -65,10 +65,14 @@ impl Pui {
     pub(super) fn composer_hints(
         &mut self,
         ui: &egui::Ui,
-        rect: egui::Rect,
-        response: &egui::Response,
+        output: &egui::widgets::text_edit::TextEditOutput,
     ) {
         let ctx = ui.ctx();
+        let response = &output.response;
+        // TextEdit keeps its text margins even with frame(false). Use its actual
+        // text origin/clip, not the surrounding scroll viewport, for overlays.
+        let rect = output.text_clip_rect;
+        let origin = output.galley_pos;
         let action = if self.state.ready() {
             Action::Send
         } else if self.prefs.settings.delivery == settings::DeliveryMode::Steer {
@@ -139,7 +143,7 @@ impl Pui {
                 FontId::proportional(14.0),
                 colors.dim,
             );
-            painter.galley(rect.min, galley, colors.dim);
+            painter.galley(origin, galley, colors.dim);
             return;
         }
         let label = painter.layout_no_wrap(
@@ -151,7 +155,7 @@ impl Pui {
         let key_size = egui::vec2(key.size().x + 10.0, 17.0);
         let hint_width = key_size.x + 6.0 + label.size().x;
         let key_rect = egui::Rect::from_min_size(
-            egui::pos2((rect.right() - hint_width).max(rect.left()), rect.top()),
+            egui::pos2((rect.right() - hint_width).max(origin.x), origin.y),
             key_size,
         );
         painter.rect(
@@ -171,7 +175,7 @@ impl Pui {
             colors.dim,
         );
         // Truncate only the empty-state hint. Drafts retain the editor's full width.
-        let width = (key_rect.left() - 16.0 - rect.left()).max(0.0);
+        let width = (key_rect.left() - 16.0 - origin.x).max(0.0);
         if width > 24.0 {
             let mut job = egui::text::LayoutJob::simple_singleline(
                 prompts[index].clone(),
@@ -180,7 +184,7 @@ impl Pui {
             );
             job.wrap = egui::text::TextWrapping::truncate_at_width(width);
             let galley = painter.layout_job(job);
-            painter.galley(rect.min, galley, colors.dim);
+            painter.galley(origin, galley, colors.dim);
         }
     }
 }
