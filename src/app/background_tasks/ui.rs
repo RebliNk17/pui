@@ -639,57 +639,65 @@ impl Pui {
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
 
-        // Top pane header bar matching Pui/Claude quiet styling.
-        egui::Frame::new()
-            .inner_margin(egui::Margin::symmetric(14, 10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    egui::Frame::new()
-                        .fill(colors.surface)
-                        .stroke(Stroke::new(1.0_f32, colors.border))
-                        .corner_radius(8.0)
-                        .inner_margin(egui::Margin::symmetric(9, 4))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                icons::inline(ui, Icon::Agents, colors.text);
-                                ui.label(
-                                    RichText::new("Background tasks")
-                                        .size(12.0)
-                                        .color(colors.text),
-                                );
-                            });
-                        });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Close, "Close Background tasks").clicked() {
-                            action = PanelAction::Close;
-                        }
-                        let (exp_icon, exp_tip) = if self.background_tasks.expanded {
-                            (Icon::Collapse, "Restore split view")
-                        } else {
-                            (Icon::Expand, "Expand Background tasks")
-                        };
-                        if icons::button(ui, exp_icon, exp_tip).clicked() {
-                            action = PanelAction::ToggleExpand;
-                        }
-                        if finished_total > 0
-                            && self.background_tasks.selected_agent.is_none()
-                            && icons::button(ui, Icon::Trash, "Clear finished background tasks")
-                                .clicked()
-                        {
-                            action = PanelAction::ClearFinished;
-                        }
+        // Top pane header bar matching Pui's Changes/Files quiet pane chrome (42px exact height).
+        egui::TopBottomPanel::top("bg-tasks-heading")
+            .exact_height(42.0)
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
+            .show_inside(ui, |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    if icons::button(ui, Icon::Close, "Close Background tasks").clicked() {
+                        action = PanelAction::Close;
+                    }
+                    let (exp_icon, exp_tip) = if self.background_tasks.expanded {
+                        (Icon::Collapse, "Restore split view")
+                    } else {
+                        (Icon::Expand, "Expand Background tasks")
+                    };
+                    if icons::button(ui, exp_icon, exp_tip).clicked() {
+                        action = PanelAction::ToggleExpand;
+                    }
+                    if finished_total > 0
+                        && self.background_tasks.selected_agent.is_none()
+                        && icons::button(ui, Icon::Trash, "Clear finished background tasks")
+                            .clicked()
+                    {
+                        action = PanelAction::ClearFinished;
+                    }
+                    ui.add_space(5.0);
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                        ui.spacing_mut().item_spacing.x = 7.0;
+                        icons::inline(ui, Icon::Agents, colors.muted);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("Background tasks")
+                                    .size(12.5)
+                                    .strong()
+                                    .color(colors.text),
+                            )
+                            .truncate(),
+                        );
                     });
                 });
             });
-        ui.separator();
+
+        let body_action = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(colors.bg))
+            .show_inside(ui, |ui| self.background_tasks_body(ui, &active))
+            .inner;
+        if matches!(action, PanelAction::None) {
+            action = body_action;
+        }
+        action
+    }
+
+    fn background_tasks_body(&mut self, ui: &mut egui::Ui, active: &str) -> PanelAction {
+        let colors = theme::palette(ui.ctx());
+        let mut action = PanelAction::None;
 
         if let Some(selected_id) = self.background_tasks.selected_agent.clone() {
-            let detail_action = self.background_agent_detail(ui, &selected_id);
-            if matches!(action, PanelAction::None) {
-                action = detail_action;
-            }
-            return action;
+            return self.background_agent_detail(ui, &selected_id);
         }
 
         // Gather top-level background tasks for `active`.
@@ -713,7 +721,7 @@ impl Pui {
             if !active.is_empty()
                 && node.background
                 && node.workflow_id.is_none()
-                && node.parent.as_deref() == Some(active.as_str())
+                && node.parent.as_deref() == Some(active)
             {
                 let snap = self.snapshot_agent(node);
                 if snap.running {
@@ -744,7 +752,7 @@ impl Pui {
         let active_jobs: Vec<(String, String, String)> = if active.is_empty() {
             Vec::new()
         } else {
-            self.automation.active_chat_jobs(&active)
+            self.automation.active_chat_jobs(active)
         };
         let active_workflow = self
             .inspector_workflow()
@@ -765,7 +773,7 @@ impl Pui {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width((ui.available_width() - 4.0).max(80.0));
                         if !has_any {
