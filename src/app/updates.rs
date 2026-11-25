@@ -1,6 +1,10 @@
 //! GitHub release checks, background auto-check, ZIP download/verification,
 //! staged installation, and post-restart temporary cleanup.
 use super::*;
+mod idle;
+mod installer;
+pub(super) use idle::Idle;
+pub(crate) use installer::run as install_staged_update;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -100,9 +104,13 @@ pub(super) struct Updates {
     install_release: Option<Release>,
     install_rx: Option<Receiver<Result<StagedInstall, String>>>,
     progress: Option<Arc<Progress>>,
+    download_started_automatically: bool,
+    /// Remember attempts, including explicit downloads, for this app session.
+    /// Cancellation, discard and failure must never become an automatic retry.
+    attempted_download_versions: std::collections::HashSet<String>,
+    install_error: Option<String>,
     last_auto_check: Option<std::time::Instant>,
     checked: bool,
-    cleaned_up: bool,
 }
 
 impl Default for Updates {
@@ -116,9 +124,11 @@ impl Default for Updates {
             install_release: None,
             install_rx: None,
             progress: None,
+            download_started_automatically: false,
+            attempted_download_versions: Default::default(),
+            install_error: None,
             last_auto_check: None,
             checked: false,
-            cleaned_up: false,
         }
     }
 }
@@ -525,77 +535,12 @@ fn download_and_stage(
     result
 }
 
-/// Remove any leftover `pui-update-*` staging directories in the system temp folder from previous updates.
-pub(super) fn cleanup_stale_staging_dirs() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|name| name.starts_with("pui-update-"))
-        {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
-}
-
 fn spawn_installer_and_relaunch(
     staged_dir: &Path,
     staged_app: &Path,
     target_app: &Path,
 ) -> Result<(), String> {
-    // Recheck at the installation boundary, not just when the download finished.
-    require_distribution_bundle(target_app)?;
-    require_distribution_bundle(staged_app)?;
-    let pid = std::process::id().to_string();
-    // Background helper waits for the current Pui process to exit completely,
-    // replaces the .app bundle atomically inside target's directory, removes
-    // the backup and staging directory, and launches the updated app.
-    let script = r#"
-pid="$1"
-staged_app="$2"
-target_app="$3"
-staged_dir="$4"
-for _ in $(seq 1 600); do
-  if ! kill -0 "$pid" 2>/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
-if kill -0 "$pid" 2>/dev/null; then
-  exit 1
-fi
-backup="${target_app}.previous.$$"
-rm -rf "$backup" 2>/dev/null || true
-if mv "$target_app" "$backup" && mv "$staged_app" "$target_app"; then
-  rm -rf "$backup" "$staged_dir" 2>/dev/null || true
-  xattr -dr com.apple.quarantine "$target_app" 2>/dev/null || true
-  open "$target_app"
-else
-  if [[ ! -e "$target_app" && -e "$backup" ]]; then
-    mv "$backup" "$target_app" 2>/dev/null || true
-  fi
-  rm -rf "$staged_dir" 2>/dev/null || true
-  exit 1
-fi
-"#;
-    std::process::Command::new("/bin/bash")
-        .arg("-c")
-        .arg(script)
-        .arg("pui-updater")
-        .arg(&pid)
-        .arg(staged_app)
-        .arg(target_app)
-        .arg(staged_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|_| "Could not start the background update installer.")?;
-    Ok(())
+    installer::spawn(staged_dir, staged_app, target_app)
 }
 
 impl Updates {
@@ -621,10 +566,8 @@ impl Updates {
 
     pub(super) fn maybe_auto_check(&mut self, ctx: &egui::Context, enabled: bool, demo: bool) {
         self.auto_check = enabled;
-        if !self.cleaned_up && !demo && !cfg!(test) {
-            self.cleaned_up = true;
-            std::thread::spawn(cleanup_stale_staging_dirs);
-        }
+        // Staging is removed by its owning worker/helper, discard or supersede.
+        // Never sweep peers' pui-update-* directories during a live startup.
         if !enabled || demo || cfg!(test) || !self.can_check() {
             return;
         }
@@ -633,6 +576,111 @@ impl Updates {
             .is_none_or(|last| last.elapsed() >= AUTO_CHECK_INTERVAL);
         if due {
             self.check_quietly(ctx);
+        }
+    }
+
+    /// Called after polling, without opening the Updates dialog. Automatic
+    /// network activity is always suppressed in demo builds and unit tests.
+    pub(super) fn maybe_auto_download(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &mut settings::Settings,
+        demo: bool,
+    ) {
+        self.apply_download_preference(settings);
+        if demo || cfg!(test) || !self.claim_auto_download(settings.auto_download_updates) {
+            return;
+        }
+        self.begin_download(ctx, true);
+    }
+
+    pub(super) fn apply_download_preference(&mut self, settings: &mut settings::Settings) {
+        settings.normalize_update_preferences();
+        if !settings.auto_download_updates && self.download_started_automatically {
+            self.cancel_download();
+        }
+    }
+
+    /// Claim before starting any worker so every outcome consumes the attempt.
+    fn claim_auto_download(&mut self, enabled: bool) -> bool {
+        if !enabled
+            || !configured()
+            || self.rx.is_some()
+            || self.install_rx.is_some()
+            || matches!(
+                self.install,
+                InstallState::Downloading | InstallState::Ready { .. }
+            )
+        {
+            return false;
+        }
+        let Some(Ok(release)) = &self.result else {
+            return false;
+        };
+        release.newer
+            && release.zip_url.is_some()
+            && self
+                .attempted_download_versions
+                .insert(release.version.clone())
+    }
+
+    pub(super) fn automatic_install_ready(&self) -> bool {
+        self.rx.is_none()
+            && self.install_rx.is_none()
+            && self.install_error.is_none()
+            && self
+                .install_release
+                .as_ref()
+                .is_some_and(|release| release.newer)
+            && matches!(
+                self.install,
+                InstallState::Ready {
+                    target_app: Some(_),
+                    ..
+                }
+            )
+    }
+
+    /// Installation failures (including a failed save) do not discard a
+    /// verified bundle. A user can explicitly retry after addressing the error.
+    pub(super) fn fail_install(&mut self, error: String) {
+        self.install_error = Some(error);
+        self.open = true;
+    }
+
+    /// The owner calls this only after saving and checking its lifecycle guards.
+    /// Renderers merely request installation; they never close the app.
+    pub(super) fn attempt_install(&mut self, ctx: &egui::Context) -> bool {
+        if self.rx.is_some() || self.install_rx.is_some() {
+            return false;
+        }
+        let InstallState::Ready {
+            staged_dir,
+            staged_app,
+            target_app: Some(target_app),
+        } = &self.install
+        else {
+            return false;
+        };
+        match spawn_installer_and_relaunch(staged_dir, staged_app, target_app) {
+            Ok(()) => {
+                self.open = false;
+                self.install_error = None;
+                ctx.input_mut(|i| {
+                    i.raw
+                        .viewports
+                        .entry(egui::ViewportId::ROOT)
+                        .or_default()
+                        .events
+                        .push(egui::ViewportEvent::Close)
+                });
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                true
+            }
+            Err(error) => {
+                self.fail_install(error);
+                false
+            }
         }
     }
 
@@ -660,6 +708,10 @@ impl Updates {
     }
 
     pub(super) fn start_download(&mut self, ctx: &egui::Context) {
+        self.begin_download(ctx, false);
+    }
+
+    fn begin_download(&mut self, ctx: &egui::Context, automatic: bool) {
         if self.install_rx.is_some() || self.rx.is_some() {
             return;
         }
@@ -669,6 +721,11 @@ impl Updates {
         let Some(Ok(release)) = &self.result else {
             return;
         };
+        if !release.newer {
+            return;
+        }
+        self.attempted_download_versions
+            .insert(release.version.clone());
         let Some(zip_url) = release.zip_url.clone() else {
             self.install = InstallState::Failed(
                 "This release does not include a macOS arm64 ZIP archive.".into(),
@@ -680,6 +737,8 @@ impl Updates {
             let _ = std::fs::remove_dir_all(staged_dir);
         }
         self.install_release = Some(release.clone());
+        self.install_error = None;
+        self.download_started_automatically = automatic;
         self.install = InstallState::Downloading;
         let progress = Arc::new(Progress::default());
         progress
@@ -714,6 +773,7 @@ impl Updates {
         }
         self.install = InstallState::Idle;
         self.install_release = None;
+        self.install_error = None;
     }
 
     pub(super) fn poll(&mut self) {
@@ -733,6 +793,7 @@ impl Updates {
         }
         if let Some(result) = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.install_rx = None;
+            self.download_started_automatically = false;
             let cancelled = self.progress.take().is_some_and(|p| p.cancelled());
             self.install = match result {
                 Ok((staged_dir, ..)) if cancelled => {
@@ -792,6 +853,9 @@ impl Updates {
                 if let Some(Err(error)) = &self.result {
                     detail.push_str(&format!(" Latest update check failed: {error}"));
                 }
+                if let Some(error) = &self.install_error {
+                    detail.push_str(&format!(" Couldn’t install: {error}"));
+                }
                 return ("Update ready to install", detail);
             }
             InstallState::Failed(error) => {
@@ -818,22 +882,26 @@ impl Updates {
 
     #[cfg(test)]
     pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
-        let mut auto_check = self.auto_check;
-        self.show_with_preference(ctx, &mut auto_check)
+        let mut settings = settings::Settings {
+            auto_check_updates: self.auto_check,
+            ..Default::default()
+        };
+        self.show_with_preference(ctx, &mut settings)
     }
 
     pub(super) fn show_with_preference(
         &mut self,
         ctx: &egui::Context,
-        auto_check: &mut bool,
+        settings: &mut settings::Settings,
     ) -> bool {
-        self.auto_check = *auto_check;
+        self.auto_check = settings.auto_check_updates;
+        self.apply_download_preference(settings);
         if !self.open {
             return false;
         }
         let mut retry = false;
         let mut download = false;
-        let mut install_now = None;
+        let mut install_now = false;
         let mut reveal_staged = None;
         let mut discard_staged = false;
         let mut cancel_download = false;
@@ -844,7 +912,8 @@ impl Updates {
             prompt_ui::heading(ui, title, "");
             egui::ScrollArea::vertical()
                 .id_salt("update-description")
-                .max_height((ctx.screen_rect().height() * 0.28).clamp(60.0, 180.0))
+                // Keep actions visible at narrow sizes and large interface zoom.
+                .max_height((ctx.screen_rect().height() - 380.0).clamp(45.0, 380.0))
                 .show(ui, |ui| {
                     ui.add(egui::Label::new(theme::small(ui, &description)).wrap());
                     if let Some(release) = self.displayed_release() {
@@ -854,27 +923,18 @@ impl Updates {
                             crate::markdown::show(ui, release.body.trim());
                         }
                     }
+                    if let (InstallState::Downloading, Some(progress)) =
+                        (&self.install, &self.progress)
+                    {
+                        ui.add_space(14.0);
+                        cancel_download = download_progress(ui, progress);
+                    }
+                    ui.add_space(14.0);
+                    installed_version(ui);
+                    ui.add_space(8.0);
+                    update_preferences(ui, settings);
+                    self.auto_check = settings.auto_check_updates;
                 });
-            if let (InstallState::Downloading, Some(progress)) = (&self.install, &self.progress) {
-                ui.add_space(14.0);
-                cancel_download = download_progress(ui, progress);
-            }
-            ui.add_space(14.0);
-            installed_version(ui);
-            ui.add_space(8.0);
-            if prompt_ui::compact_toggle_row(ui, auto_check, "Automatically check for updates")
-                .changed()
-            {
-                self.auto_check = *auto_check;
-            }
-            ui.add_space(6.0);
-            ui.add(
-                egui::Label::new(theme::small(
-                    ui,
-                    "Downloads are verified with SHA-256 and codesign. Running agents won’t be interrupted until you choose to relaunch.",
-                ))
-                .wrap(),
-            );
             ui.add_space(18.0);
             if !matches!(self.install, InstallState::Downloading) {
                 prompt_ui::footer(ui, |ui| {
@@ -894,35 +954,54 @@ impl Updates {
                 });
                 ui.add_space(6.0);
             }
+            if let InstallState::Ready {
+                staged_app,
+                target_app,
+                ..
+            } = &self.install
+            {
+                prompt_ui::footer(ui, |ui| {
+                    if target_app.is_some() {
+                        install_now = prompt_ui::button(
+                            ui,
+                            "Install & Relaunch",
+                            prompt_ui::Button::Primary,
+                            self.rx.is_none() && self.install_rx.is_none(),
+                        )
+                        .clicked();
+                    } else if prompt_ui::button(
+                        ui,
+                        "Reveal in Finder",
+                        prompt_ui::Button::Primary,
+                        self.rx.is_none(),
+                    )
+                    .clicked()
+                    {
+                        reveal_staged = Some(staged_app.clone());
+                    }
+                });
+                ui.add_space(6.0);
+            } else if matches!(self.install, InstallState::Idle | InstallState::Failed(_))
+                && self.result.as_ref().is_some_and(|result| {
+                    result
+                        .as_ref()
+                        .is_ok_and(|release| release.newer && release.zip_url.is_some())
+                })
+            {
+                prompt_ui::footer(ui, |ui| {
+                    download = prompt_ui::button(
+                        ui,
+                        "Download Update",
+                        prompt_ui::Button::Primary,
+                        self.rx.is_none(),
+                    )
+                    .clicked();
+                });
+                ui.add_space(6.0);
+            }
             prompt_ui::footer(ui, |ui| {
                 match &self.install {
-                    InstallState::Ready {
-                        staged_dir,
-                        staged_app,
-                        target_app,
-                    } => {
-                        if let Some(target) = target_app {
-                            if prompt_ui::button(
-                                ui,
-                                "Install & Relaunch",
-                                prompt_ui::Button::Primary,
-                                self.rx.is_none(),
-                            )
-                            .clicked()
-                            {
-                                install_now =
-                                    Some((staged_dir.clone(), staged_app.clone(), target.clone()));
-                            }
-                        } else if prompt_ui::button(
-                            ui,
-                            "Reveal in Finder",
-                            prompt_ui::Button::Primary,
-                            self.rx.is_none(),
-                        )
-                        .clicked()
-                        {
-                            reveal_staged = Some(staged_app.clone());
-                        }
+                    InstallState::Ready { .. } => {
                         if prompt_ui::button(
                             ui,
                             "Discard download",
@@ -939,16 +1018,6 @@ impl Updates {
                         if let Some(Ok(release)) = &self.result {
                             if release.newer {
                                 if release.zip_url.is_some() {
-                                    if prompt_ui::button(
-                                        ui,
-                                        "Download Update",
-                                        prompt_ui::Button::Primary,
-                                        self.rx.is_none(),
-                                    )
-                                    .clicked()
-                                    {
-                                        download = true;
-                                    }
                                     if prompt_ui::button(
                                         ui,
                                         "Release page",
@@ -978,6 +1047,7 @@ impl Updates {
             });
             close
         });
+        self.apply_download_preference(settings);
         if response.should_close() || response.inner {
             self.open = false;
         }
@@ -993,27 +1063,6 @@ impl Updates {
                 .arg(app_path)
                 .spawn();
         }
-        if let Some((staged_dir, staged_app, target_app)) = install_now {
-            match spawn_installer_and_relaunch(&staged_dir, &staged_app, &target_app) {
-                Ok(()) => {
-                    self.open = false;
-                    ctx.input_mut(|i| {
-                        i.raw
-                            .viewports
-                            .entry(egui::ViewportId::ROOT)
-                            .or_default()
-                            .events
-                            .push(egui::ViewportEvent::Close)
-                    });
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    return true;
-                }
-                Err(error) => {
-                    self.install_release = None;
-                    self.install = InstallState::Failed(error);
-                }
-            }
-        }
         if download {
             self.start_download(ctx);
         }
@@ -1023,8 +1072,50 @@ impl Updates {
             }
             self.start(ctx);
         }
-        false
+        install_now
     }
+}
+
+/// Shared Quiet Mac controls for Settings and Updates. The dependency is
+/// normalized before and after rendering, so re-enabling downloads never
+/// silently opts the user back into installation.
+pub(super) fn update_preferences(ui: &mut egui::Ui, settings: &mut settings::Settings) {
+    settings.normalize_update_preferences();
+    let narrow = ui.available_width() < 280.0;
+    prompt_ui::compact_toggle_row(
+        ui,
+        &mut settings.auto_check_updates,
+        if narrow {
+            "Automatically check"
+        } else {
+            "Automatically check for updates"
+        },
+    );
+    prompt_ui::compact_toggle_row(
+        ui,
+        &mut settings.auto_download_updates,
+        if narrow {
+            "Automatically download"
+        } else {
+            "Automatically download updates"
+        },
+    );
+    settings.normalize_update_preferences();
+    ui.add_enabled_ui(settings.auto_download_updates, |ui| {
+        prompt_ui::compact_toggle_row(
+            ui,
+            &mut settings.auto_install_updates,
+            if narrow {
+                "Automatically install"
+            } else {
+                "Automatically install updates"
+            },
+        );
+    });
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(theme::small(ui,
+        "Downloads are verified with SHA-256 and codesign. Optional auto-install relaunches only when all agents are sleeping and you’ve been inactive for 10 minutes, even with Pui in the foreground. Otherwise, use Install & Relaunch.",
+    )).wrap());
 }
 
 fn format_mb(bytes: u64) -> String {
@@ -1172,6 +1263,204 @@ mod tests {
         tx
     }
 
+    fn downloadable(version: &str) -> Release {
+        Release {
+            zip_url: Some(format!(
+                "https://github.com/owner/pui/releases/download/v{version}/Pui-macos-arm64.zip"
+            )),
+            ..test_release(version)
+        }
+    }
+
+    #[test]
+    fn automatic_download_claims_each_version_once_without_opening_dialog() {
+        let mut updates = Updates::default();
+        let tx = pending_check(&mut updates);
+        tx.send(Ok(downloadable("1.0.2"))).unwrap();
+        assert!(!updates.claim_auto_download(true), "wait for polling");
+        updates.poll();
+        assert!(!updates.claim_auto_download(false));
+        assert!(updates.claim_auto_download(true));
+        assert!(
+            !updates.open,
+            "background availability must not open a modal"
+        );
+        // Cancellation, discard, failure and explicit checks must not create a
+        // per-frame or preference-toggle retry loop for this release.
+        for state in [InstallState::Idle, InstallState::Failed("offline".into())] {
+            updates.install = state;
+            assert!(!updates.claim_auto_download(true));
+            assert!(!updates.claim_auto_download(false));
+            assert!(!updates.claim_auto_download(true));
+        }
+        pending_check(&mut updates)
+            .send(Ok(downloadable("1.0.2")))
+            .unwrap();
+        updates.poll();
+        assert!(!updates.claim_auto_download(true));
+        pending_check(&mut updates)
+            .send(Ok(downloadable("1.0.3")))
+            .unwrap();
+        updates.poll();
+        assert!(updates.claim_auto_download(true));
+    }
+
+    #[test]
+    fn cancelled_and_discarded_downloads_do_not_restart_automatically() {
+        let mut updates = Updates {
+            result: Some(Ok(downloadable("1.0.2"))),
+            ..Default::default()
+        };
+        assert!(updates.claim_auto_download(true));
+        let (tx, rx) = mpsc::channel();
+        let progress = Arc::new(Progress::default());
+        updates.install_rx = Some(rx);
+        updates.progress = Some(progress.clone());
+        updates.install = InstallState::Downloading;
+        updates.download_started_automatically = true;
+        updates.cancel_download();
+        tx.send(Err(CANCELLED.into())).unwrap();
+        updates.poll();
+        assert!(progress.cancelled());
+        assert!(!updates.download_started_automatically);
+        assert_eq!(updates.install, InstallState::Idle);
+        assert!(!updates.claim_auto_download(true));
+
+        let mut updates = staged_update();
+        updates.attempted_download_versions.insert("1.0.1".into());
+        updates.result = Some(Ok(downloadable("1.0.1")));
+        updates.cancel_staged();
+        assert!(!updates.claim_auto_download(true));
+    }
+
+    #[test]
+    fn automatic_download_policy_waits_for_workers_and_valid_newer_assets() {
+        let mut updates = Updates::default();
+        assert!(!updates.claim_auto_download(true));
+        updates.result = Some(Err("offline".into()));
+        assert!(!updates.claim_auto_download(true));
+        updates.result = Some(Ok(test_release("1.0.2")));
+        assert!(!updates.claim_auto_download(true), "no ZIP");
+        updates.result = Some(Ok(downloadable("1.0.0")));
+        assert!(!updates.claim_auto_download(true), "not newer");
+        updates.result = Some(Ok(downloadable("1.0.2")));
+        let _tx = pending_check(&mut updates);
+        assert!(!updates.claim_auto_download(true));
+        updates.rx = None;
+        let (_tx, rx) = mpsc::channel();
+        updates.install_rx = Some(rx);
+        assert!(!updates.claim_auto_download(true));
+        updates.install_rx = None;
+        updates.install = InstallState::Downloading;
+        assert!(!updates.claim_auto_download(true));
+        updates.install = InstallState::Ready {
+            staged_dir: PathBuf::new(),
+            staged_app: PathBuf::new(),
+            target_app: None,
+        };
+        assert!(!updates.claim_auto_download(true));
+        updates.install = InstallState::Idle;
+        assert!(updates.claim_auto_download(true));
+    }
+
+    #[test]
+    fn explicit_download_attempts_suppress_auto_retry_but_not_explicit_retry() {
+        let mut updates = Updates {
+            result: Some(Ok(test_release("1.0.2"))),
+            ..Default::default()
+        };
+        // A missing ZIP fails synchronously: no worker or real network.
+        updates.start_download(&egui::Context::default());
+        assert!(matches!(updates.install, InstallState::Failed(_)));
+        updates.result = Some(Ok(downloadable("1.0.2")));
+        assert!(!updates.claim_auto_download(true));
+        // Explicit retries are independent of the automatic attempt claim.
+        updates.result = Some(Ok(test_release("1.0.2")));
+        updates.install = InstallState::Idle;
+        updates.start_download(&egui::Context::default());
+        assert!(matches!(updates.install, InstallState::Failed(_)));
+        updates.result = Some(Ok(downloadable("1.0.0")));
+        updates.install = InstallState::Idle;
+        updates.start_download(&egui::Context::default());
+        assert_eq!(
+            updates.install,
+            InstallState::Idle,
+            "never download a non-newer release"
+        );
+        assert!(updates.install_rx.is_none());
+    }
+
+    #[test]
+    fn automatic_network_is_suppressed_in_tests_and_demo() {
+        for demo in [false, true] {
+            let mut updates = Updates {
+                result: Some(Ok(downloadable("1.0.2"))),
+                ..Default::default()
+            };
+            let mut settings = settings::Settings::default();
+            let ctx = egui::Context::default();
+            updates.maybe_auto_check(&ctx, true, demo);
+            updates.maybe_auto_download(&ctx, &mut settings, demo);
+            assert!(updates.rx.is_none());
+            assert!(updates.install_rx.is_none());
+            assert!(updates.attempted_download_versions.is_empty());
+            assert_eq!(updates.install, InstallState::Idle);
+            assert!(!updates.open);
+        }
+    }
+
+    #[test]
+    fn disabling_downloads_cancels_only_automatic_workers_and_revokes_install() {
+        for automatic in [false, true] {
+            let progress = Arc::new(Progress::default());
+            let mut updates = Updates {
+                install: InstallState::Downloading,
+                progress: Some(progress.clone()),
+                download_started_automatically: automatic,
+                ..Default::default()
+            };
+            let mut settings = settings::Settings {
+                auto_download_updates: false,
+                auto_install_updates: true,
+                ..Default::default()
+            };
+            updates.apply_download_preference(&mut settings);
+            assert_eq!(progress.cancelled(), automatic);
+            assert!(!settings.auto_install_updates);
+            settings.auto_download_updates = true;
+            updates.apply_download_preference(&mut settings);
+            assert!(!settings.auto_install_updates);
+            assert_eq!(progress.cancelled(), automatic, "never undo cancellation");
+        }
+    }
+
+    #[test]
+    fn install_failures_preserve_verified_bundle_and_block_automatic_retry() {
+        let mut updates = staged_update();
+        let expected = updates.install.clone();
+        assert!(updates.automatic_install_ready());
+        let _tx = pending_check(&mut updates);
+        assert!(!updates.automatic_install_ready());
+        assert!(!updates.attempt_install(&egui::Context::default()));
+        updates.rx = None;
+        updates.fail_install("Could not save preferences".into());
+        assert!(!updates.automatic_install_ready());
+        assert!(updates.open);
+        assert_eq!(updates.install, expected);
+        assert_eq!(updates.install_release.as_ref().unwrap().version, "1.0.1");
+        if let InstallState::Ready { staged_dir, .. } = &updates.install {
+            assert!(staged_dir.join("staged-marker").exists());
+        }
+        assert!(
+            updates
+                .status(true)
+                .1
+                .contains("Could not save preferences")
+        );
+        updates.cancel_staged();
+        assert!(updates.install_error.is_none());
+    }
+
     #[test]
     fn newer_check_replaces_stale_staged_offer_and_removes_only_its_download() {
         let mut updates = staged_update();
@@ -1249,6 +1538,175 @@ mod tests {
         let _tx = pending_check(&mut updates);
         updates.start_download(&egui::Context::default());
         assert!(updates.install_rx.is_none());
+    }
+
+    fn text_rects(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => out.push((
+                text.galley.job.text.clone(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+            )),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| text_rects(s, out)),
+            _ => {}
+        }
+    }
+
+    fn pointer_event(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    #[test]
+    fn shared_update_controls_fit_and_disabled_install_cannot_restore_consent() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.0, 1.4] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let mut settings = settings::Settings {
+                    auto_download_updates: false,
+                    auto_install_updates: true,
+                    ..Default::default()
+                };
+                let render = |settings: &mut settings::Settings, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(320.0, 500.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default()
+                                .show(ctx, |ui| update_preferences(ui, settings));
+                        },
+                    )
+                };
+                let mut labels = vec![];
+                for _ in 0..4 {
+                    let output = render(&mut settings, vec![]);
+                    labels.clear();
+                    for shape in output.shapes {
+                        text_rects(&shape.shape, &mut labels);
+                    }
+                }
+                let install = labels
+                    .iter()
+                    .find(|(text, _)| text.starts_with("Automatically install"))
+                    .unwrap()
+                    .1;
+                for (_, rect) in &labels {
+                    assert!(ctx.screen_rect().contains_rect(*rect), "{labels:?}");
+                }
+                assert!(!settings.auto_install_updates);
+                for pressed in [true, false] {
+                    render(&mut settings, pointer_event(install.center(), pressed));
+                }
+                assert!(
+                    !settings.auto_install_updates,
+                    "disabled label must not toggle"
+                );
+                settings.auto_download_updates = true;
+                render(&mut settings, vec![]);
+                assert!(
+                    !settings.auto_install_updates,
+                    "download enable must not restore install"
+                );
+                for pressed in [true, false] {
+                    render(&mut settings, pointer_event(install.center(), pressed));
+                }
+                assert!(
+                    settings.auto_install_updates,
+                    "explicit enabled opt-in works"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn manual_install_is_only_a_request_and_modal_cancellation_preserves_staging() {
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.0, 1.4] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let mut updates = staged_update();
+                let mut settings = settings::Settings::default();
+                let mut requested = false;
+                let mut render =
+                    |updates: &mut Updates, settings: &mut settings::Settings, events| {
+                        ctx.run(
+                            egui::RawInput {
+                                screen_rect: Some(egui::Rect::from_min_size(
+                                    egui::Pos2::ZERO,
+                                    Vec2::new(420.0, 620.0),
+                                )),
+                                events,
+                                ..Default::default()
+                            },
+                            |ctx| {
+                                requested |= updates.show_with_preference(ctx, settings);
+                            },
+                        )
+                    };
+                let mut labels = vec![];
+                for _ in 0..4 {
+                    let output = render(&mut updates, &mut settings, vec![]);
+                    labels.clear();
+                    for shape in output.shapes {
+                        text_rects(&shape.shape, &mut labels);
+                    }
+                }
+                let modal = ctx
+                    .read_response(egui::Id::new("pui-updates"))
+                    .unwrap()
+                    .rect;
+                assert!(ctx.screen_rect().contains_rect(modal), "{modal:?}");
+                let install = labels
+                    .iter()
+                    .find(|(text, _)| text == "Install & Relaunch")
+                    .unwrap()
+                    .1;
+                assert!(ctx.screen_rect().contains_rect(install));
+                for pressed in [true, false] {
+                    let output = render(
+                        &mut updates,
+                        &mut settings,
+                        pointer_event(install.center(), pressed),
+                    );
+                    assert!(!output.viewport_output.values().any(|v| {
+                        v.commands
+                            .iter()
+                            .any(|c| matches!(c, egui::ViewportCommand::Close))
+                    }));
+                }
+                assert!(
+                    updates.open,
+                    "request must not close the modal or spawn installer"
+                );
+                assert!(updates.ready_to_install());
+                // Backdrop cancellation is a close-only operation, never an install.
+                let outside = egui::pos2(2.0, 2.0);
+                for pressed in [true, false] {
+                    render(&mut updates, &mut settings, pointer_event(outside, pressed));
+                }
+                assert!(!updates.open);
+                assert!(updates.ready_to_install());
+                assert!(requested);
+                updates.cancel_staged();
+            }
+        }
     }
 
     #[test]

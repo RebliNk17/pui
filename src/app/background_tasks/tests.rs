@@ -32,6 +32,47 @@ fn collect_texts(shape: &egui::Shape, out: &mut Vec<String>) {
 }
 
 #[test]
+fn stopped_background_shell_blocks_update_until_process_completion_is_observed() {
+    let (_, mut app) = test_app();
+    let owner = app.agents.active.clone();
+    let (tx, rx) = mpsc::channel();
+    app.background_tasks.shells.push(ShellTask {
+        id: "bg-shell-update-test".into(),
+        owner: owner.clone(),
+        root: owner,
+        title: "Retiring shell".into(),
+        command: "fixture only".into(),
+        cwd: app.prefs.cwd.clone(),
+        started: SystemTime::now(),
+        finished: None,
+        status: ShellStatus::Stopped,
+        output: String::new(),
+        truncated: false,
+        error: None,
+        cancel: Arc::new(AtomicBool::new(true)),
+        rx: Some(rx),
+        notified: true,
+    });
+    assert!(app.background_tasks.update_restart_blocked());
+    app.clear_finished_background_tasks();
+    assert_eq!(
+        app.background_tasks.shells.len(),
+        1,
+        "don't forget a stopped but unreaped shell"
+    );
+    tx.send(ShellEvent::Done {
+        exit_code: None,
+        error: None,
+        stopped: true,
+    })
+    .unwrap();
+    app.poll_background_tasks();
+    assert!(!app.background_tasks.update_restart_blocked());
+    app.clear_finished_background_tasks();
+    assert!(app.background_tasks.shells.is_empty());
+}
+
+#[test]
 fn sidebar_child_sessions_and_background_subagents_are_strictly_separated() {
     let (_ctx, mut app) = test_app();
     let root = app.agents.active.clone();

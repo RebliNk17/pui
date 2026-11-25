@@ -64,11 +64,38 @@ fn card_title(label: &str) -> (String, Icon) {
     (label.split(" · ").next().unwrap_or(label).to_owned(), icon)
 }
 
+/// Exact untrusted composer card payload; never parsed from typed draft text.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(in crate::app) struct SavedCard {
+    label: String,
+    text: String,
+}
+
 #[derive(Default)]
 pub(in crate::app) struct Draft {
     quotes: Vec<Quote>,
 }
 impl Draft {
+    pub(in crate::app) fn saved_cards(&self) -> Vec<SavedCard> {
+        self.quotes
+            .iter()
+            .map(|quote| SavedCard {
+                label: quote.label.clone(),
+                text: quote.text.clone(),
+            })
+            .collect()
+    }
+    pub(in crate::app) fn restore_cards(&mut self, cards: &[SavedCard]) {
+        self.quotes = cards
+            .iter()
+            .map(|card| Quote {
+                id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                label: card.label.clone(),
+                text: card.text.clone(),
+            })
+            .collect();
+    }
+
     #[cfg(test)]
     pub(in crate::app) fn quote_ids(&self) -> Vec<u64> {
         self.quotes.iter().map(|q| q.id).collect()

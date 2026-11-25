@@ -153,6 +153,16 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "updates github release download install version",
         ),
         (
+            "Automatically download updates",
+            "General",
+            "updates github release automatic background download verified",
+        ),
+        (
+            "Automatically install updates",
+            "General",
+            "updates relaunch restart sleeping agents inactive idle",
+        ),
+        (
             "Pi version",
             "General",
             "pi runtime harness agent version bundled",
@@ -1070,18 +1080,9 @@ impl Pui {
         self.settings_pi_folder(ui);
         section(ui, "Updates", "");
         card(ui, |ui| {
-            row(
-                ui,
-                "Automatically check for updates",
-                "Periodically check GitHub Releases in the background. Updates never install or restart automatically without your confirmation.",
-                |ui| {
-                    toggle(
-                        ui,
-                        &mut self.prefs.settings.auto_check_updates,
-                        "Automatically check for updates",
-                    );
-                },
-            );
+            updates::update_preferences(ui, &mut self.prefs.settings);
+            self.updates
+                .apply_download_preference(&mut self.prefs.settings);
             separator(ui);
             let status_desc = if self.updates.ready_to_install() {
                 "An update is downloaded, verified and ready to install.".to_owned()
@@ -1091,7 +1092,9 @@ impl Pui {
                 format!("Installed version {}", env!("CARGO_PKG_VERSION"))
             };
             row(ui, "Software updates", &status_desc, |ui| {
-                if ui.button("Check for Updates…").clicked() {
+                if prompt_ui::button(ui, "Check for Updates…", prompt_ui::Button::Secondary, true)
+                    .clicked()
+                {
                     self.updates.start(ui.ctx());
                 }
             });

@@ -75,9 +75,10 @@ The app includes Pi 1.6.0, Node.js 22.23.5/npm, and pinned fd/ripgrep, with
 licenses and an integrity manifest. No separate Pi/Node/Homebrew installation is
 needed by the packaged app; provider authentication is still required. See
 [bundled runtime](bundled-runtime.md). Intel/universal builds, Linux/Windows
-packaging and automatic in-app update installation remain out of scope.
-The existing GitHub update checker is not configured by this pipeline. GitLab
-update checking and in-app changelog viewing are the next phase.
+packaging remain out of scope. GitHub in-app updates support automatic download
+(default ON), opt-in idle installation, draft recovery and rendered release notes;
+see [reference](reference.md). This optional GitLab pipeline does not configure
+GitLab update discovery; that remains a separate distribution feature.
 
 ## One-time GitLab setup
 

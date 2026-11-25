@@ -14,6 +14,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+static RETIRING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn retiring() -> bool {
+    RETIRING.load(Ordering::Acquire) != 0
+}
+
 pub enum Event {
     Record(Value),
     History(Vec<crate::protocol::Message>),
@@ -214,7 +220,17 @@ impl Client {
 
     /// Session changes must never join a child/extension shutdown on the UI thread.
     pub fn retire(self) {
-        thread::spawn(move || drop(self));
+        RETIRING.fetch_add(1, Ordering::AcqRel);
+        thread::spawn(move || {
+            struct Finished;
+            impl Drop for Finished {
+                fn drop(&mut self) {
+                    RETIRING.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _finished = Finished;
+            drop(self);
+        });
     }
 
     pub fn send(&mut self, record: Value) -> Result<(), String> {

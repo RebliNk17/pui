@@ -1,5 +1,36 @@
 use super::*;
 
+mod persistence;
+
+#[test]
+fn final_rpc_drain_preserves_late_active_and_parked_editor_updates() {
+    let ctx = egui::Context::default();
+    let mut app = Pui::new(
+        &eframe::CreationContext::_new_kittest(ctx),
+        Options {
+            demo: true,
+            ..Default::default()
+        },
+    );
+    app.demo = false;
+    app.state = State::default();
+    app.draft.clear();
+    let (client, events) = rpc::Client::stub_with_events();
+    app.client = Some(client);
+    events.send(rpc::Event::Record(json!({"type":"extension_ui_request","method":"set_editor_text","text":"Late editor draft"}))).unwrap();
+    assert!(app.drain_update_rpc());
+    assert_eq!(app.draft, "Late editor draft");
+    let id = app.ensure_agent();
+    let parked = app.take_chat();
+    app.agents.parked.insert(id.clone(), parked);
+    app.agents.active.clear();
+    app.draft = "Visible untouched".into();
+    events.send(rpc::Event::Record(json!({"type":"extension_ui_request","method":"set_editor_text","text":"Parked late draft"}))).unwrap();
+    assert!(app.drain_update_rpc());
+    assert_eq!(app.draft, "Visible untouched");
+    assert_eq!(app.agents.parked[&id].draft, "Parked late draft");
+}
+
 #[test]
 fn mirror_checkpoint_keeps_only_local_draft_not_remote_approval_or_run_state() {
     let mut state = State {

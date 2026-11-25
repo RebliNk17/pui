@@ -102,6 +102,44 @@ pub(super) struct Chat {
     pending_dialog: Option<String>,
 }
 impl Chat {
+    pub(super) fn composer_snapshot(
+        &self,
+    ) -> (
+        Vec<crate::media::Attachment>,
+        Vec<run_status::WaitingMessage>,
+    ) {
+        (self.images.images(), self.history_drafts.clone())
+    }
+    pub(super) fn composer_is_empty(&self) -> bool {
+        self.draft.is_empty()
+            && !self.context_chips.has_quotes()
+            && self.images.is_empty()
+            && self.history_drafts.is_empty()
+            && self.image_picker.is_none()
+    }
+    pub(super) fn restore_composer(
+        &mut self,
+        draft: &str,
+        images: &[crate::media::Attachment],
+        history_drafts: &[run_status::WaitingMessage],
+    ) {
+        if self.composer_is_empty() {
+            self.context_chips.clear();
+            self.draft = draft.to_owned();
+            self.images.set_images(images.to_vec());
+            self.history_drafts = history_drafts.to_vec();
+        }
+    }
+    fn composer_recovery_ready(&self) -> bool {
+        (self.images.is_empty() || self.images.ready())
+            && self.image_picker.is_none()
+            && self.history_pending.is_none()
+            && !self.loading
+            && self.preview.is_none()
+            && self.pending.is_none()
+            && self.pending_dialog.is_none()
+            && !self.deletion_busy()
+    }
     #[cfg(test)]
     pub(super) fn open_test_gallery(&mut self, image: crate::media::Attachment) {
         self.transcript.gallery.open(&[image], 0);
@@ -161,6 +199,221 @@ pub(super) struct Agents {
     pub(super) idle: idle::Idle,
 }
 impl Pui {
+    /// Ready attachment payloads and the unsent recovery shelf can be checkpointed;
+    /// asynchronous composer mutations and unresolved requests cannot.
+    pub(super) fn composer_recovery_ready(&self) -> bool {
+        (self.draft_images.is_empty() || self.draft_images.ready())
+            && self.image_picker_rx.is_none()
+            && self.chat_folder_rx.is_none()
+            && self.chat_folder_target.is_none()
+            && self.history_pending.is_none()
+            && !self.history_view.is_open()
+            && !self.loading_chat
+            && self.pending_session.is_none()
+            && self.preview_rx.is_none()
+            && self.pending_dialog.is_none()
+            && self.state.dialogs.is_empty()
+            && self.interrupt.is_none()
+            && self.deliveries.is_empty()
+            && !self.resource_reload.pending()
+            && !self.resource_reload.connector_pending()
+            && !self.resource_reload.confirming()
+            && !self.dictation.active()
+            && !self.restoring_code()
+            && !self
+                .paste_requested
+                .load(std::sync::atomic::Ordering::Relaxed)
+            && self
+                .agents
+                .parked
+                .values()
+                .all(Chat::composer_recovery_ready)
+    }
+    /// Drain every represented client without dispatching new follow-up work.
+    /// Any activity invalidates a preflight snapshot; save again on explicit retry.
+    pub(super) fn drain_update_rpc(&mut self) -> bool {
+        let mut activity = self.poll_rpc();
+        let ids: Vec<_> = self
+            .agents
+            .parked
+            .iter()
+            .filter(|(_, chat)| chat.client.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let active = self.agents.active.clone();
+        let cwd = self.prefs.cwd.clone();
+        let background = self.agents.background;
+        let visible = self.take_chat();
+        for id in ids {
+            let Some(chat) = self.agents.parked.remove(&id) else {
+                continue;
+            };
+            self.put_chat(chat);
+            self.agents.active = id.clone();
+            self.agents.background = true;
+            if let Some(node) = self.agents.nodes.get(&id) {
+                self.prefs.cwd = node.cwd.clone();
+            }
+            activity |= self.poll_rpc();
+            let chat = self.take_chat();
+            self.agents.parked.insert(id, chat);
+        }
+        self.put_chat(visible);
+        self.agents.active = active;
+        self.prefs.cwd = cwd;
+        self.agents.background = background;
+        activity
+    }
+
+    /// Explicit Install & Relaunch may close settled idle clients, never a run,
+    /// approval, queued report, reconnect or in-flight transport delivery.
+    pub(super) fn agents_quiet_for_update(&self) -> bool {
+        let quiet = |state: &State| {
+            state.ready()
+                && state.dialogs.is_empty()
+                && state.stream.is_none()
+                && !state.run_observed
+                && !state.retrying
+                && state.pending_messages.iter().all(|m| {
+                    matches!(
+                        m.status,
+                        protocol::DeliveryStatus::Handled | protocol::DeliveryStatus::Cancelled
+                    )
+                })
+        };
+        quiet(&self.state)
+            && self.agents.parked.values().all(|chat| quiet(&chat.state))
+            && self.agents.nodes.values().all(|node| {
+                node.setup.is_none()
+                    && (node.stopped || node.settled)
+                    && (!node.needs_report || node.reported)
+            })
+            && self.agents.mail.is_empty()
+            && self.agents.waits.is_empty()
+            && !self.agents_still_retiring()
+            && self.agents.idle.wake.is_empty()
+            && self.agents.idle.mail.is_empty()
+            && self.agents.permission_changes.is_empty()
+            && self.agents.permission_workers.is_empty()
+    }
+
+    pub(super) fn agents_sleeping_for_update(&self) -> bool {
+        self.agents_quiet_for_update()
+            && self.client.is_none()
+            && self
+                .agents
+                .parked
+                .values()
+                .all(|chat| chat.client.is_none())
+            && self.agents.nodes.iter().all(|(id, node)| {
+                (node.stopped || self.agents.idle.dormant.contains(id))
+                    && node.setup.is_none()
+                    && (!node.needs_report || node.reported)
+            })
+            && self.agents.mail.is_empty()
+            && self.agents.waits.is_empty()
+            && !self.agents_still_retiring()
+            && self.agents.idle.retiring.is_empty()
+            && self.agents.idle.wake.is_empty()
+            && self.agents.idle.mail.is_empty()
+            && self.agents.permission_changes.is_empty()
+            && self.agents.permission_workers.is_empty()
+    }
+    pub(super) fn reserve_composer_agent_ids(&mut self, ids: &[String]) {
+        for id in ids {
+            if let Some(number) = id
+                .strip_prefix("agent-")
+                .and_then(|n| n.parse::<u64>().ok())
+            {
+                self.agents.next = self.agents.next.max(number);
+            }
+        }
+    }
+    /// Recovery-only nodes are in-memory, stopped, and have no executable launch
+    /// policy or worker task. Rebuilding their draft must never start a process.
+    pub(super) fn restore_composer_agent(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        cwd: &std::path::Path,
+        path: Option<&std::path::Path>,
+        blank: bool,
+    ) -> String {
+        if let Some(existing) = path.and_then(|path| self.agent_for_path(path)) {
+            return existing;
+        }
+        let id = id.filter(|id| {
+            id.strip_prefix("agent-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some()
+        });
+        if let Some(id) = id {
+            if self
+                .agents
+                .nodes
+                .get(id)
+                .is_some_and(|node| node.path.as_deref() == path && node.cwd == cwd)
+            {
+                return id.to_owned();
+            }
+        }
+        let id = if let Some(id) = id.filter(|id| !self.agents.nodes.contains_key(*id)) {
+            self.reserve_composer_agent_ids(&[id.to_owned()]);
+            id.to_owned()
+        } else {
+            self.agents.next += 1;
+            format!("agent-{}", self.agents.next)
+        };
+        self.agents.nodes.insert(
+            id.clone(),
+            Node {
+                id: id.clone(),
+                parent: None,
+                name: if name.is_empty() {
+                    "Recovered draft".into()
+                } else {
+                    name.into()
+                },
+                cwd: cwd.into(),
+                path: path.map(PathBuf::from),
+                access: "workspace".into(),
+                permission: None,
+                background: false,
+                model: None,
+                finished_at: None,
+                status: "Recovered draft".into(),
+                last_activity: None,
+                created: None,
+                children: Vec::new(),
+                stopped: true,
+                reported: true,
+                needs_report: false,
+                settled: true,
+                launch: None,
+                failure: None,
+                result: None,
+                task: String::new(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+            },
+        );
+        self.agents.parked.insert(
+            id.clone(),
+            Chat {
+                new_chat: blank,
+                state: State {
+                    session_file: path.map(|p| p.display().to_string()),
+                    session_name: name.to_owned(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        id
+    }
     pub(super) fn with_live_chat<R>(
         &mut self,
         path: &std::path::Path,
@@ -354,6 +607,7 @@ impl Pui {
             .any(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)))
     }
     pub(super) fn forget_deleted_agent_ids(&mut self, ids: &std::collections::BTreeSet<String>) {
+        self.forget_composer_agent_checkpoints(ids);
         self.forget_unsaved_sections(ids);
         self.attention.forget_agents(ids);
         self.agents
@@ -2121,7 +2375,7 @@ impl Pui {
                 "Keep working",
                 "Stop all and quit",
             ).show(ctx, |ui| {
-                confirmations::note(ui, "Sessions, worktrees and draft text will be kept. Interrupted chats are marked for review on reopening; tools and approvals are never replayed. Running terminal commands will stop, and queued messages and unsent attachments will be lost. Active cron jobs and monitors resume when Pui reopens.");
+                confirmations::note(ui, "Sessions, worktrees, draft text, ready attachments and saved draft shelves will be kept. Interrupted chats are marked for review on reopening; tools and approvals are never replayed. Running terminal commands will stop. Queued messages, unfinished attachment imports and partial approval/question answers are not restored. Active cron jobs and monitors resume when Pui reopens.");
             });
             match choice {
                 Some(confirmations::Choice::Cancel) => self.agents.close_prompt = false,

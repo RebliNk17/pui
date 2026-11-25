@@ -86,6 +86,7 @@ impl Pui {
         self.flush_pending_origins();
         let commands: Vec<RemoteCommand> = self.remote.cmds.try_iter().collect();
         if !commands.is_empty() {
+            self.update_idle.touch();
             for cmd in commands {
                 self.handle_remote_command(cmd);
             }

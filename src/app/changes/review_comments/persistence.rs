@@ -128,6 +128,26 @@ impl Record {
     }
 }
 impl Comments {
+    /// Update preflight must acknowledge fresh output, not an old conditional save.
+    pub(in crate::app) fn restart_checkpoint(&mut self) -> Result<Option<String>, String> {
+        if self.editor.is_some() {
+            return Err("Finish or cancel the local review note before restarting.".into());
+        }
+        let dirty = self.storage_dirty;
+        self.storage_dirty = true;
+        let mut storage = crate::app::restart::Recovery::default();
+        self.save_checkpoint(&mut storage);
+        self.storage_dirty = dirty;
+        if self.storage_notice.is_some() {
+            return Err("Local review notes could not be saved; restart postponed.".into());
+        }
+        Ok(eframe::Storage::get_string(&storage, KEY))
+    }
+
+    pub(in crate::app) fn update_restart_blocked(&self) -> bool {
+        self.editor.is_some() || self.confirming()
+    }
+
     /// Called only at normal app save, never per repaint. Pending editor is excluded.
     pub(in crate::app) fn save_checkpoint(&mut self, storage: &mut dyn eframe::Storage) {
         if !self.storage_dirty {

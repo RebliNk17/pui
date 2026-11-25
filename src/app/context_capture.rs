@@ -4,7 +4,7 @@ pub(in crate::app) mod browser;
 mod chips;
 mod diff;
 mod file_blocks;
-pub(super) use chips::Draft;
+pub(super) use chips::{Draft, SavedCard};
 pub(crate) use file_blocks::offer as offer_file_block;
 pub(super) use file_blocks::show as show_file_blocks;
 mod rendered;
