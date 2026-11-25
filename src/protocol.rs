@@ -131,6 +131,10 @@ pub struct Tool {
     pub open_target: Option<String>,
     #[serde(default)]
     pub open_queued: bool,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub workflow_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -780,6 +784,7 @@ impl State {
                     if finished {
                         tool.set_answers(result);
                         tool.set_open_result(result);
+                        tool.set_workflow_result(result);
                     }
                     tool.finished = finished;
                     tool.failed = event["isError"] == true;
@@ -834,6 +839,7 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
                 tool.duration_ms = raw["durationMs"].as_u64();
                 tool.set_answers(raw);
                 tool.set_open_result(raw);
+                tool.set_workflow_result(raw);
                 if tool.name == "codemode" {
                     tool.set_nested(raw);
                 }

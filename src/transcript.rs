@@ -32,6 +32,7 @@ pub enum TranscriptAction {
         title: String,
         html: String,
     },
+    OpenWorkflow(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,6 +400,7 @@ impl Transcript {
                         t.visual.is_some().hash(&mut hasher);
                         t.open_target.hash(&mut hasher);
                         t.open_queued.hash(&mut hasher);
+                        t.workflow_id.hash(&mut hasher);
                         for child in &t.children {
                             child.finished.hash(&mut hasher);
                             child.failed.hash(&mut hasher);
@@ -1323,6 +1325,11 @@ fn assistant_with_media(
                     if let Some(visuals) = visuals.as_deref_mut() {
                         inline_cards::open_card(ui, tool, gallery, visuals, cwd, action);
                     }
+                } else if tool.name == "pui_workflow" && !tool.failed && tool.workflow_id.is_some()
+                {
+                    changed |=
+                        flush_pending(ui, &mut pending, &mut group_index, false, gallery, action);
+                    inline_cards::workflow_card(ui, tool, visuals.as_deref(), action);
                 } else {
                     pending.push(tool);
                 }
@@ -1408,6 +1415,19 @@ fn assistant_with_media(
                                         ui, tool, gallery, visuals, cwd, action,
                                     );
                                 }
+                            } else if tool.name == "pui_workflow"
+                                && !tool.failed
+                                && tool.workflow_id.is_some()
+                            {
+                                changed |= flush_pending(
+                                    ui,
+                                    &mut pending,
+                                    &mut group_index,
+                                    false,
+                                    gallery,
+                                    action,
+                                );
+                                inline_cards::workflow_card(ui, tool, visuals.as_deref(), action);
                             } else {
                                 pending.push(tool);
                             }

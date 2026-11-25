@@ -14,6 +14,8 @@ use std::{
 };
 
 mod ui;
+pub(super) mod workflow;
+mod workflow_ui;
 
 #[cfg(test)]
 mod tests;
@@ -55,6 +57,8 @@ pub(super) struct ShellTask {
     pub owner: String,
     /// Top-level non-background chat that owns this background task family.
     pub root: String,
+    /// Set when this shell runs as a verification check inside a dynamic workflow.
+    pub workflow_id: Option<String>,
     pub title: String,
     pub command: String,
     pub cwd: PathBuf,
@@ -125,9 +129,13 @@ pub(super) struct BackgroundTasks {
     pub(super) expanded_children: BTreeSet<String>,
     pub(super) expanded_brief: BTreeSet<String>,
     pub(super) expanded_tools: BTreeSet<String>,
+    pub(super) expanded_workflow_phases: BTreeSet<(String, usize)>,
     pub(super) finished_open: bool,
     pub(super) shells: Vec<ShellTask>,
     next_shell: u64,
+    pub(super) workflows: Vec<workflow::DynamicWorkflow>,
+    next_workflow: u64,
+    pub(super) workflow_waits: Vec<workflow::DynamicWorkflowWait>,
 }
 
 impl Default for BackgroundTasks {
@@ -140,9 +148,13 @@ impl Default for BackgroundTasks {
             expanded_children: BTreeSet::new(),
             expanded_brief: BTreeSet::new(),
             expanded_tools: BTreeSet::new(),
+            expanded_workflow_phases: BTreeSet::new(),
             finished_open: true,
             shells: Vec::new(),
             next_shell: 0,
+            workflows: Vec::new(),
+            next_workflow: 0,
+            workflow_waits: Vec::new(),
         }
     }
 }
@@ -150,6 +162,7 @@ impl Default for BackgroundTasks {
 impl BackgroundTasks {
     pub(super) fn has_running_shells(&self) -> bool {
         self.shells.iter().any(|s| s.status.is_running())
+            || self.workflows.iter().any(|w| w.status.is_running())
     }
 
     pub(super) fn open_list(&mut self) {
@@ -565,7 +578,10 @@ impl Pui {
         let mut running = 0usize;
         let mut finished = 0usize;
         for node in self.agents.nodes.values() {
-            if node.background && node.parent.as_deref() == Some(active) {
+            if node.background
+                && node.workflow_id.is_none()
+                && node.parent.as_deref() == Some(active)
+            {
                 if is_node_running(node) {
                     running += 1;
                 } else {
@@ -574,8 +590,17 @@ impl Pui {
             }
         }
         for shell in &self.background_tasks.shells {
-            if shell.owner == active {
+            if shell.owner == active && shell.workflow_id.is_none() {
                 if shell.status.is_running() {
+                    running += 1;
+                } else {
+                    finished += 1;
+                }
+            }
+        }
+        for wf in &self.background_tasks.workflows {
+            if wf.owner == active {
+                if wf.status.is_running() {
                     running += 1;
                 } else {
                     finished += 1;
@@ -696,6 +721,7 @@ impl Pui {
             id: id.clone(),
             owner: source.to_owned(),
             root,
+            workflow_id: None,
             title: title.clone(),
             command: command.to_owned(),
             cwd: resolved_cwd.clone(),
@@ -978,6 +1004,8 @@ impl Pui {
                 node.finished_at = Some(SystemTime::now());
             }
         }
+        self.poll_dynamic_workflows();
+        self.sync_workflow_cards();
     }
 
     pub(super) fn clear_finished_background_tasks(&mut self) {
@@ -985,6 +1013,19 @@ impl Pui {
         if active.is_empty() {
             return;
         }
+        let remove_wfs: BTreeSet<String> = self
+            .background_tasks
+            .workflows
+            .iter()
+            .filter(|w| w.owner == active && !w.status.is_running())
+            .map(|w| w.id.clone())
+            .collect();
+        self.background_tasks
+            .workflows
+            .retain(|w| !remove_wfs.contains(&w.id));
+        self.background_tasks
+            .expanded_workflow_phases
+            .retain(|(wf_id, _)| !remove_wfs.contains(wf_id));
         // Collect finished background agent subtrees owned by `active` whose
         // entire subtree is finished.
         let remove_agents: Vec<String> = self
@@ -996,6 +1037,9 @@ impl Pui {
                     && self.background_root_for(&n.id) == active
                     && !is_node_running(n)
                     && self.background_child_counts(&n.id).1 == 0
+                    && n.workflow_id
+                        .as_deref()
+                        .is_none_or(|wf| remove_wfs.contains(wf))
             })
             .map(|n| n.id.clone())
             .collect();
@@ -1014,8 +1058,11 @@ impl Pui {
             node.children.retain(|c| !remove_set.contains(c));
         }
         self.background_tasks.shells.retain(|s| {
-            let removable =
-                !s.status.is_running() && (s.root == active || remove_set.contains(&s.owner));
+            let removable = !s.status.is_running()
+                && (s.root == active || remove_set.contains(&s.owner))
+                && s.workflow_id
+                    .as_deref()
+                    .is_none_or(|wf| remove_wfs.contains(wf));
             if removable {
                 self.background_tasks.expanded_shells.remove(&s.id);
             }

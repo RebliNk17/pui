@@ -1045,8 +1045,19 @@ impl Pui {
             ui.add_space(8.0);
             ui.label(RichText::new(error).size(11.0).color(colors.red));
         }
-        section(ui, "Ultracode", "");
+        section(ui, "Ultracode & Workflows", "");
         card(ui, |ui| {
+            let mut dynamic_enabled = !self.prefs.dynamic_workflows_disabled;
+            row(
+                ui,
+                "Dynamic workflows",
+                "Let agents run phased multi-agent workflows in parallel inside Background tasks. Workflows can use your usage limit quickly.",
+                |ui| {
+                    toggle(ui, &mut dynamic_enabled, "Dynamic workflows");
+                    self.prefs.dynamic_workflows_disabled = !dynamic_enabled;
+                },
+            );
+            separator(ui);
             row(
                 ui,
                 "Worker concurrency ceiling",

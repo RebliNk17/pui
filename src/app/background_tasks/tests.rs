@@ -100,6 +100,7 @@ fn sidebar_child_sessions_and_background_subagents_are_strictly_separated() {
             cloud_host: None,
             cloud_repo: None,
             background: false,
+            workflow_id: None,
             model: None,
             finished_at: None,
         },
@@ -320,6 +321,7 @@ fn nested_child_tasks_roll_up_and_ui_renders_list_and_detail_views_cleanly() {
         id: "bg-shell-10".into(),
         owner: bg_id.clone(),
         root: root.clone(),
+        workflow_id: None,
         title: "Run unit tests".into(),
         command: "cargo test".into(),
         cwd: app.prefs.cwd.clone(),
@@ -337,6 +339,7 @@ fn nested_child_tasks_roll_up_and_ui_renders_list_and_detail_views_cleanly() {
         id: "bg-shell-11".into(),
         owner: bg_id.clone(),
         root: root.clone(),
+        workflow_id: None,
         title: "Render layout preview".into(),
         command: "godot --headless".into(),
         cwd: app.prefs.cwd.clone(),
@@ -436,4 +439,220 @@ fn nested_child_tasks_roll_up_and_ui_renders_list_and_detail_views_cleanly() {
     assert!(!app.agents.nodes.contains_key(&bg_id));
     assert!(app.background_tasks.shells.is_empty());
     assert!(app.background_tasks.selected_agent.is_none());
+}
+
+#[test]
+fn dynamic_workflow_fans_out_phases_tracks_tokens_surfaces_errors_and_renders_transcript_and_pane_ui()
+ {
+    let (ctx, mut app) = test_app();
+    let root = app.agents.active.clone();
+
+    // Respects Settings → General Dynamic workflows toggle.
+    app.prefs.dynamic_workflows_disabled = true;
+    assert!(
+        app.agent_control(
+            &root,
+            &json!({
+                "action": "dynamic_workflow_start",
+                "objective": "Audit and refactor",
+                "phases": [{ "title": "Explore", "agents": [{ "label": "Auth", "task": "Read auth" }] }]
+            }),
+        )
+        .is_err()
+    );
+    app.prefs.dynamic_workflows_disabled = false;
+
+    // Launch a 2-phase workflow with 4 total agents (triggers budget notice).
+    let started = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "dynamic_workflow_start",
+                "name": "Audit & refactor auth",
+                "objective": "Audit and refactor authentication across modules.",
+                "phases": [
+                    {
+                        "title": "Explore",
+                        "agents": [
+                            { "label": "Inspect middleware", "task": "Inspect middleware", "access": "read-only" },
+                            { "label": "Inspect token store", "task": "Inspect token store", "access": "read-only" },
+                            { "label": "Inspect tests", "task": "Inspect tests", "access": "read-only" }
+                        ]
+                    },
+                    {
+                        "title": "Implement",
+                        "agents": [
+                            { "label": "Apply refactor", "task": "Implement refactor", "access": "workspace" }
+                        ]
+                    }
+                ]
+            }),
+        )
+        .expect("start dynamic workflow");
+    let wf_id = started["workflow_id"].as_str().unwrap().to_owned();
+    assert_eq!(started["mode"], "dynamic");
+    assert_eq!(started["phases"], 2);
+    assert_eq!(started["agents"], 4);
+
+    // Phase 0 launched 3 parallel workflow-owned background agents (none in sidebar, none duplicated as top-level background agents).
+    assert_eq!(app.active_background_counts(), (1, 0));
+    let wf = &app.background_tasks.workflows[0];
+    assert!(wf.phases[0].launched);
+    assert!(!wf.phases[1].launched);
+    assert!(wf.show_budget_warning());
+    let a0 = wf.phases[0].agents[0].agent_id.clone().unwrap();
+    let a1 = wf.phases[0].agents[1].agent_id.clone().unwrap();
+    let a2 = wf.phases[0].agents[2].agent_id.clone().unwrap();
+    assert_eq!(
+        app.agents.nodes[&a0].workflow_id.as_deref(),
+        Some(wf_id.as_str())
+    );
+
+    // Simulate token usage + 2 completed + 1 failed in Phase 0.
+    if let Some(chat) = app.agents.parked.get_mut(&a0) {
+        chat.state.messages.push(protocol::Message {
+            role: "assistant".into(),
+            text: "Middleware checked.".into(),
+            prompt_usage: protocol::PromptUsage {
+                input: 8000.0,
+                cache_read: 6200.0,
+                cache_write: 0.0,
+            },
+            ..Default::default()
+        });
+    }
+    for (id, result) in [(&a0, "Middleware ok"), (&a1, "Token store ok")] {
+        let n = app.agents.nodes.get_mut(id).unwrap();
+        n.settled = true;
+        n.reported = true;
+        n.needs_report = false;
+        n.status = "Idle".into();
+        n.result = Some(result.into());
+        n.finished_at = Some(SystemTime::now());
+    }
+    {
+        let n = app.agents.nodes.get_mut(&a2).unwrap();
+        n.settled = true;
+        n.reported = true;
+        n.needs_report = false;
+        n.failure = Some("fixture missing".into());
+        n.status = "Failed: fixture missing".into();
+        n.finished_at = Some(SystemTime::now());
+    }
+
+    // Polling advances to Phase 1 (because Phase 0 had successes alongside 1 failure) and syncs workflow cards.
+    app.poll_background_tasks();
+    let wf = &app.background_tasks.workflows[0];
+    assert_eq!(wf.current_phase, 1);
+    assert!(
+        wf.phases[1].launched,
+        "Phase 1 must launch once Phase 0 settles"
+    );
+    assert_eq!(wf.phases[0].agents[0].tokens, 14200);
+    assert_eq!(
+        wf.phases[0].agents[2].state,
+        crate::inline_visual::WorkflowCellState::Error
+    );
+    assert!(app.transcript.visuals.workflow_cards.contains_key(&wf_id));
+
+    // Render Background tasks pane with Phase 0 collapsed (surfaces error row) and Phase 1 open.
+    app.background_tasks
+        .expanded_workflow_phases
+        .remove(&(wf_id.clone(), 0));
+    app.background_tasks.open_list();
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 800.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            app.background_tasks_panel(ctx);
+        },
+    );
+    let mut texts = Vec::new();
+    for s in &out.shapes {
+        collect_texts(&s.shape, &mut texts);
+    }
+    assert!(texts.iter().any(|t| t == "Audit & refactor auth"));
+    assert!(texts.iter().any(|t| t == "Explore"));
+    assert!(texts.iter().any(|t| t == "Implement"));
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Inspect tests: fixture missing")),
+        "collapsed phase with error should surface failed agent inline: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("Dynamic workflows can use your usage limit quickly")),
+        "budget warning should render for >=4 agents: {texts:?}"
+    );
+
+    // Inline transcript workflow card renders cleanly and emits OpenWorkflow on click.
+    let mut tool = protocol::Tool {
+        id: "call_wf_1".into(),
+        name: "pui_workflow".into(),
+        workflow_id: Some(wf_id.clone()),
+        workflow_title: Some("Audit & refactor auth".into()),
+        finished: true,
+        ..Default::default()
+    };
+    tool.set_workflow_result(&json!({ "details": { "workflow": { "workflow_id": wf_id } } }));
+    app.state.messages = vec![protocol::Message {
+        role: "assistant".into(),
+        tools: vec![tool],
+        ..Default::default()
+    }];
+    let out = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.transcript.show(
+                    ui,
+                    &app.state.messages,
+                    "claude-opus-5-5",
+                    "medium",
+                    false,
+                    "session-1",
+                );
+            });
+        },
+    );
+    let mut tr_texts = Vec::new();
+    for s in &out.shapes {
+        collect_texts(&s.shape, &mut tr_texts);
+    }
+    assert!(
+        tr_texts.iter().any(|t| t == "Audit & refactor auth"),
+        "inline transcript workflow card should show title: {tr_texts:?}"
+    );
+    assert!(
+        tr_texts.iter().any(|t| t.contains("4 agents")),
+        "inline transcript workflow card should show agent count: {tr_texts:?}"
+    );
+
+    // Stopping the dynamic workflow stops Phase 1's agent and marks the workflow Stopped.
+    let status = app
+        .dynamic_workflow_control(
+            &root,
+            "rpc-stop",
+            &json!({ "action": "workflow_control", "workflow_id": wf_id, "operation": "cancel" }),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["status"], "stopped");
+    assert_eq!(app.active_background_counts(), (0, 1));
+    app.clear_finished_background_tasks();
+    assert_eq!(app.active_background_counts(), (0, 0));
+    assert!(app.background_tasks.workflows.is_empty());
 }

@@ -42,13 +42,30 @@ enum PanelAction {
     ToggleTools(String),
     StopAgent(String),
     StopShell(String),
+    StopDynamicWorkflow(String),
+    DismissWorkflowBudget(String),
+    ToggleWorkflowPhase(String, usize),
     OpenWorkflow(String),
+    OpenDynamicWorkflow,
     OpenAutomation,
     PauseJob(String),
     ClearFinished,
     ToggleExpand,
     Close,
     CopyText(String),
+}
+
+fn map_workflow_action(action: workflow_ui::WorkflowUiAction) -> PanelAction {
+    match action {
+        workflow_ui::WorkflowUiAction::None => PanelAction::None,
+        workflow_ui::WorkflowUiAction::StopWorkflow(id) => PanelAction::StopDynamicWorkflow(id),
+        workflow_ui::WorkflowUiAction::DismissBudget(id) => PanelAction::DismissWorkflowBudget(id),
+        workflow_ui::WorkflowUiAction::TogglePhase(wf, idx) => {
+            PanelAction::ToggleWorkflowPhase(wf, idx)
+        }
+        workflow_ui::WorkflowUiAction::OpenAgent(id) => PanelAction::OpenAgent(id),
+        workflow_ui::WorkflowUiAction::OpenShell(id) => PanelAction::ToggleShell(id),
+    }
 }
 
 fn stop_square_button(ui: &mut egui::Ui, tooltip: &str) -> egui::Response {
@@ -164,7 +181,12 @@ impl Pui {
             .background_tasks
             .shells
             .iter()
-            .filter(|s| !active.is_empty() && s.owner == active && s.status.is_running())
+            .filter(|s| {
+                !active.is_empty()
+                    && s.owner == active
+                    && s.workflow_id.is_none()
+                    && s.status.is_running()
+            })
             .map(Self::snapshot_shell)
             .collect();
         let running_agents: Vec<AgentSnapshot> = self
@@ -174,10 +196,21 @@ impl Pui {
             .filter(|n| {
                 !active.is_empty()
                     && n.background
+                    && n.workflow_id.is_none()
                     && n.parent.as_deref() == Some(active.as_str())
                     && is_node_running(n)
             })
             .map(|n| self.snapshot_agent(n))
+            .collect();
+        let running_workflows: Vec<(String, String, Duration, usize, usize)> = self
+            .background_tasks
+            .workflows
+            .iter()
+            .filter(|w| !active.is_empty() && w.owner == active && w.status.is_running())
+            .map(|w| {
+                let (total, done, _, _) = w.counts();
+                (w.id.clone(), w.name.clone(), w.elapsed(), done, total)
+            })
             .collect();
         let active_jobs: Vec<(String, String)> = if active.is_empty() {
             Vec::new()
@@ -204,12 +237,62 @@ impl Pui {
 
         if running_shells.is_empty()
             && running_agents.is_empty()
+            && running_workflows.is_empty()
             && active_jobs.is_empty()
             && active_workflow.is_none()
         {
             ui.label(theme::small(ui, "No active background tasks."));
         } else {
             let row_w = (ui.available_width() - 4.0).max(40.0);
+            for (wf_id, wf_name, elapsed, done, total) in &running_workflows {
+                ui.push_id(wf_id, |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(row_w, 22.0),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.set_max_width(row_w);
+                            if compact_stop_dot(ui, "Stop dynamic workflow").clicked() {
+                                action = PanelAction::StopDynamicWorkflow(wf_id.clone());
+                            }
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "{done}/{total} · {}",
+                                    format_task_duration(*elapsed)
+                                ))
+                                .size(10.5)
+                                .color(colors.muted),
+                            );
+                            ui.add_space(6.0);
+                            let left_w = ui.available_width().max(20.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(left_w, 22.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_max_width(left_w);
+                                    icons::inline(ui, Icon::Agents, colors.accent);
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new(wf_name)
+                                                    .size(11.5)
+                                                    .color(colors.text),
+                                            )
+                                            .truncate()
+                                            .frame(false),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(wf_name)
+                                        .clicked()
+                                    {
+                                        action = PanelAction::OpenDynamicWorkflow;
+                                    }
+                                },
+                            );
+                        },
+                    );
+                });
+            }
             for shell in &running_shells {
                 ui.push_id(&shell.id, |ui| {
                     ui.allocate_ui_with_layout(
@@ -391,6 +474,8 @@ impl Pui {
                 self.background_tasks.stop_shell(&id);
             }
             PanelAction::StopAgent(id) => self.stop_agent_tree(&id),
+            PanelAction::StopDynamicWorkflow(id) => self.stop_dynamic_workflow(&id),
+            PanelAction::OpenDynamicWorkflow => self.open_background_tasks_panel(None, None),
             PanelAction::PauseJob(id) => {
                 let _ = self.change_job(&id, "pause");
             }
@@ -491,9 +576,29 @@ impl Pui {
             PanelAction::StopShell(id) => {
                 self.background_tasks.stop_shell(&id);
             }
+            PanelAction::StopDynamicWorkflow(id) => self.stop_dynamic_workflow(&id),
+            PanelAction::DismissWorkflowBudget(id) => {
+                if let Some(wf) = self
+                    .background_tasks
+                    .workflows
+                    .iter_mut()
+                    .find(|w| w.id == id)
+                {
+                    wf.budget_dismissed = true;
+                }
+            }
+            PanelAction::ToggleWorkflowPhase(wf_id, phase_idx) => {
+                let key = (wf_id, phase_idx);
+                if !self.background_tasks.expanded_workflow_phases.remove(&key) {
+                    self.background_tasks.expanded_workflow_phases.insert(key);
+                }
+            }
             PanelAction::OpenWorkflow(id) => {
                 self.background_tasks.open = false;
                 self.open_task_from_board(id, None);
+            }
+            PanelAction::OpenDynamicWorkflow => {
+                self.background_tasks.open_list();
             }
             PanelAction::OpenAutomation => {
                 self.background_tasks.open = false;
@@ -588,11 +693,26 @@ impl Pui {
         }
 
         // Gather top-level background tasks for `active`.
+        let mut running_workflows = Vec::new();
+        let mut finished_workflows = Vec::new();
+        for wf in &self.background_tasks.workflows {
+            if !active.is_empty() && wf.owner == active {
+                if wf.status.is_running() {
+                    running_workflows.push(wf.clone());
+                } else {
+                    finished_workflows.push(wf.clone());
+                }
+            }
+        }
+        running_workflows.sort_by_key(|w| std::cmp::Reverse(w.started));
+        finished_workflows.sort_by_key(|w| std::cmp::Reverse(w.started));
+
         let mut running_agents = Vec::new();
         let mut finished_agents = Vec::new();
         for node in self.agents.nodes.values() {
             if !active.is_empty()
                 && node.background
+                && node.workflow_id.is_none()
                 && node.parent.as_deref() == Some(active.as_str())
             {
                 let snap = self.snapshot_agent(node);
@@ -609,7 +729,7 @@ impl Pui {
         let mut running_shells = Vec::new();
         let mut finished_shells = Vec::new();
         for shell in &self.background_tasks.shells {
-            if !active.is_empty() && shell.owner == active {
+            if !active.is_empty() && shell.owner == active && shell.workflow_id.is_none() {
                 let snap = Self::snapshot_shell(shell);
                 if snap.status.is_running() {
                     running_shells.push(snap);
@@ -629,15 +749,11 @@ impl Pui {
         let active_workflow = self
             .inspector_workflow()
             .filter(|t| t.phase.active())
-            .map(|t| {
-                (
-                    t.id.clone(),
-                    t.objective.clone(),
-                    t.phase.label().to_owned(),
-                )
-            });
+            .cloned();
 
-        let has_any = !running_agents.is_empty()
+        let has_any = !running_workflows.is_empty()
+            || !finished_workflows.is_empty()
+            || !running_agents.is_empty()
             || !finished_agents.is_empty()
             || !running_shells.is_empty()
             || !finished_shells.is_empty()
@@ -674,7 +790,8 @@ impl Pui {
                             return;
                         }
 
-                        let running_count = running_agents.len()
+                        let running_count = running_workflows.len()
+                            + running_agents.len()
                             + running_shells.len()
                             + active_jobs.len()
                             + usize::from(active_workflow.is_some());
@@ -692,6 +809,17 @@ impl Pui {
                                 );
                             });
                             ui.add_space(6.0);
+                            for wf in &running_workflows {
+                                let wa = workflow_ui::render_dynamic_workflow_card(
+                                    ui,
+                                    wf,
+                                    &self.background_tasks.expanded_workflow_phases,
+                                );
+                                if matches!(action, PanelAction::None) {
+                                    action = map_workflow_action(wa);
+                                }
+                                ui.add_space(8.0);
+                            }
                             for agent in &running_agents {
                                 let a = self.render_agent_card(ui, agent, false);
                                 if matches!(action, PanelAction::None) {
@@ -750,20 +878,21 @@ impl Pui {
                                     });
                                 ui.add_space(8.0);
                             }
-                            if let Some((wf_id, objective, phase)) = &active_workflow {
+                            if let Some(task) = &active_workflow {
+                                let cells = workflow::verified_task_cells(task);
                                 egui::Frame::new()
                                     .fill(colors.surface)
                                     .stroke(Stroke::new(1.0_f32, colors.border))
                                     .corner_radius(10.0)
-                                    .inner_margin(egui::Margin::symmetric(12, 9))
+                                    .inner_margin(egui::Margin::symmetric(12, 10))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             icons::inline(ui, Icon::Agents, colors.accent);
-                                            let title = if objective.trim().is_empty() {
-                                                "Workflow".to_owned()
+                                            let title = if task.objective.trim().is_empty() {
+                                                "Verified workflow".to_owned()
                                             } else {
-                                                objective.clone()
+                                                task.objective.clone()
                                             };
                                             if ui
                                                 .add(
@@ -778,26 +907,35 @@ impl Pui {
                                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                                 .clicked()
                                             {
-                                                action = PanelAction::OpenWorkflow(wf_id.clone());
+                                                action = PanelAction::OpenWorkflow(task.id.clone());
                                             }
                                             ui.with_layout(
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
                                                     ui.label(
-                                                        RichText::new(phase)
+                                                        RichText::new(task.phase.label())
                                                             .size(11.0)
                                                             .color(colors.muted),
                                                     );
                                                 },
                                             );
                                         });
+                                        ui.add_space(6.0);
+                                        crate::inline_visual::paint_workflow_cell_grid(
+                                            ui,
+                                            &cells,
+                                            task.phase.active(),
+                                            2,
+                                        );
                                     });
                                 ui.add_space(8.0);
                             }
                             ui.add_space(4.0);
                         }
 
-                        let finished_count = finished_agents.len() + finished_shells.len();
+                        let finished_count = finished_workflows.len()
+                            + finished_agents.len()
+                            + finished_shells.len();
                         if finished_count > 0 {
                             let header = ui
                                 .horizontal(|ui| {
@@ -831,12 +969,16 @@ impl Pui {
                             }
                             if self.background_tasks.finished_open {
                                 ui.add_space(6.0);
-                                // Merge agents & shells by start time descending like Claude Desktop.
+                                // Merge workflows, agents & shells by start time descending.
                                 enum FinItem {
+                                    Workflow(workflow::DynamicWorkflow),
                                     Agent(AgentSnapshot),
                                     Shell(ShellSnapshot),
                                 }
                                 let mut items: Vec<(SystemTime, FinItem)> = Vec::new();
+                                for w in finished_workflows {
+                                    items.push((w.started, FinItem::Workflow(w)));
+                                }
                                 for a in finished_agents {
                                     items.push((a.created, FinItem::Agent(a)));
                                 }
@@ -846,6 +988,13 @@ impl Pui {
                                 items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
                                 for (_, item) in &items {
                                     let a = match item {
+                                        FinItem::Workflow(wf) => map_workflow_action(
+                                            workflow_ui::render_dynamic_workflow_card(
+                                                ui,
+                                                wf,
+                                                &self.background_tasks.expanded_workflow_phases,
+                                            ),
+                                        ),
                                         FinItem::Agent(agent) => {
                                             self.render_agent_card(ui, agent, false)
                                         }

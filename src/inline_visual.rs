@@ -221,10 +221,134 @@ const LIVE_HIDDEN: std::time::Duration = std::time::Duration::from_millis(1500);
 #[cfg(target_os = "macos")]
 const LIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkflowCellState {
+    Pending,
+    Running,
+    Done,
+    Error,
+    Stopped,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowCell {
+    pub label: String,
+    pub state: WorkflowCellState,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowCardSnapshot {
+    pub title: String,
+    pub running: bool,
+    pub failed: bool,
+    pub stopped: bool,
+    pub total_agents: usize,
+    pub done_agents: usize,
+    pub failed_agents: usize,
+    pub total_tokens: u64,
+    pub elapsed_ms: u64,
+    pub cells: Vec<WorkflowCell>,
+}
+
+pub fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 10_000 {
+        format!("{}k", (tokens + 500) / 1000)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Compact 6×6px agent status micro-grid matching Claude Desktop's workflow progress strip.
+/// Hovering any cell shows that agent's label and status detail.
+pub fn paint_workflow_cell_grid(
+    ui: &mut egui::Ui,
+    cells: &[WorkflowCell],
+    running: bool,
+    max_rows: usize,
+) {
+    let colors = crate::theme::palette(ui.ctx());
+    let cell_size = 6.0_f32;
+    let gap = 2.0_f32;
+    let pitch = cell_size + gap;
+    let avail_w = ui.available_width().max(pitch);
+    let cols = ((avail_w + gap) / pitch).floor().max(1.0) as usize;
+    let max_cells = cols.saturating_mul(max_rows.max(1));
+    let show_ghost = running && cells.len() < max_cells;
+    let visible = cells.len().min(max_cells);
+    let total_drawn = visible + usize::from(show_ghost);
+    if total_drawn == 0 {
+        return;
+    }
+    let rows = total_drawn.div_ceil(cols).min(max_rows.max(1));
+    let grid_w = (total_drawn.min(cols) as f32 * pitch - gap).max(cell_size);
+    let grid_h = (rows as f32 * pitch - gap).max(cell_size);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(grid_w, grid_h), Sense::hover());
+    let pulse = if running {
+        let t = ui.ctx().input(|i| i.time);
+        0.55 + 0.45 * (t * 3.2).sin().abs() as f32
+    } else {
+        1.0
+    };
+    if running {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(120));
+    }
+    let painter = ui.painter();
+    for (idx, cell) in cells.iter().take(visible).enumerate() {
+        let col = idx % cols;
+        let row = idx / cols;
+        let min = rect.min + Vec2::new(col as f32 * pitch, row as f32 * pitch);
+        let cell_rect = egui::Rect::from_min_size(min, Vec2::splat(cell_size));
+        let fill = match cell.state {
+            WorkflowCellState::Done => colors.green.gamma_multiply(0.85),
+            WorkflowCellState::Running => colors.accent.gamma_multiply(pulse),
+            WorkflowCellState::Error => colors.red,
+            WorkflowCellState::Stopped => colors.dim.gamma_multiply(0.55),
+            WorkflowCellState::Pending => colors.border,
+        };
+        painter.rect_filled(cell_rect, 1.5_f32, fill);
+    }
+    if show_ghost {
+        let idx = visible;
+        let col = idx % cols;
+        let row = idx / cols;
+        let min = rect.min + Vec2::new(col as f32 * pitch, row as f32 * pitch);
+        let cell_rect = egui::Rect::from_min_size(min, Vec2::splat(cell_size));
+        painter.rect_stroke(
+            cell_rect,
+            1.5_f32,
+            Stroke::new(1.0_f32, colors.dim.gamma_multiply(0.45)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    if let Some(pos) = response.hover_pos() {
+        let local = pos - rect.min;
+        if local.x >= 0.0 && local.y >= 0.0 {
+            let col = (local.x / pitch).floor() as usize;
+            let row = (local.y / pitch).floor() as usize;
+            let idx = row * cols + col;
+            if let Some(cell) = cells.get(idx) {
+                response.on_hover_ui_at_pointer(|ui| {
+                    ui.label(RichText::new(&cell.label).size(11.5).color(colors.text));
+                    if !cell.detail.is_empty() {
+                        ui.label(RichText::new(&cell.detail).size(10.5).color(colors.muted));
+                    }
+                });
+            }
+        }
+    }
+}
+
 pub struct InlineVisualHost {
     cache: HashMap<VisualKey, CachedVisual>,
     page_textures: HashMap<String, (u64, TextureHandle)>,
     pub page_snapshots: PageSnapshots,
+    pub workflow_cards: HashMap<String, WorkflowCardSnapshot>,
     svg_tx: mpsc::Sender<SvgCompleted>,
     svg_rx: mpsc::Receiver<SvgCompleted>,
     svg_pending: usize,
@@ -242,6 +366,7 @@ impl Default for InlineVisualHost {
             cache: HashMap::new(),
             page_textures: HashMap::new(),
             page_snapshots: PageSnapshots::default(),
+            workflow_cards: HashMap::new(),
             svg_tx,
             svg_rx,
             svg_pending: 0,

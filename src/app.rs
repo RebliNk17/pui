@@ -127,6 +127,8 @@ struct Preferences {
     pi_migration_dismissed: bool,
     /// Give Pi provider API keys from environment variables (off by default).
     use_environment_keys: bool,
+    /// Disable phased parallel dynamic workflows (enabled by default).
+    dynamic_workflows_disabled: bool,
 }
 
 impl Preferences {

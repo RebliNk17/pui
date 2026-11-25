@@ -218,3 +218,34 @@ test('workflow recipes validate strictly and pass through to native consent', as
   const h = host();
   await assert.rejects(h.tool.execute('', { ...args, recipe: 'custom_graph' }, undefined, null, h.ctx), /recipe/);
 });
+
+test('dynamic phased workflows validate bounds and route directly to dynamic_workflow_start', async () => {
+  const h = host();
+  h.ctx.ui.input = async (...req) => {
+    h.requests.push(req);
+    return JSON.stringify({ workflow_id: 'wf-1', mode: 'dynamic', started: true, status: 'running', phases: 2, agents: 3 });
+  };
+  const res = await h.tool.execute('call-dyn', {
+    objective: 'Audit and fix auth',
+    name: 'Auth audit',
+    reason: 'Parallel phases across independent modules.',
+    phases: [
+      { title: 'Explore', agents: [{ label: 'Middleware', task: 'Inspect middleware', access: 'read-only' }, { label: 'Tokens', task: 'Inspect tokens', access: 'read-only' }] },
+      { title: 'Fix', agents: [{ label: 'Apply fix', task: 'Fix issues', access: 'workspace' }] },
+    ],
+  }, undefined, null, h.ctx);
+  const req = JSON.parse(h.requests[0][1]);
+  assert.equal(req.action, 'dynamic_workflow_start');
+  assert.equal(req.name, 'Auth audit');
+  assert.equal(req.phases.length, 2);
+  assert.equal(res.details.workflow.workflow_id, 'wf-1');
+
+  await assert.rejects(
+    h.tool.execute('bad', { ...args, phases: [] }, undefined, null, h.ctx),
+    /1 to 8 phases/
+  );
+  await assert.rejects(
+    h.tool.execute('bad2', { ...args, phases: [{ title: 'P1', agents: [{ label: 'A', task: 'T', access: 'root' }] }] }, undefined, null, h.ctx),
+    /access/
+  );
+});

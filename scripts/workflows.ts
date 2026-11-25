@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 
-export const WORKFLOW_GUIDANCE = "Regular development is the default: inspect and get on with the work without asking about workflows. Do not open a chat with a workflow offer. Offer pui_workflow only after inspection establishes a genuinely hard, high-risk change with interdependent stages, such as a major architecture migration, a cross-system refactor, or a difficult reliability/security change where isolated execution and independent verification materially reduce risk. Routine fixes, ordinary features, UI polish, code review, investigation, documentation, adding tests, touching several files, or merely benefiting from testing/review are NOT sufficient reasons. A request to make a plan, implement everything, or use subagents is not a request for a workflow. If the user explicitly requests a workflow, honor that request through native consent. After Regular development is selected, do not offer again in this conversation unless the user explicitly asks to use a workflow. Ultracode does not lower this threshold.";
+export const WORKFLOW_GUIDANCE = "Regular development is the default: inspect and get on with the work without asking about workflows. Do not open a chat with a workflow offer. pui_workflow supports two modes: (1) Dynamic phased workflows (supply phases: [{title, agents: [...]}]) for complex tasks that genuinely benefit from ordered parallel fan-out across multiple background agents (runs directly in Background tasks with a live phase/agent grid, token/time table, and Stop button; optional final checks). (2) Verified workflows (omit phases) only after inspection establishes a genuinely hard, high-risk change with interdependent stages where an isolated worktree, frozen checks, and independent review materially reduce risk (always asks via native consent). Routine fixes, ordinary features, UI polish, code review, investigation, documentation, adding tests, touching several files, or merely benefiting from testing/review are NOT sufficient reasons. A request to make a plan, implement everything, or use subagents is not a request for a workflow. If the user explicitly requests a workflow, honor that request. After Regular development is selected, do not offer a verified workflow again in this conversation unless the user explicitly asks. Ultracode does not lower this threshold.";
 
 export function installWorkflows(pi: any) {
   let declined = false;
@@ -50,6 +50,18 @@ export function installWorkflows(pi: any) {
     promptGuidelines: [WORKFLOW_GUIDANCE + " Use pui_workflow only when this threshold is met. Explain that benefit very briefly in reason. Do not start a workflow automatically or ask separately first: pui_workflow presents the one required approval. Inspect first and include plan.steps and plan.checks when a concrete plan is available, especially after the user asks to review a plan. The native approval shows that exact plan; approved checks are frozen and no redundant proposal agent replaces them. In Plan mode, submit a concrete plan only when ready for implementation approval; the host asks explicitly to switch this conversation to Manual, while denial/cancellation keeps read-only mode. Never change modes or treat a plan/tool call as permission yourself. If the user requests changes, the tool returns revision_requested with feedback and no execution approval: revise only the plan, then submit it for a fresh host approval. Without a plan the workflow first establishes acceptance checks. After approval, manage the work without further workflow setup or acceptance steps. After a background handle returns, continue discussion or read-only inspection, but do not modify its source or candidate concurrently. Use pui_workflow_control wait once when the result is needed; no status polling. Decline uses regular development; cancellation means wait for the user, not retry. Tool permissions remain separate."],
     parameters: Type.Object({
       objective: Type.String({ minLength: 1, maxLength: 16000 }),
+      name: Type.Optional(Type.String({ maxLength: 100, description: "Optional short display title for dynamic workflows." })),
+      phases: Type.Optional(Type.Array(Type.Object({
+        title: Type.String({ minLength: 1, maxLength: 120 }),
+        agents: Type.Array(Type.Object({
+          label: Type.String({ minLength: 1, maxLength: 80 }),
+          task: Type.String({ minLength: 1, maxLength: 24000 }),
+          access: Type.Optional(Type.Union([Type.Literal("workspace"), Type.Literal("read-only"), Type.Literal("worktree")])),
+          model: Type.Optional(Type.String({ maxLength: 160 })),
+          cwd: Type.Optional(Type.String({ maxLength: 4096 })),
+          permission: Type.Optional(Type.Union(["plan", "dontAsk", "manual", "acceptEdits", "auto", "bypassPermissions"].map(m => Type.Literal(m)))),
+        }), { minItems: 1, maxItems: 16 }),
+      }), { minItems: 1, maxItems: 8, description: "Dynamic workflow mode: ordered phases of parallel background subagents tracked in Background tasks. Omit for an isolated verified workflow." })),
       constraints: Type.Optional(Type.String({ maxLength: 12000 })),
       recipe: Type.Optional(Type.Union([Type.Literal("verified_change"), Type.Literal("investigate"), Type.Literal("review")], { description: "Optional workflow recipe. Default verified_change implements and verifies a candidate; investigate and review run read-only analysis + executable checks + fresh independent review without modifying files." })),
       profile: Type.Optional(Type.Boolean({description:"Use the versioned repository pui-workflow.json steps/checks. Contents are shown in native consent; setup still requires separate exact-command approval."})),
@@ -69,6 +81,27 @@ export function installWorkflows(pi: any) {
       if (!ctx.hasUI || ctx.mode !== "rpc") throw new Error("Workflows require the native Pui app.");
       if (process.env.PUI_AGENT_ACCESS === "read-only" || process.env.PUI_TASK_ROLE) throw new Error("This worker cannot start workflows.");
       if (typeof args.objective !== "string" || !args.objective.trim() || Buffer.byteLength(args.objective) > 16000 || typeof args.reason !== "string" || !args.reason.trim() || Buffer.byteLength(args.reason) > 240 || (args.constraints !== undefined && (typeof args.constraints !== "string" || Buffer.byteLength(args.constraints) > 12000))) throw new Error("Supply a bounded objective, constraints and a very short reason.");
+      if (args.phases !== undefined) {
+        if (!Array.isArray(args.phases) || args.phases.length < 1 || args.phases.length > 8) throw new Error("Dynamic workflow requires 1 to 8 phases.");
+        let total = 0;
+        for (const phase of args.phases) {
+          if (!phase || typeof phase !== "object" || typeof phase.title !== "string" || !phase.title.trim() || Buffer.byteLength(phase.title) > 120 || !Array.isArray(phase.agents) || phase.agents.length < 1 || phase.agents.length > 16) throw new Error("Each workflow phase requires a title and 1 to 16 agents.");
+          total += phase.agents.length;
+          if (total > 32) throw new Error("Dynamic workflows are capped at 32 total agents.");
+          for (const agent of phase.agents) {
+            if (!agent || typeof agent !== "object" || typeof agent.label !== "string" || !agent.label.trim() || Buffer.byteLength(agent.label) > 80 || typeof agent.task !== "string" || !agent.task.trim() || Buffer.byteLength(agent.task) > 24000) throw new Error("Each workflow agent requires a bounded label and task.");
+            if (agent.access !== undefined && !["workspace", "read-only", "worktree"].includes(agent.access)) throw new Error("Workflow agent access must be workspace, read-only, or worktree.");
+          }
+        }
+        signal?.throwIfAborted();
+        const id = crypto.randomUUID();
+        const value = await ctx.ui.input("Pui agent control", JSON.stringify({ version: 1, action: "dynamic_workflow_start", id, name: args.name, objective: args.objective, phases: args.phases, plan: args.plan }), { signal });
+        signal?.throwIfAborted();
+        if (value === undefined) return { content: [{ type: "text", text: "Dynamic workflow request cancelled." }], details: { cancelled: true }, terminate: true };
+        const result = JSON.parse(value);
+        if (result.error) throw new Error(result.error);
+        return { content: [{ type: "text", text: JSON.stringify(result) }], details: { workflow: result } };
+      }
       if (args.policy !== undefined && args.policy !== "dynamic" && args.policy !== "pinned" && args.policy !== "selected") throw new Error("Workflow policy must be dynamic, pinned or selected; no silent fallback.");
       if (args.recipe !== undefined && args.recipe !== "verified_change" && args.recipe !== "investigate" && args.recipe !== "review") throw new Error("Workflow recipe must be verified_change, investigate or review.");
       if (args.spend_limit !== undefined && (typeof args.spend_limit !== "number" || !Number.isFinite(args.spend_limit) || args.spend_limit <= 0)) throw new Error("Reported spend threshold must be finite and positive, not a hard billing cap.");

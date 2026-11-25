@@ -83,6 +83,14 @@ impl Tool {
         self.code = args["code"].as_str().unwrap_or_default().to_owned();
         self.visual = None;
         self.open_target = None;
+        self.workflow_id = None;
+        self.workflow_title = None;
+        if self.name == "pui_workflow" {
+            self.workflow_title = args["objective"]
+                .as_str()
+                .and_then(|s| s.lines().find(|l| !l.trim().is_empty()))
+                .map(|l| l.trim().chars().take(120).collect());
+        }
         if self.name == "pui_visual" {
             if let Some(html) = args["html"].as_str().filter(|s| !s.trim().is_empty()) {
                 let title = args["title"]
@@ -154,6 +162,30 @@ impl Tool {
             self.open_target = Some(target.to_owned());
         }
         self.open_queued = details["queued"] == true;
+    }
+
+    pub fn set_workflow_result(&mut self, raw: &Value) {
+        if self.name != "pui_workflow" {
+            return;
+        }
+        let wf = &raw["details"]["workflow"];
+        if let Some(id) = wf["workflow_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            self.workflow_id = Some(id.to_owned());
+        } else if let Some(text) = raw["content"]
+            .as_array()
+            .and_then(|arr| arr.iter().find_map(|b| b["text"].as_str()))
+            && let Ok(parsed) = serde_json::from_str::<Value>(text)
+            && let Some(id) = parsed["workflow_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            self.workflow_id = Some(id.to_owned());
+        }
     }
 
     /// Collect all unique images produced by this tool and any nested children.

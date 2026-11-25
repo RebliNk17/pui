@@ -1014,6 +1014,17 @@ impl Pui {
                                 .open_visual_html(ctx, &self.prefs.cwd, &id, &title, &html);
                             self.settings_open = false;
                             self.inspector_panel = false;
+                            self.background_tasks.open = false;
+                        }
+                        crate::transcript::TranscriptAction::OpenWorkflow(id) => {
+                            self.settings_open = false;
+                            if self.background_tasks.workflows.iter().any(|w| w.id == id)
+                                || id.starts_with("wf-")
+                            {
+                                self.open_background_tasks_panel(None, None);
+                            } else {
+                                self.open_task_from_board(id, None);
+                            }
                         }
                     }
                     ctx.request_repaint();

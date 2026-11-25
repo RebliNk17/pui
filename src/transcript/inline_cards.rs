@@ -402,6 +402,131 @@ pub(super) fn open_card(
     ui.add_space(6.0);
 }
 
+/// Compact inline transcript card for a `pui_workflow` call (Claude Desktop `VIe` parity):
+/// title + chevron, agent count + elapsed time + tokens, live 6×6px agent status micro-grid.
+pub(super) fn workflow_card(
+    ui: &mut egui::Ui,
+    tool: &Tool,
+    visuals: Option<&InlineVisualHost>,
+    action: &mut Option<TranscriptAction>,
+) {
+    let Some(workflow_id) = tool.workflow_id.as_deref() else {
+        return;
+    };
+    let colors = crate::theme::palette(ui.ctx());
+    let snap = visuals.and_then(|v| v.workflow_cards.get(workflow_id));
+    let title = snap
+        .map(|s| s.title.as_str())
+        .filter(|s| !s.is_empty())
+        .or(tool.workflow_title.as_deref())
+        .unwrap_or("Workflow");
+
+    let card_width = ui.available_width().clamp(220.0, 340.0);
+    ui.add_space(6.0);
+    let resp = egui::Frame::new()
+        .fill(colors.surface)
+        .stroke(Stroke::new(1.0_f32, colors.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width((card_width - 26.0).max(180.0));
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.horizontal(|ui| {
+                icons::inline(ui, Icon::Agents, colors.accent);
+                ui.add(
+                    egui::Label::new(RichText::new(title).size(12.5).color(colors.text)).truncate(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("›").size(14.0).color(colors.dim));
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let Some(s) = snap {
+                    let status_label = if s.running {
+                        "Workflow"
+                    } else if s.failed {
+                        "Failed"
+                    } else if s.stopped {
+                        "Stopped"
+                    } else {
+                        "Done"
+                    };
+                    let status_color = if s.failed {
+                        colors.red
+                    } else if s.running {
+                        colors.accent
+                    } else {
+                        colors.muted
+                    };
+                    ui.label(RichText::new(status_label).size(11.0).color(status_color));
+                    if s.total_agents > 0 {
+                        let summary = if s.running && s.done_agents > 0 {
+                            format!("· {}/{} agents", s.done_agents, s.total_agents)
+                        } else if s.total_agents == 1 {
+                            "· 1 agent".to_owned()
+                        } else {
+                            format!("· {} agents", s.total_agents)
+                        };
+                        ui.label(RichText::new(summary).size(11.0).color(colors.muted));
+                    }
+                    if s.failed_agents > 0 {
+                        ui.label(
+                            RichText::new(format!("· {} failed", s.failed_agents))
+                                .size(11.0)
+                                .color(colors.red),
+                        );
+                    }
+                    if s.total_tokens > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "· {} tok",
+                                crate::inline_visual::format_token_count(s.total_tokens)
+                            ))
+                            .size(11.0)
+                            .color(colors.dim),
+                        );
+                    }
+                    if s.elapsed_ms > 0 || s.running {
+                        let secs = s.elapsed_ms / 1000;
+                        let dur = if secs >= 3600 {
+                            format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+                        } else if secs >= 60 {
+                            format!("{}m {:02}s", secs / 60, secs % 60)
+                        } else {
+                            format!("{secs}s")
+                        };
+                        ui.label(
+                            RichText::new(format!("· {dur}"))
+                                .size(11.0)
+                                .color(colors.dim),
+                        );
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("Workflow · open to inspect")
+                            .size(11.0)
+                            .color(colors.muted),
+                    );
+                }
+            });
+            if let Some(s) = snap
+                && !s.cells.is_empty()
+            {
+                ui.add_space(2.0);
+                crate::inline_visual::paint_workflow_cell_grid(ui, &s.cells, s.running, 6);
+            }
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Open workflow in Background tasks");
+    if resp.clicked() {
+        *action = Some(TranscriptAction::OpenWorkflow(workflow_id.to_owned()));
+    }
+    ui.add_space(6.0);
+}
+
 fn top_cover_uv(tex: Vec2, slot: Vec2) -> Rect {
     if tex.x <= 0.0 || tex.y <= 0.0 || slot.x <= 0.0 || slot.y <= 0.0 {
         return Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));

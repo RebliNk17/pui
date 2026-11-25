@@ -296,9 +296,27 @@ impl Pui {
                 egui::Label::new(format!("{} · {}", criterion.id, criterion.description)).wrap(),
             );
         }
-        ui.add_space(12.0);
-        ui.label(RichText::new("Progress").strong());
-        for role in [Role::Proposal, Role::Builder, Role::Checks, Role::Verifier] {
+        ui.add_space(8.0);
+        let cells = super::super::background_tasks::workflow::verified_task_cells(task);
+        let done_stages = cells
+            .iter()
+            .filter(|c| c.state == crate::inline_visual::WorkflowCellState::Done)
+            .count();
+        let colors = theme::palette(ui.ctx());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Progress").strong());
+            ui.label(
+                RichText::new(format!("{done_stages}/{} stages", cells.len()))
+                    .size(11.0)
+                    .color(colors.muted),
+            );
+            ui.add_space(4.0);
+            crate::inline_visual::paint_workflow_cell_grid(ui, &cells, task.phase.active(), 1);
+        });
+        for (idx, role) in [Role::Proposal, Role::Builder, Role::Checks, Role::Verifier]
+            .into_iter()
+            .enumerate()
+        {
             let run = task.runs.iter().rev().find(|r| {
                 r.role == role
                     && r.routing_for.is_none()
@@ -310,31 +328,86 @@ impl Pui {
             } else {
                 run.map(|r| r.status.as_str()).unwrap_or("Not started")
             };
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(role.label()).size(12.0));
-                ui.label(theme::small(ui, summary));
-                if let Some(run) = run {
-                    if ui
-                        .small_button(if role == Role::Checks {
-                            "View results"
-                        } else {
-                            "Details"
-                        })
-                        .clicked()
-                    {
-                        view.tab = if role == Role::Checks {
-                            Tab::Evidence
-                        } else {
-                            Tab::Activity
-                        };
-                        self.tasks.selected_run = if role == Role::Checks {
-                            None
-                        } else {
-                            Some(run.id.clone())
-                        };
+            let cell_state = cells
+                .get(idx)
+                .map(|c| c.state)
+                .unwrap_or(crate::inline_visual::WorkflowCellState::Pending);
+            let row_w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(row_w, 18.0),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.set_max_width(row_w);
+                    if let Some(run) = run {
+                        if ui
+                            .small_button(if role == Role::Checks {
+                                "View results"
+                            } else {
+                                "Details"
+                            })
+                            .clicked()
+                        {
+                            view.tab = if role == Role::Checks {
+                                Tab::Evidence
+                            } else {
+                                Tab::Activity
+                            };
+                            self.tasks.selected_run = if role == Role::Checks {
+                                None
+                            } else {
+                                Some(run.id.clone())
+                            };
+                        }
+                        ui.add_space(6.0);
                     }
-                }
-            });
+                    ui.label(theme::small(ui, summary));
+                    if let Some(sel) = run.and_then(|r| r.selection.as_ref()) {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&sel.model).size(10.5).color(colors.dim));
+                    }
+                    ui.add_space(8.0);
+                    let left_w = ui.available_width().max(60.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(left_w, 18.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                            match cell_state {
+                                crate::inline_visual::WorkflowCellState::Done => {
+                                    icons::draw(ui, dot_rect, Icon::Check, colors.green);
+                                }
+                                crate::inline_visual::WorkflowCellState::Running => {
+                                    ui.painter().circle_filled(
+                                        dot_rect.center(),
+                                        3.2,
+                                        colors.accent,
+                                    );
+                                }
+                                crate::inline_visual::WorkflowCellState::Error => {
+                                    ui.painter()
+                                        .circle_filled(dot_rect.center(), 3.2, colors.red);
+                                }
+                                crate::inline_visual::WorkflowCellState::Stopped => {
+                                    ui.painter().circle_stroke(
+                                        dot_rect.center(),
+                                        3.0,
+                                        Stroke::new(1.2_f32, colors.dim),
+                                    );
+                                }
+                                crate::inline_visual::WorkflowCellState::Pending => {
+                                    ui.painter().circle_stroke(
+                                        dot_rect.center(),
+                                        3.0,
+                                        Stroke::new(1.0_f32, colors.border),
+                                    );
+                                }
+                            }
+                            ui.label(RichText::new(role.label()).size(12.0).color(colors.text));
+                        },
+                    );
+                },
+            );
             ui.separator();
         }
         if !task.constraints.is_empty() {
