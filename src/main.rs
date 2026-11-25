@@ -23,6 +23,7 @@ mod rpc;
 mod runtime;
 mod section;
 mod sessions;
+mod skills_cli;
 mod svg_preview;
 mod task_output;
 mod tasks;
@@ -69,6 +70,7 @@ pub struct Options {
     pub demo_automation: bool,
     pub demo_task: bool,
     pub demo_task_proposal: bool,
+    pub demo_workflow: bool,
     pub demo_files: bool,
     pub demo_table_grid: bool,
     pub demo_side_chat: bool,
@@ -145,6 +147,9 @@ fn main() -> eframe::Result {
     }
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         std::process::exit(mcp_cli::run_from_env());
+    }
+    if matches!(std::env::args().nth(1).as_deref(), Some("skills" | "skill")) {
+        std::process::exit(skills_cli::run_from_env());
     }
     if std::env::args().nth(1).as_deref() == Some("install-cli") {
         std::process::exit(cli_link::run_install_from_env());
@@ -324,6 +329,10 @@ fn main() -> eframe::Result {
                 options.demo = true;
                 options.demo_task = true;
             }
+            "--demo-workflow" => {
+                options.demo = true;
+                options.demo_workflow = true;
+            }
             "--demo-automation" => {
                 options.demo = true;
                 options.demo_automation = true;
@@ -419,6 +428,7 @@ fn main() -> eframe::Result {
                      Usage:\n  \
                        pui [--demo | --demo-expanded | --demo-collapsed] [--light | --dark] [--cwd PATH] [--session PATH] [--open PATH_OR_URL] [--screenshot PATH]\n  \
                        pui mcp <add|add-json|remove|list|get|enable|disable|add-from-claude-desktop|login|logout> [options]\n  \
+                       pui skills <add|remove|list|get|enable|disable|add-from-claude> [options]\n  \
                        pui install-cli [--dir PATH] [--target PATH] [--force]\n\n\
                      Packaged macOS apps include Pi and Node.js; configure your model provider to begin. Development builds need Pi and Node on PATH. Set PUI_PI_BIN (and PUI_PI_SDK when needed) to use an external Pi."
                 );
