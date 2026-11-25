@@ -2135,7 +2135,7 @@ impl Pui {
                                 d.insert_temp(composer_text::widget_id(ctx, "composer-caret-rect"), caret)
                             });
                         }
-                        output.response
+                        output
                     });
                 // egui 0.32 returns the pre-auto-shrink budget in inner_rect.
                 // Anchor popups to the actual editor viewport, even for short drafts.
@@ -2153,7 +2153,8 @@ impl Pui {
                         (editor_rect, scroll.content_size, scroll.state.offset.y),
                     )
                 });
-                let response = scroll.inner;
+                let output = scroll.inner;
+                let response = &output.response;
                 if response.changed() {
                     self.context_chips.clear();
                 }
@@ -2163,7 +2164,7 @@ impl Pui {
                     response.request_focus();
                     self.focus_composer = false;
                 }
-                self.composer_hints(ui, editor_rect, &response);
+                self.composer_hints(ui, &output);
                 if response.has_focus()
                     && !self.attention.open
                     && !self.model_picker_open

@@ -96,6 +96,8 @@ pub(super) struct Updates {
     result: Option<Result<Release, String>>,
     rx: Option<Receiver<Result<Release, String>>>,
     install: InstallState,
+    /// Release belonging to the active download/staged bundle, not a later check.
+    install_release: Option<Release>,
     install_rx: Option<Receiver<Result<StagedInstall, String>>>,
     progress: Option<Arc<Progress>>,
     last_auto_check: Option<std::time::Instant>,
@@ -111,6 +113,7 @@ impl Default for Updates {
             result: None,
             rx: None,
             install: InstallState::Idle,
+            install_release: None,
             install_rx: None,
             progress: None,
             last_auto_check: None,
@@ -596,11 +599,20 @@ fi
 }
 
 impl Updates {
+    fn displayed_release(&self) -> Option<&Release> {
+        self.install_release
+            .as_ref()
+            .or_else(|| self.result.as_ref()?.as_ref().ok())
+    }
+
     pub(super) fn available_version(&self) -> Option<&str> {
-        match &self.result {
-            Some(Ok(release)) if release.newer => Some(&release.version),
-            _ => None,
-        }
+        self.displayed_release()
+            .filter(|release| release.newer)
+            .map(|release| release.version.as_str())
+    }
+
+    fn can_check(&self) -> bool {
+        configured() && self.rx.is_none() && !matches!(self.install, InstallState::Downloading)
     }
 
     pub(super) fn ready_to_install(&self) -> bool {
@@ -613,25 +625,26 @@ impl Updates {
             self.cleaned_up = true;
             std::thread::spawn(cleanup_stale_staging_dirs);
         }
-        if !enabled || demo || cfg!(test) || self.rx.is_some() {
+        if !enabled || demo || cfg!(test) || !self.can_check() {
             return;
         }
         let due = self
             .last_auto_check
             .is_none_or(|last| last.elapsed() >= AUTO_CHECK_INTERVAL);
         if due {
-            self.last_auto_check = Some(std::time::Instant::now());
             self.check_quietly(ctx);
         }
     }
 
     pub(super) fn check_quietly(&mut self, ctx: &egui::Context) {
-        if self.rx.is_some() {
+        if !self.can_check() {
             return;
         }
         let Some(repo) = repository() else {
             return;
         };
+        self.checked = true;
+        self.last_auto_check = Some(std::time::Instant::now());
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         let ctx = ctx.clone();
@@ -643,22 +656,11 @@ impl Updates {
 
     pub(super) fn start(&mut self, ctx: &egui::Context) {
         self.open = true;
-        if self.rx.is_some()
-            || matches!(
-                self.install,
-                InstallState::Downloading | InstallState::Ready { .. }
-            )
-        {
-            return;
-        }
-        self.checked = true;
-        self.result = None;
-        self.last_auto_check = Some(std::time::Instant::now());
         self.check_quietly(ctx);
     }
 
     pub(super) fn start_download(&mut self, ctx: &egui::Context) {
-        if self.install_rx.is_some() {
+        if self.install_rx.is_some() || self.rx.is_some() {
             return;
         }
         let Some(repo) = repository() else {
@@ -677,6 +679,7 @@ impl Updates {
         if let InstallState::Ready { staged_dir, .. } = &self.install {
             let _ = std::fs::remove_dir_all(staged_dir);
         }
+        self.install_release = Some(release.clone());
         self.install = InstallState::Downloading;
         let progress = Arc::new(Progress::default());
         progress
@@ -710,12 +713,22 @@ impl Updates {
             let _ = std::fs::remove_dir_all(staged_dir);
         }
         self.install = InstallState::Idle;
+        self.install_release = None;
     }
 
     pub(super) fn poll(&mut self) {
         if let Some(result) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.rx = None;
             self.checked = true;
+            if let (Ok(latest), Some(staged)) = (&result, &self.install_release) {
+                let superseded = semver::Version::parse(&latest.version)
+                    .ok()
+                    .zip(semver::Version::parse(&staged.version).ok())
+                    .is_some_and(|(latest, staged)| latest > staged);
+                if superseded && self.ready_to_install() {
+                    self.cancel_staged();
+                }
+            }
             self.result = Some(result);
         }
         if let Some(result) = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -734,6 +747,9 @@ impl Updates {
                 },
                 Err(error) => InstallState::Failed(error),
             };
+            if !self.ready_to_install() {
+                self.install_release = None;
+            }
         }
     }
 
@@ -743,6 +759,12 @@ impl Updates {
                 "Updates aren’t configured",
                 "This build has no GitHub release repository configured. No network request was made."
                     .to_owned(),
+            );
+        }
+        if self.rx.is_some() {
+            return (
+                "Checking for updates…",
+                "Looking for the latest published stable release.".to_owned(),
             );
         }
         match &self.install {
@@ -755,12 +777,10 @@ impl Updates {
             }
             InstallState::Ready { target_app, .. } => {
                 let version = self
-                    .result
-                    .as_ref()
-                    .and_then(|r| r.as_ref().ok())
+                    .displayed_release()
                     .map(|r| r.version.as_str())
                     .unwrap_or("new");
-                let detail = if target_app.is_some() {
+                let mut detail = if target_app.is_some() {
                     format!(
                         "Pui {version} is verified and ready. Install & Relaunch will wait for Pui to close, replace the app bundle, clean up temporary files and reopen."
                     )
@@ -769,18 +789,15 @@ impl Updates {
                         "Pui {version} is downloaded and verified. Because this instance isn’t running from a Pui distribution bundle (it may be Pui Dev or an unpackaged build), automatic replacement is disabled. You can reveal the unpacked app in Finder."
                     )
                 };
+                if let Some(Err(error)) = &self.result {
+                    detail.push_str(&format!(" Latest update check failed: {error}"));
+                }
                 return ("Update ready to install", detail);
             }
             InstallState::Failed(error) => {
                 return ("Couldn’t install update", error.clone());
             }
             InstallState::Idle => {}
-        }
-        if self.rx.is_some() {
-            return (
-                "Checking for updates…",
-                "Looking for the latest published stable release.".to_owned(),
-            );
         }
         match &self.result {
             Some(Ok(release)) if release.newer => (
@@ -830,7 +847,7 @@ impl Updates {
                 .max_height((ctx.screen_rect().height() * 0.28).clamp(60.0, 180.0))
                 .show(ui, |ui| {
                     ui.add(egui::Label::new(theme::small(ui, &description)).wrap());
-                    if let Some(Ok(release)) = &self.result {
+                    if let Some(release) = self.displayed_release() {
                         if release.newer && !release.body.trim().is_empty() {
                             ui.add_space(8.0);
                             // Release notes are the changelog section: render its Markdown.
@@ -859,6 +876,24 @@ impl Updates {
                 .wrap(),
             );
             ui.add_space(18.0);
+            if !matches!(self.install, InstallState::Downloading) {
+                prompt_ui::footer(ui, |ui| {
+                    retry = prompt_ui::button(
+                        ui,
+                        if self.rx.is_some() {
+                            "Checking…"
+                        } else if self.checked {
+                            "Check again"
+                        } else {
+                            "Check for updates"
+                        },
+                        prompt_ui::Button::Secondary,
+                        self.can_check(),
+                    )
+                    .clicked();
+                });
+                ui.add_space(6.0);
+            }
             prompt_ui::footer(ui, |ui| {
                 match &self.install {
                     InstallState::Ready {
@@ -871,7 +906,7 @@ impl Updates {
                                 ui,
                                 "Install & Relaunch",
                                 prompt_ui::Button::Primary,
-                                true,
+                                self.rx.is_none(),
                             )
                             .clicked()
                             {
@@ -882,7 +917,7 @@ impl Updates {
                             ui,
                             "Reveal in Finder",
                             prompt_ui::Button::Primary,
-                            true,
+                            self.rx.is_none(),
                         )
                         .clicked()
                         {
@@ -908,7 +943,7 @@ impl Updates {
                                         ui,
                                         "Download Update",
                                         prompt_ui::Button::Primary,
-                                        true,
+                                        self.rx.is_none(),
                                     )
                                     .clicked()
                                     {
@@ -935,26 +970,6 @@ impl Updates {
                                     ctx.open_url(egui::OpenUrl::new_tab(&release.url));
                                 }
                             }
-                        }
-                        let release_ready = self.result.as_ref().is_some_and(|result| {
-                            result.as_ref().is_ok_and(|release| release.newer)
-                        });
-                        if configured()
-                            && self.rx.is_none()
-                            && (!release_ready || matches!(self.install, InstallState::Failed(_)))
-                            && prompt_ui::button(
-                                ui,
-                                if self.checked {
-                                    "Check again"
-                                } else {
-                                    "Check for updates"
-                                },
-                                prompt_ui::Button::Secondary,
-                                true,
-                            )
-                            .clicked()
-                        {
-                            retry = true;
                         }
                     }
                 }
@@ -994,6 +1009,7 @@ impl Updates {
                     return true;
                 }
                 Err(error) => {
+                    self.install_release = None;
                     self.install = InstallState::Failed(error);
                 }
             }
@@ -1002,7 +1018,9 @@ impl Updates {
             self.start_download(ctx);
         }
         if retry {
-            self.install = InstallState::Idle;
+            if matches!(self.install, InstallState::Failed(_)) {
+                self.install = InstallState::Idle;
+            }
             self.start(ctx);
         }
         false
@@ -1114,6 +1132,227 @@ fn installed_version(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_release(version: &str) -> Release {
+        release(
+            "owner/pui",
+            "1.0.0",
+            &json!({
+                "tag_name": format!("v{version}"),
+                "draft": false,
+                "prerelease": false,
+                "body": format!("Release notes for {version}"),
+            }),
+        )
+        .unwrap()
+    }
+
+    fn staged_update() -> Updates {
+        let staged_dir = std::env::temp_dir().join(format!("pui-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staged_dir).unwrap();
+        std::fs::write(staged_dir.join("staged-marker"), "1.0.1").unwrap();
+        let staged_app = staged_dir.join("unpacked/Pui.app");
+        Updates {
+            open: true,
+            checked: true,
+            result: Some(Ok(test_release("1.0.1"))),
+            install_release: Some(test_release("1.0.1")),
+            install: InstallState::Ready {
+                staged_dir,
+                staged_app,
+                target_app: Some(PathBuf::from("/Applications/Pui.app")),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn pending_check(updates: &mut Updates) -> mpsc::Sender<Result<Release, String>> {
+        let (tx, rx) = mpsc::channel();
+        updates.rx = Some(rx);
+        tx
+    }
+
+    #[test]
+    fn newer_check_replaces_stale_staged_offer_and_removes_only_its_download() {
+        let mut updates = staged_update();
+        let staged_dir = match &updates.install {
+            InstallState::Ready { staged_dir, .. } => staged_dir.clone(),
+            _ => unreachable!(),
+        };
+        assert!(updates.can_check());
+        let tx = pending_check(&mut updates);
+        assert!(!updates.can_check());
+        assert_eq!(updates.status(true).0, "Checking for updates…");
+        // Opening again while checking reuses the pending worker.
+        updates.start(&egui::Context::default());
+        tx.send(Ok(test_release("1.0.2"))).unwrap();
+        updates.poll();
+        assert!(!staged_dir.exists());
+        assert_eq!(updates.install, InstallState::Idle);
+        assert!(updates.install_release.is_none());
+        assert_eq!(updates.available_version(), Some("1.0.2"));
+        assert_eq!(
+            updates.displayed_release().unwrap().body,
+            "Release notes for 1.0.2"
+        );
+        assert_eq!(updates.status(true).0, "A new version is ready");
+        assert!(updates.can_check());
+    }
+
+    #[test]
+    fn failed_equal_or_older_checks_preserve_the_staged_version_and_notes() {
+        for result in [
+            Err("Connection unavailable".into()),
+            Ok(test_release("1.0.1")),
+            Ok(test_release("1.0.0")),
+        ] {
+            let mut updates = staged_update();
+            let expected = updates.install.clone();
+            let failed = result.is_err();
+            pending_check(&mut updates).send(result).unwrap();
+            updates.poll();
+            assert_eq!(updates.install, expected);
+            assert_eq!(updates.available_version(), Some("1.0.1"));
+            assert_eq!(
+                updates.displayed_release().unwrap().body,
+                "Release notes for 1.0.1"
+            );
+            let (title, detail) = updates.status(true);
+            assert_eq!(title, "Update ready to install");
+            assert!(detail.contains("Pui 1.0.1"));
+            assert_eq!(detail.contains("Latest update check failed"), failed);
+            updates.cancel_staged();
+            assert!(updates.install_release.is_none());
+        }
+    }
+
+    #[test]
+    fn checks_and_downloads_do_not_overlap_and_cancellation_clears_version() {
+        let mut updates = Updates {
+            install: InstallState::Downloading,
+            install_release: Some(test_release("1.0.1")),
+            ..Default::default()
+        };
+        assert!(!updates.can_check());
+        updates.start(&egui::Context::default());
+        assert!(updates.rx.is_none());
+        let (tx, rx) = mpsc::channel();
+        updates.install_rx = Some(rx);
+        let progress = Arc::new(Progress::default());
+        progress.cancel.store(true, Ordering::Relaxed);
+        updates.progress = Some(progress);
+        tx.send(Err(CANCELLED.into())).unwrap();
+        updates.poll();
+        assert_eq!(updates.install, InstallState::Idle);
+        assert!(updates.install_release.is_none());
+        assert!(updates.can_check());
+        let _tx = pending_check(&mut updates);
+        updates.start_download(&egui::Context::default());
+        assert!(updates.install_rx.is_none());
+    }
+
+    #[test]
+    fn staged_refresh_actions_fit_themes_zoom_and_disable_install_during_check() {
+        fn collect(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+                _ => {}
+            }
+        }
+        for mode in [theme::Theme::Light, theme::Theme::Dark] {
+            for zoom in [0.8, 1.0, 1.4] {
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                mode.apply(&ctx);
+                ctx.set_zoom_factor(zoom);
+                let mut updates = staged_update();
+                let render = |updates: &mut Updates, events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(420.0, 700.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            updates.show(ctx);
+                        },
+                    )
+                };
+                for checking in [false, true] {
+                    let _tx = checking.then(|| pending_check(&mut updates));
+                    let mut labels = vec![];
+                    for _ in 0..4 {
+                        let output = render(&mut updates, vec![]);
+                        labels.clear();
+                        for shape in output.shapes {
+                            collect(&shape.shape, &mut labels);
+                        }
+                    }
+                    for label in [
+                        "Install & Relaunch",
+                        "Discard download",
+                        "Close",
+                        if checking {
+                            "Checking…"
+                        } else {
+                            "Check again"
+                        },
+                    ] {
+                        let (_, rect) = labels
+                            .iter()
+                            .find(|(text, _)| text == label)
+                            .unwrap_or_else(|| panic!("missing {label}: {labels:?}"));
+                        assert!(ctx.screen_rect().contains_rect(*rect), "{label}: {rect:?}");
+                    }
+                    if checking {
+                        let pos = labels
+                            .iter()
+                            .find(|(text, _)| text == "Install & Relaunch")
+                            .unwrap()
+                            .1
+                            .center();
+                        for pressed in [true, false] {
+                            render(
+                                &mut updates,
+                                vec![
+                                    egui::Event::PointerMoved(pos),
+                                    egui::Event::PointerButton {
+                                        pos,
+                                        button: egui::PointerButton::Primary,
+                                        pressed,
+                                        modifiers: egui::Modifiers::NONE,
+                                    },
+                                ],
+                            );
+                        }
+                        assert!(updates.open, "disabled install must not close/relaunch");
+                        assert!(updates.ready_to_install());
+                    }
+                }
+                render(
+                    &mut updates,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                assert!(!updates.open);
+                assert!(updates.ready_to_install());
+                updates.cancel_staged();
+            }
+        }
+    }
+
     #[test]
     fn github_config_and_versions_are_validated_without_trusting_response_urls() {
         for repo in [
