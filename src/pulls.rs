@@ -162,7 +162,7 @@ fn shared_cache(ctx: &egui::Context) -> SharedCache {
     })
 }
 
-fn parse_url(url: &str) -> Option<Pull> {
+pub fn parse_url(url: &str) -> Option<Pull> {
     let rest = url
         .strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("https://www.github.com/"))?;

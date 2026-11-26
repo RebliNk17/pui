@@ -612,6 +612,7 @@ impl Pui {
         self.forget_composer_agent_checkpoints(ids);
         self.forget_unsaved_sections(ids);
         self.attention.forget_agents(ids);
+        self.pr_pane.forget_agents(ids);
         self.agents
             .permission_changes
             .retain(|id, _| !ids.contains(id));
@@ -1131,6 +1132,7 @@ impl Pui {
                 .any(|(target, report)| target == id || report.as_deref() == Some(id))
             || self.tasks.parents.values().any(|parent| parent == id)
             || self.has_active_automation(id, path)
+            || self.pr_pane.has_active_autofix(id)
         {
             return false;
         }
@@ -1348,6 +1350,11 @@ impl Pui {
         let id = self.ensure_agent();
         if let Ok(request) = serde_json::from_str::<Value>(protocol::string(record, "placeholder"))
         {
+            if request["action"] == "pr_status"
+                && self.try_start_async_pr_status(&id, protocol::string(record, "id"), &request)
+            {
+                return true;
+            }
             if request["action"] == "wait" {
                 let ids: Vec<String> = request["agent_ids"]
                     .as_array()
@@ -1399,6 +1406,7 @@ impl Pui {
                 self.automation_control(source, request)
             }
             "bg_bash" | "bg_tasks" => self.background_tasks_control(source, request),
+            "pr_status" | "pr_bind" | "pr_autofix" => self.pr_control(source, request),
             "turn_update_plan" | "turn_wrap_up" | "turn_propose_session" => {
                 self.turn_ux_control(source, request)
             }
@@ -1682,6 +1690,10 @@ impl Pui {
     }
     pub(super) fn agent_mail_pending(&self, id: &str) -> bool {
         self.agents.mail.values().any(|(target, _)| target == id)
+    }
+    #[cfg(test)]
+    pub(super) fn agent_mail_count(&self) -> usize {
+        self.agents.mail.len()
     }
     pub(super) fn send_agent_message(&mut self, id: &str, text: &str) -> Result<String, String> {
         if (id == self.agents.active && self.resource_reload.pending())

@@ -10,6 +10,7 @@ import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
 import { installVisual } from "./visual.ts";
 import { installTurnUx, TURN_UX_GUIDANCE } from "./turn_ux.ts";
+import { installPrTools, PR_TOOLS_GUIDANCE } from "./pr_tools.ts";
 import { installWorkflows, WORKFLOW_GUIDANCE } from "./workflows.ts";
 import { installAntigravity } from "./antigravity.ts";
 import { installAccounts } from "./accounts.ts";
@@ -27,7 +28,8 @@ Use the fewest useful workers, including zero. Give each a bounded task, relevan
 Use pui_create_monitor for a recurring non-AI shell condition (exit 0 fires once, exit 1 keeps waiting), pui_create_cron for scheduled prompts, and pui_jobs/pui_update_job to inspect/manage your own jobs. Checks and scheduling do not consume context or call models. Only delivered events/prompts wake you. Jobs run while Pui is open; active jobs reconnect their creator on relaunch. Cron uses five numeric fields in UTC and skips missed occurrences. Use bounded side-effect-free checks; never use monitors to launch unmanaged agents. Tell the user that event handling consumes tokens.
 ${WORKFLOW_GUIDANCE} For an eligible hard/high-risk change only, give a very short, specific reason why a workflow is warranted. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.
 To show local screenshots or images inline in chat replies, embed them with standard Markdown image syntax ![description](path/to/image.png) (workspace-relative or /tmp paths). To render rich inline HTML/CSS/SVG mockups, diagrams, or visual comparisons directly inside the chat, call pui_visual. Single-line bash code blocks in replies get a one-click Run button in Pui, and [label](#terminal/<tab_id>) opens a specific Terminal tab when referencing a captured terminal tab.
-${TURN_UX_GUIDANCE}`;
+${TURN_UX_GUIDANCE}
+${PR_TOOLS_GUIDANCE}`;
 
 export const ULTRACODE_GUIDANCE = `Pui Ultracode is enabled. For substantive work, plan compactly using your tools and codemode. This is ordinary coordination, not a reason to call pui_workflow or ask for workflow consent. Reserve that offer for genuinely hard, high-risk work or an explicit user request.
 Use the LOWEST useful number of subagents, including zero when delegation has no clear benefit. Do not spawn a preset team.
@@ -48,6 +50,7 @@ export default function puiExtension(pi: any) {
   installOpen(pi);
   installVisual(pi);
   installTurnUx(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only", taskRole: process.env.PUI_TASK_ROLE || "" });
+  installPrTools(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only", taskRole: process.env.PUI_TASK_ROLE || "" });
   installWorkflows(pi);
   installContext(pi);
   installTitles(pi);
@@ -92,11 +95,11 @@ export default function puiExtension(pi: any) {
     }
   });
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
-  const orchestrationTools=["pui_spawn_agent","pui_background_agent","pui_background_bash","pui_background_tasks","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_workflow","pui_workflow_control","pui_run_check"];
+  const orchestrationTools=["pui_spawn_agent","pui_background_agent","pui_background_bash","pui_background_tasks","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_pr_status","pui_pr_bind","pui_pr_autofix","pui_workflow","pui_workflow_control","pui_run_check"];
   const setMode = (on: boolean) => {
     enabled = on && !readonly && !taskRole;
     const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
-    const controls = taskRole ? (taskRole==="builder" ? ["pui_run_check"] : []) : readonly ? ["pui_agents", "pui_message_agent"] : orchestrationTools;
+    const controls = taskRole ? (taskRole==="builder" ? ["pui_run_check"] : []) : readonly ? ["pui_agents", "pui_message_agent", "pui_pr_status"] : orchestrationTools;
     pi.setActiveTools([...new Set([...tools, ...controls, ...(enabled && pi.getAllTools().some((tool: any) => tool.name === "codemode") ? ["codemode"] : [])])]);
   };
   pi.on("session_start", (_event: any, ctx: any) => {
@@ -145,7 +148,7 @@ export default function puiExtension(pi: any) {
   });
   // Read-only is enforced at the tool boundary too, not only by a prompt/CLI allowlist.
   pi.on("tool_call", async (event: any, ctx: any) => {
-    if (readonly && !["read", "grep", "find", "ls", "pui_agents", "pui_message_agent", "pui_ask_questions", "pui_update_plan", "pui_wrap_up"].includes(event.toolName)) return { block: true, reason: "Read-only Pui worker: tool not allowed" };
+    if (readonly && !["read", "grep", "find", "ls", "pui_agents", "pui_message_agent", "pui_ask_questions", "pui_update_plan", "pui_wrap_up", "pui_pr_status"].includes(event.toolName)) return { block: true, reason: "Read-only Pui worker: tool not allowed" };
     if (taskRole === "router") return { block: true, reason: "Model router has no tool access." };
     if (taskRole === "checks") return { block: true, reason: "Task check runner executes only host-submitted, approved commands; model tools are disabled." };
     if (taskRole === "builder" && ["bash", "codemode", "pui_spawn_agent"].includes(event.toolName)) return { block: true, reason: "Verified-task builders use bounded file tools only. Approved tests execute in the independent check runner; no shell, codemode, delegation or Git mutations." };

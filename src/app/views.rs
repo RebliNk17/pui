@@ -38,7 +38,7 @@ impl Pui {
                     }
                     let narrow = ui.available_width() < 520.0;
                     let width =
-                        (ui.available_width() - if narrow { 68.0 } else { 266.0 }).max(40.0);
+                        (ui.available_width() - if narrow { 68.0 } else { 298.0 }).max(40.0);
                     self.navigation_header(ui, width);
                     if narrow {
                         self.compact_view_menu(ui);
@@ -100,6 +100,7 @@ impl Pui {
                             self.files.toggle_browser(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                             self.background_tasks.open = false;
+                            self.pr_pane.close();
                         }
                         let response = icons::button(ui, Icon::Folder, "Browse workspace files");
                         #[cfg(test)]
@@ -121,6 +122,7 @@ impl Pui {
                             self.files.toggle(ctx, &self.prefs.cwd);
                             self.inspector_panel = false;
                             self.background_tasks.open = false;
+                            self.pr_pane.close();
                         }
                         let response = icons::button(
                             ui,
@@ -136,11 +138,42 @@ impl Pui {
                             self.automation.open = false;
                             self.files.close();
                             self.background_tasks.open = false;
+                            self.pr_pane.close();
                             self.inspector_panel = !self.inspector_panel;
                             self.prefs.hide_inspector = false;
                             if self.inspector_panel {
                                 self.changes.invalidate();
                                 self.refresh_workspace();
+                            }
+                        }
+                        let active_pr = self.active_bound_pr().map(|b| (b.number, b.auto_fix));
+                        let pr_tip = match active_pr {
+                            Some((num, true)) => format!("Pull request · #{num} · Auto-fix ON"),
+                            Some((num, false)) => format!("Pull request · #{num}"),
+                            None => "Pull request".into(),
+                        };
+                        let response = icons::button(ui, Icon::Branch, &pr_tip);
+                        if self.pr_pane.open {
+                            ui.painter().rect_filled(response.rect, 7, colors.accent_bg);
+                            icons::draw(ui, response.rect, Icon::Branch, colors.text);
+                        } else if active_pr.is_some_and(|(_, auto)| auto) {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                7,
+                                Stroke::new(1.5_f32, colors.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            self.kanban.open = false;
+                            self.automation.open = false;
+                            self.files.close();
+                            self.inspector_panel = false;
+                            self.background_tasks.open = false;
+                            self.background_tasks.expanded = false;
+                            self.pr_pane.open = !self.pr_pane.open;
+                            if !self.pr_pane.open {
+                                self.pr_pane.expanded = false;
                             }
                         }
                         let (bg_running, bg_finished) = self.active_background_counts();
@@ -168,6 +201,7 @@ impl Pui {
                             self.automation.open = false;
                             self.files.close();
                             self.inspector_panel = false;
+                            self.pr_pane.close();
                             self.background_tasks.open = !self.background_tasks.open;
                             if !self.background_tasks.open {
                                 self.background_tasks.expanded = false;
@@ -176,6 +210,7 @@ impl Pui {
                         let active = !self.prefs.hide_inspector
                             && !self.inspector_panel
                             && !self.background_tasks.open
+                            && !self.pr_pane.open
                             && !self.files.is_open();
                         let response = icons::button(ui, Icon::Details, "Session details · ⌘I");
                         if active {
@@ -198,6 +233,9 @@ impl Pui {
                             } else if self.background_tasks.open {
                                 self.background_tasks.open = false;
                                 self.background_tasks.expanded = false;
+                                self.prefs.hide_inspector = false;
+                            } else if self.pr_pane.open {
+                                self.pr_pane.close();
                                 self.prefs.hide_inspector = false;
                             } else {
                                 self.prefs.hide_inspector = !self.prefs.hide_inspector;
@@ -262,6 +300,14 @@ impl Pui {
                             .to_owned();
                         let connectors = load_mcp_connectors(&self.prefs.cwd, &self.state.diagnostics);
                         let (active_bg_count, finished_bg_count) = self.active_background_counts();
+                        let bound_pr_summary = self.active_bound_pr().map(|b| {
+                            (
+                                format!("#{}", b.number),
+                                b.repo.clone(),
+                                b.auto_fix,
+                                b.detail.as_ref().map(|d| d.state.label().to_owned()),
+                            )
+                        });
                         let summaries = [
                             status.to_owned(),
                             crate::context::usage_summary(&self.state),
@@ -271,7 +317,15 @@ impl Pui {
                                 self.outputs.len()
                             }
                             .to_string(),
-                            if self.demo { "4" } else { "—" }.into(),
+                            if let Some((ref num, _, _, _)) = bound_pr_summary {
+                                num.clone()
+                            } else if !self.pulls.links.is_empty() {
+                                self.pulls.links.len().to_string()
+                            } else if self.demo {
+                                "4".into()
+                            } else {
+                                "—".into()
+                            },
                             self.workspace.files.len().to_string(),
                             connectors.len().to_string(),
                             if active_bg_count > 0 {
@@ -297,14 +351,8 @@ impl Pui {
                         if workflow_id.is_none() {
                             layout.hidden.insert(Card::Workflow);
                         }
-                        let header_action = workflow_id
-                            .as_ref()
-                            .map(|_| (Card::Workflow, "Open"))
-                            .or_else(|| {
-                                (active_bg_count > 0 || finished_bg_count > 0)
-                                    .then_some((Card::BackgroundTasks, "Open"))
-                            });
-                        let action = inspector::stack(
+                        let mut open_pr_from_card = false;
+                        let action = inspector::stack_actions(
                             ui,
                             &mut layout,
                             |card| {
@@ -323,7 +371,16 @@ impl Pui {
                                 }]
                                 .clone()
                             },
-                            header_action,
+                            |card| match card {
+                                Card::Workflow if workflow_id.is_some() => Some("Open"),
+                                Card::BackgroundTasks
+                                    if active_bg_count > 0 || finished_bg_count > 0 =>
+                                {
+                                    Some("Open")
+                                }
+                                Card::Pulls => Some("Open"),
+                                _ => None,
+                            },
                             crate::context::usage_fraction(&self.state),
                             |ui, card| match card {
                                 Card::Workflow => self.task_workflow(ui),
@@ -582,6 +639,45 @@ impl Pui {
                                     }
                                 }
                                 Card::Pulls => {
+                                    if let Some((ref num, ref repo, auto_fix, ref state)) =
+                                        bound_pr_summary
+                                    {
+                                        ui.horizontal(|ui| {
+                                            icons::inline(
+                                                ui,
+                                                Icon::Branch,
+                                                if auto_fix {
+                                                    colors.accent
+                                                } else {
+                                                    colors.green
+                                                },
+                                            );
+                                            let label = match (state.as_deref(), auto_fix) {
+                                                (Some(st), true) => {
+                                                    format!("{num} · {st} · Auto-fix ON")
+                                                }
+                                                (Some(st), false) => format!("{num} · {st}"),
+                                                (None, true) => format!("{num} · Auto-fix ON"),
+                                                (None, false) => format!("{num} · {repo}"),
+                                            };
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(label)
+                                                            .size(11.5)
+                                                            .color(colors.text),
+                                                    )
+                                                    .truncate()
+                                                    .frame(false),
+                                                )
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                open_pr_from_card = true;
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                    }
                                     self.pulls.show(ui);
                                 }
                                 Card::Changes => self.working_tree(ui),
@@ -611,6 +707,8 @@ impl Pui {
                             }
                         } else if action == Some(Card::BackgroundTasks) {
                             self.open_background_tasks_panel(None, None);
+                        } else if action == Some(Card::Pulls) || open_pr_from_card {
+                            self.open_pr_pane();
                         } else if action == Some(Card::Connectors) {
                             self.settings_view.select("Resources");
                             self.settings_open = true;
@@ -1016,6 +1114,7 @@ impl Pui {
                             self.settings_open = false;
                             self.inspector_panel = false;
                             self.background_tasks.open = false;
+                            self.pr_pane.close();
                         }
                         crate::transcript::TranscriptAction::OpenWorkflow(id) => {
                             self.settings_open = false;

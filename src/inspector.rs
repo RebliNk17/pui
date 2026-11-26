@@ -106,11 +106,30 @@ impl CardLayout {
     }
 }
 
+#[cfg(test)]
 pub fn stack(
     ui: &mut egui::Ui,
     layout: &mut CardLayout,
     summary: impl Fn(Card) -> String,
     header_action: Option<(Card, &str)>,
+    context_fraction: Option<f32>,
+    contents: impl FnMut(&mut egui::Ui, Card),
+) -> Option<Card> {
+    stack_actions(
+        ui,
+        layout,
+        summary,
+        |card| header_action.and_then(|(target, label)| (target == card).then_some(label)),
+        context_fraction,
+        contents,
+    )
+}
+
+pub fn stack_actions<'a>(
+    ui: &mut egui::Ui,
+    layout: &mut CardLayout,
+    summary: impl Fn(Card) -> String,
+    header_action: impl Fn(Card) -> Option<&'a str>,
     context_fraction: Option<f32>,
     mut contents: impl FnMut(&mut egui::Ui, Card),
 ) -> Option<Card> {
@@ -144,7 +163,7 @@ pub fn stack(
                 ui.spacing_mut().interact_size.y = 20.0;
                 ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
                 ui.horizontal(|ui| {
-                    let button = header_action.filter(|(target, _)| *target == card);
+                    let button = header_action(card);
                     let gear = button.is_none() && !collapsed && card == Card::Connectors;
                     let button_width = 46.0;
                     let gear_width = 22.0;
@@ -240,7 +259,7 @@ pub fn stack(
                         }
                     }
                     response.context_menu(|ui| layout.menu(ui));
-                    if let Some((_, label)) = button {
+                    if let Some(label) = button {
                         let response = ui.add_sized(
                             [button_width, crate::theme::COMPACT_HEIGHT],
                             egui::Button::new(egui::RichText::new(label).size(11.0)),
@@ -321,7 +340,7 @@ pub fn stack(
                         layout.menu(ui);
                     });
                 });
-                if collapsed && header_action.is_some_and(|(target, _)| target == card) {
+                if collapsed && header_action(card).is_some() {
                     ui.add(egui::Label::new(crate::theme::small(ui, summary(card))).truncate());
                 }
                 if !collapsed {

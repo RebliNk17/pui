@@ -122,6 +122,7 @@ impl Pui {
                 || self.automation.open
                 || self.kanban.open
                 || self.background_tasks.open
+                || self.pr_pane.open
                 || egui::Popup::is_any_open(ctx)
                 || ctx.memory(|m| m.top_modal_layer().is_some())
             {

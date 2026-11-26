@@ -494,6 +494,7 @@ impl Pui {
         self.automation.open = false;
         self.files.close();
         self.inspector_panel = false;
+        self.pr_pane.close();
         if let Some(id) = agent {
             self.background_tasks.open_agent(id);
         } else if let Some(id) = shell {

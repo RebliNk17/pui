@@ -120,7 +120,8 @@ impl Pui {
             inspector: !self.prefs.hide_inspector
                 && !self.files.is_open()
                 && !self.inspector_panel
-                && !self.background_tasks.open,
+                && !self.background_tasks.open
+                && !self.pr_pane.open,
             inspector_available: ctx.screen_rect().width() > 1110.0,
             files: self.files.files_open(),
             browser: self.files.browser_open(),
@@ -304,6 +305,7 @@ impl Pui {
                 self.files.close();
                 self.inspector_panel = false;
                 self.background_tasks.open = false;
+                self.pr_pane.close();
                 self.prefs.hide_inspector = shown;
             }
             Terminal => {
@@ -321,6 +323,7 @@ impl Pui {
                 self.files.toggle(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
                 self.background_tasks.open = false;
+                self.pr_pane.close();
             }
             Browser => {
                 self.diff_rx = None;
@@ -330,6 +333,7 @@ impl Pui {
                 self.files.toggle_browser(ctx, &self.prefs.cwd);
                 self.inspector_panel = false;
                 self.background_tasks.open = false;
+                self.pr_pane.close();
             }
             Changes => {
                 self.kanban.open = false;
@@ -337,6 +341,7 @@ impl Pui {
                 self.settings_open = false;
                 self.files.close();
                 self.background_tasks.open = false;
+                self.pr_pane.close();
                 self.inspector_panel = !self.inspector_panel;
                 self.prefs.hide_inspector = false;
                 if self.inspector_panel {

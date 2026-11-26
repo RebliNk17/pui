@@ -36,6 +36,7 @@ mod permission_worker;
 #[cfg(test)]
 mod persistence_tests;
 mod pi_folder;
+mod pr_pane;
 mod prompt_ui;
 #[cfg(test)]
 mod prompt_ui_tests;
@@ -275,6 +276,7 @@ pub struct Pui {
     output_revision: u64,
     inspector_panel: bool,
     background_tasks: background_tasks::BackgroundTasks,
+    pr_pane: pr_pane::PrPane,
     files: files::Browser,
     preview_opens: Vec<String>,
     session_layouts: session_layout::SessionLayouts,
@@ -487,6 +489,7 @@ impl Pui {
             output_revision: u64::MAX,
             inspector_panel: false,
             background_tasks: Default::default(),
+            pr_pane: Default::default(),
             files: Default::default(),
             preview_opens: Vec::new(),
             session_layouts: Default::default(),
@@ -717,6 +720,9 @@ impl Pui {
             }
             if options.demo_changes {
                 app.inspector_panel = true;
+            }
+            if options.demo_pr {
+                app.demo_pr();
             }
             if options.demo_inline_review {
                 let source=(0..4).map(|n|format!("@@ -{} +{} @@ synthetic hunk {}\n-old value\n+new literal value 世界\n",n*20+1,n*20+1,n+1)).collect::<String>();
@@ -1139,6 +1145,7 @@ impl Pui {
             || self.resource_reload.connector_pending()
             || !self.draft.is_empty()
             || !self.draft_images.is_empty()
+            || self.pr_pane.has_active_autofix(&self.agents.active)
             || self.sync_live_owner()
             || (!self.is_mirror()
                 && self.client.is_some()
@@ -1339,6 +1346,7 @@ impl Pui {
         self.poll_history();
         self.poll_other_agents();
         self.poll_background_tasks();
+        self.poll_pr_pane();
         self.poll_automation();
         self.poll_views();
         self.publish_live();
@@ -2645,6 +2653,7 @@ impl Pui {
             self.changes.bind_git_files(&self.workspace);
         }
         self.inspector_panel = true;
+        self.pr_pane.close();
         self.files.close();
         self.settings_open = false;
         self.kanban.open = false;
@@ -2976,6 +2985,9 @@ impl eframe::App for Pui {
             self.automation.open = false;
             self.files.close();
             self.inspector_panel = false;
+            self.background_tasks.open = false;
+            self.background_tasks.expanded = false;
+            self.pr_pane.close();
             self.prefs.hide_inspector = !self.prefs.hide_inspector;
         }
         if !self.settings_open
@@ -3071,6 +3083,8 @@ impl eframe::App for Pui {
                     .show(ctx, &self.prefs.cwd, &mut self.prefs.table_headers)
             } else if self.background_tasks.open {
                 self.background_tasks_panel(ctx)
+            } else if self.pr_pane.open {
+                self.pr_pane_panel(ctx)
             } else if self.inspector_panel {
                 let review_owner = self.review_comment_owner();
                 self.changes.show(

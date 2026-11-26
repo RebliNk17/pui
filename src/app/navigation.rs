@@ -287,6 +287,7 @@ impl Pui {
         self.tasks.open = false;
         self.files.close();
         self.inspector_panel = false;
+        self.pr_pane.close();
         self.close_model_popovers();
         self.terminals.close(&self.ctx);
         if let Some((task, run, tab)) = &location.task {
@@ -608,12 +609,27 @@ impl Pui {
                 ui.close();
             }
             self.prefs.transcript_view.menu(ui);
+            if ui.button("Pull request").clicked() {
+                self.settings_open = false;
+                self.kanban.open = false;
+                self.automation.open = false;
+                self.files.close();
+                self.inspector_panel = false;
+                self.background_tasks.open = false;
+                self.background_tasks.expanded = false;
+                self.pr_pane.open = !self.pr_pane.open;
+                if !self.pr_pane.open {
+                    self.pr_pane.expanded = false;
+                }
+                ui.close();
+            }
             if ui.button("Background tasks").clicked() {
                 self.settings_open = false;
                 self.kanban.open = false;
                 self.automation.open = false;
                 self.files.close();
                 self.inspector_panel = false;
+                self.pr_pane.close();
                 self.background_tasks.open = !self.background_tasks.open;
                 ui.close();
             }
@@ -621,6 +637,7 @@ impl Pui {
                 self.files.close();
                 self.inspector_panel = false;
                 self.background_tasks.open = false;
+                self.pr_pane.close();
                 self.prefs.hide_inspector = !self.prefs.hide_inspector;
                 ui.close();
             }

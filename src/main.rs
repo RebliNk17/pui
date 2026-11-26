@@ -86,6 +86,7 @@ pub struct Options {
     pub demo_preview_queue: bool,
     pub demo_source_context: bool,
     pub demo_changes: bool,
+    pub demo_pr: bool,
     pub demo_branches: bool,
     pub demo_git_history: bool,
     pub demo_history_filter: bool,
@@ -282,6 +283,10 @@ fn main() -> eframe::Result {
             "--demo-changes" => {
                 options.demo = true;
                 options.demo_changes = true;
+            }
+            "--demo-pr" => {
+                options.demo = true;
+                options.demo_pr = true;
             }
             "--demo-branches"
             | "--demo-git-history"
