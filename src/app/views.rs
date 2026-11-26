@@ -376,9 +376,9 @@ impl Pui {
                                 Card::BackgroundTasks
                                     if active_bg_count > 0 || finished_bg_count > 0 =>
                                 {
-                                    Some("Open")
+                                    Some("View")
                                 }
-                                Card::Pulls => Some("Open"),
+                                Card::Pulls => Some("View"),
                                 _ => None,
                             },
                             crate::context::usage_fraction(&self.state),
