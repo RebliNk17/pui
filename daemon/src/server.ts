@@ -195,7 +195,7 @@ export class PuiDaemonServer {
         unread: false,
         has_pending_dialog: Boolean(live && live.dialogs.length > 0),
         model: live?.model || s.model,
-        modified_ms: live ? Math.max(s.modified_ms, Date.now()) : s.modified_ms,
+        modified_ms: live ? Math.max(s.modified_ms, live.lastActivityMs) : s.modified_ms,
         created_ms: s.created_ms,
         origin: m?.origin || live?.origin || s.origin,
         parent_session: m?.parent_session || s.parent_session,
@@ -220,8 +220,8 @@ export class PuiDaemonServer {
         unread: false,
         has_pending_dialog: live.dialogs.length > 0,
         model: live.model,
-        modified_ms: Date.now(),
-        created_ms: live.origin.created_at ?? Date.now(),
+        modified_ms: live.lastActivityMs,
+        created_ms: live.origin.created_at ?? live.lastActivityMs,
         origin: m?.origin || live.origin,
         parent_session: m?.parent_session ?? null,
         pinned: Boolean(m?.pinned),
@@ -229,6 +229,7 @@ export class PuiDaemonServer {
       });
     }
 
+    list.sort((a, b) => b.modified_ms - a.modified_ms);
     return list;
   }
 

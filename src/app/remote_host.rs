@@ -900,6 +900,20 @@ impl Pui {
             }
             if seen_paths.insert(path_str.clone()) {
                 let parent_session = self.remote_parent_session(path, node);
+                let live_modified_ms = node
+                    .and_then(|n| n.last_activity.or(n.created))
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .into_iter()
+                    .chain(
+                        detail
+                            .messages
+                            .iter()
+                            .filter_map(|m| (m.timestamp > 0).then_some(m.timestamp)),
+                    )
+                    .chain(detail.origin.created_at)
+                    .max()
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
                 sessions.insert(
                     0,
                     SessionSummary {
@@ -913,7 +927,7 @@ impl Pui {
                         unread: false,
                         has_pending_dialog: !detail.dialogs.is_empty(),
                         model: detail.model.clone(),
-                        modified_ms: chrono::Utc::now().timestamp_millis(),
+                        modified_ms: live_modified_ms,
                         created_ms: detail.origin.created_at,
                         origin: detail.origin.clone(),
                         parent_session,

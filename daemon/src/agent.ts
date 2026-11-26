@@ -134,6 +134,7 @@ export class LiveAgent {
   commands: { name: string; description: string; source: string }[] = [];
   models: { id: string; name: string; provider: string; context_window?: number }[] = [];
   revision = 1;
+  lastActivityMs: number;
 
   constructor(
     sessionPath: string,
@@ -156,6 +157,7 @@ export class LiveAgent {
     this.baseBranch = baseBranch;
     this.onChange = onChange;
     this.onNotify = onNotify;
+    this.lastActivityMs = origin.created_at ?? Date.now();
 
     // Immediately hydrate existing messages from disk so mobile never sees a blank frame.
     if (fs.existsSync(sessionPath)) {
@@ -164,9 +166,19 @@ export class LiveAgent {
         this.messages = parsed.messages;
         if (!this.title || this.title === 'New conversation') this.title = parsed.title;
         if (parsed.model) this.model = parsed.model;
+        let latestMsgMs = 0;
         for (const m of this.messages) {
           this.cost += m.cost || 0;
+          if (typeof m.timestamp === 'number' && m.timestamp > latestMsgMs) {
+            latestMsgMs = m.timestamp;
+          }
           for (const t of m.tools) this.toolById.set(t.id, t);
+        }
+        // Preserve the session's real last-event time instead of bumping to Date.now()
+        // merely because a live handle was hydrated or opened.
+        const hydratedMs = Math.max(parsed.modified_ms || 0, latestMsgMs);
+        if (hydratedMs > 0) {
+          this.lastActivityMs = hydratedMs;
         }
       } catch {
         // ignore
@@ -276,6 +288,10 @@ export class LiveAgent {
     }
   }
 
+  private touchActivity(): void {
+    this.lastActivityMs = Date.now();
+  }
+
   private bump(): void {
     this.revision += 1;
     this.onChange(this);
@@ -334,6 +350,7 @@ export class LiveAgent {
   ): void {
     this.error = null;
     this.busy = true;
+    this.touchActivity();
     if (this.messages.length === 0 && text.trim()) {
       this.title = text.trim().split('\n')[0].slice(0, 90);
     }
@@ -371,6 +388,7 @@ export class LiveAgent {
 
   answerDialog(dialogId: string, response: Record<string, unknown>): void {
     this.dialogs = this.dialogs.filter((d) => d.id !== dialogId);
+    this.touchActivity();
     this.sendRpc({
       type: 'extension_ui_response',
       id: dialogId,
@@ -458,6 +476,7 @@ export class LiveAgent {
     if (type === 'agent_start') {
       this.busy = true;
       this.error = null;
+      this.touchActivity();
       this.bump();
       return;
     }
@@ -466,6 +485,7 @@ export class LiveAgent {
       const wasBusy = this.busy;
       this.busy = false;
       this.streamingMsg = null;
+      this.touchActivity();
       this.reloadHistoryFromDisk();
       this.bump();
 
@@ -497,6 +517,7 @@ export class LiveAgent {
         this.streamingMsg = parsed;
         this.messages.push(parsed);
       }
+      this.touchActivity();
       this.bump();
       return;
     }
@@ -522,10 +543,12 @@ export class LiveAgent {
       if (ev.type === 'text_delta' && typeof ev.delta === 'string') {
         this.streamingMsg.text += ev.delta;
         this.streamingMsg.revision += 1;
+        this.touchActivity();
         this.bump();
       } else if (ev.type === 'thinking_delta' && typeof ev.delta === 'string') {
         this.streamingMsg.thinking += ev.delta;
         this.streamingMsg.revision += 1;
+        this.touchActivity();
         this.bump();
       }
       return;
@@ -554,6 +577,7 @@ export class LiveAgent {
         if (usage && typeof usage.totalTokens === 'number') {
           this.contextTokens = usage.totalTokens;
         }
+        this.touchActivity();
         this.bump();
       }
       return;
@@ -603,6 +627,7 @@ export class LiveAgent {
           this.streamingMsg.tools.push(tool);
         }
       }
+      this.touchActivity();
       this.bump();
       return;
     }
@@ -621,6 +646,7 @@ export class LiveAgent {
             .join('\n')
             .slice(0, 16_000);
         }
+        this.touchActivity();
         this.bump();
       }
       return;
@@ -686,6 +712,7 @@ export class LiveAgent {
 
       if (!this.dialogs.some((d) => d.id === id)) {
         this.dialogs.push(rec);
+        this.touchActivity();
         this.bump();
       }
       if (!this.seenDialogIds.has(id)) {

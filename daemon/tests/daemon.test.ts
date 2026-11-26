@@ -12,6 +12,7 @@ import {
   validateGitCloneUrl,
 } from '../src/admin.ts';
 import { buildPairingUri, isTailscaleIpv4, type DaemonConfig } from '../src/config.ts';
+import { LiveAgent } from '../src/agent.ts';
 import { PuiDaemonServer } from '../src/server.ts';
 import { createEmptySessionFile } from '../src/sessions.ts';
 import { encodeWsText, parseWsFrames } from '../src/ws.ts';
@@ -329,6 +330,47 @@ describe('pui-daemon v1 remote server', () => {
       assert.equal(isAllowedCloudWorktreeGitAction('git push -u origin main', 'main'), false);
     } finally {
       await srv.close();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves historical last-event modified_ms for idle live cloud sessions instead of pinning them to now', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pui-daemon-activity-'));
+    try {
+      const oldMs = Date.now() - 3 * 3600 * 1000;
+      const oldDate = new Date(oldMs);
+      const sessionFile = path.join(tmp, 'old-cloud-session.jsonl');
+      fs.writeFileSync(
+        sessionFile,
+        [
+          JSON.stringify({ type: 'session', version: 3, id: 'old-1', timestamp: oldDate.toISOString(), cwd: tmp }),
+          JSON.stringify({
+            type: 'message',
+            id: 'm1',
+            timestamp: oldDate.toISOString(),
+            message: { role: 'user', content: [{ type: 'text', text: 'Earlier cloud prompt' }], timestamp: oldMs },
+          }),
+        ].join('\n') + '\n',
+      );
+      fs.utimesSync(sessionFile, oldDate, oldDate);
+
+      const agent = new LiveAgent(
+        sessionFile,
+        tmp,
+        'Earlier cloud prompt',
+        { platform: 'android', device: 'Phone', created_at: oldMs },
+        'auto',
+        () => {},
+        () => {},
+      );
+      // Hydrating an idle cloud agent must keep its historical last-event timestamp,
+      // not jump to Date.now() and pin it at the top of the session list.
+      assert.ok(
+        Math.abs(agent.lastActivityMs - oldMs) < 2000,
+        `expected lastActivityMs (~${oldMs}) to stay near historical timestamp, got ${agent.lastActivityMs}`,
+      );
+      assert.ok(Date.now() - agent.lastActivityMs > 2 * 3600 * 1000);
+    } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
