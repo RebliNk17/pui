@@ -117,6 +117,10 @@ pub(super) struct Settings {
     #[serde(default = "default_auto_check_updates")]
     pub auto_download_updates: bool,
     pub auto_install_updates: bool,
+    #[serde(default)]
+    pub local_sandbox: bool,
+    #[serde(default)]
+    pub strict_sandbox: bool,
     /// Runtime-only: the models the picker shows (configured providers minus
     /// hidden models). Auto's classifier never selects anything outside it.
     #[serde(skip)]
@@ -141,6 +145,8 @@ impl Default for Settings {
             auto_check_updates: true,
             auto_download_updates: true,
             auto_install_updates: false,
+            local_sandbox: false,
+            strict_sandbox: false,
             model_scope: None,
         }
     }
@@ -153,8 +159,27 @@ impl Settings {
         }
     }
 
+    /// Disabling local sandbox also disables strict sandbox mode.
+    pub(super) fn normalize_sandbox_preferences(&mut self) {
+        if !self.local_sandbox {
+            self.strict_sandbox = false;
+        }
+    }
+
+    pub(super) fn sandbox_mode(&self) -> crate::sandbox::Mode {
+        crate::sandbox::Mode::from_flags(self.local_sandbox, self.strict_sandbox)
+    }
+
     pub fn payload(&self) -> Value {
-        let mut payload = json!({"permission":self.permission.key(),"permissionClassifier":self.permission_classifier,"compactPercent":self.compact_percent.clamp(50,95),"keepRecentTokens":self.keep_recent_tokens.clamp(1000,200000)});
+        let strict_sandbox = self.local_sandbox && self.strict_sandbox;
+        let mut payload = json!({
+            "permission": self.permission.key(),
+            "permissionClassifier": self.permission_classifier,
+            "compactPercent": self.compact_percent.clamp(50, 95),
+            "keepRecentTokens": self.keep_recent_tokens.clamp(1000, 200000),
+            "localSandbox": self.local_sandbox,
+            "strictSandbox": strict_sandbox,
+        });
         if let Some(scope) = &self.model_scope {
             payload["classifierProviders"] = json!(scope.providers);
             payload["hiddenModels"] = json!(scope.hidden);
@@ -167,6 +192,8 @@ impl Settings {
         self.permission_classifier.hash(state);
         self.compact_percent.clamp(50, 95).hash(state);
         self.keep_recent_tokens.clamp(1000, 200000).hash(state);
+        self.local_sandbox.hash(state);
+        (self.local_sandbox && self.strict_sandbox).hash(state);
         if let Some(scope) = &self.model_scope {
             scope.providers.hash(state);
             scope.hidden.hash(state);
@@ -263,5 +290,39 @@ mod tests {
         assert_eq!(settings.permission.key(), "auto");
         assert_eq!(settings.payload()["compactPercent"], 85);
         assert_eq!(settings.delivery.opposite().opposite().label(), "Steer");
+    }
+
+    #[test]
+    fn sandbox_settings_default_roundtrip_normalize_and_reach_payload() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.local_sandbox);
+        assert!(!settings.strict_sandbox);
+        assert_eq!(settings.sandbox_mode(), crate::sandbox::Mode::Off);
+        assert_eq!(settings.payload()["localSandbox"], false);
+        assert_eq!(settings.payload()["strictSandbox"], false);
+
+        // Enabling local sandbox alone uses Standard mode.
+        settings.local_sandbox = true;
+        assert_eq!(settings.sandbox_mode(), crate::sandbox::Mode::Standard);
+        assert_eq!(settings.payload()["localSandbox"], true);
+        assert_eq!(settings.payload()["strictSandbox"], false);
+
+        // Enabling strict sandbox alongside local sandbox uses Strict mode.
+        settings.strict_sandbox = true;
+        assert_eq!(settings.sandbox_mode(), crate::sandbox::Mode::Strict);
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(restored.local_sandbox);
+        assert!(restored.strict_sandbox);
+        assert_eq!(restored.payload()["localSandbox"], true);
+        assert_eq!(restored.payload()["strictSandbox"], true);
+
+        // Disabling local sandbox clears strict sandbox and turns payload flags off.
+        settings.local_sandbox = false;
+        assert_eq!(settings.sandbox_mode(), crate::sandbox::Mode::Off);
+        assert_eq!(settings.payload()["localSandbox"], false);
+        assert_eq!(settings.payload()["strictSandbox"], false);
+        settings.normalize_sandbox_preferences();
+        assert!(!settings.strict_sandbox);
     }
 }

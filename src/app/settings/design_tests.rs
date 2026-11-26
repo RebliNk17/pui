@@ -127,3 +127,132 @@ fn every_settings_page_stays_within_the_viewport_and_keeps_work_intact() {
         }
     }
 }
+
+#[test]
+fn permissions_sandbox_toggles_render_enforce_dependency_and_propagate() {
+    fn toggle_state(ctx: &egui::Context, title: &str) -> (egui::Rect, bool) {
+        ctx.data(|d| {
+            d.get_temp::<(egui::Rect, bool)>(egui::Id::new(("settings-toggle-rect", title)))
+                .unwrap_or_else(|| panic!("missing toggle rect for {title}"))
+        })
+    }
+
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                theme: Some(mode),
+                ..Default::default()
+            },
+        );
+        app.demo = false;
+        let (client, _tx, commands) = rpc::Client::stub_with_commands();
+        app.client = Some(client);
+        app.settings_view.page = Page::Permissions;
+        app.prefs.settings.local_sandbox = false;
+        app.prefs.settings.strict_sandbox = false;
+
+        let run_frame = |app: &mut Pui, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1100.0, 1100.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.session_settings(ctx),
+            )
+        };
+        let click = |app: &mut Pui, pos: egui::Pos2| {
+            for pressed in [true, false] {
+                let _ = run_frame(
+                    app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+
+        let _ = run_frame(&mut app, vec![]);
+        let _ = run_frame(&mut app, vec![]);
+        let (local_rect, local_enabled) = toggle_state(&ctx, "Local sandbox");
+        let (strict_rect, strict_enabled) = toggle_state(&ctx, "Strict sandbox mode");
+
+        assert_eq!(local_enabled, crate::sandbox::is_supported());
+        assert!(
+            !strict_enabled,
+            "Strict sandbox must be disabled when Local sandbox is off"
+        );
+
+        // Clicking disabled Strict toggle must not enable it.
+        click(&mut app, strict_rect.center());
+        assert!(!app.prefs.settings.strict_sandbox);
+
+        if crate::sandbox::is_supported() {
+            // Enable Local sandbox and verify /pui-settings propagation.
+            click(&mut app, local_rect.center());
+            assert!(app.prefs.settings.local_sandbox);
+            assert!(!app.prefs.settings.strict_sandbox);
+            let sent: Vec<_> = commands.try_iter().collect();
+            assert!(
+                sent.iter().any(|cmd| {
+                    cmd["message"].as_str().is_some_and(|m| {
+                        m.starts_with("/pui-settings ") && m.contains("\"localSandbox\":true")
+                    })
+                }),
+                "expected /pui-settings with localSandbox:true, got: {sent:?}"
+            );
+
+            let _ = run_frame(&mut app, vec![]);
+            let (strict_rect, strict_enabled) = toggle_state(&ctx, "Strict sandbox mode");
+            assert!(
+                strict_enabled,
+                "Strict sandbox must unlock when Local sandbox is on"
+            );
+
+            // Enable Strict sandbox mode.
+            click(&mut app, strict_rect.center());
+            assert!(app.prefs.settings.local_sandbox);
+            assert!(app.prefs.settings.strict_sandbox);
+            let sent: Vec<_> = commands.try_iter().collect();
+            assert!(
+                sent.iter().any(|cmd| {
+                    cmd["message"].as_str().is_some_and(|m| {
+                        m.starts_with("/pui-settings ") && m.contains("\"strictSandbox\":true")
+                    })
+                }),
+                "expected /pui-settings with strictSandbox:true, got: {sent:?}"
+            );
+
+            // Disabling Local sandbox must also clear Strict sandbox mode.
+            click(&mut app, local_rect.center());
+            assert!(!app.prefs.settings.local_sandbox);
+            assert!(!app.prefs.settings.strict_sandbox);
+        }
+    }
+
+    // Search entries include both sandbox toggles under Permissions.
+    let entries = search_entries();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.title == "Local sandbox" && e.page == "Permissions")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.title == "Strict sandbox mode" && e.page == "Permissions")
+    );
+}

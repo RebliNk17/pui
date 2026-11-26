@@ -50,13 +50,14 @@ export default function puiExtension(pi: any) {
   installTitles(pi);
   installAntigravity(pi);
   installModelFallback(pi);
-  installShellEnv(pi);
+  const shellEnv = installShellEnv(pi, undefined, { settings: initial });
   pi.registerCommand("pui-settings", {
     description: "Apply native Pui permission and compaction settings",
     handler: (args: string, ctx: any) => {
       const next = JSON.parse(args);
       compaction.update(next, ctx);
       permissions.update(next, ctx);
+      shellEnv.update(next);
       process.env.PUI_SETTINGS = JSON.stringify(next);
     },
   });

@@ -278,7 +278,9 @@ fn stream_pipe(mut reader: impl Read, tx: Sender<ShellEvent>, ctx: egui::Context
 
 fn spawn_shell_thread(
     cwd: PathBuf,
+    workspace: PathBuf,
     command: String,
+    sandbox_mode: crate::sandbox::Mode,
     cancel: Arc<AtomicBool>,
     tx: Sender<ShellEvent>,
     ctx: egui::Context,
@@ -293,18 +295,7 @@ fn spawn_shell_thread(
             ctx.request_repaint();
             return;
         }
-        #[cfg(not(windows))]
-        let mut cmd = {
-            let mut c = Command::new("/bin/sh");
-            c.args(["-c", &command]);
-            c
-        };
-        #[cfg(windows)]
-        let mut cmd = {
-            let mut c = Command::new("cmd.exe");
-            c.args(["/D", "/S", "/C", &command]);
-            c
-        };
+        let mut cmd = crate::sandbox::shell_command(&command, &workspace, sandbox_mode);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -669,7 +660,7 @@ impl Pui {
             .map(|n| n.cwd.clone())
             .unwrap_or_else(|| self.prefs.cwd.clone());
         let resolved_cwd = match cwd {
-            None => base_cwd,
+            None => base_cwd.clone(),
             Some(path) if !path.trim().is_empty() && path.len() <= 16384 => {
                 let path = base_cwd.join(path);
                 let path = std::fs::canonicalize(path)
@@ -708,12 +699,15 @@ impl Pui {
         self.background_tasks.next_shell += 1;
         let id = format!("bg-shell-{}", self.background_tasks.next_shell);
         let root = self.background_root_for(source);
+        let sandbox_mode = self.agent_settings(source).sandbox_mode();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
         #[cfg(not(test))]
         spawn_shell_thread(
             resolved_cwd.clone(),
+            base_cwd,
             command.to_owned(),
+            sandbox_mode,
             Arc::clone(&cancel),
             tx,
             self.ctx.clone(),
@@ -723,7 +717,9 @@ impl Pui {
             // Tests can still spawn real shells when explicitly invoked via spawn_background_shell.
             spawn_shell_thread(
                 resolved_cwd.clone(),
+                base_cwd,
                 command.to_owned(),
+                sandbox_mode,
                 Arc::clone(&cancel),
                 tx,
                 self.ctx.clone(),

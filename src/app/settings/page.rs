@@ -68,7 +68,9 @@ impl Page {
                 "sound completion alerts desktop macos permission notification test"
             }
             Self::Shortcuts => "keyboard shortcuts keys command control enter escape",
-            Self::Permissions => "manual auto accept edits plan dont ask classifier safety tools",
+            Self::Permissions => {
+                "manual auto accept edits plan dont ask classifier safety tools sandbox seatbelt local strict network"
+            }
             Self::Models => "model reasoning effort thinking pricing context provider",
             Self::Providers => {
                 "provider authentication login credentials catalog claude code subscription anthropic openai compatible endpoint local ollama lm studio vllm discover models"
@@ -198,6 +200,16 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "Bypass confirmation",
             "Permissions",
             "dont ask again reset remember bypass warning confirmation",
+        ),
+        (
+            "Local sandbox",
+            "Permissions",
+            "sandbox seatbelt workspace writes credentials macos shell isolation",
+        ),
+        (
+            "Strict sandbox mode",
+            "Permissions",
+            "sandbox seatbelt strict network outbound block external isolation",
         ),
         (
             "Models and thinking levels",
@@ -454,6 +466,13 @@ pub(in crate::app) fn toggle(ui: &mut egui::Ui, value: &mut bool, title: &str) {
     }
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, title)
+    });
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            egui::Id::new(("settings-toggle-rect", title)),
+            (target, ui.is_enabled()),
+        );
     });
     let fill = if *value {
         colors.switch_on
@@ -1410,6 +1429,49 @@ impl Pui {
                 },
             );
         });
+        let sandbox_supported = crate::sandbox::is_supported();
+        self.prefs.settings.normalize_sandbox_preferences();
+        section(
+            ui,
+            "Sandbox",
+            if sandbox_supported {
+                "OS-level kernel restrictions for shell commands executed by agents."
+            } else {
+                "OS-level sandboxing requires macOS Seatbelt and is unavailable on this platform."
+            },
+        );
+        card(ui, |ui| {
+            ui.add_enabled_ui(sandbox_supported, |ui| {
+                row(
+                    ui,
+                    "Local sandbox",
+                    "Restrict shell writes to the session workspace and block reads of credential directories using macOS Seatbelt.",
+                    |ui| {
+                        toggle(ui, &mut self.prefs.settings.local_sandbox, "Local sandbox");
+                    },
+                );
+                self.prefs.settings.normalize_sandbox_preferences();
+                separator(ui);
+                ui.add_enabled_ui(self.prefs.settings.local_sandbox, |ui| {
+                    row(
+                        ui,
+                        "Strict sandbox mode",
+                        "Also block outbound external network access from sandboxed shell commands.",
+                        |ui| {
+                            toggle(
+                                ui,
+                                &mut self.prefs.settings.strict_sandbox,
+                                "Strict sandbox mode",
+                            );
+                        },
+                    );
+                });
+            });
+        });
+        if !sandbox_supported {
+            ui.add_space(6.0);
+            ui.label(theme::small(ui, "OS-level sandboxing requires macOS."));
+        }
         section(ui, "Confirmations", "");
         card(ui, |ui| {
             row(

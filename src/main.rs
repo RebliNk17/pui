@@ -21,6 +21,7 @@ mod pulls;
 mod remote;
 mod rpc;
 mod runtime;
+mod sandbox;
 mod section;
 mod sessions;
 mod skills_cli;
