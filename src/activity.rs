@@ -1,7 +1,7 @@
 //! Compact activity summaries shared by the transcript and recorded outputs.
 mod git;
 mod turn;
-use crate::protocol::{Message, Tool};
+use crate::protocol::{DenialKind, Message, Tool};
 use serde_json::{Value, json};
 pub use turn::turn_files;
 
@@ -21,15 +21,44 @@ pub struct Summary {
     pub writes: usize,
     pub other: usize,
     pub failed: usize,
+    pub blocked_auto: usize,
+    pub blocked_classifier: usize,
+    pub blocked_sandbox: usize,
+    pub blocked_policy: usize,
     git: git::Summary,
 }
 impl Summary {
+    pub fn blocked(&self) -> usize {
+        self.blocked_auto + self.blocked_classifier + self.blocked_sandbox + self.blocked_policy
+    }
+
+    fn record_denial(&mut self, kind: DenialKind) {
+        match kind {
+            DenialKind::AutoMode => self.blocked_auto += 1,
+            DenialKind::ClassifierUnavailable => self.blocked_classifier += 1,
+            DenialKind::Sandbox => self.blocked_sandbox += 1,
+            DenialKind::PolicyRule => self.blocked_policy += 1,
+        }
+    }
+
     pub fn add(&mut self, tool: &Tool) {
         if tool.name == "codemode" && !tool.children.is_empty() {
+            let blocked_before = self.blocked();
             for child in &tool.children {
                 self.add(child);
             }
-            self.failed += usize::from(tool.failed);
+            if let Some(kind) = tool.denial_kind {
+                if self.blocked() == blocked_before {
+                    self.record_denial(kind);
+                }
+            } else if tool.failed && self.blocked() == blocked_before {
+                self.failed += 1;
+            }
+            return;
+        }
+        if let Some(kind) = tool.denial_kind {
+            self.git.barrier();
+            self.record_denial(kind);
             return;
         }
         match tool.name.as_str() {
@@ -64,6 +93,16 @@ impl Summary {
                 ));
             }
         }
+        for (count, suffix) in [
+            (self.blocked_auto, "blocked by Auto"),
+            (self.blocked_classifier, "classifier unavailable"),
+            (self.blocked_sandbox, "blocked by sandbox"),
+            (self.blocked_policy, "blocked by mode"),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {suffix}"));
+            }
+        }
         if parts.is_empty() {
             "Thinking".into()
         } else {
@@ -72,7 +111,132 @@ impl Summary {
     }
 }
 
+const MAX_DENIAL_REASON_CHARS: usize = 220;
+
+fn normalize_reason(line: &str) -> String {
+    let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let prefix: String = chars.by_ref().take(MAX_DENIAL_REASON_CHARS).collect();
+    if chars.next().is_some() {
+        let truncated: String = prefix
+            .chars()
+            .take(MAX_DENIAL_REASON_CHARS.saturating_sub(1))
+            .collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        prefix
+    }
+}
+
+fn strip_auto_prefix(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("Auto blocked ")
+        && let Some((tool, detail)) = rest.split_once(": ")
+        && !tool.is_empty()
+        && !tool.contains(' ')
+        && !detail.trim().is_empty()
+    {
+        return detail.trim();
+    }
+    line.trim()
+}
+
+pub fn classify_denial(output: &str, failed: bool) -> Option<(DenialKind, String)> {
+    if !failed {
+        return None;
+    }
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first_line = trimmed
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(trimmed);
+
+    if trimmed.contains("Classifier check unavailable")
+        || trimmed.contains("No suitable priced classifier model")
+        || trimmed.contains("is unavailable or outside the configured scope")
+    {
+        let line = trimmed
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                line.contains("Classifier check unavailable")
+                    || line.contains("No suitable priced classifier model")
+                    || line.contains("is unavailable or outside the configured scope")
+            })
+            .unwrap_or(first_line);
+        return Some((
+            DenialKind::ClassifierUnavailable,
+            normalize_reason(strip_auto_prefix(line)),
+        ));
+    }
+
+    if trimmed.starts_with("Auto blocked ")
+        || trimmed.starts_with("Auto rule denied:")
+        || trimmed.contains("Built-in safety rule:")
+    {
+        let line =
+            if trimmed.starts_with("Auto blocked ") || trimmed.starts_with("Auto rule denied:") {
+                first_line
+            } else {
+                trimmed
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| line.contains("Built-in safety rule:"))
+                    .unwrap_or(first_line)
+            };
+        return Some((
+            DenialKind::AutoMode,
+            normalize_reason(strip_auto_prefix(line)),
+        ));
+    }
+
+    let has_sandbox_context = {
+        let lower = trimmed.to_ascii_lowercase();
+        lower.contains("sandbox") || lower.contains("seatbelt")
+    };
+    if trimmed.contains("sandbox-exec:")
+        || trimmed.contains("Sandbox blocked")
+        || (trimmed.contains("Operation not permitted") && has_sandbox_context)
+    {
+        let line = trimmed
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                line.contains("sandbox-exec:")
+                    || line.contains("Sandbox blocked")
+                    || line.contains("Operation not permitted")
+            })
+            .unwrap_or(first_line);
+        return Some((DenialKind::Sandbox, normalize_reason(line)));
+    }
+
+    if trimmed.starts_with("Plan mode is read-only")
+        || trimmed.starts_with("Don't ask:")
+        || trimmed.starts_with("Action not approved.")
+        || trimmed.starts_with("Unmanaged agent launches are disabled")
+        || trimmed.starts_with("Read-only Pui worker:")
+        || trimmed.starts_with("Permission mode changed")
+    {
+        return Some((DenialKind::PolicyRule, normalize_reason(first_line)));
+    }
+
+    None
+}
+
 impl Tool {
+    pub fn refresh_denial(&mut self) {
+        if let Some((kind, reason)) = classify_denial(&self.output, self.failed) {
+            self.denial_kind = Some(kind);
+            self.denial_reason = Some(reason);
+        } else {
+            self.denial_kind = None;
+            self.denial_reason = None;
+        }
+    }
+
     pub fn set_args(&mut self, args: &Value) {
         self.added = 0;
         self.removed = 0;
@@ -318,6 +482,7 @@ impl Tool {
                 if let Some(error) = call["error"].as_str() {
                     child.output = error.into();
                 }
+                child.refresh_denial();
                 if let Some(existing) = self.children.iter_mut().find(|t| t.id == id) {
                     *existing = child;
                 } else {
@@ -479,6 +644,211 @@ mod tests {
                 ..Default::default()
             }])
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn classify_denial_handles_all_four_denial_kinds() {
+        assert_eq!(DenialKind::AutoMode.badge(), "Blocked by Auto");
+        assert_eq!(
+            DenialKind::ClassifierUnavailable.badge(),
+            "Classifier unavailable"
+        );
+        assert_eq!(DenialKind::Sandbox.badge(), "Blocked by sandbox");
+        assert_eq!(DenialKind::PolicyRule.badge(), "Blocked by mode");
+
+        // AutoMode: classifier denial strips AUTO_GUIDANCE after newline and Auto blocked prefix.
+        let (kind, reason) = classify_denial(
+            "Auto blocked bash: google/flash denied. Classifier explanation (untrusted data): \"Deletes files outside workspace\"\nPui Auto mode: blocked tool calls are non-terminal.",
+            true,
+        )
+        .expect("auto mode denial");
+        assert_eq!(kind, DenialKind::AutoMode);
+        assert!(reason.contains("google/flash denied"), "{reason}");
+        assert!(!reason.contains("Pui Auto mode"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+
+        // AutoMode: Built-in safety rule.
+        let (kind, reason) = classify_denial(
+            "Auto blocked bash: Built-in safety rule: destructive action or protected/external resource, with no explicit user authorization for it.\nPui Auto mode: blocked tool calls are non-terminal.",
+            true,
+        )
+        .expect("built-in safety rule denial");
+        assert_eq!(kind, DenialKind::AutoMode);
+        assert!(reason.starts_with("Built-in safety rule:"), "{reason}");
+
+        // AutoMode: custom auto rule denied.
+        let (kind, reason) = classify_denial(
+            "Auto rule denied: command matches denylist pattern 'rm -rf'\nPui Auto mode: ...",
+            true,
+        )
+        .expect("auto rule denial");
+        assert_eq!(kind, DenialKind::AutoMode);
+        assert_eq!(
+            reason,
+            "Auto rule denied: command matches denylist pattern 'rm -rf'"
+        );
+
+        // ClassifierUnavailable variants (must take precedence over AutoMode wrapper).
+        for sample in [
+            "Auto blocked bash: Classifier check unavailable — google/flash: authentication failed. This is not a model denial.\nPui Auto mode: ...",
+            "Auto blocked bash: Built-in safety rule: destructive action, and the classifier could not review it. Classifier check unavailable — google/flash: timeout.\nPui Auto mode: ...",
+            "Auto blocked edit: No suitable priced classifier model is available.\nPui Auto mode: ...",
+            "Auto blocked bash: Selected classifier anthropic/haiku is unavailable or outside the configured scope; no fallback model was used.\nPui Auto mode: ...",
+        ] {
+            let (kind, reason) = classify_denial(sample, true).expect("classifier unavailable");
+            assert_eq!(kind, DenialKind::ClassifierUnavailable, "{sample}");
+            assert!(!reason.contains("Pui Auto mode"), "{reason}");
+            assert!(!reason.contains('\n'), "{reason}");
+            assert!(
+                reason.chars().count() <= MAX_DENIAL_REASON_CHARS,
+                "{reason}"
+            );
+        }
+
+        // Sandbox variants (Seatbelt / sandbox-exec / Sandbox blocked).
+        for sample in [
+            "sandbox-exec: /bin/bash: /Users/dev/.ssh/id_rsa: Operation not permitted",
+            "Sandbox blocked outbound network connection to example.com",
+            "Starting command\n/bin/bash: /etc/hosts: Operation not permitted\n(macOS Seatbelt sandbox active)",
+        ] {
+            let (kind, reason) = classify_denial(sample, true).expect("sandbox denial");
+            assert_eq!(kind, DenialKind::Sandbox, "{sample}");
+            assert!(!reason.contains('\n'), "{reason}");
+            assert!(
+                reason.contains("sandbox-exec:")
+                    || reason.contains("Sandbox blocked")
+                    || reason.contains("Operation not permitted"),
+                "{reason}"
+            );
+        }
+
+        // PolicyRule variants.
+        for sample in [
+            "Plan mode is read-only. Approve the written plan and change mode in Pui before implementation.",
+            "Don't ask: this action requires approval and was automatically denied.",
+            "Action not approved.",
+            "Unmanaged agent launches are disabled in Pui. Use pui_spawn_agent (sidebar child chat) or pui_background_agent (in-turn background subagent) so the worker is tracked and stoppable in Pui. If managed spawning is unavailable or denied, report the blocker; do not launch a detached CLI or SDK agent.",
+            "Read-only Pui worker: tool not allowed",
+            "Permission mode changed; retry the action.",
+        ] {
+            let (kind, reason) = classify_denial(sample, true).expect("policy rule denial");
+            assert_eq!(kind, DenialKind::PolicyRule, "{sample}");
+            assert!(
+                reason.chars().count() <= MAX_DENIAL_REASON_CHARS,
+                "{reason}"
+            );
+        }
+
+        // Long single-line reasons are bounded to MAX_DENIAL_REASON_CHARS with an ellipsis.
+        let long = format!("Auto blocked bash: {}", "x".repeat(300));
+        let (kind, reason) = classify_denial(&long, true).expect("bounded reason");
+        assert_eq!(kind, DenialKind::AutoMode);
+        assert_eq!(reason.chars().count(), MAX_DENIAL_REASON_CHARS);
+        assert!(reason.ends_with('…'), "{reason}");
+
+        // Non-failed tool output must never be classified as a denial even if text matches.
+        assert_eq!(
+            classify_denial("Auto blocked bash: Built-in safety rule: test", false),
+            None
+        );
+        assert_eq!(
+            classify_denial("sandbox-exec: Operation not permitted", false),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_denial_returns_none_for_ordinary_failures() {
+        for sample in [
+            "",
+            "Command exited with code 1",
+            "error[E0425]: cannot find value `x` in this scope\n --> src/main.rs:10:5",
+            "test result: FAILED. 14 passed; 1 failed; 0 ignored",
+            "ENOENT: no such file or directory, open '/tmp/missing.txt'",
+            "cat: missing.rs: No such file or directory",
+            "chmod: /System/Library/CoreServices/foo: Operation not permitted",
+        ] {
+            assert_eq!(
+                classify_denial(sample, true),
+                None,
+                "ordinary failure misclassified: {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_distinguishes_blocked_tools_from_ordinary_failures() {
+        let mut summary = Summary::default();
+        for _ in 0..3 {
+            summary.add(&Tool {
+                name: "read".into(),
+                finished: true,
+                ..Default::default()
+            });
+        }
+        for _ in 0..2 {
+            summary.add(&Tool {
+                name: "bash".into(),
+                command: "cargo check".into(),
+                finished: true,
+                ..Default::default()
+            });
+        }
+        summary.add(&Tool {
+            name: "bash".into(),
+            command: "rm -rf /tmp/foo".into(),
+            finished: true,
+            failed: true,
+            denial_kind: Some(DenialKind::AutoMode),
+            denial_reason: Some("Built-in safety rule".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            summary.label(),
+            "read 3 files · ran 2 commands · 1 blocked by Auto"
+        );
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.blocked(), 1);
+
+        // Mix ordinary failure with sandbox, classifier unavailable, and policy denials.
+        let mut mixed = Summary::default();
+        mixed.add(&Tool {
+            name: "bash".into(),
+            command: "cargo test".into(),
+            finished: true,
+            failed: true,
+            ..Default::default()
+        });
+        mixed.add(&Tool {
+            name: "bash".into(),
+            command: "cat ~/.ssh/id_rsa".into(),
+            finished: true,
+            failed: true,
+            denial_kind: Some(DenialKind::Sandbox),
+            ..Default::default()
+        });
+        mixed.add(&Tool {
+            name: "edit".into(),
+            path: "a.rs".into(),
+            finished: true,
+            failed: true,
+            denial_kind: Some(DenialKind::ClassifierUnavailable),
+            ..Default::default()
+        });
+        mixed.add(&Tool {
+            name: "write".into(),
+            path: "b.rs".into(),
+            finished: true,
+            failed: true,
+            denial_kind: Some(DenialKind::PolicyRule),
+            ..Default::default()
+        });
+        assert_eq!(mixed.failed, 1);
+        assert_eq!(mixed.blocked(), 3);
+        assert_eq!(
+            mixed.label(),
+            "ran 1 command · 1 classifier unavailable · 1 blocked by sandbox · 1 blocked by mode"
         );
     }
 }

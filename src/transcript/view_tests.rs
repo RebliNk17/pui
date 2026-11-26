@@ -317,3 +317,151 @@ fn verbose_expands_nested_tools_and_read_results_without_changing_normal_state()
     let rows = draw(&ctx, &messages, View::Normal, false, 800.0);
     assert!(!rows.iter().any(|row| row.contains("READ_CONTENTS")));
 }
+
+#[test]
+fn collapsed_group_summary_distinguishes_blocked_calls_from_ordinary_errors() {
+    use crate::protocol::DenialKind;
+
+    for theme in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+        for width in [320.0, 800.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            theme.apply(&ctx);
+
+            // Case 1: reads + successful command + Auto-blocked call -> no red "failed" count.
+            let auto_only = vec![Message {
+                role: "assistant".into(),
+                tools: vec![
+                    Tool {
+                        id: "r1".into(),
+                        name: "read".into(),
+                        path: "src/a.rs".into(),
+                        finished: true,
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "r2".into(),
+                        name: "read".into(),
+                        path: "src/b.rs".into(),
+                        finished: true,
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        command: "cargo check".into(),
+                        finished: true,
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "b1".into(),
+                        name: "bash".into(),
+                        command: "rm -rf /etc/hosts".into(),
+                        finished: true,
+                        failed: true,
+                        denial_kind: Some(DenialKind::AutoMode),
+                        denial_reason: Some("Built-in safety rule: destructive action.".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }];
+            let rows = draw(&ctx, &auto_only, View::Normal, false, width);
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains("read 2 files · ran 1 command · 1 blocked by Auto")),
+                "missing Auto blocked group summary (theme={theme:?}, width={width}): {rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r.contains("failed")),
+                "Auto blocked group should not show ordinary failed label: {rows:?}"
+            );
+
+            // Case 2: sandbox-blocked call alongside an ordinary command failure.
+            let mixed = vec![Message {
+                role: "assistant".into(),
+                tools: vec![
+                    Tool {
+                        id: "r3".into(),
+                        name: "read".into(),
+                        path: "src/lib.rs".into(),
+                        finished: true,
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "s1".into(),
+                        name: "bash".into(),
+                        command: "cat ~/.ssh/id_rsa".into(),
+                        finished: true,
+                        failed: true,
+                        denial_kind: Some(DenialKind::Sandbox),
+                        denial_reason: Some(
+                            "sandbox-exec: /bin/bash: Operation not permitted".into(),
+                        ),
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "f1".into(),
+                        name: "bash".into(),
+                        command: "cargo test".into(),
+                        output: "test result: FAILED.".into(),
+                        finished: true,
+                        failed: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }];
+            let rows = draw(&ctx, &mixed, View::Normal, false, width);
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains("read 1 file · ran 1 command · 1 blocked by sandbox")),
+                "missing sandbox blocked group summary (theme={theme:?}, width={width}): {rows:?}"
+            );
+            assert!(
+                rows.iter().any(|r| r == "1 failed"),
+                "ordinary command failure should still show '1 failed' alongside blocked count: {rows:?}"
+            );
+
+            // Case 3: classifier unavailable + policy mode blocked, zero ordinary failures.
+            let unavail_and_mode = vec![Message {
+                role: "assistant".into(),
+                tools: vec![
+                    Tool {
+                        id: "u1".into(),
+                        name: "bash".into(),
+                        command: "curl https://example.com".into(),
+                        finished: true,
+                        failed: true,
+                        denial_kind: Some(DenialKind::ClassifierUnavailable),
+                        denial_reason: Some(
+                            "Classifier check unavailable — google/flash: timeout.".into(),
+                        ),
+                        ..Default::default()
+                    },
+                    Tool {
+                        id: "p1".into(),
+                        name: "edit".into(),
+                        path: "src/main.rs".into(),
+                        finished: true,
+                        failed: true,
+                        denial_kind: Some(DenialKind::PolicyRule),
+                        denial_reason: Some("Plan mode is read-only.".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }];
+            let rows = draw(&ctx, &unavail_and_mode, View::Normal, false, width);
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains("1 classifier unavailable · 1 blocked by mode")),
+                "missing classifier/mode group summary (theme={theme:?}, width={width}): {rows:?}"
+            );
+            assert!(
+                !rows.iter().any(|r| r.contains("failed")),
+                "denied-only group should not show ordinary failed label: {rows:?}"
+            );
+        }
+    }
+}

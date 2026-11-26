@@ -105,6 +105,25 @@ pub struct InlineVisual {
     pub height: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DenialKind {
+    AutoMode,
+    ClassifierUnavailable,
+    Sandbox,
+    PolicyRule,
+}
+
+impl DenialKind {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::AutoMode => "Blocked by Auto",
+            Self::ClassifierUnavailable => "Classifier unavailable",
+            Self::Sandbox => "Blocked by sandbox",
+            Self::PolicyRule => "Blocked by mode",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Tool {
     pub id: String,
@@ -139,6 +158,10 @@ pub struct Tool {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub agent_title: Option<String>,
+    #[serde(default)]
+    pub denial_kind: Option<DenialKind>,
+    #[serde(default)]
+    pub denial_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -794,6 +817,12 @@ impl State {
                     tool.finished = finished;
                     tool.failed = event["isError"] == true;
                     tool.duration_ms = event["durationMs"].as_u64();
+                    if finished {
+                        tool.refresh_denial();
+                    } else {
+                        tool.denial_kind = None;
+                        tool.denial_reason = None;
+                    }
                 }
             }
             "session_info_changed" => self.session_name = string(&event, "name").into(),
@@ -842,6 +871,7 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
                 tool.finished = true;
                 tool.failed = raw["isError"] == true;
                 tool.duration_ms = raw["durationMs"].as_u64();
+                tool.refresh_denial();
                 tool.set_answers(raw);
                 tool.set_open_result(raw);
                 tool.set_workflow_result(raw);
@@ -1342,5 +1372,68 @@ mod tests {
             messages[0].tools[3].edited_html_files(),
             vec!["campaign-map-designs.html"]
         );
+    }
+
+    #[test]
+    fn denial_classification_populates_on_live_end_and_history_replay() {
+        let raw = vec![
+            json!({"role":"assistant","content":[
+                {"type":"toolCall","id":"t-auto","name":"bash","arguments":{"command":"rm -rf /etc/hosts"}},
+                {"type":"toolCall","id":"t-sandbox","name":"bash","arguments":{"command":"cat ~/.ssh/id_rsa"}},
+                {"type":"toolCall","id":"t-unavail","name":"edit","arguments":{"path":"src/main.rs","oldText":"a","newText":"b"}},
+                {"type":"toolCall","id":"t-err","name":"bash","arguments":{"command":"cargo test"}}
+            ]}),
+            json!({"role":"toolResult","toolCallId":"t-auto","content":[{"type":"text","text":"Auto blocked bash: Built-in safety rule: destructive action.\nPui Auto mode: blocked tool calls are non-terminal."}],"isError":true}),
+            json!({"role":"toolResult","toolCallId":"t-sandbox","content":[{"type":"text","text":"sandbox-exec: /bin/bash: /Users/dev/.ssh/id_rsa: Operation not permitted"}],"isError":true}),
+            json!({"role":"toolResult","toolCallId":"t-unavail","content":[{"type":"text","text":"Auto blocked edit: Classifier check unavailable — google/flash: timeout.\nPui Auto mode: ..."}],"isError":true}),
+            json!({"role":"toolResult","toolCallId":"t-err","content":[{"type":"text","text":"test result: FAILED. 2 passed; 1 failed"}],"isError":true}),
+        ];
+
+        // 1. History replay
+        let history = parse_history(&raw);
+        let tools = &history[0].tools;
+        assert_eq!(tools[0].denial_kind, Some(DenialKind::AutoMode));
+        assert_eq!(
+            tools[0].denial_reason.as_deref(),
+            Some("Built-in safety rule: destructive action.")
+        );
+        assert_eq!(tools[1].denial_kind, Some(DenialKind::Sandbox));
+        assert!(
+            tools[1]
+                .denial_reason
+                .as_deref()
+                .unwrap()
+                .contains("Operation not permitted")
+        );
+        assert_eq!(
+            tools[2].denial_kind,
+            Some(DenialKind::ClassifierUnavailable)
+        );
+        assert!(
+            tools[2]
+                .denial_reason
+                .as_deref()
+                .unwrap()
+                .contains("Classifier check unavailable")
+        );
+        assert_eq!(tools[3].denial_kind, None);
+        assert_eq!(tools[3].denial_reason, None);
+
+        // 2. Live execution events
+        let mut state = State::default();
+        state.apply(json!({"type":"message_start","message":raw[0]}));
+        for result in &raw[1..] {
+            state.apply(json!({
+                "type": "tool_execution_end",
+                "toolCallId": result["toolCallId"],
+                "result": {"content": result["content"]},
+                "isError": result["isError"],
+            }));
+        }
+        let live_tools = &state.messages[0].tools;
+        for i in 0..4 {
+            assert_eq!(live_tools[i].denial_kind, tools[i].denial_kind);
+            assert_eq!(live_tools[i].denial_reason, tools[i].denial_reason);
+        }
     }
 }

@@ -478,6 +478,8 @@ impl Transcript {
                         t.output.len().hash(&mut hasher);
                         t.duration_ms.hash(&mut hasher);
                         t.failed.hash(&mut hasher);
+                        t.denial_kind.hash(&mut hasher);
+                        t.denial_reason.hash(&mut hasher);
                         t.images.len().hash(&mut hasher);
                         t.visual.is_some().hash(&mut hasher);
                         t.open_target.hash(&mut hasher);
@@ -498,6 +500,8 @@ impl Transcript {
                         for child in &t.children {
                             child.finished.hash(&mut hasher);
                             child.failed.hash(&mut hasher);
+                            child.denial_kind.hash(&mut hasher);
+                            child.denial_reason.hash(&mut hasher);
                             child.output.len().hash(&mut hasher);
                             child.args.len().hash(&mut hasher);
                             child.images.len().hash(&mut hasher);
@@ -1944,37 +1948,72 @@ fn activity(
                         },
                     );
                 }
-                let (verb, count) = part.split_once(' ').unwrap_or((part, ""));
-                job.append(
-                    verb,
-                    0.0,
-                    egui::TextFormat {
-                        font_id: FontId::proportional(12.0),
-                        color: colors.muted,
-                        ..Default::default()
-                    },
-                );
-                if !count.is_empty() {
+                let amber_blocked = part.ends_with("blocked by Auto")
+                    || part.ends_with("blocked by sandbox")
+                    || part.ends_with("classifier unavailable");
+                let mode_blocked = part.ends_with("blocked by mode");
+                if amber_blocked || mode_blocked {
                     job.append(
-                        &format!(" {count}"),
+                        part,
                         0.0,
                         egui::TextFormat {
                             font_id: FontId::new(12.0, egui::FontFamily::Name("body-bold".into())),
+                            color: if amber_blocked {
+                                colors.amber
+                            } else {
+                                colors.muted
+                            },
+                            ..Default::default()
+                        },
+                    );
+                } else {
+                    let (verb, count) = part.split_once(' ').unwrap_or((part, ""));
+                    job.append(
+                        verb,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: FontId::proportional(12.0),
                             color: colors.muted,
                             ..Default::default()
                         },
                     );
+                    if !count.is_empty() {
+                        job.append(
+                            &format!(" {count}"),
+                            0.0,
+                            egui::TextFormat {
+                                font_id: FontId::new(
+                                    12.0,
+                                    egui::FontFamily::Name("body-bold".into()),
+                                ),
+                                color: colors.muted,
+                                ..Default::default()
+                            },
+                        );
+                    }
                 }
             }
-            job.wrap.max_width =
+            let summary_max_w =
                 (rect.width() - right_reserved_base - thumbs_total_w - 30.0).max(20.0);
+            job.wrap.max_width = summary_max_w;
             job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            job.wrap.overflow_character = Some('…');
             let galley = ui.painter().layout_job(job);
-            ui.painter().galley(
-                rect.left_center() + egui::vec2(25.0, -galley.size().y / 2.0),
-                galley,
-                colors.muted,
+            let summary_clip = Rect::from_min_max(
+                rect.min + egui::vec2(25.0, 0.0),
+                egui::pos2(
+                    (rect.left() + 25.0 + summary_max_w).min(rect.right()),
+                    rect.max.y,
+                ),
             );
+            ui.painter()
+                .with_clip_rect(summary_clip.intersect(ui.clip_rect()))
+                .galley(
+                    rect.left_center() + egui::vec2(25.0, -galley.size().y / 2.0),
+                    galley,
+                    colors.muted,
+                );
             if shown_thumbs > 0 {
                 let mut cursor_x = thumbs_right - extra_w;
                 if extra_thumbs > 0 {
