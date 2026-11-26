@@ -85,6 +85,18 @@ impl Tool {
         self.open_target = None;
         self.workflow_id = None;
         self.workflow_title = None;
+        self.agent_id = None;
+        self.agent_title = None;
+        if matches!(
+            self.name.as_str(),
+            "pui_background_agent" | "pui_spawn_agent"
+        ) {
+            self.agent_title = args["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(120).collect());
+        }
         if self.name == "pui_workflow" {
             self.workflow_title = args["objective"]
                 .as_str()
@@ -185,6 +197,53 @@ impl Tool {
                 .filter(|s| !s.is_empty())
         {
             self.workflow_id = Some(id.to_owned());
+        }
+    }
+
+    pub fn set_agent_result(&mut self, raw: &Value) {
+        if !matches!(
+            self.name.as_str(),
+            "pui_background_agent" | "pui_spawn_agent"
+        ) {
+            return;
+        }
+        let parsed_text = raw["content"]
+            .as_array()
+            .and_then(|arr| arr.iter().find_map(|b| b["text"].as_str()))
+            .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let payload = if raw["details"]["pui"]["agent_id"].is_string() {
+            Some(&raw["details"]["pui"])
+        } else if raw["details"]["agent_id"].is_string() {
+            Some(&raw["details"])
+        } else if raw["agent_id"].is_string() {
+            Some(raw)
+        } else {
+            parsed_text.as_ref().filter(|v| v["agent_id"].is_string())
+        };
+        if let Some(payload) = payload {
+            if let Some(id) = payload["agent_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                self.agent_id = Some(id.to_owned());
+            }
+            if self.agent_title.is_none() {
+                self.agent_title = payload["name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.chars().take(120).collect())
+                    .or_else(|| {
+                        payload["kind"].as_str().map(|kind| {
+                            if kind == "background" {
+                                "Background subagent".to_owned()
+                            } else {
+                                "Child session".to_owned()
+                            }
+                        })
+                    });
+            }
         }
     }
 

@@ -2,7 +2,9 @@
 //! fan-out, optional final verification checks, live token/duration tracking, and
 //! one-click Stop — integrated directly into Background tasks.
 use super::*;
-use crate::inline_visual::{WorkflowCardSnapshot, WorkflowCell, WorkflowCellState};
+use crate::inline_visual::{
+    AgentCardSnapshot, WorkflowCardSnapshot, WorkflowCell, WorkflowCellState,
+};
 
 const MAX_PHASES: usize = 8;
 const MAX_AGENTS_PER_PHASE: usize = 16;
@@ -322,6 +324,21 @@ pub(super) fn agent_total_tokens(state: &State) -> u64 {
         state.context_tokens.unwrap_or(0.0)
     };
     total.max(0.0).round() as u64
+}
+
+fn agent_preview_snippet(text: &str, max_chars: usize) -> Option<String> {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        Some(format!("{}…", head.trim_end()))
+    } else {
+        Some(head)
+    }
 }
 
 impl Pui {
@@ -1145,6 +1162,104 @@ impl Pui {
                 },
             );
         }
+        self.sync_agent_cards();
+    }
+
+    pub(super) fn agent_tokens_for(&self, id: &str) -> u64 {
+        let state_tokens = if id == self.agents.active {
+            agent_total_tokens(&self.state)
+        } else {
+            self.agents
+                .parked
+                .get(id)
+                .map(|c| agent_total_tokens(&c.state))
+                .unwrap_or(0)
+        };
+        let wf_tokens = self
+            .background_tasks
+            .workflows
+            .iter()
+            .flat_map(|w| &w.phases)
+            .flat_map(|p| &p.agents)
+            .find(|a| a.agent_id.as_deref() == Some(id))
+            .map(|a| a.tokens)
+            .unwrap_or(0);
+        state_tokens.max(wf_tokens)
+    }
+
+    /// Keep `self.transcript.visuals.agent_cards` in sync with `self.agents.nodes`
+    /// and `self.agents.parked` so inline `pui_background_agent` / `pui_spawn_agent`
+    /// cards show live status, stats, and bounded result previews.
+    pub(in crate::app) fn sync_agent_cards(&mut self) {
+        self.transcript.visuals.agent_cards.clear();
+        let now = SystemTime::now();
+        let ids: Vec<String> = self
+            .agents
+            .nodes
+            .values()
+            .filter(|n| n.parent.is_some())
+            .map(|n| n.id.clone())
+            .collect();
+        for id in ids {
+            let Some(node) = self.agents.nodes.get(&id) else {
+                continue;
+            };
+            let state = if id == self.agents.active {
+                Some(&self.state)
+            } else {
+                self.agents.parked.get(&id).map(|c| &c.state)
+            };
+            let running = is_node_running(node);
+            let failed = is_node_failed(node);
+            let stopped = node.stopped;
+            let created = node.created.unwrap_or(now);
+            let end = node.finished_at.unwrap_or(now);
+            let elapsed_ms = end.duration_since(created).unwrap_or_default().as_millis() as u64;
+            let model = state
+                .map(|s| {
+                    if !s.model_name.is_empty() {
+                        s.model_name.clone()
+                    } else {
+                        s.model.clone()
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .or_else(|| node.model.clone())
+                .unwrap_or_default();
+            let tool_uses = state.map(|s| summarize_agent_tools(s).total).unwrap_or(0);
+            let tokens = self.agent_tokens_for(&id);
+            let latest_reply = state
+                .and_then(|s| {
+                    s.messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == "assistant" && !m.text.trim().is_empty())
+                        .map(|m| m.text.as_str())
+                })
+                .or(node.result.as_deref());
+            let preview = latest_reply.and_then(|text| agent_preview_snippet(text, 320));
+            let error = node
+                .failure
+                .clone()
+                .or_else(|| state.and_then(|s| s.error.clone()));
+            self.transcript.visuals.agent_cards.insert(
+                id.clone(),
+                AgentCardSnapshot {
+                    id,
+                    title: node.name.clone(),
+                    is_background: node.background,
+                    running,
+                    failed,
+                    stopped,
+                    model,
+                    tool_uses,
+                    tokens,
+                    elapsed_ms,
+                    preview,
+                    error,
+                },
+            );
+        }
     }
 }
 
@@ -1645,9 +1760,69 @@ impl Pui {
             notified: true,
         });
 
-        // 4. Add an inline transcript workflow card in the conversation so both
-        //    the inline card and the right-side Background tasks pane are visible!
+        // 3b. Standalone completed background agent with Markdown reply & stats.
+        let demo_agent_id = "agent-bg-demo-1".to_owned();
+        insert_bg_agent(
+            &demo_agent_id,
+            "Audit responsive safe-area insets",
+            "Check HUD safe-area inset handling on notched phones and report any overlapping widgets.",
+            "Claude Sonnet 4.6",
+            None,
+            false,
+            None,
+            34,
+            "### Safe-Area Audit Summary\n\nChecked mobile HUD anchors across `scenes/hud.gd` and `scripts/ui/control_groups.gd`:\n\n- **Bottom charge bar**: respects `DisplayServer.get_display_safe_area()` inset (`24px` bottom padding).\n- **Left order column**: stays inside the safe area with `12px` leading margin.\n- **Groups popup**: needs `bottom_offset = 58` to clear the charge meter on `375×812` viewports.",
+            vec![
+                protocol::Tool {
+                    id: "bgd1".into(),
+                    name: "read".into(),
+                    path: "scenes/hud.gd".into(),
+                    finished: true,
+                    duration_ms: Some(12),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "bgd2".into(),
+                    name: "read".into(),
+                    path: "scripts/ui/control_groups.gd".into(),
+                    finished: true,
+                    duration_ms: Some(15),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "bgd3".into(),
+                    name: "bash".into(),
+                    command: "godot --headless -s tests/safe_area_check.gd".into(),
+                    finished: true,
+                    duration_ms: Some(1840),
+                    ..Default::default()
+                },
+            ],
+        );
+        if let Some(chat) = self.agents.parked.get_mut(&demo_agent_id)
+            && let Some(msg) = chat.state.messages.last_mut()
+        {
+            msg.prompt_usage = protocol::PromptUsage {
+                input: 8_400.0,
+                cache_read: 5_800.0,
+                cache_write: 0.0,
+            };
+        }
+
+        // 4. Add an inline transcript workflow card + completed background agent result card
+        //    in the conversation so both inline cards and Background tasks are immediately visible!
         self.sync_workflow_cards();
+        let mut bg_agent_tool = protocol::Tool {
+            id: "demo-bg-agent-tool".into(),
+            name: "pui_background_agent".into(),
+            agent_id: Some(demo_agent_id.clone()),
+            agent_title: Some("Audit responsive safe-area insets".into()),
+            finished: true,
+            ..Default::default()
+        };
+        bg_agent_tool.set_agent_result(&json!({
+            "details": { "pui": { "agent_id": demo_agent_id, "kind": "background" } }
+        }));
         let mut wf_tool = protocol::Tool {
             id: "demo-wf-tool".into(),
             name: "pui_workflow".into(),
@@ -1660,8 +1835,8 @@ impl Pui {
             .set_workflow_result(&json!({ "details": { "workflow": { "workflow_id": wf1_id } } }));
         self.state.messages.push(protocol::Message {
             role: "assistant".into(),
-            text: "Started a 3-phase dynamic workflow to audit, refactor, and verify the control-group layouts across phone, tablet, and desktop breakpoints. Click the card below or inspect individual phases and agents in **Background tasks**.".into(),
-            tools: vec![wf_tool],
+            text: "Started a 3-phase dynamic workflow to audit, refactor, and verify the control-group layouts across phone, tablet, and desktop breakpoints, and completed a safe-area inset audit in a background subagent. Click either card below to inspect details in **Background tasks**.".into(),
+            tools: vec![bg_agent_tool, wf_tool],
             ..Default::default()
         });
         self.state.transcript_revision += 1;

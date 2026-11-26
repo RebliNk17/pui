@@ -348,3 +348,213 @@ fn markdown_inline_local_photo_resolves_safely_and_remote_images_never_fetch() {
             .is_some()
     );
 }
+
+#[test]
+fn inline_agent_cards_render_status_stats_preview_and_emit_open_agent_in_light_and_dark() {
+    use crate::inline_visual::AgentCardSnapshot;
+
+    let messages = crate::protocol::parse_history(&[
+        serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "toolCall",
+                    "id": "call-bg-1",
+                    "name": "pui_background_agent",
+                    "arguments": { "name": "Audit HUD layout", "task": "Inspect HUD" }
+                },
+                {
+                    "type": "toolCall",
+                    "id": "call-sess-1",
+                    "name": "pui_spawn_agent",
+                    "arguments": { "name": "Refactor sidebar", "task": "Refactor", "access": "read-only" }
+                },
+                {
+                    "type": "toolCall",
+                    "id": "call-bg-fail",
+                    "name": "pui_background_agent",
+                    "arguments": { "name": "Phone 375px check", "task": "Verify phone" }
+                }
+            ]
+        }),
+        serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": "call-bg-1",
+            "content": [{ "type": "text", "text": "{\"agent_id\":\"agent-bg-1\",\"kind\":\"background\"}" }],
+            "details": { "pui": { "agent_id": "agent-bg-1", "kind": "background" } },
+            "isError": false
+        }),
+        serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": "call-sess-1",
+            "content": [{ "type": "text", "text": "{\"agent_id\":\"agent-sess-1\",\"kind\":\"session\"}" }],
+            "isError": false
+        }),
+        serde_json::json!({
+            "role": "toolResult",
+            "toolCallId": "call-bg-fail",
+            "content": [{ "type": "text", "text": "{\"agent_id\":\"agent-bg-fail\",\"kind\":\"background\"}" }],
+            "details": { "pui": { "agent_id": "agent-bg-fail", "kind": "background" } },
+            "isError": false
+        }),
+    ]);
+
+    assert_eq!(messages[0].tools[0].agent_id.as_deref(), Some("agent-bg-1"));
+    assert_eq!(
+        messages[0].tools[0].agent_title.as_deref(),
+        Some("Audit HUD layout")
+    );
+    assert_eq!(
+        messages[0].tools[1].agent_id.as_deref(),
+        Some("agent-sess-1")
+    );
+    assert_eq!(
+        messages[0].tools[1].agent_title.as_deref(),
+        Some("Refactor sidebar")
+    );
+
+    for mode in [crate::theme::Theme::Light, crate::theme::Theme::Dark] {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        mode.apply(&ctx);
+        let mut transcript = Transcript::default();
+        transcript.visuals.agent_cards.insert(
+            "agent-bg-1".into(),
+            AgentCardSnapshot {
+                id: "agent-bg-1".into(),
+                title: "Audit HUD layout".into(),
+                is_background: true,
+                running: false,
+                failed: false,
+                stopped: false,
+                model: "Claude Sonnet 4.6".into(),
+                tool_uses: 12,
+                tokens: 14_200,
+                elapsed_ms: 34_000,
+                preview: Some("Mapped all 6 order buttons and verified safe-area insets.".into()),
+                error: None,
+            },
+        );
+        transcript.visuals.agent_cards.insert(
+            "agent-sess-1".into(),
+            AgentCardSnapshot {
+                id: "agent-sess-1".into(),
+                title: "Refactor sidebar".into(),
+                is_background: false,
+                running: true,
+                failed: false,
+                stopped: false,
+                model: "Claude Opus 5.5".into(),
+                tool_uses: 3,
+                tokens: 4_500,
+                elapsed_ms: 12_000,
+                preview: None,
+                error: None,
+            },
+        );
+        transcript.visuals.agent_cards.insert(
+            "agent-bg-fail".into(),
+            AgentCardSnapshot {
+                id: "agent-bg-fail".into(),
+                title: "Phone 375px check".into(),
+                is_background: true,
+                running: false,
+                failed: true,
+                stopped: false,
+                model: "Claude Sonnet 4.6".into(),
+                tool_uses: 1,
+                tokens: 2_100,
+                elapsed_ms: 9_000,
+                preview: None,
+                error: Some("Popup overlaps bottom meter by 14px".into()),
+            },
+        );
+
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(840.0, 700.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    transcript.show(ui, &messages, "claude", "medium", false, "agent-cards");
+                });
+            },
+        );
+        let mut items = Vec::new();
+        for clipped in &out.shapes {
+            collect_text_rects(&clipped.shape, &mut items);
+        }
+        let labels: Vec<&str> = items.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(
+            labels.contains(&"Audit HUD layout"),
+            "missing completed card title ({mode:?}): {labels:?}"
+        );
+        assert!(labels.contains(&"Done"));
+        assert!(labels.contains(&"· 12 tool uses"));
+        assert!(labels.contains(&"· 14k tok"));
+        assert!(labels.contains(&"· 34s"));
+        assert!(
+            labels
+                .iter()
+                .any(|t| t.contains("Mapped all 6 order buttons")),
+            "missing completed preview ({mode:?}): {labels:?}"
+        );
+        assert!(labels.contains(&"Refactor sidebar"));
+        assert!(labels.contains(&"Running…"));
+        assert!(labels.contains(&"· 4.5k tok"));
+        assert!(labels.contains(&"Phone 375px check"));
+        assert!(labels.contains(&"Failed"));
+        assert!(
+            labels
+                .iter()
+                .any(|t| t.contains("Popup overlaps bottom meter")),
+            "missing failed error text ({mode:?}): {labels:?}"
+        );
+
+        // Clicking the completed background agent card emits OpenAgent("agent-bg-1").
+        let bg_pos = items
+            .iter()
+            .find(|(t, _)| t == "Audit HUD layout")
+            .unwrap()
+            .1
+            .center();
+        let mut clicked_action = None;
+        click_at(&ctx, bg_pos, 840.0, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                transcript.show(ui, &messages, "claude", "medium", false, "agent-cards");
+                if let Some(a) = transcript.action.take() {
+                    clicked_action = Some(a);
+                }
+            });
+        });
+        assert_eq!(
+            clicked_action,
+            Some(TranscriptAction::OpenAgent("agent-bg-1".into()))
+        );
+
+        // Clicking the child session card emits OpenAgent("agent-sess-1").
+        let sess_pos = items
+            .iter()
+            .find(|(t, _)| t == "Refactor sidebar")
+            .unwrap()
+            .1
+            .center();
+        let mut sess_action = None;
+        click_at(&ctx, sess_pos, 840.0, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                transcript.show(ui, &messages, "claude", "medium", false, "agent-cards");
+                if let Some(a) = transcript.action.take() {
+                    sess_action = Some(a);
+                }
+            });
+        });
+        assert_eq!(
+            sess_action,
+            Some(TranscriptAction::OpenAgent("agent-sess-1".into()))
+        );
+    }
+}

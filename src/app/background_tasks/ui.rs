@@ -1470,8 +1470,14 @@ impl Pui {
                         }
 
                         // Expandable tool-call activity summary (`Ran 24 commands, read 11 files… >`).
+                        let mut tool_total = 0usize;
+                        let mut failed_tools = 0usize;
+                        let mut latest_text: Option<String> = None;
+                        let mut state_error: Option<String> = None;
                         if let Some(chat) = self.agents.parked.get(id) {
                             let summary = summarize_agent_tools(&chat.state);
+                            tool_total = summary.total;
+                            failed_tools = summary.failed;
                             let tools_expanded =
                                 self.background_tasks.expanded_tools.contains(&agent.id);
                             let suffix = if summary.total > 0 {
@@ -1567,51 +1573,143 @@ impl Pui {
                             }
                             ui.add_space(10.0);
 
-                            // Latest assistant text / live status / error.
-                            let latest_text = chat
+                            latest_text = chat
                                 .state
                                 .messages
                                 .iter()
                                 .rev()
                                 .find(|m| m.role == "assistant" && !m.text.trim().is_empty())
                                 .map(|m| m.text.trim().to_owned());
-                            if let Some(text) = latest_text {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(text).size(12.5).color(colors.text),
-                                    )
-                                    .selectable(true)
-                                    .wrap(),
-                                );
-                            } else if let Some(err) = chat.state.error.as_deref() {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(err).size(12.0).color(colors.red),
-                                    )
-                                    .selectable(true)
-                                    .wrap(),
-                                );
-                            } else if agent.running {
-                                ui.label(
-                                    RichText::new(&agent.status).size(12.0).color(colors.muted),
-                                );
-                            }
-                        } else if let Some(result) = node.result.as_deref() {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(result).size(12.5).color(colors.text),
-                                )
-                                .selectable(true)
-                                .wrap(),
+                            state_error = chat
+                                .state
+                                .error
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                        }
+
+                        let reply_text = latest_text.or_else(|| {
+                            node.result
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                        });
+                        let error_notice = node
+                            .failure
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .or(state_error);
+
+                        // Subtle tinted warning/error callout above the result when tool calls
+                        // failed or the agent reported an error notice.
+                        if failed_tools > 0 || error_notice.is_some() {
+                            let is_error = error_notice.is_some();
+                            let tint = if is_error { colors.red } else { colors.amber };
+                            egui::Frame::new()
+                                .fill(tint.gamma_multiply(0.10))
+                                .stroke(Stroke::new(1.0_f32, tint.gamma_multiply(0.35)))
+                                .corner_radius(7.0)
+                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    if let Some(err) = error_notice.as_deref() {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(err).size(11.5).color(colors.red),
+                                            )
+                                            .selectable(true)
+                                            .wrap(),
+                                        );
+                                    }
+                                    if failed_tools > 0 {
+                                        if error_notice.is_some() {
+                                            ui.add_space(3.0);
+                                        }
+                                        let notice = if failed_tools == 1 {
+                                            "1 tool call failed during this run.".to_owned()
+                                        } else {
+                                            format!(
+                                                "{failed_tools} tool calls failed during this run."
+                                            )
+                                        };
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(notice).size(11.0).color(
+                                                    if is_error {
+                                                        colors.muted
+                                                    } else {
+                                                        colors.amber
+                                                    },
+                                                ),
+                                            )
+                                            .wrap(),
+                                        );
+                                    }
+                                });
+                            ui.add_space(10.0);
+                        }
+
+                        // Assistant response rendered with Pui's Markdown renderer, or clean
+                        // Claude-style empty/terminal fallback.
+                        if let Some(text) = reply_text.as_deref() {
+                            crate::markdown::show_reply_with_media(
+                                ui,
+                                text,
+                                ("bg-agent-detail-reply", &agent.id),
+                                None,
+                            );
+                        } else if agent.failed {
+                            ui.label(
+                                RichText::new("No result. The agent failed.")
+                                    .size(12.0)
+                                    .color(colors.muted),
+                            );
+                        } else if agent.stopped {
+                            ui.label(
+                                RichText::new("No result. The agent was stopped.")
+                                    .size(12.0)
+                                    .color(colors.muted),
+                            );
+                        } else if agent.running && tool_total > 0 && !agent.status.trim().is_empty()
+                        {
+                            ui.label(RichText::new(&agent.status).size(12.0).color(colors.muted));
+                        } else {
+                            ui.label(
+                                RichText::new("No activity yet")
+                                    .size(12.0)
+                                    .color(colors.dim),
                             );
                         }
 
-                        if let Some(err) = node.failure.as_deref() {
-                            ui.add_space(8.0);
-                            ui.add(
-                                egui::Label::new(RichText::new(err).size(12.0).color(colors.red))
-                                    .selectable(true)
-                                    .wrap(),
+                        // Claude-style stats footer when finished/settled.
+                        if !agent.running {
+                            let tokens = self.agent_tokens_for(&agent.id);
+                            let mut stats = Vec::new();
+                            if tool_total > 0 {
+                                stats.push(if tool_total == 1 {
+                                    "1 tool use".to_owned()
+                                } else {
+                                    format!("{tool_total} tool uses")
+                                });
+                            }
+                            if tokens > 0 {
+                                stats.push(format!(
+                                    "{} tokens",
+                                    crate::inline_visual::format_token_count(tokens)
+                                ));
+                            }
+                            stats.push(format_task_duration(agent.elapsed));
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(stats.join(" · "))
+                                    .size(11.0)
+                                    .color(colors.dim),
                             );
                         }
 

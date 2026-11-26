@@ -698,3 +698,389 @@ fn dynamic_workflow_fans_out_phases_tracks_tokens_surfaces_errors_and_renders_tr
     assert_eq!(app.active_background_counts(), (0, 0));
     assert!(app.background_tasks.workflows.is_empty());
 }
+
+#[test]
+fn detail_view_renders_markdown_stats_footer_warning_callout_and_fallbacks() {
+    for mode in [theme::Theme::Light, theme::Theme::Dark] {
+        let (ctx, mut app) = test_app();
+        mode.apply(&ctx);
+        let root = app.agents.active.clone();
+        let now = SystemTime::now();
+
+        // 1. Completed background agent with Markdown, failed tool warning, tokens, and duration.
+        let ok_id = "agent-md-detail".to_owned();
+        app.agents.nodes.insert(
+            ok_id.clone(),
+            agents::Node {
+                id: ok_id.clone(),
+                parent: Some(root.clone()),
+                name: "Audit layout insets".into(),
+                cwd: app.prefs.cwd.clone(),
+                path: None,
+                access: "read-only".into(),
+                permission: Some(settings::PermissionMode::Plan),
+                status: "Idle".into(),
+                last_activity: Some(now),
+                created: Some(now - Duration::from_secs(34)),
+                children: Vec::new(),
+                stopped: false,
+                reported: true,
+                needs_report: false,
+                settled: true,
+                launch: None,
+                failure: None,
+                result: None,
+                task: "Audit mobile layout insets.".into(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: true,
+                workflow_id: None,
+                model: Some("Claude Sonnet 4.6".into()),
+                finished_at: Some(now),
+            },
+        );
+        let mut chat = agents::Chat::default();
+        chat.state.model_name = "Claude Sonnet 4.6".into();
+        chat.state.messages.push(protocol::Message {
+            role: "assistant".into(),
+            text: "### Inset Findings\n\n- **Header bar** clears the notch.\n- Verified via `safe_area_check`.".into(),
+            prompt_usage: protocol::PromptUsage {
+                input: 8_200.0,
+                cache_read: 6_000.0,
+                cache_write: 0.0,
+            },
+            tools: vec![
+                protocol::Tool {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    path: "scenes/hud.gd".into(),
+                    finished: true,
+                    duration_ms: Some(15),
+                    ..Default::default()
+                },
+                protocol::Tool {
+                    id: "t2".into(),
+                    name: "bash".into(),
+                    command: "false".into(),
+                    finished: true,
+                    failed: true,
+                    duration_ms: Some(40),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        app.agents.parked.insert(ok_id.clone(), chat);
+
+        app.background_tasks.open_agent(ok_id.clone());
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.background_tasks_panel(ctx);
+            },
+        );
+        let mut texts = Vec::new();
+        for s in &out.shapes {
+            collect_texts(&s.shape, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|t| t == "Inset Findings"),
+            "Markdown heading should render without raw ### syntax ({mode:?}): {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("### Inset Findings")),
+            "Raw Markdown hashes should not appear ({mode:?}): {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("1 tool call failed during this run.")),
+            "Failed tool warning callout should appear above result ({mode:?}): {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "2 tool uses · 14k tokens · 34s"),
+            "Claude-style stats footer should appear when settled ({mode:?}): {texts:?}"
+        );
+
+        // 2. Failed agent with no assistant text -> error callout + failed fallback.
+        let fail_id = "agent-empty-fail".to_owned();
+        app.agents.nodes.insert(
+            fail_id.clone(),
+            agents::Node {
+                id: fail_id.clone(),
+                parent: Some(root.clone()),
+                name: "Broken run".into(),
+                cwd: app.prefs.cwd.clone(),
+                path: None,
+                access: "read-only".into(),
+                permission: Some(settings::PermissionMode::Plan),
+                status: "Failed: provider timeout".into(),
+                last_activity: Some(now),
+                created: Some(now - Duration::from_secs(12)),
+                children: Vec::new(),
+                stopped: false,
+                reported: true,
+                needs_report: false,
+                settled: true,
+                launch: None,
+                failure: Some("provider timeout".into()),
+                result: None,
+                task: "Inspect crash.".into(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: true,
+                workflow_id: None,
+                model: None,
+                finished_at: Some(now),
+            },
+        );
+        app.agents
+            .parked
+            .insert(fail_id.clone(), agents::Chat::default());
+        app.background_tasks.open_agent(fail_id);
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.background_tasks_panel(ctx);
+            },
+        );
+        let mut texts = Vec::new();
+        for s in &out.shapes {
+            collect_texts(&s.shape, &mut texts);
+        }
+        assert!(texts.iter().any(|t| t == "provider timeout"));
+        assert!(
+            texts.iter().any(|t| t == "No result. The agent failed."),
+            "Expected failed empty fallback ({mode:?}): {texts:?}"
+        );
+
+        // 3. Stopped agent with no assistant text -> stopped fallback.
+        let stop_id = "agent-empty-stop".to_owned();
+        app.agents.nodes.insert(
+            stop_id.clone(),
+            agents::Node {
+                id: stop_id.clone(),
+                parent: Some(root.clone()),
+                name: "Cancelled run".into(),
+                cwd: app.prefs.cwd.clone(),
+                path: None,
+                access: "read-only".into(),
+                permission: Some(settings::PermissionMode::Plan),
+                status: "Stopped".into(),
+                last_activity: Some(now),
+                created: Some(now - Duration::from_secs(5)),
+                children: Vec::new(),
+                stopped: true,
+                reported: true,
+                needs_report: false,
+                settled: true,
+                launch: None,
+                failure: None,
+                result: None,
+                task: "Run audit.".into(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: true,
+                workflow_id: None,
+                model: None,
+                finished_at: Some(now),
+            },
+        );
+        app.agents
+            .parked
+            .insert(stop_id.clone(), agents::Chat::default());
+        app.background_tasks.open_agent(stop_id);
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.background_tasks_panel(ctx);
+            },
+        );
+        let mut texts = Vec::new();
+        for s in &out.shapes {
+            collect_texts(&s.shape, &mut texts);
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "No result. The agent was stopped."),
+            "Expected stopped empty fallback ({mode:?}): {texts:?}"
+        );
+
+        // 4. Fresh agent with no activity -> "No activity yet".
+        let fresh_id = "agent-empty-fresh".to_owned();
+        app.agents.nodes.insert(
+            fresh_id.clone(),
+            agents::Node {
+                id: fresh_id.clone(),
+                parent: Some(root.clone()),
+                name: "Queued run".into(),
+                cwd: app.prefs.cwd.clone(),
+                path: None,
+                access: "read-only".into(),
+                permission: Some(settings::PermissionMode::Plan),
+                status: "Queued".into(),
+                last_activity: Some(now),
+                created: Some(now),
+                children: Vec::new(),
+                stopped: false,
+                reported: false,
+                needs_report: true,
+                settled: false,
+                launch: None,
+                failure: None,
+                result: None,
+                task: "Wait to start.".into(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: true,
+                workflow_id: None,
+                model: None,
+                finished_at: None,
+            },
+        );
+        app.agents
+            .parked
+            .insert(fresh_id.clone(), agents::Chat::default());
+        app.background_tasks.open_agent(fresh_id);
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                app.background_tasks_panel(ctx);
+            },
+        );
+        let mut texts = Vec::new();
+        for s in &out.shapes {
+            collect_texts(&s.shape, &mut texts);
+        }
+        assert!(
+            texts.iter().any(|t| t == "No activity yet"),
+            "Expected empty activity fallback ({mode:?}): {texts:?}"
+        );
+    }
+}
+
+#[test]
+fn demo_workflow_includes_completed_background_agent_result_card() {
+    let (_ctx, mut app) = test_app();
+    app.demo_workflow();
+    let snap = app
+        .transcript
+        .visuals
+        .agent_cards
+        .get("agent-bg-demo-1")
+        .expect("demo_workflow should sync completed background agent card");
+    assert!(snap.is_background);
+    assert!(!snap.running && !snap.failed && !snap.stopped);
+    assert_eq!(snap.tool_uses, 3);
+    assert_eq!(snap.tokens, 14_200);
+    assert!(
+        snap.preview
+            .as_deref()
+            .is_some_and(|p| p.contains("Safe-Area Audit Summary"))
+    );
+    assert!(
+        app.state.messages.iter().any(|m| {
+            m.tools.iter().any(|t| {
+                t.name == "pui_background_agent" && t.agent_id.as_deref() == Some("agent-bg-demo-1")
+            })
+        }),
+        "demo_workflow should include an inline pui_background_agent tool card"
+    );
+}
+
+#[test]
+fn open_agent_transcript_action_routes_background_to_detail_view_and_session_to_child_chat() {
+    let (_ctx, mut app) = test_app();
+    let root = app.agents.active.clone();
+
+    let bg_res = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "spawn_background",
+                "name": "Background audit",
+                "task": "Inspect files."
+            }),
+        )
+        .expect("spawn background");
+    let bg_id = bg_res["agent_id"].as_str().unwrap().to_owned();
+
+    let sess_res = app
+        .agent_control(
+            &root,
+            &json!({
+                "action": "spawn",
+                "name": "Child session",
+                "task": "Work on feature.",
+                "access": "read-only"
+            }),
+        )
+        .expect("spawn session");
+    let sess_id = sess_res["agent_id"].as_str().unwrap().to_owned();
+
+    app.sync_workflow_cards();
+    assert!(
+        app.transcript
+            .visuals
+            .agent_cards
+            .get(&bg_id)
+            .is_some_and(|s| s.is_background && s.running)
+    );
+    assert!(
+        app.transcript
+            .visuals
+            .agent_cards
+            .get(&sess_id)
+            .is_some_and(|s| !s.is_background && s.running)
+    );
+
+    // Opening a background agent opens Detail View without changing active chat.
+    app.view_agent(&bg_id);
+    assert_eq!(app.agents.active, root);
+    assert!(app.background_tasks.open);
+    assert_eq!(
+        app.background_tasks.selected_agent.as_deref(),
+        Some(bg_id.as_str())
+    );
+
+    // Opening a sidebar child session switches to that child chat.
+    app.view_agent(&sess_id);
+    assert_eq!(app.agents.active, sess_id);
+}

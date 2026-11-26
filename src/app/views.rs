@@ -1026,6 +1026,10 @@ impl Pui {
                                 self.open_task_from_board(id, None);
                             }
                         }
+                        crate::transcript::TranscriptAction::OpenAgent(id) => {
+                            self.settings_open = false;
+                            self.view_agent(&id);
+                        }
                     }
                     ctx.request_repaint();
                 }

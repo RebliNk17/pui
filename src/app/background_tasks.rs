@@ -420,6 +420,7 @@ pub(super) fn is_node_failed(node: &agents::Node) -> bool {
 pub(super) struct ToolSummary {
     pub line: String,
     pub total: usize,
+    pub failed: usize,
 }
 
 pub(super) fn summarize_agent_tools(state: &State) -> ToolSummary {
@@ -508,7 +509,11 @@ pub(super) fn summarize_agent_tools(state: &State) -> ToolSummary {
     } else {
         parts.join(", ")
     };
-    ToolSummary { line, total }
+    ToolSummary {
+        line,
+        total,
+        failed,
+    }
 }
 
 impl Pui {

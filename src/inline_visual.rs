@@ -251,6 +251,22 @@ pub struct WorkflowCardSnapshot {
     pub cells: Vec<WorkflowCell>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentCardSnapshot {
+    pub id: String,
+    pub title: String,
+    pub is_background: bool,
+    pub running: bool,
+    pub failed: bool,
+    pub stopped: bool,
+    pub model: String,
+    pub tool_uses: usize,
+    pub tokens: u64,
+    pub elapsed_ms: u64,
+    pub preview: Option<String>,
+    pub error: Option<String>,
+}
+
 pub fn format_token_count(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -349,6 +365,7 @@ pub struct InlineVisualHost {
     page_textures: HashMap<String, (u64, TextureHandle)>,
     pub page_snapshots: PageSnapshots,
     pub workflow_cards: HashMap<String, WorkflowCardSnapshot>,
+    pub agent_cards: HashMap<String, AgentCardSnapshot>,
     svg_tx: mpsc::Sender<SvgCompleted>,
     svg_rx: mpsc::Receiver<SvgCompleted>,
     svg_pending: usize,
@@ -367,6 +384,7 @@ impl Default for InlineVisualHost {
             page_textures: HashMap::new(),
             page_snapshots: PageSnapshots::default(),
             workflow_cards: HashMap::new(),
+            agent_cards: HashMap::new(),
             svg_tx,
             svg_rx,
             svg_pending: 0,
@@ -505,6 +523,8 @@ impl InlineVisualHost {
 
     pub fn release_textures(&mut self) {
         let snapshots = self.page_snapshots.clone();
+        let workflow_cards = std::mem::take(&mut self.workflow_cards);
+        let agent_cards = std::mem::take(&mut self.agent_cards);
         #[cfg(target_os = "macos")]
         {
             self.live = None;
@@ -512,6 +532,8 @@ impl InlineVisualHost {
         }
         *self = Self::default();
         self.page_snapshots = snapshots;
+        self.workflow_cards = workflow_cards;
+        self.agent_cards = agent_cards;
     }
 
     /// Fetch or upload a cached GPU texture for a Browser preview card (`pui_open`).

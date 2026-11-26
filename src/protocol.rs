@@ -135,6 +135,10 @@ pub struct Tool {
     pub workflow_id: Option<String>,
     #[serde(default)]
     pub workflow_title: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -785,6 +789,7 @@ impl State {
                         tool.set_answers(result);
                         tool.set_open_result(result);
                         tool.set_workflow_result(result);
+                        tool.set_agent_result(result);
                     }
                     tool.finished = finished;
                     tool.failed = event["isError"] == true;
@@ -840,6 +845,7 @@ pub fn parse_history_iter<'a>(raw: impl IntoIterator<Item = &'a Value>) -> Vec<M
                 tool.set_answers(raw);
                 tool.set_open_result(raw);
                 tool.set_workflow_result(raw);
+                tool.set_agent_result(raw);
                 if tool.name == "codemode" {
                     tool.set_nested(raw);
                 }

@@ -527,6 +527,162 @@ pub(super) fn workflow_card(
     ui.add_space(6.0);
 }
 
+fn format_card_duration(ms: u64) -> String {
+    let secs = ms / 1000;
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Claude-style inline transcript card for a `pui_background_agent` or `pui_spawn_agent` call:
+/// icon, title + chevron, status + stats (`Done · 12 tool uses · 14.2k tok · 34s`, `Running…`,
+/// or red `Failed`), compact muted result preview when finished, and click-to-open.
+pub(super) fn agent_card(
+    ui: &mut egui::Ui,
+    tool: &Tool,
+    visuals: Option<&InlineVisualHost>,
+    action: &mut Option<TranscriptAction>,
+) {
+    let Some(agent_id) = tool.agent_id.as_deref() else {
+        return;
+    };
+    let colors = crate::theme::palette(ui.ctx());
+    let snap = visuals.and_then(|v| v.agent_cards.get(agent_id));
+    let is_background = snap
+        .map(|s| s.is_background)
+        .unwrap_or_else(|| tool.name == "pui_background_agent");
+    let title = snap
+        .map(|s| s.title.as_str())
+        .filter(|s| !s.is_empty())
+        .or(tool.agent_title.as_deref())
+        .unwrap_or(if is_background {
+            "Background subagent"
+        } else {
+            "Child session"
+        });
+
+    let icon_color = match snap {
+        Some(s) if s.failed => colors.red,
+        Some(s) if s.running => colors.accent,
+        _ => colors.muted,
+    };
+
+    let card_width = ui.available_width().clamp(240.0, 520.0);
+    ui.add_space(6.0);
+    let resp = egui::Frame::new()
+        .fill(colors.surface)
+        .stroke(Stroke::new(1.0_f32, colors.border))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width((card_width - 26.0).max(200.0));
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.horizontal(|ui| {
+                icons::inline(ui, Icon::Agents, icon_color);
+                ui.add(
+                    egui::Label::new(RichText::new(title).size(12.5).color(colors.text)).truncate(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("›").size(14.0).color(colors.dim));
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if let Some(s) = snap {
+                    let (status_label, status_color) = if s.running {
+                        ("Running…", colors.accent)
+                    } else if s.failed {
+                        ("Failed", colors.red)
+                    } else if s.stopped {
+                        ("Stopped", colors.dim)
+                    } else {
+                        ("Done", colors.muted)
+                    };
+                    ui.label(RichText::new(status_label).size(11.0).color(status_color));
+                    if s.tool_uses > 0 {
+                        let tools_label = if s.tool_uses == 1 {
+                            "· 1 tool use".to_owned()
+                        } else {
+                            format!("· {} tool uses", s.tool_uses)
+                        };
+                        ui.label(RichText::new(tools_label).size(11.0).color(colors.muted));
+                    }
+                    if s.tokens > 0 {
+                        ui.label(
+                            RichText::new(format!(
+                                "· {} tok",
+                                crate::inline_visual::format_token_count(s.tokens)
+                            ))
+                            .size(11.0)
+                            .color(colors.dim),
+                        );
+                    }
+                    if s.elapsed_ms > 0 || s.running {
+                        ui.label(
+                            RichText::new(format!("· {}", format_card_duration(s.elapsed_ms)))
+                                .size(11.0)
+                                .color(colors.dim),
+                        );
+                    }
+                    if s.running {
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs(1));
+                    }
+                } else {
+                    let fallback = if is_background {
+                        "Background subagent · open to inspect"
+                    } else {
+                        "Child session · open to inspect"
+                    };
+                    ui.label(RichText::new(fallback).size(11.0).color(colors.muted));
+                }
+            });
+            if let Some(s) = snap {
+                if s.failed
+                    && let Some(err) = s.error.as_deref().filter(|e| !e.trim().is_empty())
+                {
+                    ui.add_space(2.0);
+                    let mut job = egui::text::LayoutJob::simple(
+                        err.to_owned(),
+                        FontId::proportional(11.5),
+                        colors.red,
+                        ui.available_width(),
+                    );
+                    job.wrap.max_rows = 2;
+                    ui.add(egui::Label::new(job));
+                } else if !s.running
+                    && let Some(preview) = s.preview.as_deref().filter(|p| !p.trim().is_empty())
+                {
+                    ui.add_space(2.0);
+                    let mut job = egui::text::LayoutJob::simple(
+                        preview.to_owned(),
+                        FontId::proportional(11.5),
+                        colors.muted,
+                        ui.available_width(),
+                    );
+                    job.wrap.max_rows = 3;
+                    ui.add(egui::Label::new(job));
+                }
+            }
+        })
+        .response
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if is_background {
+            "Open subagent in Background tasks"
+        } else {
+            "Open child session"
+        });
+    if resp.clicked() {
+        *action = Some(TranscriptAction::OpenAgent(agent_id.to_owned()));
+    }
+    ui.add_space(6.0);
+}
+
 fn top_cover_uv(tex: Vec2, slot: Vec2) -> Rect {
     if tex.x <= 0.0 || tex.y <= 0.0 || slot.x <= 0.0 || slot.y <= 0.0 {
         return Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
