@@ -26,8 +26,8 @@ class BundleIdentityTests(unittest.TestCase):
             (scripts / name).write_text("")
         # Empty adapter files are sufficient: this tests packaging, not runtime content.
         for name in ("ultracode", "permissions", "compaction", "context", "titles", "rewind",
-                     "questions", "open", "visual", "shellenv", "workflows", "antigravity",
-                     "accounts", "model-fallback"):
+                     "questions", "open", "browser", "visual", "turn_ux", "pr_tools", "shellenv",
+                     "workflows", "antigravity", "accounts", "model-fallback"):
             (scripts / (name + ".ts")).touch()
         (scripts / "dictation.swift").touch()
         (root / "assets/pui-engineering").mkdir(parents=True)
