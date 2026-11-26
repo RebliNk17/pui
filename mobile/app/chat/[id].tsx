@@ -56,6 +56,7 @@ export default function ChatScreen() {
     clientOrigin,
     loadSessionDetail: loadSessionDetailFromStore,
     sendMessage: sendMessageFromStore,
+    removeQueuedMessage: removeQueuedMessageFromStore,
     setActiveChatPath,
     pendingShare,
     setPendingShare,
@@ -578,10 +579,9 @@ export default function ChatScreen() {
               models={detail?.models ?? []}
               slashCommands={slashCommands.length > 0 ? slashCommands : (detail?.commands ?? [])}
               waitingMessages={detail?.waiting_messages ?? []}
-              onRemoveQueued={async (index) => {
-                await transport?.removeQueuedMessage(sessionPath, index);
-                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 150);
-              }}
+              onRemoveQueued={(index) =>
+                removeQueuedMessageFromStore(sessionPath, resolvedHostId, index)
+              }
               onSteerQueued={async (index) => {
                 await transport?.steerQueuedMessage(sessionPath, index);
                 setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 150);

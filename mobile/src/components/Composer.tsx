@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Image,
   Modal,
@@ -92,6 +92,7 @@ export function Composer({
   onPreviewImage,
 }: Props) {
   const colors = usePalette();
+  const inputRef = useRef<React.ComponentRef<typeof TextInput> | null>(null);
   const [text, setText] = useState('');
   const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [images, setImages] = useState<DraftImage[]>([]);
@@ -338,37 +339,69 @@ export function Composer({
           <Text style={[styles.queueHeader, { color: colors.muted }]}>
             Waiting messages · {waitingMessages.length}
           </Text>
-          {waitingMessages.map((item) => (
-            <View
-              key={`${item.index}-${item.text.slice(0, 12)}`}
-              style={[styles.queueRow, { borderTopColor: colors.hairline }]}
-            >
-              <View style={[styles.queueTag, { backgroundColor: colors.accentBg }]}>
-                <Text style={{ color: colors.accent, fontSize: 10, fontWeight: '700' }}>
-                  {item.index < 0 ? 'Sending…' : item.mode === 'steer' ? 'Steer' : 'Queue'}
-                </Text>
-              </View>
-              <Text numberOfLines={2} style={[styles.queueText, { color: colors.text }]}>
-                {item.text || `${item.image_count} image(s)`}
-              </Text>
-              {item.index >= 0 && item.mode !== 'steer' && onSteerQueued ? (
+          {waitingMessages.map((item) => {
+            const isOptimistic = item.index < 0;
+            const handleEditQueued = () => {
+              if (isOptimistic) return;
+              const restored = item.text;
+              setText((cur) => (cur.trim() ? `${cur}\n${restored}` : restored));
+              if (sessionPath) void saveChatDraft(sessionPath, restored);
+              void onRemoveQueued?.(item.index);
+              setTimeout(() => inputRef.current?.focus(), 60);
+            };
+            return (
+              <View
+                key={`${item.index}-${item.text.slice(0, 12)}`}
+                style={[styles.queueRow, { borderTopColor: colors.hairline }]}
+              >
+                {isOptimistic || item.mode === 'steer' ? (
+                  <View style={[styles.queueTag, { backgroundColor: colors.accentBg }]}>
+                    <Text style={{ color: colors.accent, fontSize: 10, fontWeight: '700' }}>
+                      {isOptimistic ? 'Sending…' : 'Next'}
+                    </Text>
+                  </View>
+                ) : null}
                 <Pressable
-                  onPress={() => void onSteerQueued(item.index)}
-                  style={[styles.steerNowBtn, { borderColor: colors.border }]}
-                  hitSlop={6}
+                  onPress={handleEditQueued}
+                  disabled={isOptimistic}
+                  style={{ flex: 1 }}
                 >
-                  <Text style={{ color: colors.accent, fontSize: 10.5, fontWeight: '600' }}>
-                    Steer
+                  <Text numberOfLines={2} style={[styles.queueText, { color: colors.text }]}>
+                    {item.text || `${item.image_count} image(s)`}
                   </Text>
                 </Pressable>
-              ) : null}
-              {item.index >= 0 && onRemoveQueued ? (
-                <Pressable onPress={() => void onRemoveQueued(item.index)} hitSlop={8}>
-                  <Ionicons name="close" size={16} color={colors.dim} />
-                </Pressable>
-              ) : null}
-            </View>
-          ))}
+                {!isOptimistic && item.mode !== 'steer' && onSteerQueued ? (
+                  <Pressable
+                    onPress={() => void onSteerQueued(item.index)}
+                    style={[styles.steerNowBtn, { borderColor: colors.border }]}
+                    hitSlop={6}
+                  >
+                    <Text style={{ color: colors.accent, fontSize: 10.5, fontWeight: '600' }}>
+                      Send now
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {!isOptimistic && onRemoveQueued ? (
+                  <Pressable
+                    onPress={handleEditQueued}
+                    hitSlop={8}
+                    accessibilityLabel="Edit queued message"
+                  >
+                    <Ionicons name="pencil-outline" size={15} color={colors.muted} />
+                  </Pressable>
+                ) : null}
+                {!isOptimistic && onRemoveQueued ? (
+                  <Pressable
+                    onPress={() => void onRemoveQueued(item.index)}
+                    hitSlop={8}
+                    accessibilityLabel="Remove queued message"
+                  >
+                    <Ionicons name="close" size={16} color={colors.dim} />
+                  </Pressable>
+                ) : null}
+              </View>
+            );
+          })}
         </View>
       ) : null}
 
@@ -436,6 +469,7 @@ export function Composer({
         ) : null}
 
         <TextInput
+          ref={inputRef}
           value={text}
           onChangeText={(next) => {
             setText(next);

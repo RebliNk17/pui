@@ -117,6 +117,11 @@ export interface PuiContextValue {
       origin: SessionOrigin;
     },
   ) => Promise<void>;
+  removeQueuedMessage: (
+    path: string,
+    hostId: string | null | undefined,
+    index: number,
+  ) => Promise<void>;
   setActiveChatPath: (path: string | null) => void;
   pendingShare: SharedPayload | null;
   setPendingShare: (payload: SharedPayload | null) => void;
@@ -809,6 +814,29 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     [getTransportForHost, loadSessionDetail],
   );
 
+  const removeQueuedMessage = useCallback(
+    async (path: string, hostId: string | null | undefined, index: number): Promise<void> => {
+      const targetTransport = getTransportForHost(hostId);
+      if (!targetTransport) return;
+      // Optimistically remove from the queue immediately (0ms).
+      setDetailsByPath((prev) => {
+        const cur = prev[path];
+        if (!cur) return prev;
+        const next = (cur.waiting_messages ?? [])
+          .filter((w) => w.index !== index)
+          .map((w, i) => (w.index >= 0 ? { ...w, index: i } : w));
+        return { ...prev, [path]: { ...cur, waiting_messages: next } };
+      });
+      try {
+        await targetTransport.removeQueuedMessage(path, index);
+        setTimeout(() => void loadSessionDetail(path, hostId).catch(() => {}), 180);
+      } catch {
+        void loadSessionDetail(path, hostId).catch(() => {});
+      }
+    },
+    [getTransportForHost, loadSessionDetail],
+  );
+
   const value: PuiContextValue = {
     hosts,
     activeHost,
@@ -830,6 +858,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     refreshSessions,
     loadSessionDetail,
     sendMessage,
+    removeQueuedMessage,
     setActiveChatPath,
     pendingShare,
     setPendingShare,
