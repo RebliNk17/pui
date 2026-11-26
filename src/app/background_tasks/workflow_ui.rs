@@ -234,17 +234,18 @@ pub(super) fn render_dynamic_workflow_card(
                 }
 
                 // Collapsible Phase rows.
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.separator();
+                ui.add_space(2.0);
                 let show_tokens_col = ui.available_width() >= 310.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
                 for phase in &wf.phases {
-                    ui.add_space(4.0);
                     let open = expanded_phases.contains(&(wf.id.clone(), phase.index));
                     let (p_total, p_done, p_running, p_failed) = phase.counts();
                     let header_w = ui.available_width();
                     let header_resp = ui
                         .allocate_ui_with_layout(
-                            Vec2::new(header_w, 24.0),
+                            Vec2::new(header_w, 22.0),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 ui.set_max_width(header_w);
@@ -264,7 +265,7 @@ pub(super) fn render_dynamic_workflow_card(
                                 ui.add_space(6.0);
                                 let left_w = ui.available_width().max(40.0);
                                 ui.allocate_ui_with_layout(
-                                    Vec2::new(left_w, 24.0),
+                                    Vec2::new(left_w, 22.0),
                                     Layout::left_to_right(Align::Center),
                                     |ui| {
                                         ui.set_max_width(left_w);
@@ -357,9 +358,13 @@ pub(super) fn render_dynamic_workflow_card(
 
                     // Expanded Phase Agent table: `[glyph] | Agent | Tokens | Time` (`WIe`).
                     if open {
-                        ui.add_space(4.0);
+                        ui.add_space(2.0);
                         ui.indent(("wf-phase-table", &wf.id, phase.index), |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.spacing_mut().interact_size.y = 18.0;
                             let table_w = ui.available_width();
+                            let time_col_w = 64.0_f32;
+                            let tok_col_w = 46.0_f32;
                             // Column headers
                             ui.allocate_ui_with_layout(
                                 Vec2::new(table_w, 16.0),
@@ -367,7 +372,7 @@ pub(super) fn render_dynamic_workflow_card(
                                 |ui| {
                                     ui.set_max_width(table_w);
                                     ui.allocate_ui_with_layout(
-                                        Vec2::new(50.0, 16.0),
+                                        Vec2::new(time_col_w, 16.0),
                                         Layout::right_to_left(Align::Center),
                                         |ui| {
                                             ui.label(
@@ -380,7 +385,7 @@ pub(super) fn render_dynamic_workflow_card(
                                     if show_tokens_col {
                                         ui.add_space(6.0);
                                         ui.allocate_ui_with_layout(
-                                            Vec2::new(52.0, 16.0),
+                                            Vec2::new(tok_col_w, 16.0),
                                             Layout::right_to_left(Align::Center),
                                             |ui| {
                                                 ui.label(
@@ -407,15 +412,14 @@ pub(super) fn render_dynamic_workflow_card(
                                     );
                                 },
                             );
-                            ui.add_space(2.0);
                             for agent in &phase.agents {
                                 ui.allocate_ui_with_layout(
-                                    Vec2::new(table_w, 20.0),
+                                    Vec2::new(table_w, 19.0),
                                     Layout::right_to_left(Align::Center),
                                     |ui| {
                                         ui.set_max_width(table_w);
                                         ui.allocate_ui_with_layout(
-                                            Vec2::new(50.0, 20.0),
+                                            Vec2::new(time_col_w, 19.0),
                                             Layout::right_to_left(Align::Center),
                                             |ui| match agent.state {
                                                 WorkflowCellState::Error => {
@@ -455,7 +459,7 @@ pub(super) fn render_dynamic_workflow_card(
                                         if show_tokens_col {
                                             ui.add_space(6.0);
                                             ui.allocate_ui_with_layout(
-                                                Vec2::new(52.0, 20.0),
+                                                Vec2::new(tok_col_w, 19.0),
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
                                                     let tok = if agent.tokens > 0 {
@@ -474,7 +478,7 @@ pub(super) fn render_dynamic_workflow_card(
                                         ui.add_space(6.0);
                                         let left_w = ui.available_width().max(40.0);
                                         ui.allocate_ui_with_layout(
-                                            Vec2::new(left_w, 20.0),
+                                            Vec2::new(left_w, 19.0),
                                             Layout::left_to_right(Align::Center),
                                             |ui| {
                                                 ui.set_max_width(left_w);
@@ -482,7 +486,7 @@ pub(super) fn render_dynamic_workflow_card(
                                                 let clickable = agent.agent_id.is_some();
                                                 let resp = ui
                                                     .add(
-                                                        egui::Button::new(
+                                                        egui::Label::new(
                                                             RichText::new(&agent.label)
                                                                 .size(11.0)
                                                                 .color(if clickable {
@@ -492,7 +496,11 @@ pub(super) fn render_dynamic_workflow_card(
                                                                 }),
                                                         )
                                                         .truncate()
-                                                        .frame(false),
+                                                        .sense(if clickable {
+                                                            Sense::click()
+                                                        } else {
+                                                            Sense::hover()
+                                                        }),
                                                     )
                                                     .on_hover_cursor(if clickable {
                                                         egui::CursorIcon::PointingHand
@@ -513,12 +521,12 @@ pub(super) fn render_dynamic_workflow_card(
                                 );
                             }
                         });
+                        ui.add_space(2.0);
                     }
                 }
 
                 // Optional verification Checks phase.
                 if !wf.checks.is_empty() {
-                    ui.add_space(4.0);
                     let check_phase_idx = wf.phases.len();
                     let open = expanded_phases.contains(&(wf.id.clone(), check_phase_idx));
                     let c_done = wf
@@ -534,7 +542,7 @@ pub(super) fn render_dynamic_workflow_card(
                     let header_w = ui.available_width();
                     let resp = ui
                         .allocate_ui_with_layout(
-                            Vec2::new(header_w, 24.0),
+                            Vec2::new(header_w, 22.0),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 ui.set_max_width(header_w);
