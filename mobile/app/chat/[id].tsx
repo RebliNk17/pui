@@ -32,6 +32,11 @@ import { usePui } from '../../src/store/connectionStore';
 import { usePreferences } from '../../src/store/preferencesStore';
 import { usePalette } from '../../src/theme/colors';
 import { findMatchingEntryIndices } from '../../src/utils/search';
+import {
+  collectChatGalleryImages,
+  type GalleryImage,
+  isImageFilePath,
+} from '../../src/utils/imageZoom';
 import { descendantsOfSession } from '../../src/utils/sessions';
 import { groupTranscript } from '../../src/utils/transcript';
 
@@ -72,7 +77,10 @@ export default function ChatScreen() {
   const detail = detailsByPath[sessionPath];
   const [tab, setTab] = useState<Tab>('chat');
   const [slashCommands, setSlashCommands] = useState<SlashCommandItem[]>([]);
-  const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
+  const [previewGallery, setPreviewGallery] = useState<{
+    images: GalleryImage[];
+    initialIndex: number;
+  } | null>(null);
   const [fileToOpen, setFileToOpen] = useState<string | null>(null);
   const [usageOpen, setUsageOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -195,9 +203,6 @@ export default function ChatScreen() {
     { key: 'bypassPermissions', label: 'Bypass' },
   ];
 
-  const isImageTarget = (target: string): boolean =>
-    /\.(png|jpe?g|gif|webp|bmp)$/i.test(target.split(/[?#]/)[0] ?? '');
-
   const resolveChatImageUri = useCallback(
     (src: string): string | null => {
       const trimmed = src.trim();
@@ -209,13 +214,27 @@ export default function ChatScreen() {
     [transport, cwd],
   );
 
+  const chatGallery = useMemo(
+    () => collectChatGalleryImages(detail?.messages ?? [], resolveChatImageUri),
+    [detail?.messages, resolveChatImageUri],
+  );
+
+  const openGalleryImage = useCallback(
+    (uri: string, imgTitle?: string) => {
+      const idx = chatGallery.findIndex((item) => item.uri === uri);
+      if (idx >= 0) {
+        setPreviewGallery({ images: chatGallery, initialIndex: idx });
+      } else {
+        setPreviewGallery({ images: [{ uri, title: imgTitle }], initialIndex: 0 });
+      }
+    },
+    [chatGallery],
+  );
+
   const openFileInTree = (target: string) => {
-    if (transport && isImageTarget(target)) {
+    if (transport && isImageFilePath(target)) {
       const label = target.split('/').pop() || target;
-      setPreviewImage({
-        uri: transport.getRawFileUrl(cwd, target),
-        title: label,
-      });
+      openGalleryImage(transport.getRawFileUrl(cwd, target), label);
       return;
     }
     setFileToOpen(target);
@@ -223,8 +242,8 @@ export default function ChatScreen() {
   };
 
   const handleNavigateBack = useCallback((): boolean => {
-    if (previewImage) {
-      setPreviewImage(null);
+    if (previewGallery) {
+      setPreviewGallery(null);
       return true;
     }
     if (menuOpen) {
@@ -246,7 +265,7 @@ export default function ChatScreen() {
       return true;
     }
     return false;
-  }, [previewImage, menuOpen, usageOpen, tab, findOpen]);
+  }, [previewGallery, menuOpen, usageOpen, tab, findOpen]);
 
   // Intercept Android swipe-back / hardware back so leaving Files/Artifacts/Changes
   // returns to the chat that opened them instead of popping all the way to the chat list.
@@ -451,7 +470,7 @@ export default function ChatScreen() {
                           hasRunning={item.hasRunning}
                           hasError={item.hasError}
                           verbose={verbose}
-                          onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                          onOpenImage={openGalleryImage}
                         />
                       );
                     }
@@ -460,7 +479,7 @@ export default function ChatScreen() {
                         <MessageBubble
                           message={item.message}
                           highlighted={isHit}
-                          onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                          onOpenImage={openGalleryImage}
                           onOpenFileTarget={openFileInTree}
                           resolveImageUri={resolveChatImageUri}
                         />
@@ -471,7 +490,7 @@ export default function ChatScreen() {
                         message={item.message}
                         inlineTools={item.inlineTools}
                         highlighted={isHit}
-                        onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+                        onOpenImage={openGalleryImage}
                         onOpenFileTarget={openFileInTree}
                         resolveImageUri={resolveChatImageUri}
                       />
@@ -607,7 +626,7 @@ export default function ChatScreen() {
               onLocalCommand={(name) => {
                 if (name === 'files') setTab('files');
               }}
-              onPreviewImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+              onPreviewImage={openGalleryImage}
             />
           </>
         ) : tab === 'artifacts' ? (
@@ -615,7 +634,7 @@ export default function ChatScreen() {
             cwd={cwd}
             artifacts={artifacts}
             transport={transport}
-            onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+            onOpenImage={openGalleryImage}
             onOpenFile={openFileInTree}
           />
         ) : tab === 'files' ? (
@@ -623,7 +642,7 @@ export default function ChatScreen() {
             cwd={cwd}
             transport={transport}
             initialFilePath={fileToOpen}
-            onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+            onOpenImage={openGalleryImage}
             onCloseDirectFile={
               fileToOpen
                 ? () => {
@@ -773,9 +792,9 @@ export default function ChatScreen() {
       />
 
       <ImageModal
-        uri={previewImage?.uri ?? null}
-        title={previewImage?.title}
-        onClose={() => setPreviewImage(null)}
+        images={previewGallery?.images}
+        initialIndex={previewGallery?.initialIndex}
+        onClose={() => setPreviewGallery(null)}
       />
     </SafeAreaView>
   );

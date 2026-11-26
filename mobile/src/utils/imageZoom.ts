@@ -14,6 +14,21 @@ export interface Point {
   y: number;
 }
 
+export interface GalleryImage {
+  uri: string;
+  title?: string;
+}
+
+export interface GalleryMessageInput {
+  text?: string;
+  images?: { data: string; mime: string; file?: { name: string } | null }[];
+  tools?: {
+    name?: string;
+    open_target?: string | null;
+    images?: { data: string; mime: string; file?: { name: string } | null }[];
+  }[];
+}
+
 export function clampScale(scale: number): number {
   if (!Number.isFinite(scale)) return MIN_ZOOM_SCALE;
   return Math.min(MAX_ZOOM_SCALE, Math.max(MIN_ZOOM_SCALE, scale));
@@ -85,4 +100,93 @@ export function touchDistance(a: Point, b: Point): number {
 
 export function touchMidpoint(a: Point, b: Point): Point {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+const MD_IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+
+export function isImageFilePath(target: string): boolean {
+  return IMAGE_EXT_RE.test((target.split(/[?#]/)[0] ?? '').trim());
+}
+
+/**
+ * Collect all unique images across a chat transcript in chronological order:
+ * user/assistant attached images, inline Markdown images, tool-result images,
+ * and `pui_open` image targets.
+ */
+export function collectChatGalleryImages(
+  messages: GalleryMessageInput[],
+  resolveLocalUri: (src: string) => string | null,
+): GalleryImage[] {
+  const out: GalleryImage[] = [];
+  const seen = new Set<string>();
+  const push = (uri: string | null | undefined, title?: string) => {
+    if (!uri || seen.has(uri)) return;
+    seen.add(uri);
+    out.push({ uri, title });
+  };
+
+  for (const msg of messages) {
+    if (msg.images) {
+      msg.images.forEach((img, idx) => {
+        if (img.data) {
+          push(
+            `data:${img.mime || 'image/png'};base64,${img.data}`,
+            img.file?.name || `Image ${idx + 1}`,
+          );
+        }
+      });
+    }
+    if (msg.text) {
+      MD_IMAGE_RE.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = MD_IMAGE_RE.exec(msg.text)) !== null) {
+        const alt = (match[1] ?? '').trim();
+        const rawSrc = (match[2] ?? '').trim().replace(/^<|>$/g, '');
+        if (!rawSrc) continue;
+        const uri = resolveLocalUri(rawSrc);
+        const fallbackName = rawSrc.split('/').pop() || rawSrc;
+        push(uri, alt || fallbackName);
+      }
+    }
+    if (msg.tools) {
+      for (const tool of msg.tools) {
+        if (tool.images) {
+          tool.images.forEach((img) => {
+            if (img.data) {
+              push(
+                `data:${img.mime || 'image/png'};base64,${img.data}`,
+                img.file?.name || `${tool.name || 'Tool'} image`,
+              );
+            }
+          });
+        }
+        if (tool.open_target && isImageFilePath(tool.open_target)) {
+          const uri = resolveLocalUri(tool.open_target);
+          const label = tool.open_target.split('/').pop() || tool.open_target;
+          push(uri, label);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Decide whether a horizontal release at 1x zoom should page next, prev, or snap back. */
+export function resolveSwipeAction(
+  dx: number,
+  vx: number,
+  viewportWidth: number,
+  currentIndex: number,
+  total: number,
+): 'next' | 'prev' | 'stay' {
+  if (total <= 1) return 'stay';
+  const threshold = Math.min(80, Math.max(40, viewportWidth * 0.2));
+  if ((dx < -threshold || (dx < -20 && vx < -0.45)) && currentIndex < total - 1) {
+    return 'next';
+  }
+  if ((dx > threshold || (dx > 20 && vx > 0.45)) && currentIndex > 0) {
+    return 'prev';
+  }
+  return 'stay';
 }
