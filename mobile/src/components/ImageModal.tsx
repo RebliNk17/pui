@@ -40,8 +40,10 @@ export function ImageModal({ uri, title, onClose }: Props) {
   const tyAnim = useRef(new Animated.Value(0)).current;
 
   const stateRef = useRef<ZoomState>({ scale: MIN_ZOOM_SCALE, tx: 0, ty: 0 });
-  const viewportRef = useRef({ width: 0, height: 0 });
+  const stageRef = useRef<React.ComponentRef<typeof View> | null>(null);
+  const viewportRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
   const [zoomPercent, setZoomPercent] = useState(100);
+  const shownPercentRef = useRef(100);
 
   // Gesture bookkeeping refs (never trigger React re-renders per frame).
   const modeRef = useRef<'none' | 'pan' | 'pinch'>('none');
@@ -55,21 +57,29 @@ export function ImageModal({ uri, title, onClose }: Props) {
   const movedRef = useRef(false);
   const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
 
+  const syncPercent = useCallback((scale: number, force = false) => {
+    const pct = Math.round(scale * 100);
+    if (force || Math.abs(pct - shownPercentRef.current) >= 5) {
+      shownPercentRef.current = pct;
+      setZoomPercent(pct);
+    }
+  }, []);
+
   const applyImmediate = useCallback(
-    (next: ZoomState) => {
+    (next: ZoomState, forcePercent = false) => {
       stateRef.current = next;
       scaleAnim.setValue(next.scale);
       txAnim.setValue(next.tx);
       tyAnim.setValue(next.ty);
-      setZoomPercent(Math.round(next.scale * 100));
+      syncPercent(next.scale, forcePercent);
     },
-    [scaleAnim, txAnim, tyAnim],
+    [scaleAnim, txAnim, tyAnim, syncPercent],
   );
 
   const animateTo = useCallback(
     (next: ZoomState) => {
       stateRef.current = next;
-      setZoomPercent(Math.round(next.scale * 100));
+      syncPercent(next.scale, true);
       Animated.parallel([
         Animated.timing(scaleAnim, {
           toValue: next.scale,
@@ -88,28 +98,42 @@ export function ImageModal({ uri, title, onClose }: Props) {
         }),
       ]).start();
     },
-    [scaleAnim, txAnim, tyAnim],
+    [scaleAnim, txAnim, tyAnim, syncPercent],
   );
 
   // Reset zoom cleanly whenever a different image opens or the modal closes.
   useEffect(() => {
-    applyImmediate({ scale: MIN_ZOOM_SCALE, tx: 0, ty: 0 });
+    applyImmediate({ scale: MIN_ZOOM_SCALE, tx: 0, ty: 0 }, true);
     lastTapRef.current = null;
     modeRef.current = 'none';
   }, [uri, applyImmediate]);
 
+  const measureStageOrigin = useCallback(() => {
+    stageRef.current?.measureInWindow((x, y, width, height) => {
+      if (width > 0 && height > 0) {
+        viewportRef.current = { x, y, width, height };
+      }
+    });
+  }, []);
+
   const handleStageLayout = useCallback(
     (e: LayoutChangeEvent) => {
       const { width, height } = e.nativeEvent.layout;
-      viewportRef.current = { width, height };
+      viewportRef.current = { ...viewportRef.current, width, height };
+      measureStageOrigin();
       const cur = stateRef.current;
       const clamped = clampTranslation(cur.tx, cur.ty, cur.scale, width, height);
       if (clamped.tx !== cur.tx || clamped.ty !== cur.ty) {
-        applyImmediate({ scale: cur.scale, tx: clamped.tx, ty: clamped.ty });
+        applyImmediate({ scale: cur.scale, tx: clamped.tx, ty: clamped.ty }, true);
       }
     },
-    [applyImmediate],
+    [applyImmediate, measureStageOrigin],
   );
+
+  const touchToStagePoint = useCallback((touch: { pageX: number; pageY: number }) => {
+    const vp = viewportRef.current;
+    return { x: touch.pageX - vp.x, y: touch.pageY - vp.y };
+  }, []);
 
   const handleZoomButton = useCallback(
     (direction: 'in' | 'out') => {
@@ -130,16 +154,19 @@ export function ImageModal({ uri, title, onClose }: Props) {
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
+        onStartShouldSetPanResponderCapture: () => true,
         onMoveShouldSetPanResponder: (_, gs) =>
           gs.numberActiveTouches >= 2 ||
           (stateRef.current.scale > MIN_ZOOM_SCALE + 0.01 &&
             (Math.abs(gs.dx) > 2 || Math.abs(gs.dy) > 2)),
+        onMoveShouldSetPanResponderCapture: (_, gs) => gs.numberActiveTouches >= 2,
+        onPanResponderTerminationRequest: () => false,
         onPanResponderGrant: (evt) => {
           movedRef.current = false;
           const touches = evt.nativeEvent.touches;
           if (touches.length >= 2) {
-            const p0 = { x: touches[0].locationX, y: touches[0].locationY };
-            const p1 = { x: touches[1].locationX, y: touches[1].locationY };
+            const p0 = touchToStagePoint(touches[0]);
+            const p1 = touchToStagePoint(touches[1]);
             const mid = touchMidpoint(p0, p1);
             modeRef.current = 'pinch';
             pinchStartRef.current = {
@@ -163,8 +190,8 @@ export function ImageModal({ uri, title, onClose }: Props) {
           const { width, height } = viewportRef.current;
           if (touches.length >= 2) {
             movedRef.current = true;
-            const p0 = { x: touches[0].locationX, y: touches[0].locationY };
-            const p1 = { x: touches[1].locationX, y: touches[1].locationY };
+            const p0 = touchToStagePoint(touches[0]);
+            const p1 = touchToStagePoint(touches[1]);
             const dist = Math.max(1, touchDistance(p0, p1));
             const mid = touchMidpoint(p0, p1);
             if (modeRef.current !== 'pinch') {
@@ -231,19 +258,19 @@ export function ImageModal({ uri, title, onClose }: Props) {
           const wasPinch = modeRef.current === 'pinch';
           modeRef.current = 'none';
           const cur = stateRef.current;
+          syncPercent(cur.scale, true);
           if (cur.scale < 1.03 && (cur.scale !== MIN_ZOOM_SCALE || cur.tx !== 0 || cur.ty !== 0)) {
             animateTo({ scale: MIN_ZOOM_SCALE, tx: 0, ty: 0 });
             return;
           }
           if (!wasPinch && !movedRef.current) {
             const now = Date.now();
-            const tapX = evt.nativeEvent.locationX;
-            const tapY = evt.nativeEvent.locationY;
+            const tap = touchToStagePoint(evt.nativeEvent);
             const prev = lastTapRef.current;
             if (
               prev &&
               now - prev.time <= DOUBLE_TAP_WINDOW_MS &&
-              Math.hypot(tapX - prev.x, tapY - prev.y) <= DOUBLE_TAP_MAX_DIST
+              Math.hypot(tap.x - prev.x, tap.y - prev.y) <= DOUBLE_TAP_MAX_DIST
             ) {
               lastTapRef.current = null;
               if (cur.scale > MIN_ZOOM_SCALE + 0.05) {
@@ -253,23 +280,24 @@ export function ImageModal({ uri, title, onClose }: Props) {
                 const next = zoomAroundFocalPoint(
                   cur,
                   DOUBLE_TAP_ZOOM_SCALE,
-                  tapX,
-                  tapY,
+                  tap.x,
+                  tap.y,
                   width,
                   height,
                 );
                 animateTo(next);
               }
             } else {
-              lastTapRef.current = { time: now, x: tapX, y: tapY };
+              lastTapRef.current = { time: now, x: tap.x, y: tap.y };
             }
           }
         },
         onPanResponderTerminate: () => {
           modeRef.current = 'none';
+          syncPercent(stateRef.current.scale, true);
         },
       }),
-    [animateTo, applyImmediate],
+    [animateTo, applyImmediate, syncPercent, touchToStagePoint],
   );
 
   const canZoomOut = zoomPercent > Math.round(MIN_ZOOM_SCALE * 100);
@@ -288,6 +316,8 @@ export function ImageModal({ uri, title, onClose }: Props) {
         </View>
 
         <View
+          ref={stageRef}
+          collapsable={false}
           style={styles.stage}
           onLayout={handleStageLayout}
           {...panResponder.panHandlers}
