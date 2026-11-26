@@ -198,6 +198,17 @@ export default function ChatScreen() {
   const isImageTarget = (target: string): boolean =>
     /\.(png|jpe?g|gif|webp|bmp)$/i.test(target.split(/[?#]/)[0] ?? '');
 
+  const resolveChatImageUri = useCallback(
+    (src: string): string | null => {
+      const trimmed = src.trim();
+      if (!trimmed) return null;
+      if (/^(https?:\/\/|data:image\/)/i.test(trimmed)) return trimmed;
+      if (!transport) return null;
+      return transport.getRawFileUrl(cwd, trimmed);
+    },
+    [transport, cwd],
+  );
+
   const openFileInTree = (target: string) => {
     if (transport && isImageTarget(target)) {
       const label = target.split('/').pop() || target;
@@ -451,6 +462,7 @@ export default function ChatScreen() {
                           highlighted={isHit}
                           onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
                           onOpenFileTarget={openFileInTree}
+                          resolveImageUri={resolveChatImageUri}
                         />
                       );
                     }
@@ -461,6 +473,7 @@ export default function ChatScreen() {
                         highlighted={isHit}
                         onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
                         onOpenFileTarget={openFileInTree}
+                        resolveImageUri={resolveChatImageUri}
                       />
                     );
                   }}

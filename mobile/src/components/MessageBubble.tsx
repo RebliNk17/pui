@@ -114,6 +114,7 @@ interface Props {
   inlineTools?: ToolRecord[];
   onOpenImage: (uri: string, title?: string) => void;
   onOpenFileTarget: (target: string) => void;
+  resolveImageUri?: (src: string) => string | null;
 }
 
 export function MessageBubble({
@@ -122,6 +123,7 @@ export function MessageBubble({
   highlighted = false,
   onOpenImage,
   onOpenFileTarget,
+  resolveImageUri,
 }: Props & { highlighted?: boolean }) {
   const colors = usePalette();
   const isUser = message.role === 'user';
@@ -215,7 +217,14 @@ export function MessageBubble({
         },
       ]}
     >
-      {message.text ? <MarkdownView text={message.text} colors={colors} /> : null}
+      {message.text ? (
+        <MarkdownView
+          text={message.text}
+          colors={colors}
+          resolveImageUri={resolveImageUri}
+          onOpenImage={onOpenImage}
+        />
+      ) : null}
       {message.text.trim() ? (
         <View style={styles.msgActionRow}>
           <Pressable
@@ -274,7 +283,19 @@ export function MessageBubble({
               { backgroundColor: colors.surface, borderColor: colors.border },
             ]}
           >
-            <Ionicons name="document-text-outline" size={15} color={colors.accent} />
+            <Ionicons
+              name={
+                /\.(png|jpe?g|gif|webp|bmp)$/i.test(tool.open_target)
+                  ? 'image-outline'
+                  : 'document-text-outline'
+              }
+              size={15}
+              color={
+                /\.(png|jpe?g|gif|webp|bmp)$/i.test(tool.open_target)
+                  ? colors.green
+                  : colors.accent
+              }
+            />
             <Text numberOfLines={1} style={[styles.artifactChipText, { color: colors.text }]}>
               {tool.open_target}
             </Text>

@@ -769,11 +769,75 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+fn extract_markdown_local_images(text: &str) -> Vec<(String, String)> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let mut found = Vec::new();
+    let mut active_url: Option<String> = None;
+    let mut alt = String::new();
+    for event in Parser::new(text) {
+        match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                active_url = Some(dest_url.to_string());
+                alt.clear();
+            }
+            Event::Text(t) | Event::Code(t) if active_url.is_some() => {
+                alt.push_str(&t);
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(url) = active_url.take() {
+                    let trimmed = url.trim();
+                    let lower = trimmed.to_ascii_lowercase();
+                    let is_remote = lower.starts_with("http://")
+                        || lower.starts_with("https://")
+                        || lower.starts_with("data:");
+                    if !trimmed.is_empty()
+                        && !is_remote
+                        && files::is_image_path(std::path::Path::new(trimmed))
+                    {
+                        found.push((trimmed.to_owned(), alt.trim().to_owned()));
+                    }
+                }
+                alt.clear();
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
 pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<PathBuf>) {
     let mut artifacts = Vec::new();
     let mut allowed_paths = BTreeSet::new();
 
     for (msg_idx, msg) in messages.iter().enumerate() {
+        for (md_idx, (img_path, alt)) in extract_markdown_local_images(&msg.text)
+            .into_iter()
+            .enumerate()
+        {
+            let target_path = PathBuf::from(&img_path);
+            let is_new = allowed_paths.insert(target_path.clone());
+            if is_new {
+                let title = if !alt.is_empty() {
+                    alt
+                } else {
+                    target_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| img_path.clone())
+                };
+                artifacts.push(ArtifactItem {
+                    id: format!("md-img-{msg_idx}-{md_idx}"),
+                    kind: "image".into(),
+                    title,
+                    html: None,
+                    height: None,
+                    path: Some(img_path),
+                    mime: Some(files::mime_for_path(&target_path).into()),
+                    data_base64: None,
+                    message_index: msg_idx,
+                });
+            }
+        }
         for (img_idx, img) in msg.images.iter().enumerate() {
             if let Some(f) = &img.file {
                 allowed_paths.insert(f.path.clone());

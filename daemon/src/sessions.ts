@@ -183,8 +183,32 @@ export function forkSessionFile(sourcePath: string, origin?: SessionOrigin): str
 
 export function extractArtifacts(messages: MessageRecord[]): ArtifactItem[] {
   const out: ArtifactItem[] = [];
+  const seenPaths = new Set<string>();
   let seq = 0;
   messages.forEach((msg, mIdx) => {
+    if (msg.text) {
+      const mdImgRe = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+      let m: RegExpExecArray | null;
+      while ((m = mdImgRe.exec(msg.text)) !== null) {
+        const alt = (m[1] || '').trim();
+        const rawTarget = (m[2] || '').trim().replace(/^<|>$/g, '');
+        if (
+          rawTarget &&
+          !/^(https?:\/\/|data:)/i.test(rawTarget) &&
+          /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(rawTarget) &&
+          !seenPaths.has(rawTarget)
+        ) {
+          seenPaths.add(rawTarget);
+          out.push({
+            id: `art-${seq++}`,
+            kind: 'image',
+            title: alt || path.basename(rawTarget) || rawTarget,
+            path: rawTarget,
+            message_index: mIdx,
+          });
+        }
+      }
+    }
     for (const tool of msg.tools) {
       if (tool.visual) {
         out.push({

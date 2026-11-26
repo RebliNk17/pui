@@ -549,10 +549,12 @@ fn saved_session_pui_open_artifacts_outside_workspace_stay_readable_after_snapsh
     let workspace = dir.join("repo");
     std::fs::create_dir_all(&workspace).unwrap();
     let artifact_png = dir.join("pui-feat-workflow.png");
+    let inline_md_png = dir.join("pui-feat-inline-md.png");
     // Minimal valid PNG header bytes.
     std::fs::write(&artifact_png, b"\x89PNG\r\n\x1a\nfake-png-bytes").unwrap();
+    std::fs::write(&inline_md_png, b"\x89PNG\r\n\x1a\ninline-md-png-bytes").unwrap();
 
-    // Write a saved session JSONL containing a pui_open tool call referencing the /tmp PNG.
+    // Write a saved session JSONL containing both a pui_open tool call and an inline Markdown image.
     let session_file = dir.join("saved-session.jsonl");
     let session_lines = [
         json!({
@@ -569,12 +571,18 @@ fn saved_session_pui_open_artifacts_outside_workspace_stay_readable_after_snapsh
             "timestamp": "2026-11-26T09:00:01Z",
             "message": {
                 "role": "assistant",
-                "content": [{
-                    "type": "toolCall",
-                    "id": "tc-1",
-                    "name": "pui_open",
-                    "arguments": { "target": artifact_png.to_string_lossy() }
-                }]
+                "content": [
+                    {
+                        "type": "text",
+                        "text": format!("Here is the screenshot:\n\n![Inline workflow]({})", inline_md_png.to_string_lossy())
+                    },
+                    {
+                        "type": "toolCall",
+                        "id": "tc-1",
+                        "name": "pui_open",
+                        "arguments": { "target": artifact_png.to_string_lossy() }
+                    }
+                ]
             }
         })
         .to_string(),
@@ -674,6 +682,17 @@ fn saved_session_pui_open_artifacts_outside_workspace_stay_readable_after_snapsh
     );
     assert_eq!(code, 200);
     assert!(raw_body.contains("fake-png-bytes"));
+
+    // Inline Markdown image (`![Inline workflow](/tmp/...)`) is also authorized and served.
+    let md_art_q = http::percent_encode(&inline_md_png.to_string_lossy());
+    let (code, md_raw_body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/files/raw?cwd={cwd_q}&path={md_art_q} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(md_raw_body.contains("inline-md-png-bytes"));
 
     server.stop_listener();
     let _ = std::fs::remove_dir_all(&dir);
