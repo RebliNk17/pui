@@ -265,6 +265,7 @@ impl Process {
             .collect(),
             readonly: false,
             worker: true,
+            family_notes_dir: None,
             task_role: Some("checks".into()),
             settings,
         };

@@ -1104,12 +1104,16 @@ impl Pui {
                     ctx.clone(),
                 ));
             } else {
+                let family_notes_dir = (!self.agents.active.is_empty())
+                    .then(|| self.family_notes_dir(&self.agents.active))
+                    .flatten();
                 self.client = Some(rpc::Client::start_with(
                     &self.prefs.cwd,
                     session.as_deref(),
                     ctx.clone(),
                     rpc::Launch {
                         settings: self.agent_settings(&self.agents.active).payload(),
+                        family_notes_dir,
                         ..Default::default()
                     },
                 ));

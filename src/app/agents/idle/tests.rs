@@ -188,7 +188,7 @@ fn running_tools_compaction_questions_queue_reports_and_dependencies_never_expir
             9 => {
                 app.agents
                     .mail
-                    .insert("pending".into(), (child.clone(), None));
+                    .insert("pending".into(), (child.clone(), Vec::new()));
             }
             10 => {
                 let other = spawn(&mut app, &parent);

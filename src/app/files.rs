@@ -1659,15 +1659,20 @@ impl Pui {
 
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
         // Keep remote web links with the OS/default browser. Only local
-        // development previews, files, and internal terminal deep links are
-        // captured by Pui.
+        // development previews, files, and internal terminal/session deep links
+        // are captured by Pui.
         let mut targets: Vec<(String, Option<usize>)> = Vec::new();
         let mut terminal_tabs: Vec<String> = Vec::new();
+        let mut agent_links: Vec<String> = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| {
                 if let egui::OutputCommand::OpenUrl(url) = command {
                     if let Some(tab_id) = crate::markdown::parse_terminal_link(&url.url) {
                         terminal_tabs.push(tab_id.to_owned());
+                        return false;
+                    }
+                    if let Some(agent_id) = crate::markdown::parse_agent_link(&url.url) {
+                        agent_links.push(agent_id.to_owned());
                         return false;
                     }
                     if cfg!(target_os = "macos") && super::webview::local_preview_url(&url.url) {
@@ -1709,6 +1714,15 @@ impl Pui {
                 self.settings_open = false;
             } else {
                 self.state.notice = Some(format!("Terminal tab '{tab_id}' is no longer open."));
+            }
+            ctx.request_repaint();
+        }
+        for agent_id in agent_links {
+            if self.agents.nodes.contains_key(&agent_id) {
+                self.settings_open = false;
+                self.view_agent(&agent_id);
+            } else {
+                self.state.notice = Some(format!("Session '{agent_id}' is no longer open."));
             }
             ctx.request_repaint();
         }

@@ -1431,7 +1431,7 @@ fn assistant_with_media(
                     inline_cards::workflow_card(ui, tool, visuals.as_deref(), action);
                 } else if matches!(
                     tool.name.as_str(),
-                    "pui_background_agent" | "pui_spawn_agent"
+                    "pui_background_agent" | "pui_spawn_agent" | "pui_handoff_session"
                 ) && !tool.failed
                     && tool.agent_id.is_some()
                 {
@@ -1541,7 +1541,7 @@ fn assistant_with_media(
                                 inline_cards::workflow_card(ui, tool, visuals.as_deref(), action);
                             } else if matches!(
                                 tool.name.as_str(),
-                                "pui_background_agent" | "pui_spawn_agent"
+                                "pui_background_agent" | "pui_spawn_agent" | "pui_handoff_session"
                             ) && !tool.failed
                                 && tool.agent_id.is_some()
                             {

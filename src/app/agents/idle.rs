@@ -41,7 +41,13 @@ impl Pui {
                 .agents
                 .mail
                 .values()
-                .any(|(target, report)| target == id || report.as_deref() == Some(id))
+                .any(|(target, reports)| target == id || reports.iter().any(|r| r == id))
+            || self.agents.pending_side_reports.contains_key(id)
+            || self
+                .agents
+                .pending_side_reports
+                .values()
+                .any(|reports| reports.iter().any(|r| r.agent_id == id))
             || self
                 .agents
                 .waits

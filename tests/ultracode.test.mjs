@@ -229,3 +229,40 @@ test('background subagent and background shell tools route to host and enforce p
   await assert.rejects(() => ro.tools.get('pui_background_agent').execute('call', { name: 'a', task: 'b' }, undefined, null, ro.ctx), /cannot create subagents/);
   await assert.rejects(() => ro.tools.get('pui_background_bash').execute('call', { command: 'echo hi' }, undefined, null, ro.ctx), /cannot run background shell/);
 });
+test('pui_spawn_agent supports context fork and pui_handoff_session routes handoff with proper guards', async () => {
+  const h = await host();
+  Object.assign(h.ctx, { cwd: tmpdir(), hasUI: true });
+  assert.ok(h.active().includes('pui_handoff_session'));
+
+  // System prompt documents context fork, handoff, family_notes_dir, and #agent links.
+  const { systemPrompt } = await h.events.get('before_agent_start')({ systemPrompt: 'base' });
+  assert.match(systemPrompt, /context: "fork"/);
+  assert.match(systemPrompt, /pui_handoff_session/);
+  assert.match(systemPrompt, /family_notes_dir/);
+  assert.match(systemPrompt, /#agent\/<agent_id>/);
+
+  // pui_spawn_agent forwards context: 'fork'.
+  await h.tools.get('pui_spawn_agent').execute('call', { name: 'Forked child', task: 'Continue work', access: 'read-only', context: 'fork' }, undefined, null, h.ctx);
+  const spawnReq = JSON.parse(h.requests.at(-1)[1]);
+  assert.equal(spawnReq.action, 'spawn');
+  assert.equal(spawnReq.context, 'fork');
+
+  // pui_handoff_session routes action: 'handoff'.
+  await h.tools.get('pui_handoff_session').execute('call', { name: 'Handoff task', task: 'Finish feature while main pivots', access: 'worktree', context: 'fork' }, undefined, null, h.ctx);
+  const handoffReq = JSON.parse(h.requests.at(-1)[1]);
+  assert.equal(handoffReq.action, 'handoff');
+  assert.equal(handoffReq.access, 'worktree');
+  assert.equal(handoffReq.context, 'fork');
+
+  // Plan mode blocks pui_handoff_session just like pui_spawn_agent.
+  h.commands.get('pui-settings').handler(JSON.stringify({ permission: 'plan', compactPercent: 85, keepRecentTokens: 20000 }), h.ctx);
+  assert.equal((await h.events.get('tool_call')({ toolName: 'pui_handoff_session', input: { name: 'a', task: 'b' } }, h.ctx)).block, true);
+
+  // Read-only and task workers cannot activate or call pui_handoff_session.
+  for (const [readonly, role] of [[true, ''], [false, 'builder'], [true, 'router'], [false, 'checks']]) {
+    const worker = await host(readonly, role);
+    assert.ok(!worker.active().includes('pui_handoff_session'));
+    await assert.rejects(() => worker.tools.get('pui_handoff_session').execute('call', { name: 'a', task: 'b' }, undefined, null, worker.ctx), /cannot hand off/);
+    assert.equal((await worker.events.get('tool_call')({ toolName: 'pui_handoff_session', input: { name: 'a', task: 'b' } }, worker.ctx)).block, true);
+  }
+});

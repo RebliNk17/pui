@@ -309,6 +309,7 @@ pub struct Launch {
     pub worker: bool,
     pub task_role: Option<String>,
     pub settings: Value,
+    pub family_notes_dir: Option<PathBuf>,
 }
 
 #[cfg(not(test))]
@@ -351,6 +352,11 @@ fn run(
     command.arg("--extension").arg(adapter_path()?);
     command.env("PUI_AGENT_CHILD", if launch.worker { "1" } else { "0" });
     command.env("PUI_TASK_ROLE", launch.task_role.as_deref().unwrap_or(""));
+    if let Some(notes_dir) = &launch.family_notes_dir {
+        command.env("PUI_FAMILY_NOTES_DIR", notes_dir);
+    } else {
+        command.env_remove("PUI_FAMILY_NOTES_DIR");
+    }
     if let Some(data) = dirs::data_local_dir() {
         command.env("PUI_CHECKPOINT_DIR", data.join("pui/checkpoints-v1"));
     }

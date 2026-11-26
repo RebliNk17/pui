@@ -1355,6 +1355,7 @@ impl Pui {
                     launch: None,
                     failure: failed.map(str::to_owned),
                     result: (!running).then(|| reply.to_owned()),
+                    report_summary: None,
                     task: task.to_owned(),
                     depends: Vec::new(),
                     setup: None,

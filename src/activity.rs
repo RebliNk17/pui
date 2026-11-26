@@ -89,7 +89,7 @@ impl Tool {
         self.agent_title = None;
         if matches!(
             self.name.as_str(),
-            "pui_background_agent" | "pui_spawn_agent"
+            "pui_background_agent" | "pui_spawn_agent" | "pui_handoff_session"
         ) {
             self.agent_title = args["name"]
                 .as_str()
@@ -203,7 +203,7 @@ impl Tool {
     pub fn set_agent_result(&mut self, raw: &Value) {
         if !matches!(
             self.name.as_str(),
-            "pui_background_agent" | "pui_spawn_agent"
+            "pui_background_agent" | "pui_spawn_agent" | "pui_handoff_session"
         ) {
             return;
         }

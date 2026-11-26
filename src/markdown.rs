@@ -348,12 +348,23 @@ pub fn parse_terminal_link(url: &str) -> Option<&str> {
     .then_some(id)
 }
 
+pub fn parse_agent_link(url: &str) -> Option<&str> {
+    let id = url.strip_prefix("#agent/")?;
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(id)
+}
+
 fn safe_url(url: &str) -> bool {
     url.starts_with("https://")
         || url.starts_with("http://")
         || url.starts_with("mailto:")
         || url.starts_with("file://")
         || parse_terminal_link(url).is_some()
+        || parse_agent_link(url).is_some()
         || local_file(url)
         || {
             let (base, _) = split_file_line(url);
@@ -489,6 +500,8 @@ fn show_galley_with_find(
                 .on_hover_text(pr_capsule::tooltip(link).unwrap_or_else(|| {
                     if let Some(tab_id) = parse_terminal_link(&link.url) {
                         format!("Open Terminal tab {tab_id}")
+                    } else if let Some(agent_id) = parse_agent_link(&link.url) {
+                        format!("Open session {agent_id}")
                     } else {
                         format!(
                             "{}{}",
@@ -499,7 +512,10 @@ fn show_galley_with_find(
                 }));
             if response.clicked() {
                 let mut target = link.url.clone();
-                if parse_terminal_link(&target).is_none() && !target.contains(':') {
+                if parse_terminal_link(&target).is_none()
+                    && parse_agent_link(&target).is_none()
+                    && !target.contains(':')
+                {
                     let base = ui.ctx().data(|data| {
                         data.get_temp::<std::path::PathBuf>(egui::Id::new("markdown-file-base"))
                     });
@@ -1390,6 +1406,25 @@ mod tests {
             "javascript:alert(1)",
         ] {
             assert!(parse_terminal_link(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parse_agent_link_accepts_valid_agent_ids_and_rejects_invalid_fragments() {
+        assert_eq!(parse_agent_link("#agent/agent-2"), Some("agent-2"));
+        assert_eq!(parse_agent_link("#agent/session_42"), Some("session_42"));
+        assert!(safe_url("#agent/agent-2"));
+        let too_long = format!("#agent/{}", "a".repeat(65));
+        for bad in [
+            "#agent/",
+            "#agent/a/b",
+            "#agent/agent 1",
+            "#other/agent-1",
+            "agent/agent-1",
+            "javascript:alert(1)",
+            too_long.as_str(),
+        ] {
+            assert!(parse_agent_link(bad).is_none(), "{bad}");
         }
     }
 

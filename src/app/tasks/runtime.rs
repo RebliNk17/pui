@@ -532,6 +532,7 @@ impl Pui {
             args,
             readonly,
             worker: true,
+            family_notes_dir: None,
             task_role: Some(
                 if routing_for.is_some() {
                     "router"
