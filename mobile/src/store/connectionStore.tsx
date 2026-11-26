@@ -11,6 +11,7 @@ import type {
   SessionSummary,
   WsServerEvent,
 } from '../protocol/types';
+import { saveChatDraft } from '../services/drafts';
 import { startBackgroundKeepAlive, stopBackgroundKeepAlive } from '../services/keepAlive';
 import { getNotificationPermissionStatus, presentAgentNotification } from '../services/notifications';
 import type { SharedPayload } from '../services/shareIntent';
@@ -106,6 +107,16 @@ export interface PuiContextValue {
   retryConnection: () => void;
   refreshSessions: () => Promise<void>;
   loadSessionDetail: (path: string, hostId?: string | null) => Promise<SessionDetail | null>;
+  sendMessage: (
+    path: string,
+    hostId: string | null | undefined,
+    input: {
+      text: string;
+      images?: { data_base64: string; mime: string; name?: string }[];
+      mode?: 'queue' | 'steer';
+      origin: SessionOrigin;
+    },
+  ) => Promise<void>;
   setActiveChatPath: (path: string | null) => void;
   pendingShare: SharedPayload | null;
   setPendingShare: (payload: SharedPayload | null) => void;
@@ -141,6 +152,16 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const [pendingShare, setPendingShare] = useState<SharedPayload | null>(null);
 
   const liveHostsRef = useRef<Map<string, LiveHostEntry>>(new Map());
+  const detailsRef = useRef<Record<string, SessionDetail>>({});
+  const inFlightDetailsRef = useRef<Map<string, Promise<SessionDetail | null>>>(new Map());
+  const prefetchedHostsRef = useRef<Set<string>>(new Set());
+  const optimisticSendsRef = useRef<
+    Record<
+      string,
+      { id: number; text: string; mode: 'queue' | 'steer'; image_count: number; baselineMsgCount: number }[]
+    >
+  >({});
+  const nextOptimisticIdRef = useRef(-1);
   const appStateRef = useRef<string>(AppState.currentState || 'active');
   const activeChatPathRef = useRef<string | null>(null);
   const seenNotificationIdsRef = useRef<Set<string>>(new Set());
@@ -159,6 +180,101 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     hostsRef.current = hosts;
   }, [hosts]);
+
+  useEffect(() => {
+    detailsRef.current = detailsByPath;
+  }, [detailsByPath]);
+
+  /**
+   * Merge an incoming server `SessionDetail` without letting a transient empty
+   * boot snapshot wipe out already-loaded disk history, and preserve any
+   * still-in-flight optimistic sends until the host confirms them.
+   */
+  const mergeDetail = useCallback((path: string, incoming: SessionDetail): SessionDetail => {
+    const prev = detailsRef.current[path];
+    const messages =
+      incoming.messages.length === 0 && prev && prev.messages.length > 0
+        ? prev.messages
+        : incoming.messages;
+    const artifacts =
+      incoming.artifacts.length === 0 &&
+      incoming.messages.length === 0 &&
+      prev &&
+      prev.artifacts.length > 0
+        ? prev.artifacts
+        : incoming.artifacts;
+
+    const pendingOpt = optimisticSendsRef.current[path];
+    let waiting_messages = incoming.waiting_messages ?? [];
+    if (pendingOpt && pendingOpt.length > 0) {
+      const remaining = pendingOpt.filter((opt) => {
+        const trimmed = opt.text.trim();
+        const inServerQueue = waiting_messages.some((w) => w.text.trim() === trimmed);
+        const inPending = (incoming.pending_messages ?? []).some(
+          (p) => p.text.trim() === trimmed,
+        );
+        const deliveredToTranscript =
+          messages.length > opt.baselineMsgCount &&
+          messages
+            .slice(opt.baselineMsgCount)
+            .some((m) => m.role === 'user' && (trimmed === '' || m.text.trim() === trimmed));
+        return !inServerQueue && !inPending && !deliveredToTranscript;
+      });
+      if (remaining.length > 0) {
+        optimisticSendsRef.current[path] = remaining;
+        const optWaiting: SessionDetail['waiting_messages'] = remaining.map((opt) => ({
+          index: opt.id,
+          text: opt.text,
+          mode: opt.mode,
+          image_count: opt.image_count,
+        }));
+        waiting_messages = [...waiting_messages, ...optWaiting];
+      } else {
+        delete optimisticSendsRef.current[path];
+      }
+    }
+
+    return {
+      ...incoming,
+      messages,
+      artifacts,
+      waiting_messages,
+    };
+  }, []);
+
+  const prefetchTopSessions = useCallback(
+    (hostId: string, list: SessionSummary[]) => {
+      if (prefetchedHostsRef.current.has(hostId) || list.length === 0) return;
+      prefetchedHostsRef.current.add(hostId);
+      const entry = liveHostsRef.current.get(hostId);
+      if (!entry) return;
+      const candidates = list
+        .filter((s) => !s.parent_session && !detailsRef.current[s.path])
+        .slice(0, 3);
+      if (candidates.length === 0) return;
+      void (async () => {
+        for (const s of candidates) {
+          if (detailsRef.current[s.path]) continue;
+          const key = `${hostId}::${s.path}`;
+          if (inFlightDetailsRef.current.has(key)) continue;
+          try {
+            const p = entry.transport.getSessionDetail(s.path).then((detail) => {
+              const merged = mergeDetail(s.path, detail);
+              setDetailsByPath((prev) => ({ ...prev, [s.path]: merged }));
+              return merged;
+            });
+            inFlightDetailsRef.current.set(key, p);
+            await p;
+          } catch {
+            // Best-effort background warm-up; ignore errors.
+          } finally {
+            inFlightDetailsRef.current.delete(key);
+          }
+        }
+      })();
+    },
+    [mergeDetail],
+  );
 
   // Hydrate saved hosts and device name on startup.
   useEffect(() => {
@@ -207,12 +323,17 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     };
   }, [deviceName]);
 
-  const handleHostWsEvent = useCallback((hostId: string, event: WsServerEvent) => {
-    if (event.type === 'sessions_updated') {
-      setSessionsByHost((prev) => ({ ...prev, [hostId]: event.sessions }));
-    } else if (event.type === 'session_updated') {
-      setDetailsByPath((prev) => ({ ...prev, [event.path]: event.detail }));
-    } else if (event.type === 'notification') {
+  const handleHostWsEvent = useCallback(
+    (hostId: string, event: WsServerEvent) => {
+      if (event.type === 'sessions_updated') {
+        setSessionsByHost((prev) => ({ ...prev, [hostId]: event.sessions }));
+        prefetchTopSessions(hostId, event.sessions);
+      } else if (event.type === 'session_updated') {
+        setDetailsByPath((prev) => ({
+          ...prev,
+          [event.path]: mergeDetail(event.path, event.detail),
+        }));
+      } else if (event.type === 'notification') {
       const note = event.notification;
       if (
         shouldPresentNotification(
@@ -233,7 +354,9 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
         void presentAgentNotification(note).catch(() => {});
       }
     }
-  }, []);
+    },
+    [mergeDetail, prefetchTopSessions],
+  );
 
   // Keep live transports connected for ALL paired hosts simultaneously (Mac + pui-cloud)
   // so both local and remote cloud sessions stay synced in one unified list.
@@ -297,6 +420,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
         .listSessions()
         .then((res) => {
           setSessionsByHost((prev) => ({ ...prev, [hostId]: res.sessions }));
+          prefetchTopSessions(hostId, res.sessions);
         })
         .catch(() => {});
     }
@@ -304,7 +428,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     if (changed) {
       setTransportVersion((v) => v + 1);
     }
-  }, [hosts, deviceName, handleHostWsEvent]);
+  }, [hosts, deviceName, handleHostWsEvent, prefetchTopSessions]);
 
   // Clean up all host transports on unmount.
   useEffect(() => {
@@ -560,13 +684,129 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
 
   const loadSessionDetail = useCallback(
     async (path: string, hostId?: string | null): Promise<SessionDetail | null> => {
+      const targetId = hostId || activeHost?.id || '';
       const targetTransport = getTransportForHost(hostId);
       if (!targetTransport) return null;
-      const detail = await targetTransport.getSessionDetail(path);
-      setDetailsByPath((prev) => ({ ...prev, [path]: detail }));
-      return detail;
+      const key = `${targetId}::${path}`;
+      const existing = inFlightDetailsRef.current.get(key);
+      if (existing) return existing;
+      const promise = targetTransport
+        .getSessionDetail(path)
+        .then((detail) => {
+          const merged = mergeDetail(path, detail);
+          setDetailsByPath((prev) => ({ ...prev, [path]: merged }));
+          return merged;
+        })
+        .finally(() => {
+          inFlightDetailsRef.current.delete(key);
+        });
+      inFlightDetailsRef.current.set(key, promise);
+      return promise;
     },
-    [getTransportForHost],
+    [activeHost?.id, getTransportForHost, mergeDetail],
+  );
+
+  /**
+   * App-level message delivery that survives navigating away from ChatScreen
+   * and immediately places the message into the chat's waiting queue optimistically.
+   */
+  const sendMessage = useCallback(
+    async (
+      path: string,
+      hostId: string | null | undefined,
+      input: {
+        text: string;
+        images?: { data_base64: string; mime: string; name?: string }[];
+        mode?: 'queue' | 'steer';
+        origin: SessionOrigin;
+      },
+    ): Promise<void> => {
+      const targetTransport = getTransportForHost(hostId);
+      if (!targetTransport) {
+        if (input.text.trim()) void saveChatDraft(path, input.text);
+        throw new Error('Not connected to Pui host.');
+      }
+
+      const optId = nextOptimisticIdRef.current--;
+      const mode: 'queue' | 'steer' = input.mode ?? 'queue';
+      const curDetail = detailsRef.current[path];
+      const optRecord = {
+        id: optId,
+        text: input.text,
+        mode,
+        image_count: input.images?.length ?? 0,
+        baselineMsgCount: curDetail?.messages.length ?? 0,
+      };
+      optimisticSendsRef.current[path] = [
+        ...(optimisticSendsRef.current[path] ?? []),
+        optRecord,
+      ];
+
+      // Optimistically show the message in the queue at 0ms.
+      setDetailsByPath((prev) => {
+        const cur = prev[path];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [path]: {
+            ...cur,
+            error: null,
+            waiting_messages: [
+              ...(cur.waiting_messages ?? []),
+              {
+                index: optId,
+                text: input.text,
+                mode,
+                image_count: input.images?.length ?? 0,
+              },
+            ],
+          },
+        };
+      });
+
+      const prevRev = curDetail?.revision ?? 0;
+      try {
+        await targetTransport.sendMessage({
+          path,
+          text: input.text,
+          images: input.images,
+          mode,
+          origin: input.origin,
+        });
+        // Fallback sync in case WS session_updated didn't arrive yet.
+        setTimeout(() => {
+          const latest = detailsRef.current[path];
+          if (!latest || latest.revision === prevRev || optimisticSendsRef.current[path]?.length) {
+            void loadSessionDetail(path, hostId).catch(() => {});
+          }
+        }, 250);
+      } catch (err: unknown) {
+        // Roll back the optimistic entry and preserve the unsent text in draft.
+        const remaining = (optimisticSendsRef.current[path] ?? []).filter((o) => o.id !== optId);
+        if (remaining.length > 0) {
+          optimisticSendsRef.current[path] = remaining;
+        } else {
+          delete optimisticSendsRef.current[path];
+        }
+        if (input.text.trim()) {
+          void saveChatDraft(path, input.text);
+        }
+        const message = err instanceof Error ? err.message : 'Failed to send message';
+        setDetailsByPath((prev) => {
+          const cur = prev[path];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [path]: {
+              ...cur,
+              error: message,
+              waiting_messages: (cur.waiting_messages ?? []).filter((w) => w.index !== optId),
+            },
+          };
+        });
+      }
+    },
+    [getTransportForHost, loadSessionDetail],
   );
 
   const value: PuiContextValue = {
@@ -589,6 +829,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     retryConnection,
     refreshSessions,
     loadSessionDetail,
+    sendMessage,
     setActiveChatPath,
     pendingShare,
     setPendingShare,

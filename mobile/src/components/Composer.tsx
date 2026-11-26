@@ -240,17 +240,21 @@ export function Composer({
       setShowModelPicker(true);
       return;
     }
+    const payloadImages = images.map(({ data_base64, mime, name }) => ({
+      data_base64,
+      mime,
+      name,
+    }));
+    // Clear composer immediately so sending feels instant and optimistic queue
+    // feedback is visible right away; delivery continues in connectionStore even
+    // if the user navigates back out of this chat.
+    setText('');
+    setImages([]);
+    setSelection({ start: 0, end: 0 });
+    if (sessionPath) void clearChatDraft(sessionPath);
     setSending(true);
     try {
-      await onSend(
-        trimmed,
-        images.map(({ data_base64, mime, name }) => ({ data_base64, mime, name })),
-        mode,
-      );
-      setText('');
-      setImages([]);
-      setSelection({ start: 0, end: 0 });
-      if (sessionPath) void clearChatDraft(sessionPath);
+      await onSend(trimmed, payloadImages, mode);
     } finally {
       setSending(false);
     }
@@ -341,13 +345,13 @@ export function Composer({
             >
               <View style={[styles.queueTag, { backgroundColor: colors.accentBg }]}>
                 <Text style={{ color: colors.accent, fontSize: 10, fontWeight: '700' }}>
-                  {item.mode === 'steer' ? 'Steer' : 'Queue'}
+                  {item.index < 0 ? 'Sending…' : item.mode === 'steer' ? 'Steer' : 'Queue'}
                 </Text>
               </View>
               <Text numberOfLines={2} style={[styles.queueText, { color: colors.text }]}>
                 {item.text || `${item.image_count} image(s)`}
               </Text>
-              {item.mode !== 'steer' && onSteerQueued ? (
+              {item.index >= 0 && item.mode !== 'steer' && onSteerQueued ? (
                 <Pressable
                   onPress={() => void onSteerQueued(item.index)}
                   style={[styles.steerNowBtn, { borderColor: colors.border }]}
@@ -358,7 +362,7 @@ export function Composer({
                   </Text>
                 </Pressable>
               ) : null}
-              {onRemoveQueued ? (
+              {item.index >= 0 && onRemoveQueued ? (
                 <Pressable onPress={() => void onRemoveQueued(item.index)} hitSlop={8}>
                   <Ionicons name="close" size={16} color={colors.dim} />
                 </Pressable>

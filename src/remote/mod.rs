@@ -839,9 +839,10 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
             }
         }
         for (img_idx, img) in msg.images.iter().enumerate() {
-            if let Some(f) = &img.file {
+            let file_path = img.file.as_ref().map(|f| {
                 allowed_paths.insert(f.path.clone());
-            }
+                f.path.to_string_lossy().into_owned()
+            });
             artifacts.push(ArtifactItem {
                 id: format!("msg-img-{msg_idx}-{img_idx}"),
                 kind: "image".into(),
@@ -852,12 +853,15 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
                     .unwrap_or_else(|| format!("Image {}", img_idx + 1)),
                 html: None,
                 height: None,
-                path: img
-                    .file
-                    .as_ref()
-                    .map(|f| f.path.to_string_lossy().into_owned()),
+                // Avoid duplicating multi-MB base64 blobs when the image is already
+                // servable via /v1/files/raw; ArtifactsView loads path-backed images lazily.
+                data_base64: if file_path.is_some() {
+                    None
+                } else {
+                    Some(img.data.to_string())
+                },
+                path: file_path,
                 mime: Some(img.mime.clone()),
-                data_base64: Some(img.data.to_string()),
                 message_index: msg_idx,
             });
         }
@@ -909,9 +913,10 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
                 });
             }
             for (img_idx, img) in tool.images.iter().enumerate() {
-                if let Some(f) = &img.file {
+                let file_path = img.file.as_ref().map(|f| {
                     allowed_paths.insert(f.path.clone());
-                }
+                    f.path.to_string_lossy().into_owned()
+                });
                 artifacts.push(ArtifactItem {
                     id: format!("tool-img-{msg_idx}-{tool_idx}-{img_idx}"),
                     kind: "image".into(),
@@ -922,12 +927,13 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
                         .unwrap_or_else(|| format!("{} image", tool.name)),
                     html: None,
                     height: None,
-                    path: img
-                        .file
-                        .as_ref()
-                        .map(|f| f.path.to_string_lossy().into_owned()),
+                    data_base64: if file_path.is_some() {
+                        None
+                    } else {
+                        Some(img.data.to_string())
+                    },
+                    path: file_path,
                     mime: Some(img.mime.clone()),
-                    data_base64: Some(img.data.to_string()),
                     message_index: msg_idx,
                 });
             }

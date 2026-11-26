@@ -85,16 +85,101 @@ impl Pui {
     pub(super) fn poll_remote(&mut self) {
         self.flush_pending_origins();
         let commands: Vec<RemoteCommand> = self.remote.cmds.try_iter().collect();
-        if !commands.is_empty() {
+        let had_commands = !commands.is_empty();
+        if had_commands {
             self.update_idle.touch();
             for cmd in commands {
                 self.handle_remote_command(cmd);
             }
             self.flush_pending_origins();
+            self.ctx.request_repaint();
         }
         if self.remote.is_running() {
             self.publish_remote_snapshot();
+            // Keep macOS repainting briskly while any remote chat has queued messages
+            // or is booting/working so mobile sees queue & stream updates immediately
+            // instead of waiting for the 2-second idle timer.
+            let has_active_remote_work = !self.waiting.is_empty()
+                || self.state.busy
+                || self.loading_chat
+                || self.agents.parked.values().any(|c| {
+                    c.state.busy
+                        || (c.client.is_some() && !c.connected)
+                        || c.history_pending.is_some()
+                });
+            if has_active_remote_work && !self.remote.connected_devices().is_empty() {
+                self.ctx.request_repaint_after(Duration::from_millis(50));
+            }
         }
+    }
+
+    /// Submit a remote message immediately if the target chat is connected and ready,
+    /// otherwise enqueue it directly into `self.waiting` (even while booting, loading
+    /// history, waking from idle, or busy) so remote messages are never silently dropped.
+    fn submit_or_queue_remote_message(
+        &mut self,
+        text: String,
+        images: Vec<crate::remote::IncomingImage>,
+        delivery: settings::DeliveryMode,
+    ) {
+        let mut decoded = Vec::new();
+        for img in images {
+            if let Ok(bytes) =
+                base64::engine::general_purpose::STANDARD.decode(img.data_base64.trim())
+            {
+                if let Ok(att) = crate::media::Attachment::from_bytes(&bytes) {
+                    decoded.push(att);
+                }
+            }
+        }
+        if text.trim().is_empty() && decoded.is_empty() {
+            return;
+        }
+        if !decoded.is_empty() {
+            self.draft_images.set_images(decoded);
+        }
+        let ctx = self.ctx.clone();
+        let is_dormant = self.agents.idle.dormant.contains(&self.agents.active);
+        let ready_now = self.connected
+            && self.client.is_some()
+            && self.state.ready()
+            && !self.loading_chat
+            && self.history_pending.is_none()
+            && !self.restoring_code()
+            && !is_dormant
+            && !self.is_mirror();
+        if ready_now {
+            self.draft = text;
+            self.submit_mode(&ctx, delivery);
+            return;
+        }
+
+        // Chat is still booting, loading history, waking from idle, or busy:
+        // preserve the message in `self.waiting` immediately so it appears in the
+        // queue right away and drains automatically as soon as Pi becomes ready.
+        let images_ready = self.draft_images.images();
+        self.draft_images.clear();
+        let trimmed = text.trim().to_owned();
+        if let Some(path) = self.state.session_file.as_ref().map(PathBuf::from) {
+            let waiting_msg = run_status::WaitingMessage {
+                text: trimmed,
+                images: images_ready,
+                mode: delivery,
+            };
+            if !self.remote_action(sync::Action::Queue(waiting_msg.clone())) {
+                self.waiting.entry(path).or_default().push(waiting_msg);
+            }
+            self.turn_ux.on_user_submit();
+        }
+        if is_dormant {
+            let id = self.agents.active.clone();
+            let _ = self.wake_idle_agent(&id);
+        } else if self.client.is_none() {
+            if !self.resume_agent() {
+                self.connect(&ctx, self.state.session_file.as_ref().map(PathBuf::from));
+            }
+        }
+        self.ctx.request_repaint();
     }
 
     /// Ensures a saved session is loaded as a live Pi agent in `self.agents.parked` (or already active)
@@ -325,24 +410,7 @@ impl Pui {
                         Some("steer") => settings::DeliveryMode::Steer,
                         _ => app.prefs.settings.delivery,
                     };
-                    if !images.is_empty() {
-                        let mut decoded = Vec::new();
-                        for img in images {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD
-                                .decode(img.data_base64.trim())
-                            {
-                                if let Ok(att) = crate::media::Attachment::from_bytes(&bytes) {
-                                    decoded.push(att);
-                                }
-                            }
-                        }
-                        if !decoded.is_empty() {
-                            app.draft_images.set_images(decoded);
-                        }
-                    }
-                    app.draft = text;
-                    let ctx = app.ctx.clone();
-                    app.submit_mode(&ctx, delivery);
+                    app.submit_or_queue_remote_message(text, images, delivery);
                 });
             }
             RemoteCommand::Abort { path } => {
@@ -740,10 +808,12 @@ impl Pui {
             {
                 continue;
             }
-            if chat.client.is_none() && chat.state.messages.is_empty() {
+            let path = PathBuf::from(&path_str);
+            let parked_waiting = self.waiting_items_for(&path);
+            if chat.client.is_none() && chat.state.messages.is_empty() && parked_waiting.is_empty()
+            {
                 continue;
             }
-            let path = PathBuf::from(&path_str);
             let origin = self
                 .pending_origins
                 .get(id)
@@ -762,7 +832,6 @@ impl Pui {
                 .and_then(|m| m.title.clone())
                 .or_else(|| node.map(|n| n.name.clone()))
                 .unwrap_or_else(|| "Conversation".into());
-            let parked_waiting = self.waiting_items_for(&path);
             let detail_rev = Self::detail_fingerprint(&chat.state, &parked_waiting);
             details.insert(
                 path_str.clone(),
@@ -3439,6 +3508,91 @@ mod tests {
                 .iter()
                 .any(|s| s.path == bg_path.to_string_lossy()),
             "background subagents must be excluded from remote session list"
+        );
+    }
+
+    #[test]
+    fn remote_send_message_queues_immediately_while_chat_is_booting_or_loading() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.sessions.clear();
+        app.agents.nodes.clear();
+        app.agents.parked.clear();
+        app.waiting.clear();
+
+        let target_path = PathBuf::from("/tmp/pui-remote-booting.jsonl");
+        app.agents.active = "agent-1".into();
+        app.state.session_file = Some("/tmp/pui-remote-desktop.jsonl".into());
+        app.agents.nodes.insert(
+            "agent-2".into(),
+            agents::Node {
+                id: "agent-2".into(),
+                parent: None,
+                name: "Phone chat".into(),
+                cwd: PathBuf::from("/repo/pui"),
+                path: Some(target_path.clone()),
+                access: "workspace".into(),
+                permission: None,
+                status: "Connecting…".into(),
+                last_activity: None,
+                created: None,
+                children: Vec::new(),
+                stopped: false,
+                reported: false,
+                needs_report: false,
+                settled: false,
+                launch: None,
+                failure: None,
+                result: None,
+                task: String::new(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: false,
+                workflow_id: None,
+                model: None,
+                finished_at: None,
+            },
+        );
+        // Simulate a parked chat still booting (connected = false).
+        let mut parked = agents::Chat::default();
+        parked.state.session_file = Some(target_path.to_string_lossy().into_owned());
+        parked.connected = false;
+        app.agents.parked.insert("agent-2".into(), parked);
+
+        app.handle_remote_command(RemoteCommand::SendMessage {
+            path: Some(target_path.clone()),
+            text: "Queued before Pi finished booting".into(),
+            mode: Some("queue".into()),
+            images: Vec::new(),
+            origin: None,
+        });
+
+        let waiting = app
+            .waiting
+            .get(&target_path)
+            .expect("message must be queued");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].text, "Queued before Pi finished booting");
+
+        app.publish_remote_snapshot();
+        let snap = app.remote.current_snapshot();
+        let detail = snap
+            .details
+            .get(&target_path.to_string_lossy().into_owned())
+            .expect("booting chat with queued message must appear in snapshot details");
+        assert_eq!(detail.waiting_messages.len(), 1);
+        assert_eq!(
+            detail.waiting_messages[0].text,
+            "Queued before Pi finished booting"
         );
     }
 }

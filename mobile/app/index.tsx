@@ -50,6 +50,7 @@ export default function SessionsScreen() {
     deviceName,
     retryConnection,
     refreshSessions,
+    loadSessionDetail,
     pendingShare,
     setPendingShare,
   } = usePui();
@@ -104,8 +105,10 @@ export default function SessionsScreen() {
   };
 
   const openSession = (session: SessionSummary) => {
-    // Loads the session in background on its owning host without switching Desktop's active chat.
+    // Start fetching history immediately on tap AND wake the session in background on Desktop
+    // so the chat opens without waiting for the navigation transition to complete first.
     const hostTransport = getTransportForHost(session.host_id);
+    void loadSessionDetail(session.path, session.host_id).catch(() => {});
     void hostTransport?.openSession(session.path).catch(() => {});
     router.push({
       pathname: '/chat/[id]',

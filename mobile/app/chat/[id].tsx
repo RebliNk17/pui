@@ -55,6 +55,7 @@ export default function ChatScreen() {
     getHostInfoForHost,
     clientOrigin,
     loadSessionDetail: loadSessionDetailFromStore,
+    sendMessage: sendMessageFromStore,
     setActiveChatPath,
     pendingShare,
     setPendingShare,
@@ -586,17 +587,14 @@ export default function ChatScreen() {
                 setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 150);
               }}
               onFetchFileMentions={fetchMentions}
-              onSend={async (text, images, mode) => {
-                if (!transport) return;
-                await transport.sendMessage({
-                  path: sessionPath,
+              onSend={(text, images, mode) =>
+                sendMessageFromStore(sessionPath, resolvedHostId, {
                   text,
                   images,
                   mode,
                   origin: clientOrigin(),
-                });
-                setTimeout(() => void loadSessionDetail(sessionPath).catch(() => {}), 180);
-              }}
+                })
+              }
               onAbort={async () => {
                 await transport?.abortSession(sessionPath);
               }}
