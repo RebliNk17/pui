@@ -87,6 +87,40 @@ impl Terminals {
         self.focus = true;
         project.tabs[index].focus(ctx);
     }
+    pub(in crate::app) fn focus_tab_by_id(&mut self, ctx: &egui::Context, tab_id: &str) -> bool {
+        if tab_id.is_empty() {
+            return false;
+        }
+        if let Some(index) = self
+            .projects
+            .get(&self.root)
+            .and_then(|project| project.tabs.iter().position(|tab| tab.tab_id == tab_id))
+        {
+            self.open = true;
+            self.select_tab(ctx, index);
+            ctx.request_repaint();
+            return true;
+        }
+        let found = self.projects.iter().find_map(|(root, project)| {
+            project
+                .tabs
+                .iter()
+                .position(|tab| tab.tab_id == tab_id)
+                .map(|index| (root.clone(), index))
+        });
+        let Some((root, index)) = found else {
+            return false;
+        };
+        if self.root != root {
+            capture::clear(ctx);
+            self.root = root;
+            self.confirm_stop = None;
+        }
+        self.open = true;
+        self.select_tab(ctx, index);
+        ctx.request_repaint();
+        true
+    }
     pub(super) fn close_tab(&mut self, ctx: &egui::Context, root: &Path, id: u64) {
         let Some(project) = self.projects.get_mut(root) else {
             return;

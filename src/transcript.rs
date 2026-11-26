@@ -34,6 +34,7 @@ pub enum TranscriptAction {
     },
     OpenWorkflow(String),
     OpenAgent(String),
+    RunInTerminal(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1392,6 +1393,9 @@ fn assistant_with_media(
                         (message_index, "text"),
                         Some(markdown::InlineMedia { gallery, base: cwd }),
                     );
+                    if let Some(command) = markdown::take_terminal_command(ui.ctx()) {
+                        *action = Some(TranscriptAction::RunInTerminal(command));
+                    }
                 }
             }
 
@@ -1457,6 +1461,9 @@ fn assistant_with_media(
                                 (message_index, "block", block_index),
                                 Some(markdown::InlineMedia { gallery, base: cwd }),
                             );
+                            if let Some(command) = markdown::take_terminal_command(ui.ctx()) {
+                                *action = Some(TranscriptAction::RunInTerminal(command));
+                            }
                         }
                     }
                     Block::Thinking(text) if view == View::Verbose && !text.is_empty() => {

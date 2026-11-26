@@ -90,7 +90,16 @@ pub(super) fn shell_row(
             (icon, text_pos, galley.elided),
         )
     });
-    response.on_hover_text(format!("{label} · {status}\nCtrl+Tab / Ctrl+Shift+Tab switches shells. Hiding keeps them running.")).on_hover_cursor(egui::CursorIcon::PointingHand)
+    let tip_prefix = if tab.tab_id.is_empty() {
+        format!("{label} · {status}")
+    } else {
+        format!("{label} · {} · {status}", tab.tab_id)
+    };
+    response
+        .on_hover_text(format!(
+            "{tip_prefix}\nCtrl+Tab / Ctrl+Shift+Tab switches shells. Hiding keeps them running."
+        ))
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub(super) fn new_shell(ui: &mut egui::Ui, enabled: bool) -> egui::Response {

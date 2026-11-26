@@ -116,6 +116,9 @@ impl Pui {
             crate::transcript::TranscriptAction::OpenAgent(id) => {
                 self.view_agent(&id);
             }
+            crate::transcript::TranscriptAction::RunInTerminal(command) => {
+                self.run_in_terminal(ctx, &command);
+            }
         }
         ctx.request_repaint();
     }

@@ -338,11 +338,22 @@ fn local_file(value: &str) -> bool {
     known_bare_extension(ext)
 }
 
+pub fn parse_terminal_link(url: &str) -> Option<&str> {
+    let id = url.strip_prefix("#terminal/")?;
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+    .then_some(id)
+}
+
 fn safe_url(url: &str) -> bool {
     url.starts_with("https://")
         || url.starts_with("http://")
         || url.starts_with("mailto:")
         || url.starts_with("file://")
+        || parse_terminal_link(url).is_some()
         || local_file(url)
         || {
             let (base, _) = split_file_line(url);
@@ -476,15 +487,19 @@ fn show_galley_with_find(
                 .clone()
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(pr_capsule::tooltip(link).unwrap_or_else(|| {
-                    format!(
-                        "{}{}",
-                        link.url,
-                        crate::pulls::inline(ui.ctx(), &link.url).unwrap_or_default()
-                    )
+                    if let Some(tab_id) = parse_terminal_link(&link.url) {
+                        format!("Open Terminal tab {tab_id}")
+                    } else {
+                        format!(
+                            "{}{}",
+                            link.url,
+                            crate::pulls::inline(ui.ctx(), &link.url).unwrap_or_default()
+                        )
+                    }
                 }));
             if response.clicked() {
                 let mut target = link.url.clone();
-                if !target.contains(':') {
+                if parse_terminal_link(&target).is_none() && !target.contains(':') {
                     let base = ui.ctx().data(|data| {
                         data.get_temp::<std::path::PathBuf>(egui::Id::new("markdown-file-base"))
                     });
@@ -546,36 +561,48 @@ fn terminal_command_id() -> egui::Id {
     egui::Id::new("pui-markdown-run-in-terminal")
 }
 
-/// Shell commands from assistant replies get a Run action. Unlabeled fences
-/// qualify too: agents often omit the language for one-off commands.
-fn runnable_command(language: &str, code: &str) -> Option<String> {
-    let language = language.split_whitespace().next().unwrap_or("");
-    let shell = [
-        "",
-        "sh",
-        "bash",
-        "zsh",
-        "fish",
-        "shell",
-        "console",
-        "terminal",
-        "shellsession",
-    ];
-    if !shell.iter().any(|l| l.eq_ignore_ascii_case(language)) {
+fn has_heredoc(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'<' {
+            if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
+                i += 3;
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Single-line shell commands from assistant replies get a one-click Run action.
+pub fn is_runnable_shell_block(lang: &str, code: &str) -> Option<String> {
+    let token = lang.trim().split_whitespace().next().unwrap_or("");
+    if !matches!(
+        token.to_ascii_lowercase().as_str(),
+        "bash" | "sh" | "zsh" | "shell"
+    ) {
         return None;
     }
-    let lines: Vec<&str> = code
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            trimmed
-                .strip_prefix("$ ")
-                .or_else(|| trimmed.strip_prefix("% "))
-                .unwrap_or(line)
-        })
-        .collect();
-    let command = lines.join("\n").trim().to_owned();
-    (!command.is_empty() && lines.len() <= 20).then_some(command)
+    let mut non_empty = code.lines().filter(|line| !line.trim().is_empty());
+    let line = non_empty.next()?;
+    if non_empty.next().is_some() {
+        return None;
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > 2000
+        || trimmed.starts_with("$ ")
+        || trimmed == "$"
+        || trimmed.starts_with('#')
+        || trimmed.ends_with('\\')
+        || has_heredoc(trimmed)
+    {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
 fn request_terminal_command(ctx: &egui::Context, command: String) {
@@ -858,15 +885,29 @@ fn show_events_with_media(
                                     }
                                     if reply
                                         && let Some(command) =
-                                            runnable_command(&language, &code_text)
-                                        && crate::icons::button(
+                                            is_runnable_shell_block(&language, &code_text)
+                                    {
+                                        let run_btn = crate::icons::button(
                                             ui,
                                             crate::icons::Icon::Play,
-                                            "Run in terminal",
-                                        )
-                                        .clicked()
-                                    {
-                                        request_terminal_command(ui.ctx(), command);
+                                            "Run in Terminal",
+                                        );
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| {
+                                            let mut rects = d
+                                                .get_temp::<Vec<(String, egui::Rect)>>(
+                                                    egui::Id::new("markdown-run-buttons"),
+                                                )
+                                                .unwrap_or_default();
+                                            rects.push((command.clone(), run_btn.rect));
+                                            d.insert_temp(
+                                                egui::Id::new("markdown-run-buttons"),
+                                                rects,
+                                            );
+                                        });
+                                        if run_btn.clicked() {
+                                            request_terminal_command(ui.ctx(), command);
+                                        }
                                     }
                                     if is_mermaid {
                                         let toggle_label = if show_mermaid_source {
@@ -1207,21 +1248,149 @@ mod tests {
     use egui::cache::ComputerMut;
 
     #[test]
-    fn only_shell_fences_offer_run_and_prompt_markers_are_stripped() {
-        assert_eq!(
-            runnable_command("", "git status && git log -1\n").as_deref(),
-            Some("git status && git log -1")
-        );
-        assert_eq!(
-            runnable_command("console", "$ cargo test\n$ cargo fmt\n").as_deref(),
-            Some("cargo test\ncargo fmt")
-        );
-        assert_eq!(runnable_command("bash title", "ls").as_deref(), Some("ls"));
-        for language in ["rust", "json", "diff", "mermaid"] {
-            assert!(runnable_command(language, "ls").is_none());
+    fn is_runnable_shell_block_accepts_single_line_shell_and_rejects_unsafe_or_multiline() {
+        for (lang, code, expected) in [
+            ("bash", "cargo test", "cargo test"),
+            (
+                " BASH ",
+                "\n  git status && git log -1  \n\n",
+                "git status && git log -1",
+            ),
+            ("sh", "echo hello", "echo hello"),
+            ("ZSH", "ls -la", "ls -la"),
+            ("shell", "pwd", "pwd"),
+            ("bash title", "ls", "ls"),
+            ("bash", "cat <<< 'here-string'", "cat <<< 'here-string'"),
+        ] {
+            assert_eq!(
+                is_runnable_shell_block(lang, code).as_deref(),
+                Some(expected),
+                "expected runnable for lang={lang:?} code={code:?}"
+            );
         }
-        assert!(runnable_command("sh", "  \n").is_none());
-        assert!(runnable_command("sh", &"echo\n".repeat(21)).is_none());
+        let max_len = "a".repeat(2000);
+        assert_eq!(
+            is_runnable_shell_block("bash", &max_len).as_deref(),
+            Some(max_len.as_str())
+        );
+
+        for (lang, code) in [
+            ("bash", "echo a\necho b"),
+            ("bash", "echo a\n\necho b"),
+            ("bash", "cat <<EOF\nhello\nEOF"),
+            ("bash", "cat <<EOF"),
+            ("bash", "cargo test \\"),
+            ("bash", "$ cargo test"),
+            ("bash", "$"),
+            ("bash", "# comment line"),
+            ("bash", "#!/bin/bash"),
+            ("bash", ""),
+            ("bash", "   \n  \n"),
+            ("sh", &"a".repeat(2001)),
+            ("", "git status"),
+            ("rust", "fn main() {}"),
+            ("json", "{\"ok\": true}"),
+            ("python", "print(1)"),
+            ("diff", "+line"),
+            ("mermaid", "graph TD; A-->B;"),
+        ] {
+            assert!(
+                is_runnable_shell_block(lang, code).is_none(),
+                "expected None for lang={lang:?} code={code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_button_renders_only_for_single_line_shell_and_emits_transcript_action() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let source = concat!(
+            "```bash\ncargo test\n```\n\n",
+            "```bash\necho one\necho two\n```\n\n",
+            "```rust\nfn main() {}\n```\n",
+        );
+        let mut transcript = crate::transcript::Transcript::default();
+        let messages = vec![crate::protocol::Message {
+            role: "assistant".into(),
+            text: source.into(),
+            ..Default::default()
+        }];
+        let mut run_frame = |events: Vec<egui::Event>| {
+            ctx.data_mut(|d| {
+                d.remove::<Vec<(String, egui::Rect)>>(egui::Id::new("markdown-run-buttons"));
+            });
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        transcript.show(ui, &messages, "model", "medium", false, "run-ui-test");
+                    });
+                },
+            );
+            ctx.data(|d| {
+                d.get_temp::<Vec<(String, egui::Rect)>>(egui::Id::new("markdown-run-buttons"))
+                    .unwrap_or_default()
+            })
+        };
+
+        let buttons = run_frame(vec![]);
+        assert_eq!(
+            buttons.len(),
+            1,
+            "Only the single-line bash block should render a Run button: {buttons:?}"
+        );
+        assert_eq!(buttons[0].0, "cargo test");
+
+        let pos = buttons[0].1.center();
+        run_frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        run_frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert_eq!(
+            transcript.action.take(),
+            Some(crate::transcript::TranscriptAction::RunInTerminal(
+                "cargo test".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_terminal_link_accepts_valid_tab_ids_and_rejects_invalid_fragments() {
+        assert_eq!(parse_terminal_link("#terminal/term-1"), Some("term-1"));
+        assert_eq!(parse_terminal_link("#terminal/term_42"), Some("term_42"));
+        assert!(safe_url("#terminal/term-1"));
+        for bad in [
+            "#terminal/",
+            "#terminal/a/b",
+            "#terminal/term 1",
+            "#other/term-1",
+            "terminal/term-1",
+            "javascript:alert(1)",
+        ] {
+            assert!(parse_terminal_link(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]

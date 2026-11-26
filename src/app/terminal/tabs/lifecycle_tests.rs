@@ -30,7 +30,7 @@ fn tab_switch_clears_frozen_capture_and_quote_names_the_exact_shell() {
         .unwrap();
     click(&ctx, &mut app, add.center());
     assert!(
-        app.outgoing_text().contains(" · shell 1]"),
+        app.outgoing_text().contains(" · tab term-1 · shell 1]"),
         "{}",
         app.outgoing_text()
     );
@@ -41,7 +41,7 @@ fn tab_switch_clears_frozen_capture_and_quote_names_the_exact_shell() {
         .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("terminal-context-add")))
         .unwrap();
     click(&ctx, &mut app, add.center());
-    assert!(app.outgoing_text().contains(" · shell 2]"));
+    assert!(app.outgoing_text().contains(" · tab term-2 · shell 2]"));
 }
 
 #[cfg(unix)]

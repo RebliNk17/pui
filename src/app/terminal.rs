@@ -22,10 +22,12 @@ pub(super) struct Terminals {
     restored_roots: std::collections::BTreeSet<PathBuf>,
     restore_guard: bool,
     demo_context: bool,
+    next_short_id: u64,
 }
 #[derive(Default)]
 struct Tab {
     id: u64,
+    tab_id: String,
     label: u64,
     session: Option<Session>,
     starting: Option<Receiver<Result<Session, String>>>,
@@ -191,15 +193,12 @@ impl Terminals {
             self.surrender_focus(ctx);
         }
     }
-    /// Run a command from a chat reply in this project's active shell,
-    /// opening the terminal (and a shell) when needed.
-    pub(super) fn run_command(
-        &mut self,
-        ctx: &egui::Context,
-        root: &Path,
-        demo: bool,
-        command: &str,
-    ) {
+    pub(super) fn next_short_tab_id(&mut self) -> String {
+        self.next_short_id = self.next_short_id.saturating_add(1);
+        format!("term-{}", self.next_short_id)
+    }
+    /// Open the Terminal pane for this project and ensure an active shell tab exists.
+    pub(super) fn open_for_run(&mut self, ctx: &egui::Context, root: &Path, demo: bool) {
         if !self.open {
             self.toggle(ctx, root, demo);
         } else {
@@ -219,6 +218,17 @@ impl Terminals {
         {
             self.start(ctx, demo);
         }
+    }
+    /// Run a command from a chat reply in this project's active shell,
+    /// opening the terminal (and a shell) when needed.
+    pub(super) fn run_command(
+        &mut self,
+        ctx: &egui::Context,
+        root: &Path,
+        demo: bool,
+        command: &str,
+    ) {
+        self.open_for_run(ctx, root, demo);
         let Some(tab) = self
             .projects
             .get_mut(&self.root)
@@ -296,8 +306,10 @@ impl Terminals {
             .projects
             .get(&self.root)
             .map_or(1, |project| project.next_label.saturating_add(1));
+        let tab_id = self.next_short_tab_id();
         let mut project = Tab {
             id: next_tab_id(),
+            tab_id,
             label,
             ..Default::default()
         };
@@ -735,7 +747,7 @@ impl Terminals {
                 project.selection,
                 &self.root,
                 false,
-                Some(project.label),
+                Some((project.label, project.tab_id.as_str())),
             );
             if let Some(button) = &capture_button {
                 capture::offer_with_tab(
@@ -744,7 +756,7 @@ impl Terminals {
                     project.selection,
                     &self.root,
                     true,
-                    Some(project.label),
+                    Some((project.label, project.tab_id.as_str())),
                 );
             }
         }
@@ -775,7 +787,7 @@ impl Terminals {
                 project.selection,
                 &self.root,
                 false,
-                Some(project.label),
+                Some((project.label, project.tab_id.as_str())),
             );
             if let Some(button) = &capture_button {
                 capture::offer_with_tab(
@@ -784,7 +796,7 @@ impl Terminals {
                     project.selection,
                     &self.root,
                     true,
-                    Some(project.label),
+                    Some((project.label, project.tab_id.as_str())),
                 );
             }
             drop(state);
@@ -1171,6 +1183,18 @@ fn paint(
                 Stroke::new(1.0, colors.muted),
                 egui::StrokeKind::Inside,
             );
+        }
+    }
+}
+
+impl Pui {
+    pub(super) fn run_in_terminal(&mut self, ctx: &egui::Context, command: &str) {
+        self.terminals
+            .run_command(ctx, &self.prefs.cwd, self.demo, command);
+        if self.demo {
+            self.state.notice = Some(format!(
+                "Demo mode: command not executed in Terminal ({command})."
+            ));
         }
     }
 }

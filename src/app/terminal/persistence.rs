@@ -118,18 +118,20 @@ impl Terminals {
                 .unwrap_or(0);
             let next_label = labels.iter().copied().max().unwrap_or(0);
             self.restored_roots.remove(&project.root);
+            let tabs = labels
+                .into_iter()
+                .map(|label| Tab {
+                    id: next_tab_id(),
+                    tab_id: self.next_short_tab_id(),
+                    label,
+                    restored: true,
+                    ..Default::default()
+                })
+                .collect();
             self.projects.insert(
                 project.root,
                 Project {
-                    tabs: labels
-                        .into_iter()
-                        .map(|label| Tab {
-                            id: next_tab_id(),
-                            label,
-                            restored: true,
-                            ..Default::default()
-                        })
-                        .collect(),
+                    tabs,
                     selected,
                     next_label,
                 },

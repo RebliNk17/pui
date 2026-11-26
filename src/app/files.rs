@@ -1659,11 +1659,17 @@ impl Pui {
 
     pub(super) fn process_open_links(&mut self, ctx: &egui::Context) {
         // Keep remote web links with the OS/default browser. Only local
-        // development previews and files are captured by the docked viewer.
+        // development previews, files, and internal terminal deep links are
+        // captured by Pui.
         let mut targets: Vec<(String, Option<usize>)> = Vec::new();
+        let mut terminal_tabs: Vec<String> = Vec::new();
         ctx.output_mut(|output| {
             output.commands.retain(|command| {
                 if let egui::OutputCommand::OpenUrl(url) = command {
+                    if let Some(tab_id) = crate::markdown::parse_terminal_link(&url.url) {
+                        terminal_tabs.push(tab_id.to_owned());
+                        return false;
+                    }
                     if cfg!(target_os = "macos") && super::webview::local_preview_url(&url.url) {
                         targets.push((url.url.clone(), None));
                         return false;
@@ -1698,6 +1704,14 @@ impl Pui {
                 true
             })
         });
+        for tab_id in terminal_tabs {
+            if self.terminals.focus_tab_by_id(ctx, &tab_id) {
+                self.settings_open = false;
+            } else {
+                self.state.notice = Some(format!("Terminal tab '{tab_id}' is no longer open."));
+            }
+            ctx.request_repaint();
+        }
         for (target, line) in targets {
             let result = if let Some(line_num) = line {
                 let candidate = Path::new(&target);

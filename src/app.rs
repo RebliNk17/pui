@@ -2879,8 +2879,7 @@ impl eframe::App for Pui {
             !self.search_blocked(),
         );
         if let Some(command) = crate::markdown::take_terminal_command(ctx) {
-            self.terminals
-                .run_command(ctx, &self.prefs.cwd, self.demo, &command);
+            self.run_in_terminal(ctx, &command);
         }
         self.terminals.context_inputs(
             ctx,

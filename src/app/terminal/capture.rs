@@ -141,7 +141,7 @@ pub(super) fn offer_with_tab(
     selection: Selection,
     root: &Path,
     toolbar: bool,
-    tab: Option<u64>,
+    tab: Option<(u64, &str)>,
 ) {
     let ctx = &response.ctx;
     let id = response.id.with("terminal-context");
@@ -167,9 +167,25 @@ pub(super) fn offer_with_tab(
         let refresh = ctx.data(|data| data.get_temp::<Capture>(key).is_none_or(|saved| saved.owner != id || saved.pass + 1 < pass))
             || (toolbar && response.clicked()) || (!toolbar && response.secondary_clicked());
         if refresh {
-            let mut snapshot=snapshot(screen,selection,root);
-            if let Some(tab)=tab {snapshot.label.push_str(&format!(" · shell {tab}"));}
-            ctx.data_mut(|data|data.insert_temp(key,Capture {snapshot:Arc::new(snapshot),owner:id,trigger:response.id,root:root.into(),pass}));
+            let mut snapshot = snapshot(screen, selection, root);
+            if let Some((tab_label, tab_id)) = tab {
+                if !tab_id.is_empty() {
+                    snapshot.label.push_str(&format!(" · tab {tab_id}"));
+                }
+                snapshot.label.push_str(&format!(" · shell {tab_label}"));
+            }
+            ctx.data_mut(|data| {
+                data.insert_temp(
+                    key,
+                    Capture {
+                        snapshot: Arc::new(snapshot),
+                        owner: id,
+                        trigger: response.id,
+                        root: root.into(),
+                        pass,
+                    },
+                )
+            });
         }
         let captured = ctx.data_mut(|data| {
             let mut captured = data.get_temp::<Capture>(key).expect("snapshot initialized");
