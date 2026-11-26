@@ -349,12 +349,41 @@ struct Shared {
     /// start chats on it without scanning a second QR code.
     linked_cloud: RwLock<Option<cloud::CloudHostConfig>>,
     snapshot: RwLock<RemoteSnapshot>,
+    /// Artifact paths discovered on-demand when serving saved/hydrated session details
+    /// (`GET /v1/sessions/detail`), preserved across periodic `update_snapshot` ticks.
+    hydrated_artifacts: RwLock<BTreeSet<PathBuf>>,
     clients: Mutex<Vec<WsClient>>,
     cmd_tx: Sender<RemoteCommand>,
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
+const MAX_HYDRATED_ARTIFACTS: usize = 2048;
+
 impl Shared {
+    fn record_hydrated_artifacts(&self, paths: BTreeSet<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.hydrated_artifacts.write() {
+            for path in paths {
+                if guard.len() >= MAX_HYDRATED_ARTIFACTS && !guard.contains(&path) {
+                    if let Some(oldest) = guard.iter().next().cloned() {
+                        guard.remove(&oldest);
+                    }
+                }
+                guard.insert(path);
+            }
+        }
+    }
+
+    fn effective_allowed_artifacts(&self, snap: &RemoteSnapshot) -> BTreeSet<PathBuf> {
+        let mut combined = snap.allowed_artifacts.clone();
+        if let Ok(guard) = self.hydrated_artifacts.read() {
+            combined.extend(guard.iter().cloned());
+        }
+        combined
+    }
+
     fn broadcast(&self, frame: &str, filter_path: Option<&str>) {
         let mut clients = self.clients.lock().unwrap_or_else(|p| p.into_inner());
         clients.retain(|client| {
@@ -414,6 +443,7 @@ impl RemoteServer {
                 tailscale_ip: tailscale_ip.clone(),
                 ..Default::default()
             }),
+            hydrated_artifacts: RwLock::new(BTreeSet::new()),
             clients: Mutex::new(Vec::new()),
             cmd_tx,
             wake: Box::new(wake),
@@ -745,6 +775,9 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
 
     for (msg_idx, msg) in messages.iter().enumerate() {
         for (img_idx, img) in msg.images.iter().enumerate() {
+            if let Some(f) = &img.file {
+                allowed_paths.insert(f.path.clone());
+            }
             artifacts.push(ArtifactItem {
                 id: format!("msg-img-{msg_idx}-{img_idx}"),
                 kind: "image".into(),
@@ -812,6 +845,9 @@ pub fn extract_artifacts(messages: &[Message]) -> (Vec<ArtifactItem>, BTreeSet<P
                 });
             }
             for (img_idx, img) in tool.images.iter().enumerate() {
+                if let Some(f) = &img.file {
+                    allowed_paths.insert(f.path.clone());
+                }
                 artifacts.push(ArtifactItem {
                     id: format!("tool-img-{msg_idx}-{tool_idx}-{img_idx}"),
                     kind: "image".into(),
@@ -1166,7 +1202,8 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                     if let Ok(preview) = crate::history::load(&path_buf) {
                         if !preview.messages.is_empty() {
                             let mut hydrated = detail.clone();
-                            let (artifacts, _) = extract_artifacts(&preview.messages);
+                            let (artifacts, allowed_paths) = extract_artifacts(&preview.messages);
+                            shared.record_hydrated_artifacts(allowed_paths);
                             hydrated.messages = preview.messages;
                             hydrated.artifacts = artifacts;
                             let _ = http::write_json(stream, 200, "OK", &json!(hydrated));
@@ -1184,7 +1221,8 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 let messages = crate::history::load(&path_buf)
                     .map(|p| p.messages)
                     .unwrap_or_default();
-                let (artifacts, _) = extract_artifacts(&messages);
+                let (artifacts, allowed_paths) = extract_artifacts(&messages);
+                shared.record_hydrated_artifacts(allowed_paths);
                 let detail = SessionDetail {
                     path: summary.path.clone(),
                     title: summary.title.clone(),
@@ -1751,7 +1789,8 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 );
                 return;
             };
-            match files::read_file_content(&cwd, path, &snap.projects, &snap.allowed_artifacts) {
+            let allowed_artifacts = shared.effective_allowed_artifacts(&snap);
+            match files::read_file_content(&cwd, path, &snap.projects, &allowed_artifacts) {
                 Ok(resp) => {
                     let _ = http::write_json(stream, 200, "OK", &json!(resp));
                 }
@@ -1776,7 +1815,8 @@ fn route_http(req: &http::Request, stream: &mut TcpStream, shared: &Shared) {
                 );
                 return;
             };
-            match files::read_file_raw(&cwd, path, &snap.projects, &snap.allowed_artifacts) {
+            let allowed_artifacts = shared.effective_allowed_artifacts(&snap);
+            match files::read_file_raw(&cwd, path, &snap.projects, &allowed_artifacts) {
                 Ok((mime, bytes)) => {
                     let _ = http::write_bytes(stream, 200, "OK", &mime, &bytes);
                 }

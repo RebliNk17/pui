@@ -77,7 +77,24 @@ export function resolveSafeFile(
   cwd: string,
   relOrAbs: string,
   allowedProjects: string[],
+  allowedArtifacts?: Set<string>,
 ): { root: string; fullPath: string; relPath: string } | null {
+  if (path.isAbsolute(relOrAbs) && allowedArtifacts && allowedArtifacts.size > 0) {
+    try {
+      const real = fs.realpathSync(relOrAbs);
+      for (const art of allowedArtifacts) {
+        try {
+          if (fs.realpathSync(art) === real) {
+            return { root: path.dirname(real), fullPath: real, relPath: relOrAbs };
+          }
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // fall through to workspace check
+    }
+  }
   const root = resolveAllowedWorkspace(cwd, allowedProjects);
   if (!root) return null;
   const candidate = path.isAbsolute(relOrAbs) ? relOrAbs : path.join(root, relOrAbs);
@@ -130,8 +147,13 @@ export function listFileTree(cwd: string, dir: string, allowedProjects: string[]
   };
 }
 
-export function readFileContent(cwd: string, targetPath: string, allowedProjects: string[]) {
-  const resolved = resolveSafeFile(cwd, targetPath, allowedProjects);
+export function readFileContent(
+  cwd: string,
+  targetPath: string,
+  allowedProjects: string[],
+  allowedArtifacts?: Set<string>,
+) {
+  const resolved = resolveSafeFile(cwd, targetPath, allowedProjects, allowedArtifacts);
   if (!resolved) {
     throw Object.assign(new Error('File not found or outside allowed workspace.'), { status: 404 });
   }

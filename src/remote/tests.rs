@@ -542,3 +542,139 @@ fn notifications_fire_on_finish_approval_and_questions_without_duplicates() {
 
     server.stop_listener();
 }
+
+#[test]
+fn saved_session_pui_open_artifacts_outside_workspace_stay_readable_after_snapshot_refresh() {
+    let dir = std::env::temp_dir().join(format!("pui-remote-art-{}", uuid::Uuid::new_v4()));
+    let workspace = dir.join("repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let artifact_png = dir.join("pui-feat-workflow.png");
+    // Minimal valid PNG header bytes.
+    std::fs::write(&artifact_png, b"\x89PNG\r\n\x1a\nfake-png-bytes").unwrap();
+
+    // Write a saved session JSONL containing a pui_open tool call referencing the /tmp PNG.
+    let session_file = dir.join("saved-session.jsonl");
+    let session_lines = [
+        json!({
+            "type": "session",
+            "version": 3,
+            "id": "s-art-1",
+            "timestamp": "2026-11-26T09:00:00Z",
+            "cwd": workspace.to_string_lossy()
+        })
+        .to_string(),
+        json!({
+            "type": "message",
+            "id": "m1",
+            "timestamp": "2026-11-26T09:00:01Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "tc-1",
+                    "name": "pui_open",
+                    "arguments": { "target": artifact_png.to_string_lossy() }
+                }]
+            }
+        })
+        .to_string(),
+        json!({
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-11-26T09:00:02Z",
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "tc-1",
+                "toolName": "pui_open",
+                "content": [{ "type": "text", "text": "Opened" }]
+            }
+        })
+        .to_string(),
+    ];
+    std::fs::write(&session_file, format!("{}\n", session_lines.join("\n"))).unwrap();
+
+    let mut cfg = RemoteConfig {
+        enabled: false,
+        bind_mode: BindMode::Localhost,
+        port: 0,
+        host_name: "TestMac".into(),
+        ..Default::default()
+    };
+    cfg.ensure_populated();
+    let token = cfg.token.clone();
+    let mut server = RemoteServer::new(cfg, || {});
+    server.config.enabled = true;
+    server.config.port = 0;
+    server.start_listener();
+    let addr = server.bound_addr.expect("server bound");
+
+    let make_snap = |rev: u64| RemoteSnapshot {
+        revision: rev,
+        host_name: "TestMac".into(),
+        tailscale_ip: Some("100.64.0.1".into()),
+        active_path: None,
+        projects: vec![workspace.clone()],
+        sessions: vec![SessionSummary {
+            path: session_file.to_string_lossy().into_owned(),
+            title: "Saved screenshot chat".into(),
+            project: workspace.to_string_lossy().into_owned(),
+            project_name: "repo".into(),
+            cwd: workspace.to_string_lossy().into_owned(),
+            status: "Saved".into(),
+            busy: false,
+            unread: false,
+            has_pending_dialog: false,
+            model: String::new(),
+            modified_ms: 1_700_000_000_000,
+            created_ms: Some(1_700_000_000_000),
+            origin: SessionOrigin::desktop(),
+            parent_session: None,
+            pinned: false,
+            is_active: false,
+        }],
+        details: BTreeMap::new(),
+        allowed_artifacts: BTreeSet::new(),
+        usage: Default::default(),
+    };
+    server.update_snapshot(make_snap(1));
+
+    let sess_q = http::percent_encode(&session_file.to_string_lossy());
+    let cwd_q = http::percent_encode(&workspace.to_string_lossy());
+    let art_q = http::percent_encode(&artifact_png.to_string_lossy());
+
+    // Loading the saved session detail hydrates its pui_open artifact paths.
+    let (code, detail_body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/sessions/detail?path={sess_q} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(detail_body.contains("pui-feat-workflow.png"));
+
+    // Even after a subsequent snapshot refresh with empty allowed_artifacts, the hydrated
+    // artifact remains readable via /v1/files/content and /v1/files/raw.
+    server.update_snapshot(make_snap(2));
+
+    let (code, content_body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/files/content?cwd={cwd_q}&path={art_q} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200, "body: {content_body}");
+    assert!(content_body.contains("\"is_image\":true"));
+
+    let (code, raw_body) = send_http(
+        addr,
+        &format!(
+            "GET /v1/files/raw?cwd={cwd_q}&path={art_q} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 200);
+    assert!(raw_body.contains("fake-png-bytes"));
+
+    server.stop_listener();
+    let _ = std::fs::remove_dir_all(&dir);
+}

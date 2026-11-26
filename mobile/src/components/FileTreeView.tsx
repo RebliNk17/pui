@@ -23,14 +23,25 @@ interface Props {
   transport: PuiTransport | null;
   initialFilePath?: string | null;
   onOpenImage: (uri: string, title?: string) => void;
+  onCloseDirectFile?: () => void;
 }
 
-export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: Props) {
+export function FileTreeView({
+  cwd,
+  transport,
+  initialFilePath,
+  onOpenImage,
+  onCloseDirectFile,
+}: Props) {
   const colors = usePalette();
   const [dir, setDir] = useState('');
   const [entries, setEntries] = useState<TreeEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [treeLoaded, setTreeLoaded] = useState(false);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [treeError, setTreeError] = useState<string | null>(null);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [pendingFilePath, setPendingFilePath] = useState<string | null>(initialFilePath ?? null);
   const [selectedFile, setSelectedFile] = useState<FileContentResponse | null>(null);
   const [mdMode, setMdMode] = useState<'preview' | 'source'>('preview');
   const { bindings, metrics } = useCustomScrollbar();
@@ -38,16 +49,17 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
   const loadDir = useCallback(
     async (nextDir: string) => {
       if (!transport || !cwd) return;
-      setLoading(true);
-      setError(null);
+      setTreeLoading(true);
+      setTreeError(null);
       try {
         const res = await transport.getFileTree(cwd, nextDir);
         setDir(res.dir);
         setEntries(res.entries);
+        setTreeLoaded(true);
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : 'Failed to load files');
+        setTreeError(e instanceof Error ? e.message : 'Failed to load files');
       } finally {
-        setLoading(false);
+        setTreeLoading(false);
       }
     },
     [transport, cwd],
@@ -55,31 +67,103 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
 
   const openFile = useCallback(
     async (filePath: string) => {
-      if (!transport || !cwd) return;
-      setLoading(true);
-      setError(null);
+      setPendingFilePath(filePath);
+      if (!transport || !cwd) {
+        setFileError('Not connected to host.');
+        return;
+      }
+      setFileLoading(true);
+      setFileError(null);
       try {
         const content = await transport.getFileContent(cwd, filePath);
         setSelectedFile(content);
         setMdMode('preview');
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : 'Failed to read file');
+        setSelectedFile(null);
+        setFileError(e instanceof Error ? e.message : 'Failed to read file');
       } finally {
-        setLoading(false);
+        setFileLoading(false);
       }
     },
     [transport, cwd],
   );
 
   useEffect(() => {
-    void loadDir('');
-  }, [loadDir]);
-
-  useEffect(() => {
     if (initialFilePath) {
       void openFile(initialFilePath);
+    } else {
+      setPendingFilePath(null);
+      setSelectedFile(null);
+      setFileError(null);
+      void loadDir('');
     }
-  }, [initialFilePath, openFile]);
+  }, [initialFilePath, openFile, loadDir]);
+
+  const showTree = () => {
+    setSelectedFile(null);
+    setPendingFilePath(null);
+    setFileError(null);
+    if (!treeLoaded) {
+      void loadDir('');
+    }
+  };
+
+  // Dedicated loading / error state when opening a specific file (never raced with loadDir).
+  if (pendingFilePath && !selectedFile && (fileLoading || fileError)) {
+    const displayPending =
+      cwd && pendingFilePath.startsWith(`${cwd}/`)
+        ? pendingFilePath.slice(cwd.length + 1)
+        : pendingFilePath;
+    return (
+      <View style={styles.flex}>
+        <View style={[styles.bar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
+          <Pressable
+            onPress={() => (onCloseDirectFile ? onCloseDirectFile() : showTree())}
+            style={styles.backBtn}
+          >
+            <Ionicons name="arrow-back" size={18} color={colors.accent} />
+            <Text style={{ color: colors.accent, fontSize: 13, fontWeight: '600' }}>
+              {onCloseDirectFile ? 'Chat' : 'Files'}
+            </Text>
+          </Pressable>
+          <Text numberOfLines={1} style={[styles.pathLabel, { color: colors.text }]}>
+            {displayPending}
+          </Text>
+        </View>
+        {fileLoading ? (
+          <View style={styles.centerState}>
+            <ActivityIndicator color={colors.accent} />
+            <Text style={{ color: colors.muted, fontSize: 13, marginTop: 10 }}>
+              Loading file…
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.centerState}>
+            <Ionicons name="alert-circle-outline" size={28} color={colors.red} />
+            <Text style={{ color: colors.red, fontSize: 13.5, textAlign: 'center', marginTop: 8 }}>
+              {fileError}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+              <Pressable
+                onPress={() => void openFile(pendingFilePath)}
+                style={[styles.actionBtn, { backgroundColor: colors.accentBg }]}
+              >
+                <Text style={{ color: colors.accent, fontSize: 13, fontWeight: '600' }}>Retry</Text>
+              </Pressable>
+              <Pressable
+                onPress={showTree}
+                style={[styles.actionBtn, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: StyleSheet.hairlineWidth }]}
+              >
+                <Text style={{ color: colors.text, fontSize: 13, fontWeight: '500' }}>
+                  Browse files
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  }
 
   if (selectedFile) {
     const rawUrl = transport ? transport.getRawFileUrl(cwd, selectedFile.path) : '';
@@ -99,7 +183,7 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
     return (
       <View style={styles.flex}>
         <View style={[styles.bar, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
-          <Pressable onPress={() => setSelectedFile(null)} style={styles.backBtn}>
+          <Pressable onPress={showTree} style={styles.backBtn}>
             <Ionicons name="arrow-back" size={18} color={colors.accent} />
             <Text style={{ color: colors.accent, fontSize: 13, fontWeight: '600' }}>Files</Text>
           </Pressable>
@@ -211,9 +295,9 @@ export function FileTreeView({ cwd, transport, initialFilePath, onOpenImage }: P
         </Pressable>
       </View>
 
-      {error ? (
-        <Text style={{ color: colors.red, padding: 14, fontSize: 13 }}>{error}</Text>
-      ) : loading ? (
+      {treeError ? (
+        <Text style={{ color: colors.red, padding: 14, fontSize: 13 }}>{treeError}</Text>
+      ) : treeLoading ? (
         <ActivityIndicator style={{ marginTop: 28 }} color={colors.accent} />
       ) : (
         <FlatList
@@ -333,5 +417,16 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 360,
     borderRadius: 10,
+  },
+  centerState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  actionBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
 });

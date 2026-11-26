@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Animated,
   Image,
   type LayoutChangeEvent,
@@ -44,6 +45,9 @@ export function ImageModal({ uri, title, onClose }: Props) {
   const viewportRef = useRef({ x: 0, y: 0, width: 0, height: 0 });
   const [zoomPercent, setZoomPercent] = useState(100);
   const shownPercentRef = useRef(100);
+  const [imgLoading, setImgLoading] = useState(false);
+  const [imgError, setImgError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Gesture bookkeeping refs (never trigger React re-renders per frame).
   const modeRef = useRef<'none' | 'pan' | 'pinch'>('none');
@@ -106,6 +110,9 @@ export function ImageModal({ uri, title, onClose }: Props) {
     applyImmediate({ scale: MIN_ZOOM_SCALE, tx: 0, ty: 0 }, true);
     lastTapRef.current = null;
     modeRef.current = 'none';
+    setImgError(null);
+    setImgLoading(Boolean(uri));
+    setRetryKey(0);
   }, [uri, applyImmediate]);
 
   const measureStageOrigin = useCallback(() => {
@@ -336,8 +343,43 @@ export function ImageModal({ uri, title, onClose }: Props) {
                 },
               ]}
             >
-              <Image source={{ uri }} style={styles.image} resizeMode="contain" />
+              <Image
+                key={`${uri}:${retryKey}`}
+                source={{ uri }}
+                style={styles.image}
+                resizeMode="contain"
+                onLoadStart={() => {
+                  setImgLoading(true);
+                  setImgError(null);
+                }}
+                onLoadEnd={() => setImgLoading(false)}
+                onError={() => {
+                  setImgLoading(false);
+                  setImgError('Could not load image from Pui host.');
+                }}
+              />
             </Animated.View>
+          ) : null}
+          {imgLoading ? (
+            <View pointerEvents="none" style={styles.overlayCenter}>
+              <ActivityIndicator size="large" color="#fff" />
+            </View>
+          ) : null}
+          {imgError ? (
+            <View style={styles.overlayCenter}>
+              <Ionicons name="alert-circle-outline" size={32} color="#f87171" />
+              <Text style={styles.errorText}>{imgError}</Text>
+              <Pressable
+                onPress={() => {
+                  setImgError(null);
+                  setImgLoading(true);
+                  setRetryKey((k) => k + 1);
+                }}
+                style={styles.retryBtn}
+              >
+                <Text style={styles.retryText}>Retry</Text>
+              </Pressable>
+            </View>
           ) : null}
         </View>
 
@@ -454,5 +496,33 @@ const styles = StyleSheet.create({
     fontSize: 12.5,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
+  },
+  overlayCenter: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  errorText: {
+    color: '#fca5a5',
+    fontSize: 13.5,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  retryBtn: {
+    marginTop: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.16)',
+  },
+  retryText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

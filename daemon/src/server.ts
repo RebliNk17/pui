@@ -115,6 +115,7 @@ export class PuiDaemonServer {
   readonly tailscaleIp: string | null;
   private meta: Record<string, ChatMeta>;
   private liveAgents = new Map<string, LiveAgent>();
+  private allowedArtifacts = new Set<string>();
   private clients = new Set<WsClient>();
   private revision = 1;
   private server: http.Server;
@@ -673,6 +674,11 @@ export class PuiDaemonServer {
           sendJson(res, 404, { error: 'Session not found.' });
           return;
         }
+        for (const art of detail.artifacts ?? []) {
+          if (art.path && !/^https?:\/\//i.test(art.path)) {
+            this.allowedArtifacts.add(art.path);
+          }
+        }
         sendJson(res, 200, detail);
         return;
       }
@@ -1004,14 +1010,14 @@ export class PuiDaemonServer {
       if (method === 'GET' && url.pathname === '/v1/files/content') {
         const cwd = url.searchParams.get('cwd') || this.projects()[0] || this.config.workspaces_dir;
         const filePath = url.searchParams.get('path') || '';
-        sendJson(res, 200, readFileContent(cwd, filePath, this.projects()));
+        sendJson(res, 200, readFileContent(cwd, filePath, this.projects(), this.allowedArtifacts));
         return;
       }
 
       if (method === 'GET' && url.pathname === '/v1/files/raw') {
         const cwd = url.searchParams.get('cwd') || this.projects()[0] || this.config.workspaces_dir;
         const filePath = url.searchParams.get('path') || '';
-        const resolved = resolveSafeFile(cwd, filePath, this.projects());
+        const resolved = resolveSafeFile(cwd, filePath, this.projects(), this.allowedArtifacts);
         if (!resolved) {
           sendJson(res, 404, { error: 'File not found.' });
           return;

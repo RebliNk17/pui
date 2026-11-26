@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -194,10 +195,54 @@ export default function ChatScreen() {
     { key: 'bypassPermissions', label: 'Bypass' },
   ];
 
+  const isImageTarget = (target: string): boolean =>
+    /\.(png|jpe?g|gif|webp|bmp)$/i.test(target.split(/[?#]/)[0] ?? '');
+
   const openFileInTree = (target: string) => {
+    if (transport && isImageTarget(target)) {
+      const label = target.split('/').pop() || target;
+      setPreviewImage({
+        uri: transport.getRawFileUrl(cwd, target),
+        title: label,
+      });
+      return;
+    }
     setFileToOpen(target);
     setTab('files');
   };
+
+  const handleNavigateBack = useCallback((): boolean => {
+    if (previewImage) {
+      setPreviewImage(null);
+      return true;
+    }
+    if (menuOpen) {
+      setMenuOpen(false);
+      return true;
+    }
+    if (usageOpen) {
+      setUsageOpen(false);
+      return true;
+    }
+    if (tab !== 'chat') {
+      setFileToOpen(null);
+      setTab('chat');
+      return true;
+    }
+    if (findOpen) {
+      setFindOpen(false);
+      setFindQuery('');
+      return true;
+    }
+    return false;
+  }, [previewImage, menuOpen, usageOpen, tab, findOpen]);
+
+  // Intercept Android swipe-back / hardware back so leaving Files/Artifacts/Changes
+  // returns to the chat that opened them instead of popping all the way to the chat list.
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', handleNavigateBack);
+    return () => sub.remove();
+  }, [handleNavigateBack]);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.bg }]}>
@@ -210,9 +255,7 @@ export default function ChatScreen() {
       >
         <Pressable
           onPress={() => {
-            if (tab !== 'chat') {
-              setTab('chat');
-            } else {
+            if (!handleNavigateBack()) {
               router.back();
             }
           }}
@@ -568,6 +611,14 @@ export default function ChatScreen() {
             transport={transport}
             initialFilePath={fileToOpen}
             onOpenImage={(uri, imgTitle) => setPreviewImage({ uri, title: imgTitle })}
+            onCloseDirectFile={
+              fileToOpen
+                ? () => {
+                    setFileToOpen(null);
+                    setTab('chat');
+                  }
+                : undefined
+            }
           />
         ) : (
           <ChangesView cwd={cwd} transport={transport} onAskPi={prefillInChat} />

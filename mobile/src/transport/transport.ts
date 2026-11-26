@@ -304,16 +304,32 @@ export class DirectTransport implements PuiTransport {
     };
   }
 
-  private async requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  private async requestJson<T>(path: string, init?: RequestInit, timeoutMs = 15_000): Promise<T> {
     const base = buildBaseHttpUrl(this.host);
-    const res = await fetch(`${base}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.host.token}`,
-        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-        ...(init?.headers ?? {}),
-      },
-    });
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer =
+      controller && timeoutMs > 0
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : null;
+    let res: Response;
+    try {
+      res = await fetch(`${base}${path}`, {
+        ...init,
+        signal: init?.signal ?? controller?.signal,
+        headers: {
+          Authorization: `Bearer ${this.host.token}`,
+          ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+          ...(init?.headers ?? {}),
+        },
+      });
+    } catch (err: unknown) {
+      if (controller?.signal.aborted) {
+        throw new Error('Request timed out. Check connection to Pui host and retry.');
+      }
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
       try {
