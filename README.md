@@ -10,8 +10,9 @@ Chat with your agent, watch what it does, review its changes and run several age
 
 - **Everything in one place.** Chats on the left, the conversation in the middle, and context, cost and changed files on the right.
 - **See what the agent did.** Every action (files read, commands run, edits made) is grouped into a short summary you can expand.
-- **Stay in control.** Choose how much the agent may do on its own, per chat, from the bottom of the composer — and optionally enforce OS-level macOS Seatbelt sandboxing on shell commands.
-- **Subagents, background tasks & dynamic workflows.** Spawn interactive child sessions in the sidebar for independent work, or run lightweight background subagents, async shell commands, and phased multi-agent workflows inside the **Background tasks** pane.
+- **Stay in control.** Choose how much the agent may do on its own, per chat, from the bottom of the composer — with an upgraded sandbox-aware Auto mode (custom allow/deny rules, interactive fallback, and distinct denial badges) plus optional OS-level macOS Seatbelt sandboxing on shell commands.
+- **Subagents, background tasks & dynamic workflows.** Spawn interactive child sessions in the sidebar (fresh or forked from the current conversation, plus one-tool mid-task handoff, shared family notes, and family-wide messaging), or run lightweight background subagents, async shell commands, and phased multi-agent workflows inside the **Background tasks** pane.
+- **Pull requests & autonomous browser verification.** Track PRs, CI checks, merge conflicts and review comments in a dedicated **Pull request** pane with optional background **Auto-fix**, and let agents drive Pui's built-in Chromium browser while you watch live and can take over anytime.
 - **Stay in flow.** Follow live per-turn step plans, click one-tap next steps in the end-of-turn wrap-up box, launch proposed follow-up sessions in one click, and run single-line shell blocks straight in the built-in terminal.
 - **Batteries included.** Pi, Node.js, ripgrep and fd come inside the app. Nothing else to install.
 - **Light and dark**, several color themes, and full keyboard control.
@@ -36,9 +37,17 @@ One search box covers chats, message text, files and settings.
 
 ![Search overlay](docs/images/search.png)
 
-### Dynamic workflows & background tasks
+### Pull request pane & PR Auto-fix
+
+Bind any GitHub pull request (`pui_pr_bind`) or auto-detect the current branch's PR to inspect CI checks, merge conflicts, and review comments side by side with chat. Turn on **Auto-fix** (`pui_pr_autofix`) to watch the PR in the background (~30s) and automatically wake the chat on new CI failures, merge conflicts, or review comments — without ever enabling GitHub auto-merge.
+
+![Pull request right-side pane with CI checks, review comments, and Auto-fix toggle](docs/images/pr-pane.png)
+
+### Dynamic workflows, background tasks & side-session collaboration
 
 Run phased multi-agent workflows, lightweight non-sidebar background subagents, and long-running background shell commands from the **Background tasks** pane — with a live 6×6 status micro-grid, collapsible phase rows, per-agent token/time tables, surfaced errors, and one-click Stop.
+
+For independent work that outlives a turn, sidebar child sessions (`pui_spawn_agent` / `pui_handoff_session`) support `context: "fork"` (inheriting the parent's conversation history), a shared per-family notes folder (`PUI_FAMILY_NOTES_DIR`), family-wide sibling messaging (`pui_message_agent`), batched completion wakes (`<side-sessions-event>`), and clickable `[title](#agent/<agent_id>)` session links.
 
 ![Dynamic workflows, inline agent result cards, and the Background tasks pane](docs/images/workflows.png)
 
@@ -54,9 +63,9 @@ Multi-step turns pin a collapsible progress strip above the composer (`pui_updat
 
 ![Turn UX plan strip, wrap-up box, and follow-up session proposal card](docs/images/turn-ux.png)
 
-### Files, a browser and a terminal built in
+### Files, an agent-driven browser and a terminal built in
 
-Browse the workspace, preview files and web pages in the built-in browser, and open terminals without leaving the app. Single-line `bash`/`sh`/`zsh` code blocks get a one-click **Run** button, and replies can deep-link straight to a specific terminal tab (`#terminal/<tab_id>`).
+Browse the workspace, preview files and web pages in the built-in Chromium browser, and open terminals without leaving the app. Agents can also drive the visible Browser pane directly (`pui_browser_navigate`, `pui_browser_read`, `pui_browser_act`, `pui_browser_screenshot`, `pui_browser_console`) to verify localhost dev servers and forms while you watch live and can take over anytime. Single-line `bash`/`sh`/`zsh` code blocks get a one-click **Run** button, and replies can deep-link straight to a specific terminal tab (`#terminal/<tab_id>`).
 
 ![Workspace file browser](docs/images/files.png)
 
@@ -124,14 +133,16 @@ Choose a mode per chat from the composer. New chats start in the last mode you p
 
 | Mode | What the agent can do without asking |
 |---|---|
-| **Auto** | Routine development. A small, cheap model checks each risky action, and dangerous ones are blocked. |
+| **Auto** | Routine development. Fast-paths safe read-only dev commands, caches repeated verdicts, respects custom Allow/Deny rules and active OS sandboxing, checks remaining actions with a cheap classifier model, and falls back to inline approval when uncertain or unavailable. |
 | **Manual** | Read files. Everything else asks first. |
 | **Accept edits** | Read and edit files in the workspace. Commands and network access ask first. |
 | **Plan** | Read-only. The agent writes a plan for you to approve. |
 | **Don't ask** | Safe reads and workspace edits. Anything else is refused silently. |
 | **Bypass** | Everything. Use only for work you trust. |
 
-Subagents run in their parent's mode or a stricter one, never a looser one.
+Subagents run in their parent's mode or a stricter one, never a looser one. Blocked tool calls are stamped in the transcript with distinct quiet badges (**Blocked by Auto**, **Classifier unavailable**, **Blocked by sandbox**, **Blocked by mode**) and a concise one-line reason so you can tell policy blocks apart from ordinary command errors.
+
+Under **Settings → Permissions**, you can also configure **Interactive approval fallback** (ask inline when the Auto classifier is uncertain, unavailable, encounters an oversized payload, or hits consecutive blocks) and custom **Auto mode rules** (Allow and Deny patterns, with Deny taking precedence and never weakening credential or unmanaged-agent protections).
 
 ### OS-level Local Sandbox (macOS)
 
@@ -149,6 +160,7 @@ You need Rust 1.88+, CMake and Ninja (`brew install cmake ninja`).
 ```sh
 cargo run -- --demo              # a populated design preview; never starts Pi
 cargo run -- --demo-workflow     # dynamic workflows, background tasks & agent results preview
+cargo run -- --demo-pr           # Pull Request pane, CI checks & Auto-fix preview
 cargo run -- --demo-turn-ux      # live plan strip, wrap-up box & session proposal preview
 cargo run -- --demo-shell-run    # single-line shell Run button & terminal deep link preview
 cargo run -- --cwd /path/to/repo # open a real project
