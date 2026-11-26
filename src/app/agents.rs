@@ -98,6 +98,7 @@ pub(super) struct Chat {
     resource_reload: resource_reload::Reload,
     dialog_text: String,
     questions: questions::View,
+    pub(super) turn_ux: turn_ux::TurnUx,
     current_dialog: String,
     pending_dialog: Option<String>,
 }
@@ -717,6 +718,7 @@ impl Pui {
             resource_reload: std::mem::take(&mut self.resource_reload),
             dialog_text: std::mem::take(&mut self.dialog_text),
             questions: std::mem::take(&mut self.questions),
+            turn_ux: std::mem::take(&mut self.turn_ux),
             current_dialog: std::mem::take(&mut self.current_dialog),
             pending_dialog: self.pending_dialog.take(),
         }
@@ -749,6 +751,7 @@ impl Pui {
         self.resource_reload = chat.resource_reload;
         self.dialog_text = chat.dialog_text;
         self.questions = chat.questions;
+        self.turn_ux = chat.turn_ux;
         self.current_dialog = chat.current_dialog;
         self.pending_dialog = chat.pending_dialog;
     }
@@ -1396,6 +1399,9 @@ impl Pui {
                 self.automation_control(source, request)
             }
             "bg_bash" | "bg_tasks" => self.background_tasks_control(source, request),
+            "turn_update_plan" | "turn_wrap_up" | "turn_propose_session" => {
+                self.turn_ux_control(source, request)
+            }
             "dynamic_workflow_start" => self.start_dynamic_workflow(source, request),
             "spawn" | "spawn_background" => {
                 let background = action == "spawn_background";

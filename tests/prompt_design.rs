@@ -61,6 +61,7 @@ fn custom_prompt_dialogs_do_not_keep_stock_headings_or_decision_buttons() {
         "src/app/settings/model_editor.rs",
         "src/app/settings/resources/dialogs.rs",
         "src/app/sidebar/sections/confirmation.rs",
+        "src/app/turn_ux.rs",
     ] {
         let source = std::fs::read_to_string(root.join(path)).expect("read prompt source");
         assert_shared_controls(path, &source);

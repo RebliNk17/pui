@@ -710,6 +710,7 @@ impl Pui {
             self.completion_run = Default::default();
             self.attention_observed = Default::default();
             self.questions = Default::default();
+            self.turn_ux = Default::default();
             self.current_dialog.clear();
             self.pending_dialog = None;
             self.recall = Default::default();

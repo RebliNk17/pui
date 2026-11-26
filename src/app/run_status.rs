@@ -400,6 +400,7 @@ impl Pui {
         if !self.remote_action(sync::Action::Queue(message.clone())) {
             self.waiting.entry(path).or_default().push(message);
         }
+        self.turn_ux.on_user_submit();
         self.draft.clear();
         self.context_chips.clear();
         self.context_chips.clear_quotes();

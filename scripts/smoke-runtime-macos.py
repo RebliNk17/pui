@@ -15,7 +15,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-ADAPTER_FILES = ("ultracode.ts", "permissions.ts", "compaction.ts", "context.ts", "titles.ts", "rewind.ts", "questions.ts", "open.ts", "visual.ts", "workflows.ts", "antigravity.ts", "accounts.ts", "model-fallback.ts", "shellenv.ts")
+ADAPTER_FILES = ("ultracode.ts", "permissions.ts", "compaction.ts", "context.ts", "titles.ts", "rewind.ts", "questions.ts", "open.ts", "visual.ts", "turn_ux.ts", "workflows.ts", "antigravity.ts", "accounts.ts", "model-fallback.ts", "shellenv.ts")
 
 
 def tree_digest(root):

@@ -58,6 +58,7 @@ mod sidebar_view;
 mod sync;
 mod tasks;
 mod terminal;
+mod turn_ux;
 mod updates;
 pub(crate) use updates::install_staged_update;
 mod views;
@@ -282,6 +283,7 @@ pub struct Pui {
     diff_rx: Option<workspace::read_only::Request<changes::git_files::Loaded>>,
     dialog_text: String,
     questions: questions::View,
+    turn_ux: turn_ux::TurnUx,
     question_designs: Option<questions::designs::Preview>,
     current_dialog: String,
     pending_dialog: Option<String>,
@@ -493,6 +495,7 @@ impl Pui {
             diff_rx: None,
             dialog_text: String::new(),
             questions: Default::default(),
+            turn_ux: Default::default(),
             question_designs: options.demo_question_designs.then(Default::default),
             current_dialog: String::new(),
             pending_dialog: None,
@@ -1021,19 +1024,21 @@ impl Pui {
         self.preview_rx = None;
         self.preview_partial = false;
         self.uncertain_deliveries();
-        let restart_notice = if session.is_some()
-            && self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref()
-        {
+        let same_session = session.is_some()
+            && self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref();
+        if !same_session {
+            self.turn_ux = Default::default();
+        }
+        let restart_notice = if same_session {
             std::mem::take(&mut self.state.restart_notice)
         } else {
             String::new()
         };
-        let pending_messages =
-            if self.state.session_file.as_deref().map(std::path::Path::new) == session.as_deref() {
-                std::mem::take(&mut self.state.pending_messages)
-            } else {
-                Vec::new()
-            };
+        let pending_messages = if same_session {
+            std::mem::take(&mut self.state.pending_messages)
+        } else {
+            Vec::new()
+        };
         self.state = State {
             pending_messages,
             restart_notice,
@@ -1925,6 +1930,7 @@ impl Pui {
             return;
         }
         self.state.restart_notice.clear();
+        self.turn_ux.on_user_submit();
         self.draft_images.clear();
         self.draft.clear();
         self.context_chips.clear();

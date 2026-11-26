@@ -888,6 +888,7 @@ impl Pui {
                             ui.add_space(padding);
                             ui.vertical(|ui| {
                                 ui.set_width(width);
+                                self.turn_ux_strip(ui, ctx);
                                 self.composer(ui, ctx);
                             });
                         });
