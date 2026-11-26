@@ -163,7 +163,14 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
   const optimisticSendsRef = useRef<
     Record<
       string,
-      { id: number; text: string; mode: 'queue' | 'steer'; image_count: number; baselineMsgCount: number }[]
+      {
+        id: number;
+        text: string;
+        mode: 'queue' | 'steer';
+        image_count: number;
+        baselineMsgCount: number;
+        createdAt: number;
+      }[]
     >
   >({});
   const nextOptimisticIdRef = useRef(-1);
@@ -212,17 +219,20 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
     const pendingOpt = optimisticSendsRef.current[path];
     let waiting_messages = incoming.waiting_messages ?? [];
     if (pendingOpt && pendingOpt.length > 0) {
+      const now = Date.now();
       const remaining = pendingOpt.filter((opt) => {
+        // Never leave a stale optimistic "Sending…" stuck forever if an older host
+        // dropped the message or already processed it with a slightly modified text.
+        if (now - opt.createdAt > 12_000) return false;
         const trimmed = opt.text.trim();
         const inServerQueue = waiting_messages.some((w) => w.text.trim() === trimmed);
         const inPending = (incoming.pending_messages ?? []).some(
           (p) => p.text.trim() === trimmed,
         );
-        const deliveredToTranscript =
-          messages.length > opt.baselineMsgCount &&
-          messages
-            .slice(opt.baselineMsgCount)
-            .some((m) => m.role === 'user' && (trimmed === '' || m.text.trim() === trimmed));
+        const tailStart = Math.max(0, Math.min(opt.baselineMsgCount, messages.length - 4));
+        const deliveredToTranscript = messages
+          .slice(tailStart)
+          .some((m) => m.role === 'user' && (trimmed === '' || m.text.trim() === trimmed));
         return !inServerQueue && !inPending && !deliveredToTranscript;
       });
       if (remaining.length > 0) {
@@ -741,6 +751,7 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
         mode,
         image_count: input.images?.length ?? 0,
         baselineMsgCount: curDetail?.messages.length ?? 0,
+        createdAt: Date.now(),
       };
       optimisticSendsRef.current[path] = [
         ...(optimisticSendsRef.current[path] ?? []),
@@ -785,6 +796,36 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
             void loadSessionDetail(path, hostId).catch(() => {});
           }
         }, 250);
+        // Guardrail: if the host still hasn't acknowledged the message after 8s
+        // (e.g. an older host dropped it while waking), clear the stale "Sending…"
+        // pill, restore the text to draft, and show a clear notice.
+        setTimeout(() => {
+          const stillPending = (optimisticSendsRef.current[path] ?? []).some(
+            (o) => o.id === optId,
+          );
+          if (!stillPending) return;
+          const remaining = (optimisticSendsRef.current[path] ?? []).filter(
+            (o) => o.id !== optId,
+          );
+          if (remaining.length > 0) {
+            optimisticSendsRef.current[path] = remaining;
+          } else {
+            delete optimisticSendsRef.current[path];
+          }
+          if (input.text.trim()) void saveChatDraft(path, input.text);
+          setDetailsByPath((prev) => {
+            const cur = prev[path];
+            if (!cur) return prev;
+            return {
+              ...prev,
+              [path]: {
+                ...cur,
+                notice: 'Host did not confirm message delivery — draft restored.',
+                waiting_messages: (cur.waiting_messages ?? []).filter((w) => w.index !== optId),
+              },
+            };
+          });
+        }, 8_000);
       } catch (err: unknown) {
         // Roll back the optimistic entry and preserve the unsent text in draft.
         const remaining = (optimisticSendsRef.current[path] ?? []).filter((o) => o.id !== optId);
@@ -816,6 +857,27 @@ export function PuiProvider({ children }: { children: React.ReactNode }) {
 
   const removeQueuedMessage = useCallback(
     async (path: string, hostId: string | null | undefined, index: number): Promise<void> => {
+      if (index < 0) {
+        // Dismiss an optimistic "Sending…" entry locally.
+        const remaining = (optimisticSendsRef.current[path] ?? []).filter((o) => o.id !== index);
+        if (remaining.length > 0) {
+          optimisticSendsRef.current[path] = remaining;
+        } else {
+          delete optimisticSendsRef.current[path];
+        }
+        setDetailsByPath((prev) => {
+          const cur = prev[path];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [path]: {
+              ...cur,
+              waiting_messages: (cur.waiting_messages ?? []).filter((w) => w.index !== index),
+            },
+          };
+        });
+        return;
+      }
       const targetTransport = getTransportForHost(hostId);
       if (!targetTransport) return;
       // Optimistically remove from the queue immediately (0ms).

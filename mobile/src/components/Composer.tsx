@@ -390,11 +390,11 @@ export function Composer({
                     <Ionicons name="pencil-outline" size={15} color={colors.muted} />
                   </Pressable>
                 ) : null}
-                {!isOptimistic && onRemoveQueued ? (
+                {onRemoveQueued ? (
                   <Pressable
                     onPress={() => void onRemoveQueued(item.index)}
                     hitSlop={8}
-                    accessibilityLabel="Remove queued message"
+                    accessibilityLabel={isOptimistic ? 'Dismiss pending message' : 'Remove queued message'}
                   >
                     <Ionicons name="close" size={16} color={colors.dim} />
                   </Pressable>
