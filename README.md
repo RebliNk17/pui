@@ -10,8 +10,9 @@ Chat with your agent, watch what it does, review its changes and run several age
 
 - **Everything in one place.** Chats on the left, the conversation in the middle, and context, cost and changed files on the right.
 - **See what the agent did.** Every action (files read, commands run, edits made) is grouped into a short summary you can expand.
-- **Stay in control.** Choose how much the agent may do on its own, per chat, from the bottom of the composer.
-- **Run agents in parallel.** Spawn subagents in their own Git worktrees; each one is a chat you can open and talk to.
+- **Stay in control.** Choose how much the agent may do on its own, per chat, from the bottom of the composer — and optionally enforce OS-level macOS Seatbelt sandboxing on shell commands.
+- **Subagents, background tasks & dynamic workflows.** Spawn interactive child sessions in the sidebar for independent work, or run lightweight background subagents, async shell commands, and phased multi-agent workflows inside the **Background tasks** pane.
+- **Stay in flow.** Follow live per-turn step plans, click one-tap next steps in the end-of-turn wrap-up box, launch proposed follow-up sessions in one click, and run single-line shell blocks straight in the built-in terminal.
 - **Batteries included.** Pi, Node.js, ripgrep and fd come inside the app. Nothing else to install.
 - **Light and dark**, several color themes, and full keyboard control.
 
@@ -35,11 +36,31 @@ One search box covers chats, message text, files and settings.
 
 ![Search overlay](docs/images/search.png)
 
+### Dynamic workflows & background tasks
+
+Run phased multi-agent workflows, lightweight non-sidebar background subagents, and long-running background shell commands from the **Background tasks** pane — with a live 6×6 status micro-grid, collapsible phase rows, per-agent token/time tables, surfaced errors, and one-click Stop.
+
+![Dynamic workflows, inline agent result cards, and the Background tasks pane](docs/images/workflows.png)
+
+### Inspect agent results cleanly
+
+Click any background subagent card (in chat or in Background tasks) to open its Detail View: prompt brief, model, expandable tool summary, full Markdown-rendered response, and settled stats (`tool uses · tokens · duration`). Host completion reports render as quiet collapsible cards in the parent transcript.
+
+![Subagent Detail View with Markdown response, stats footer, and collapsible report card](docs/images/agent-detail.png)
+
+### Live turn plans, wrap-up actions & follow-up proposals
+
+Multi-step turns pin a collapsible progress strip above the composer (`pui_update_plan`), finish with a recap and clickable quick-reply buttons (`pui_wrap_up`), and surface independent follow-ups as one-click session proposal cards (`pui_propose_session`).
+
+![Turn UX plan strip, wrap-up box, and follow-up session proposal card](docs/images/turn-ux.png)
+
 ### Files, a browser and a terminal built in
 
-Browse the workspace, preview files and web pages in the built-in browser, and open terminals without leaving the app.
+Browse the workspace, preview files and web pages in the built-in browser, and open terminals without leaving the app. Single-line `bash`/`sh`/`zsh` code blocks get a one-click **Run** button, and replies can deep-link straight to a specific terminal tab (`#terminal/<tab_id>`).
 
 ![Workspace file browser](docs/images/files.png)
+
+![Single-line shell Run button and deep-linked Terminal tab](docs/images/shell-run.png)
 
 ### Know when an agent needs you
 
@@ -110,7 +131,16 @@ Choose a mode per chat from the composer. New chats start in the last mode you p
 | **Don't ask** | Safe reads and workspace edits. Anything else is refused silently. |
 | **Bypass** | Everything. Use only for work you trust. |
 
-Subagents run in their parent's mode or a stricter one, never a looser one. Permission checks are tool-level guards, not an operating-system sandbox.
+Subagents run in their parent's mode or a stricter one, never a looser one.
+
+### OS-level Local Sandbox (macOS)
+
+Permission modes gate actions at the tool boundary. For kernel-enforced isolation on macOS, enable **Local sandbox** under **Settings → Permissions** to wrap foreground `bash` and background shell commands in macOS Seatbelt (`sandbox-exec`):
+
+- **Local sandbox**: restricts filesystem writes to the session workspace and temporary directories, and blocks reads of credential paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.netrc`, `~/.git-credentials`).
+- **Strict sandbox mode**: additionally blocks external outbound network access while preserving localhost and Unix domain sockets.
+
+![Local sandbox and strict sandbox mode toggles in Settings → Permissions](docs/images/sandbox.png)
 
 ## Build from source
 
@@ -118,6 +148,9 @@ You need Rust 1.88+, CMake and Ninja (`brew install cmake ninja`).
 
 ```sh
 cargo run -- --demo              # a populated design preview; never starts Pi
+cargo run -- --demo-workflow     # dynamic workflows, background tasks & agent results preview
+cargo run -- --demo-turn-ux      # live plan strip, wrap-up box & session proposal preview
+cargo run -- --demo-shell-run    # single-line shell Run button & terminal deep link preview
 cargo run -- --cwd /path/to/repo # open a real project
 ./scripts/bundle-macos.sh        # optimized Pui Dev bundle at dist/Pui.app
 ```
