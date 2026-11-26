@@ -69,7 +69,7 @@ impl Page {
             }
             Self::Shortcuts => "keyboard shortcuts keys command control enter escape",
             Self::Permissions => {
-                "manual auto accept edits plan dont ask classifier safety tools sandbox seatbelt local strict network"
+                "manual auto accept edits plan dont ask classifier safety tools sandbox seatbelt local strict network rules allow deny fallback approval"
             }
             Self::Models => "model reasoning effort thinking pricing context provider",
             Self::Providers => {
@@ -212,6 +212,16 @@ pub(in crate::app) fn search_entries() -> Vec<SearchEntry> {
             "sandbox seatbelt strict network outbound block external isolation",
         ),
         (
+            "Auto mode rules",
+            "Permissions",
+            "auto mode rules allow deny patterns commands tools glob",
+        ),
+        (
+            "Interactive approval fallback",
+            "Permissions",
+            "auto mode fallback approval ask uncertain unavailable oversized prompt",
+        ),
+        (
             "Models and thinking levels",
             "Models",
             "reasoning effort pricing context",
@@ -263,6 +273,9 @@ pub(in crate::app) struct View {
     default_open: bool,
     default_list: crate::app::model_picker::ListState,
     defaults_error: Option<String>,
+    auto_allow_text: String,
+    auto_deny_text: String,
+    auto_rules_synced: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl View {
@@ -1409,7 +1422,7 @@ impl Pui {
         section(
             ui,
             "Auto classifier",
-            "Used by chats in Auto mode. Blocked calls return to the agent, not an approval prompt. The agent continues safe work and reports blocked attempts.",
+            "Used by chats in Auto mode. Denied calls return to the agent to continue safe work; uncertain, unavailable, oversized, or repeated blocks can fall back to interactive approval.",
         );
         card(ui, |ui| {
             row(
@@ -1472,6 +1485,7 @@ impl Pui {
             ui.add_space(6.0);
             ui.label(theme::small(ui, "OS-level sandboxing requires macOS."));
         }
+        self.settings_auto_rules(ui);
         section(ui, "Confirmations", "");
         card(ui, |ui| {
             row(
@@ -1501,6 +1515,139 @@ impl Pui {
             "Trusted extensions",
             "Extensions can run their own code. Bypass skips Pui approvals, not OS permissions or read-only worker restrictions. These are tool-level controls, not a security sandbox.",
         );
+    }
+    fn settings_auto_rules(&mut self, ui: &mut egui::Ui) {
+        let colors = theme::palette(ui.ctx());
+        let current = (
+            normalized_auto_rules(&self.prefs.settings.auto_allow_rules),
+            normalized_auto_rules(&self.prefs.settings.auto_deny_rules),
+        );
+        if self.settings_view.auto_rules_synced.as_ref() != Some(&current) {
+            self.settings_view.auto_allow_text = current.0.join("\n");
+            self.settings_view.auto_deny_text = current.1.join("\n");
+            self.settings_view.auto_rules_synced = Some(current);
+        }
+        section(
+            ui,
+            "Auto mode rules",
+            "Match tool names or command prefixes/globs (one per line, e.g. cargo test*, bash:npm test*, git push*). Deny rules take precedence and never weaken unmanaged-agent or credential protections.",
+        );
+        let allow_count = self.prefs.settings.auto_allow_rules.len();
+        let deny_count = self.prefs.settings.auto_deny_rules.len();
+        let mut changed = false;
+        card(ui, |ui| {
+            let mut rule_editor = |ui: &mut egui::Ui,
+                                   id_salt: &'static str,
+                                   title: &'static str,
+                                   description: &'static str,
+                                   hint: &'static str,
+                                   count: usize,
+                                   text: &mut String| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(title).size(13.0).color(colors.text));
+                            if count > 0 {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!("{count} / 32"))
+                                            .size(11.0)
+                                            .color(colors.dim),
+                                    );
+                                });
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(description).size(11.5).color(colors.muted),
+                            )
+                            .wrap(),
+                        );
+                        let response = egui::Frame::new()
+                            .fill(colors.surface)
+                            .stroke(Stroke::new(1.0_f32, colors.border))
+                            .corner_radius(7)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(
+                                    egui::TextEdit::multiline(text)
+                                        .id_salt(id_salt)
+                                        .hint_text(hint)
+                                        .font(FontId::monospace(11.5))
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY)
+                                        .frame(false),
+                                )
+                            })
+                            .inner;
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| {
+                            d.insert_temp(
+                                egui::Id::new(("settings-rule-editor", title)),
+                                response.rect,
+                            );
+                        });
+                        if response.changed() {
+                            changed = true;
+                        }
+                    });
+            };
+            rule_editor(
+                ui,
+                "settings-auto-allow-rules",
+                "Allow rules",
+                "Skip the classifier for matching non-risky actions (one per line, e.g. cargo test*, npm test*).",
+                "cargo test*\nnpm test*",
+                allow_count,
+                &mut self.settings_view.auto_allow_text,
+            );
+            separator(ui);
+            rule_editor(
+                ui,
+                "settings-auto-deny-rules",
+                "Deny rules",
+                "Always block matching actions in Auto mode before classification (one per line, e.g. git push*, docker*).",
+                "git push*\ndocker*",
+                deny_count,
+                &mut self.settings_view.auto_deny_text,
+            );
+            separator(ui);
+            row(
+                ui,
+                "Interactive approval fallback",
+                "Ask for approval when Auto is uncertain, the classifier is unavailable, an action is oversized, or three consecutive non-risky calls are blocked. Built-in safety rules and deny rules still block without prompting.",
+                |ui| {
+                    toggle(
+                        ui,
+                        &mut self.prefs.settings.auto_fallback_prompt,
+                        "Interactive approval fallback",
+                    );
+                },
+            );
+        });
+        if changed {
+            self.prefs.settings.auto_allow_rules = self
+                .settings_view
+                .auto_allow_text
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            self.prefs.settings.auto_deny_rules = self
+                .settings_view
+                .auto_deny_text
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            self.prefs.settings.normalize_auto_rules();
+            self.settings_view.auto_rules_synced = Some((
+                self.prefs.settings.auto_allow_rules.clone(),
+                self.prefs.settings.auto_deny_rules.clone(),
+            ));
+        }
     }
     /// Classifier choices from the app catalog (picker scope, Auto's
     /// eligibility rules); before the first catalog load, the chat's report.

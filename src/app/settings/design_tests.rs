@@ -237,6 +237,7 @@ fn permissions_sandbox_toggles_render_enforce_dependency_and_propagate() {
             );
 
             // Disabling Local sandbox must also clear Strict sandbox mode.
+            let (local_rect, _) = toggle_state(&ctx, "Local sandbox");
             click(&mut app, local_rect.center());
             assert!(!app.prefs.settings.local_sandbox);
             assert!(!app.prefs.settings.strict_sandbox);
@@ -254,5 +255,143 @@ fn permissions_sandbox_toggles_render_enforce_dependency_and_propagate() {
         entries
             .iter()
             .any(|e| e.title == "Strict sandbox mode" && e.page == "Permissions")
+    );
+}
+
+#[test]
+fn permissions_auto_rules_and_fallback_render_edit_and_propagate_in_both_themes() {
+    fn toggle_state(ctx: &egui::Context, title: &str) -> (egui::Rect, bool) {
+        ctx.data(|d| {
+            d.get_temp::<(egui::Rect, bool)>(egui::Id::new(("settings-toggle-rect", title)))
+                .unwrap_or_else(|| panic!("missing toggle rect for {title}"))
+        })
+    }
+    fn editor_rect(ctx: &egui::Context, title: &str) -> egui::Rect {
+        ctx.data(|d| {
+            d.get_temp::<egui::Rect>(egui::Id::new(("settings-rule-editor", title)))
+                .unwrap_or_else(|| panic!("missing rule editor rect for {title}"))
+        })
+    }
+
+    for mode in [theme::Theme::Dark, theme::Theme::Light] {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx.clone()),
+            Options {
+                demo: true,
+                demo_settings: true,
+                theme: Some(mode),
+                ..Default::default()
+            },
+        );
+        app.demo = false;
+        let (client, _tx, commands) = rpc::Client::stub_with_commands();
+        app.client = Some(client);
+        app.settings_view.page = Page::Permissions;
+        app.prefs.settings.auto_allow_rules = vec!["cargo test*".into()];
+        app.prefs.settings.auto_deny_rules = vec!["git push*".into()];
+        app.prefs.settings.auto_fallback_prompt = true;
+
+        let run_frame = |app: &mut Pui, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(1100.0, 1400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.session_settings(ctx),
+            )
+        };
+        let click = |app: &mut Pui, pos: egui::Pos2| {
+            for pressed in [true, false] {
+                let _ = run_frame(
+                    app,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        };
+
+        let _ = run_frame(&mut app, vec![]);
+        let _ = run_frame(&mut app, vec![]);
+        let (fallback_rect, fallback_enabled) = toggle_state(&ctx, "Interactive approval fallback");
+        assert!(fallback_enabled);
+        let allow_rect = editor_rect(&ctx, "Allow rules");
+        let deny_rect = editor_rect(&ctx, "Deny rules");
+        assert!(allow_rect.width() > 200.0 && allow_rect.height() > 20.0);
+        assert!(deny_rect.width() > 200.0 && deny_rect.height() > 20.0);
+        assert_eq!(app.settings_view.auto_allow_text, "cargo test*");
+        assert_eq!(app.settings_view.auto_deny_text, "git push*");
+
+        // Toggling Interactive approval fallback updates settings and propagates /pui-settings.
+        click(&mut app, fallback_rect.center());
+        assert!(!app.prefs.settings.auto_fallback_prompt);
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            sent.iter().any(|cmd| {
+                cmd["message"].as_str().is_some_and(|m| {
+                    m.starts_with("/pui-settings ") && m.contains("\"autoFallbackPrompt\":false")
+                })
+            }),
+            "expected /pui-settings with autoFallbackPrompt:false, got: {sent:?}"
+        );
+
+        // Focus Allow rules editor and type an additional line; verify normalized rules propagate.
+        click(&mut app, allow_rect.center());
+        let _ = run_frame(
+            &mut app,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Text("npm test*".into()),
+            ],
+        );
+        assert!(
+            app.prefs
+                .settings
+                .auto_allow_rules
+                .iter()
+                .any(|r| r.contains("npm test*")),
+            "expected Allow rules to include typed rule, got: {:?}",
+            app.prefs.settings.auto_allow_rules
+        );
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            sent.iter().any(|cmd| {
+                cmd["message"].as_str().is_some_and(|m| {
+                    m.starts_with("/pui-settings ")
+                        && m.contains("\"autoAllowRules\"")
+                        && m.contains("npm test*")
+                })
+            }),
+            "expected /pui-settings with updated autoAllowRules, got: {sent:?}"
+        );
+    }
+
+    let entries = search_entries();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.title == "Auto mode rules" && e.page == "Permissions")
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.title == "Interactive approval fallback" && e.page == "Permissions")
     );
 }

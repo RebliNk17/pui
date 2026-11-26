@@ -93,7 +93,7 @@ impl PermissionMode {
                 "Strict read-only tools and a small allowlist of inspection commands. Approve the written plan, then change mode to implement."
             }
             Self::Auto => {
-                "Routine development actions proceed automatically. The cheapest available suitable model (or your override) checks for dangerous effects. Blocked or uncertain calls return to the agent without asking; it continues safe work and reports blocked attempts. Classifier calls incur provider usage."
+                "Routine development actions proceed automatically. The cheapest available suitable model (or your override) checks for dangerous effects. Denied calls return to the agent to continue safe work; uncertain, unavailable, oversized, or repeated blocks can fall back to interactive approval. Classifier calls incur provider usage."
             }
             Self::DontAsk => {
                 "Allow reads, safe inspection commands and workspace edits/moves. Automatically deny everything requiring approval; no permission dialogs."
@@ -121,6 +121,12 @@ pub(super) struct Settings {
     pub local_sandbox: bool,
     #[serde(default)]
     pub strict_sandbox: bool,
+    #[serde(default)]
+    pub auto_allow_rules: Vec<String>,
+    #[serde(default)]
+    pub auto_deny_rules: Vec<String>,
+    #[serde(default = "default_auto_fallback_prompt")]
+    pub auto_fallback_prompt: bool,
     /// Runtime-only: the models the picker shows (configured providers minus
     /// hidden models). Auto's classifier never selects anything outside it.
     #[serde(skip)]
@@ -133,6 +139,29 @@ pub(super) struct ModelScope {
 }
 fn default_auto_check_updates() -> bool {
     true
+}
+fn default_auto_fallback_prompt() -> bool {
+    true
+}
+pub(super) fn normalized_auto_rules(rules: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for rule in rules {
+        let cleaned: String = rule
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>()
+            .trim()
+            .chars()
+            .take(240)
+            .collect();
+        if !cleaned.is_empty() {
+            normalized.push(cleaned);
+            if normalized.len() >= 32 {
+                break;
+            }
+        }
+    }
+    normalized
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -147,6 +176,9 @@ impl Default for Settings {
             auto_install_updates: false,
             local_sandbox: false,
             strict_sandbox: false,
+            auto_allow_rules: Vec::new(),
+            auto_deny_rules: Vec::new(),
+            auto_fallback_prompt: true,
             model_scope: None,
         }
     }
@@ -166,12 +198,20 @@ impl Settings {
         }
     }
 
+    /// Trim non-empty Auto rules, strip control characters, and bound list/entry lengths.
+    pub(super) fn normalize_auto_rules(&mut self) {
+        self.auto_allow_rules = normalized_auto_rules(&self.auto_allow_rules);
+        self.auto_deny_rules = normalized_auto_rules(&self.auto_deny_rules);
+    }
+
     pub(super) fn sandbox_mode(&self) -> crate::sandbox::Mode {
         crate::sandbox::Mode::from_flags(self.local_sandbox, self.strict_sandbox)
     }
 
     pub fn payload(&self) -> Value {
         let strict_sandbox = self.local_sandbox && self.strict_sandbox;
+        let allow_rules = normalized_auto_rules(&self.auto_allow_rules);
+        let deny_rules = normalized_auto_rules(&self.auto_deny_rules);
         let mut payload = json!({
             "permission": self.permission.key(),
             "permissionClassifier": self.permission_classifier,
@@ -179,6 +219,9 @@ impl Settings {
             "keepRecentTokens": self.keep_recent_tokens.clamp(1000, 200000),
             "localSandbox": self.local_sandbox,
             "strictSandbox": strict_sandbox,
+            "autoAllowRules": allow_rules,
+            "autoDenyRules": deny_rules,
+            "autoFallbackPrompt": self.auto_fallback_prompt,
         });
         if let Some(scope) = &self.model_scope {
             payload["classifierProviders"] = json!(scope.providers);
@@ -194,6 +237,9 @@ impl Settings {
         self.keep_recent_tokens.clamp(1000, 200000).hash(state);
         self.local_sandbox.hash(state);
         (self.local_sandbox && self.strict_sandbox).hash(state);
+        normalized_auto_rules(&self.auto_allow_rules).hash(state);
+        normalized_auto_rules(&self.auto_deny_rules).hash(state);
+        self.auto_fallback_prompt.hash(state);
         if let Some(scope) = &self.model_scope {
             scope.providers.hash(state);
             scope.hidden.hash(state);
@@ -324,5 +370,65 @@ mod tests {
         assert_eq!(settings.payload()["strictSandbox"], false);
         settings.normalize_sandbox_preferences();
         assert!(!settings.strict_sandbox);
+    }
+
+    #[test]
+    fn auto_rules_normalize_roundtrip_serialize_and_hash() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.auto_allow_rules.is_empty());
+        assert!(settings.auto_deny_rules.is_empty());
+        assert!(settings.auto_fallback_prompt);
+        assert_eq!(settings.payload()["autoAllowRules"], json!([]));
+        assert_eq!(settings.payload()["autoDenyRules"], json!([]));
+        assert_eq!(settings.payload()["autoFallbackPrompt"], true);
+
+        let long_rule = "a".repeat(300);
+        settings.auto_allow_rules = (0..40)
+            .map(|i| match i {
+                0 => "  cargo test* \t ".into(),
+                1 => "   ".into(),
+                2 => "npm\x00 test*\x07".into(),
+                3 => long_rule.clone(),
+                _ => format!("rule-{i}"),
+            })
+            .collect();
+        settings.auto_deny_rules = vec!["\n git push* \r".into(), "".into(), "docker*".into()];
+        settings.auto_fallback_prompt = false;
+
+        // Payload normalizes even before explicit normalize_auto_rules call.
+        let payload = settings.payload();
+        let payload_allow = payload["autoAllowRules"].as_array().unwrap();
+        assert_eq!(payload_allow.len(), 32);
+        assert_eq!(payload_allow[0], "cargo test*");
+        assert_eq!(payload_allow[1], "npm test*");
+        assert_eq!(payload_allow[2].as_str().unwrap().len(), 240);
+        assert_eq!(payload["autoDenyRules"], json!(["git push*", "docker*"]));
+        assert_eq!(payload["autoFallbackPrompt"], false);
+
+        settings.normalize_auto_rules();
+        assert_eq!(settings.auto_allow_rules.len(), 32);
+        assert_eq!(settings.auto_allow_rules[0], "cargo test*");
+        assert_eq!(settings.auto_allow_rules[1], "npm test*");
+        assert_eq!(settings.auto_allow_rules[2].len(), 240);
+        assert_eq!(settings.auto_deny_rules, vec!["git push*", "docker*"]);
+
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(restored.auto_allow_rules, settings.auto_allow_rules);
+        assert_eq!(restored.auto_deny_rules, settings.auto_deny_rules);
+        assert!(!restored.auto_fallback_prompt);
+
+        let hash_of = |s: &Settings| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            s.hash_payload(&mut hasher);
+            std::hash::Hasher::finish(&hasher)
+        };
+        let h1 = hash_of(&settings);
+        let mut modified = settings.clone();
+        modified.auto_deny_rules.push("kubectl*".into());
+        assert_ne!(h1, hash_of(&modified));
+        let mut toggled = settings.clone();
+        toggled.auto_fallback_prompt = true;
+        assert_ne!(h1, hash_of(&toggled));
     }
 }

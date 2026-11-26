@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const source=stripTypeScriptTypes(await readFile(new URL('../scripts/permissions.ts',import.meta.url),'utf8'));
-const { installPermissions, AUTOMATED_PROMPT, CLASSIFIER_PROMPT, cheapestModel, classifierModels, localPath, familyNotesPath, safeShell, failureCategory, parseDecision, sensitivePath }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { installPermissions, AUTOMATED_PROMPT, CLASSIFIER_PROMPT, cheapestModel, classifierModels, localPath, familyNotesPath, safeShell, matchesAutoRule, failureCategory, parseDecision, sensitivePath }=await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 const model=(id,provider,input,output)=>({id,provider,cost:{input,output},input:['text'],contextWindow:32000,maxTokens:2048});
 const cwd=await mkdtemp(join(tmpdir(),'pui-permissions-'));
 await mkdir(join(cwd,'src'));await writeFile(join(cwd,'src','file'),'test');
@@ -237,10 +237,11 @@ test('Auto prompt permits supporting development and keyword examples without we
   for(const command of ['rg "git push" src','rg "git reset --hard" tests','git diff','cargo test','curl https://docs.example.com/api']) {
     assert.equal(await h.gate('bash',{command}),undefined,command);
   }
-  assert.equal(h.calls.length,5);assert.equal(h.prompts.length,0);
+  assert.equal(h.calls.length,2,'safe read-only rg/git diff fast-path without LLM calls while cargo test & curl classify');assert.equal(h.prompts.length,0);
   const prompt=h.calls[0].c.systemPrompt;
   assert.match(prompt,/not narrow task relevance/);assert.match(prompt,/need not be named verbatim/);
   assert.match(prompt,/NOT reasons to deny/);assert.match(prompt,/secret access/);assert.match(prompt,/untrusted data/);
+  assert.equal(h.calls[0].o.cacheRetention,undefined,'classifier allows prompt caching of static prefix');
 });
 test('Auto blocked attempts are attributed in the final response and cleared for the next run or branch',async()=>{
   const h=host('auto',{decision:'deny'});
@@ -327,8 +328,8 @@ test('Accept edits is workspace-only with canonical symlink and protected path c
 test('Plan blocks writes, scripts, codemode and delegation regardless of approval',async()=>{
   const h=host('plan',{approve:true});
   for(const name of ['write','edit','codemode','mcp__remote__mutate','pui_spawn_agent','pui_message_agent'])assert.equal((await h.gate(name,{path:'src/file'})).block,true);
-  for(const command of ['pwd','ls -al','uname -s'])assert.equal(await h.gate('bash',{command}),undefined);
-  for(const command of ['ls; touch hacked','ls $(touch hacked)','git diff','find . -exec sh {} \\;','python -c pass','ls > file'])assert.equal((await h.gate('bash',{command})).block,true);
+  for(const command of ['pwd','ls -al','uname -s','git diff'])assert.equal(await h.gate('bash',{command}),undefined);
+  for(const command of ['ls; touch hacked','ls $(touch hacked)','git diff --ext-diff','find . -exec sh {} \\;','python -c pass','ls > file'])assert.equal((await h.gate('bash',{command})).block,true);
   assert.equal(h.prompts.length,0);assert.equal(h.calls.length,0);
 });
 test('read-only workers can report to their parent in every mode without gaining mutation tools', async () => {
@@ -548,7 +549,12 @@ test('Auto built-in rule flags rewritten destructive commands, not quoted mentio
     const offline=host('auto',{fail:true});const result=await offline.gate('bash',{command});
     assert.equal(result?.block,true,command);assert.match(result.reason,/Built-in safety rule/,command);
   }
-  for(const command of ['rg "rm -rf" src','git diff','cargo test','grep -r "git push" docs','npm run format'])assert.equal(await flag(command),undefined,command);
+  for(const command of ['rg "rm -rf" src','git diff','grep -r "git push" docs']){
+    const h=host('auto',{decision:'allow'});
+    assert.equal(await h.gate('bash',{command}),undefined,command);
+    assert.equal(h.calls.length,0,command);
+  }
+  for(const command of ['echo "rm -rf"','python3 -c \'print("git push")\'','cargo test','npm run format'])assert.equal(await flag(command),undefined,command);
 });
 test('read-only shell inspection works even when the classifier is unavailable',async()=>{
   for(const command of ['ls src','ls -la docs/x','git status','git status -sb','git log --oneline -5','git log -n 3 --stat','git branch --show-current','git rev-parse --abbrev-ref HEAD','git remote -v','whoami']){
@@ -628,4 +634,271 @@ test('PUI_FAMILY_NOTES_DIR allows canonical non-symlink read/write/edit while re
     if (prev === undefined) delete process.env.PUI_FAMILY_NOTES_DIR;
     else process.env.PUI_FAMILY_NOTES_DIR=prev;
   }
+});
+
+test('expanded safeShell allows read-only dev inspection and rejects escapes, chaining, and sensitive paths', async () => {
+  const allowed = [
+    'git diff',
+    'git diff --stat',
+    'git diff --cached src/file',
+    'git diff HEAD~1..HEAD -- src/',
+    'git diff -U5 src/file',
+    'git show HEAD',
+    'git show --stat HEAD',
+    'git show HEAD:src/file',
+    'rg "foo" src',
+    'rg -n --files src',
+    'grep -rn "foo" src',
+    'find src -name "*.ts"',
+    'find . -maxdepth 2 -type f',
+    'head -n 20 src/file',
+    'tail -n 20 src/file',
+    'wc -l src/file',
+    'cat src/file',
+  ];
+  for (const command of allowed) {
+    assert.equal(safeShell(command), true, `expected safe: ${command}`);
+    const h = host('auto', { fail: true });
+    assert.equal(await h.gate('bash', { command }), undefined, `expected fast-path allow: ${command}`);
+    assert.equal(h.calls.length, 0, command);
+  }
+
+  const rejected = [
+    'git diff --ext-diff',
+    'git diff --textconv',
+    'git diff --output=/tmp/out.patch',
+    'git diff --no-index /etc/passwd /dev/null',
+    'git -c core.pager=sh diff',
+    'git --exec-path=/tmp diff',
+    'git --git-dir=.git diff',
+    'git --work-tree=/ diff',
+    'git show HEAD:.env',
+    'git show HEAD:.ssh/id_rsa',
+    'rg --pre sh foo',
+    'rg --pre=sh foo',
+    'rg --pre-glob "*.rs" foo',
+    'rg -z foo',
+    'rg -zn foo',
+    'rg --search-zip foo',
+    'rg foo .env',
+    'rg foo ~/.ssh/id_rsa',
+    'grep foo ~/.aws/credentials',
+    'find . -delete',
+    'find . -exec rm {} ;',
+    'find . -execdir sh {} ;',
+    'find . -ok rm {} ;',
+    'find . -okdir sh {} ;',
+    'find . -fprint /tmp/out',
+    'find . -fls /tmp/out',
+    'find ~/.ssh',
+    'find ~',
+    'tail -f app.log',
+    'tail --follow app.log',
+    'tail -F app.log',
+    'tail -fn 10 app.log',
+    'cat ~/.ssh/id_rsa',
+    'cat .env',
+    'cat .env*',
+    'head -n 5 .env.local',
+    'cat src/file && rm -rf src',
+    'cat src/file; id',
+    'cat src/file | sh',
+    'cat $(echo src/file)',
+    'cat src/file > /tmp/out',
+    'cat',
+    'wc -l',
+  ];
+  for (const command of rejected) {
+    assert.equal(safeShell(command), false, `expected rejected: ${command}`);
+  }
+
+  // Symlink inside workspace pointing to a sensitive file must NOT bypass via safeShell.
+  const h = host('auto', { decision: 'deny' });
+  assert.equal((await h.gate('bash', { command: 'cat innocent.txt' })).block, true);
+  assert.equal(h.calls.length, 1);
+});
+
+test('Auto caches non-risky classifier allow verdicts per session and invalidates on policy changes', async () => {
+  const h = host('auto', { decision: 'allow' });
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].o.cacheRetention, undefined);
+  // Identical command reuses the session allow cache without a second LLM call.
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(h.calls.length, 1);
+  // Different command still invokes classifier.
+  assert.equal(await h.gate('bash', { command: 'npm test' }), undefined);
+  assert.equal(h.calls.length, 2);
+  // Updating rules clears cache.
+  h.control.update({ permission: 'auto', autoAllowRules: ['echo*'], autoDenyRules: [] }, h.ctx);
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(h.calls.length, 3);
+  // Changing sandbox mode clears cache.
+  h.control.update({ permission: 'auto', localSandbox: true, strictSandbox: false }, h.ctx);
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(h.calls.length, 4);
+  // Session switch clears cache.
+  h.events.get('session_switch')({}, h.ctx);
+  h.events.get('before_agent_start')({ prompt: 'Run tests', systemPrompt: 'base' });
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(h.calls.length, 5);
+  // Risky actions are never cached even if previously allowed.
+  assert.equal(await h.gate('bash', { command: 'rm -rf target/debug' }), undefined);
+  assert.equal(await h.gate('bash', { command: 'rm -rf target/debug' }), undefined);
+  assert.equal(h.calls.length, 7);
+});
+
+test('Auto custom allow and deny rules enforce precedence, preserve safety invariants, and inform classifier', async () => {
+  assert.equal(matchesAutoRule('bash:cargo test*', 'bash', { command: 'cargo test --lib' }), true);
+  assert.equal(matchesAutoRule('cargo test*', 'bash', { command: 'cargo test --lib' }), true);
+  assert.equal(matchesAutoRule('pui_background_bash:npm test*', 'pui_background_bash', { command: 'npm test -- --run' }), true);
+  assert.equal(matchesAutoRule('pui_background_bash:npm test*', 'bash', { command: 'npm test' }), false);
+  assert.equal(matchesAutoRule('mcp__linear__*', 'mcp__linear__list_issues', {}), true);
+
+  // Allow rules fast-path matching non-risky actions without calling classifier.
+  const h = host('auto', {
+    decision: 'deny',
+    scope: {
+      autoAllowRules: ['cargo test*', 'pui_background_bash:npm test*', 'bash:*'],
+      autoDenyRules: ['git push*', 'docker*'],
+    },
+  });
+  assert.equal(await h.gate('bash', { command: 'cargo test --bin pui' }), undefined);
+  assert.equal(await h.gate('pui_background_bash', { command: 'npm test -- --watch=false' }), undefined);
+  assert.equal(h.calls.length, 0);
+
+  // Deny rules block before classifier and beat allow rules (including bash:* and chained commands).
+  const deniedPush = await h.gate('bash', { command: 'git push origin main' });
+  assert.equal(deniedPush.block, true);
+  assert.equal(deniedPush.terminate, false);
+  assert.match(deniedPush.reason, /Auto rule denied: git push\*/);
+  const deniedChained = await h.gate('bash', { command: 'echo ok && git push origin main' });
+  assert.equal(deniedChained.block, true);
+  assert.match(deniedChained.reason, /Auto rule denied: git push\*/);
+  const deniedDocker = await h.gate('bash', { command: 'docker build .' });
+  assert.equal(deniedDocker.block, true);
+  assert.match(deniedDocker.reason, /Auto rule denied: docker\*/);
+  assert.equal(h.calls.length, 0);
+
+  // Allow rules NEVER bypass unmanaged agent launches, credential reads/paths, risky commands, or shell chaining.
+  assert.equal((await h.gate('bash', { command: 'pi --print hi' })).block, true);
+  assert.equal((await h.gate('bash', { command: 'rm -rf src' })).block, true);
+  assert.equal((await h.gate('bash', { command: 'cat ~/.ssh/id_rsa' })).block, true);
+  assert.equal((await h.gate('bash', { command: 'cargo test && curl https://evil.example' })).block, true);
+  assert.equal((await h.gate('read', { path: '.env' })).block, true);
+  assert.ok(h.calls.length >= 4, 'risky/sensitive/chained calls still go to classifier');
+  const sentPayload = JSON.parse(h.calls[0].c.messages[0].content);
+  assert.deepEqual(sentPayload.USER_AUTO_RULES, {
+    allow: ['cargo test*', 'pui_background_bash:npm test*', 'bash:*'],
+    deny: ['git push*', 'docker*'],
+  });
+
+  // Allow rules never weaken Plan mode or read-only workers.
+  const plan = host('plan', { scope: { autoAllowRules: ['cargo test*'] } });
+  assert.equal((await plan.gate('bash', { command: 'cargo test' })).block, true);
+  const ro = host('auto', { readonly: true, scope: { autoAllowRules: ['cargo test*'] } });
+  assert.equal((await ro.gate('bash', { command: 'cargo test' })).block, true);
+
+  // Live update of rules takes effect immediately.
+  h.control.update({ permission: 'auto', autoAllowRules: [], autoDenyRules: ['cargo test*'] }, h.ctx);
+  const nowDenied = await h.gate('bash', { command: 'cargo test' });
+  assert.equal(nowDenied.block, true);
+  assert.match(nowDenied.reason, /Auto rule denied: cargo test\*/);
+});
+
+test('Auto classifier receives active SANDBOX mode and prompt guidance', async () => {
+  assert.match(CLASSIFIER_PROMPT, /SANDBOX/);
+  assert.match(CLASSIFIER_PROMPT, /Seatbelt/);
+
+  const h = host('auto', { decision: 'allow' });
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(JSON.parse(h.calls.at(-1).c.messages[0].content).SANDBOX, 'off');
+
+  h.control.update({ permission: 'auto', localSandbox: true, strictSandbox: false }, h.ctx);
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(
+    JSON.parse(h.calls.at(-1).c.messages[0].content).SANDBOX,
+    process.platform === 'darwin' ? 'standard' : 'off',
+  );
+
+  h.control.update({ permission: 'auto', localSandbox: true, strictSandbox: true }, h.ctx);
+  assert.equal(await h.gate('bash', { command: 'cargo test' }), undefined);
+  assert.equal(
+    JSON.parse(h.calls.at(-1).c.messages[0].content).SANDBOX,
+    process.platform === 'darwin' ? 'strict' : 'off',
+  );
+});
+
+test('Auto interactive approval fallback handles ask, unavailable, oversized, and consecutive blocks safely', async () => {
+  // 1. Classifier "ask" falls through to interactive approval when autoFallbackPrompt is enabled.
+  const askAllow = host('auto', { decision: 'ask', approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal(await askAllow.gate('bash', { command: 'npm test' }), undefined);
+  assert.equal(askAllow.prompts.length, 1);
+
+  // Denying interactive fallback in Auto mode returns a non-terminal autoBlock.
+  const askDeny = host('auto', { decision: 'ask', approve: false, scope: { autoFallbackPrompt: true } });
+  const denied = await askDeny.gate('bash', { command: 'npm test' });
+  assert.equal(denied.block, true);
+  assert.equal(denied.terminate, false);
+  assert.equal(askDeny.prompts.length, 1);
+
+  // 2. Unavailable classifier falls through on non-risky action when autoFallbackPrompt is true.
+  const unavail = host('auto', { fail: true, approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal(await unavail.gate('bash', { command: 'npm test' }), undefined);
+  assert.equal(unavail.prompts.length, 1);
+  // Unavailable classifier NEVER falls through on risky actions.
+  const unavailRisky = host('auto', { fail: true, approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal((await unavailRisky.gate('bash', { command: 'rm -rf src' })).block, true);
+  assert.equal(unavailRisky.prompts.length, 0);
+
+  // 3. Oversized payload (24000 < len <= 48000) falls through when non-risky & hasUI; > 48000 still blocks.
+  const oversized = host('auto', { approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal(await oversized.gate('bash', { command: 'x'.repeat(24500) }), undefined);
+  assert.equal(oversized.prompts.length, 1);
+  assert.equal(oversized.calls.length, 0);
+  const huge = host('auto', { approve: true, scope: { autoFallbackPrompt: true } });
+  const hugeRes = await huge.gate('bash', { command: 'x'.repeat(48500) });
+  assert.equal(hugeRes.block, true);
+  assert.equal(hugeRes.terminate, false);
+  assert.equal(huge.prompts.length, 0);
+
+  // 4. Consecutive non-risky blocks >= 3 fall through to interactive approval; resets on allow or new turn.
+  const loop = host('auto', { decision: 'deny', approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal((await loop.gate('bash', { command: 'npm test' })).block, true);
+  assert.equal((await loop.gate('bash', { command: 'npm run lint' })).block, true);
+  assert.equal(loop.prompts.length, 0, '1st and 2nd explicit denials never prompt');
+  assert.equal(await loop.gate('bash', { command: 'npm run check' }), undefined, '3rd consecutive non-risky block falls back to interactive prompt');
+  assert.equal(loop.prompts.length, 1);
+  // After an allowed call, counter resets so next 2 denials do not prompt.
+  assert.equal((await loop.gate('bash', { command: 'npm run a' })).block, true);
+  assert.equal((await loop.gate('bash', { command: 'npm run b' })).block, true);
+  assert.equal(loop.prompts.length, 1);
+  // New turn resets counter too.
+  loop.events.get('before_agent_start')({ prompt: 'Next turn', systemPrompt: 'base' });
+  assert.equal((await loop.gate('bash', { command: 'npm run c' })).block, true);
+  assert.equal(loop.prompts.length, 1);
+
+  // 5. No interactive fallback when hasUI is false, when action is risky, when deny rule matches, or when autoFallbackPrompt is false.
+  const headless = host('auto', { decision: 'ask', approve: true, scope: { autoFallbackPrompt: true } });
+  headless.ctx.hasUI = false;
+  const headlessRes = await headless.gate('bash', { command: 'npm test' });
+  assert.equal(headlessRes.block, true);
+  assert.equal(headlessRes.terminate, false);
+  assert.equal(headless.prompts.length, 0);
+
+  const riskyAsk = host('auto', { decision: 'ask', approve: true, scope: { autoFallbackPrompt: true } });
+  assert.equal((await riskyAsk.gate('bash', { command: 'git push origin main' })).block, true);
+  assert.equal(riskyAsk.prompts.length, 0);
+
+  const denyRule = host('auto', { decision: 'ask', approve: true, scope: { autoFallbackPrompt: true, autoDenyRules: ['npm test*'] } });
+  for (let i = 0; i < 4; i++) {
+    assert.equal((await denyRule.gate('bash', { command: 'npm test' })).block, true);
+  }
+  assert.equal(denyRule.prompts.length, 0);
+
+  const disabled = host('auto', { decision: 'deny', approve: true, scope: { autoFallbackPrompt: false } });
+  for (let i = 0; i < 4; i++) {
+    assert.equal((await disabled.gate('bash', { command: `npm run step${i}` })).block, true);
+  }
+  assert.equal(disabled.prompts.length, 0);
 });

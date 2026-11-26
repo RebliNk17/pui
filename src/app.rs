@@ -322,6 +322,7 @@ impl Pui {
             .unwrap_or_default();
         prefs.settings.normalize_update_preferences();
         prefs.settings.normalize_sandbox_preferences();
+        prefs.settings.normalize_auto_rules();
         // Before any Pi process or session discovery: adopt or offer Pui's Pi folder.
         let pi_folder = if options.demo || cfg!(test) {
             pi_folder::PiFolder::default()
