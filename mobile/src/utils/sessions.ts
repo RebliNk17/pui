@@ -44,11 +44,33 @@ export function filterSessions(
 ): SessionSummary[] {
   const q = query.trim().toLowerCase();
   return sessions.filter((s) => {
+    const isSubagent = Boolean(s.parent_session);
+    // Keep subagents out of the top-level session list during normal browsing;
+    // they live under their parent (expandable in the list and in the chat's
+    // Subagents bar). Still surface subagents when searching or when one needs
+    // approval in the Alerts filter.
+    if (!q && isSubagent) {
+      if (filter === 'attention' && s.has_pending_dialog) {
+        return true;
+      }
+      return false;
+    }
+
+    const descendants = isSubagent ? [] : descendantsOfSession(sessions, s.path);
     if (filter === 'phone' && s.origin.platform !== 'android' && s.origin.platform !== 'ios') {
       return false;
     }
-    if (filter === 'running' && !s.busy) return false;
-    if (filter === 'attention' && !s.has_pending_dialog && !s.unread) return false;
+    if (filter === 'running' && !s.busy && !descendants.some((d) => d.busy)) {
+      return false;
+    }
+    if (
+      filter === 'attention' &&
+      !s.has_pending_dialog &&
+      !s.unread &&
+      !descendants.some((d) => d.has_pending_dialog || d.unread)
+    ) {
+      return false;
+    }
     if (!q) return true;
     return (
       s.title.toLowerCase().includes(q) ||
@@ -92,6 +114,55 @@ export function childrenOfSession(
   return sessions
     .filter((s) => s.parent_session === parentPath)
     .sort((a, b) => b.modified_ms - a.modified_ms);
+}
+
+/** Recursively collect direct and nested subagent sessions for `parentPath`. */
+export function descendantsOfSession(
+  sessions: SessionSummary[],
+  parentPath: string,
+): SessionSummary[] {
+  const out: SessionSummary[] = [];
+  const visited = new Set<string>([parentPath]);
+  const queue = [parentPath];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    for (const s of sessions) {
+      if (s.parent_session === current && !visited.has(s.path)) {
+        visited.add(s.path);
+        out.push(s);
+        queue.push(s.path);
+      }
+    }
+  }
+  out.sort((a, b) => b.modified_ms - a.modified_ms);
+  return out;
+}
+
+/**
+ * Splice expanded subagent sessions directly below their parent row in each
+ * grouped section without duplicating any already-present row.
+ */
+export function expandSectionsWithSubagents(
+  sections: SessionSection[],
+  allSessions: SessionSummary[],
+  expandedParents: Record<string, boolean>,
+): SessionSection[] {
+  return sections.map((section) => {
+    const nextData: SessionSummary[] = [];
+    const seen = new Set<string>(section.data.map((s) => s.path));
+    for (const item of section.data) {
+      nextData.push(item);
+      if (!item.parent_session && expandedParents[item.path]) {
+        for (const child of descendantsOfSession(allSessions, item.path)) {
+          if (!seen.has(child.path)) {
+            seen.add(child.path);
+            nextData.push(child);
+          }
+        }
+      }
+    }
+    return { ...section, data: nextData };
+  });
 }
 
 export function groupSessions(

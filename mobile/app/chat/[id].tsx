@@ -31,7 +31,7 @@ import { usePui } from '../../src/store/connectionStore';
 import { usePreferences } from '../../src/store/preferencesStore';
 import { usePalette } from '../../src/theme/colors';
 import { findMatchingEntryIndices } from '../../src/utils/search';
-import { childrenOfSession } from '../../src/utils/sessions';
+import { descendantsOfSession } from '../../src/utils/sessions';
 import { groupTranscript } from '../../src/utils/transcript';
 
 type Tab = 'chat' | 'artifacts' | 'files' | 'changes';
@@ -150,7 +150,7 @@ export default function ChatScreen() {
     [detail?.messages],
   );
   const childAgents = useMemo(
-    () => childrenOfSession(sessions, sessionPath),
+    () => descendantsOfSession(sessions, sessionPath),
     [sessions, sessionPath],
   );
   const findMatches = useMemo(
@@ -231,7 +231,7 @@ export default function ChatScreen() {
             </Text>
           </View>
           <Text numberOfLines={1} style={[styles.subText, { color: colors.muted }]}>
-            {projectLabel}
+            {summary?.parent_session ? `Subagent · ${projectLabel}` : projectLabel}
             {tab !== 'chat'
               ? ` · ${tab === 'artifacts' ? 'Artifacts' : tab === 'files' ? 'Files' : 'Changes'}`
               : detail?.busy

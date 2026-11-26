@@ -578,6 +578,74 @@ impl Pui {
         h
     }
 
+    fn remote_agent_path(&self, id: &str) -> Option<PathBuf> {
+        if let Some(path) = self.agents.nodes.get(id).and_then(|n| n.path.clone()) {
+            return Some(path);
+        }
+        if id == self.agents.active {
+            if let Some(path) = self.state.session_file.as_deref() {
+                return Some(PathBuf::from(path));
+            }
+        }
+        if let Some(path) = self
+            .agents
+            .parked
+            .get(id)
+            .and_then(|c| c.state.session_file.as_deref())
+        {
+            return Some(PathBuf::from(path));
+        }
+        self.prefs
+            .agent_tree
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.path.clone())
+    }
+
+    fn canonical_remote_path(&self, path: &std::path::Path) -> String {
+        if let Some(found) = self
+            .sessions
+            .iter()
+            .find(|s| sidebar_tree::same_path(&s.path, path))
+        {
+            return found.path.to_string_lossy().into_owned();
+        }
+        if let Some(active) = self.state.session_file.as_deref() {
+            if sidebar_tree::same_path(std::path::Path::new(active), path) {
+                return active.to_owned();
+            }
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    fn remote_parent_session(
+        &self,
+        path: &std::path::Path,
+        node: Option<&agents::Node>,
+    ) -> Option<String> {
+        if let Some(parent) = self
+            .chat_prefs(path)
+            .and_then(|m| m.parent_session.as_ref())
+            .filter(|parent| !sidebar_tree::same_path(parent, path))
+        {
+            return Some(self.canonical_remote_path(parent));
+        }
+        let parent_id = node.and_then(|n| n.parent.as_deref()).or_else(|| {
+            self.prefs
+                .agent_tree
+                .iter()
+                .find(|r| sidebar_tree::same_path(&r.path, path))
+                .and_then(|r| r.parent.as_deref())
+        })?;
+        if let Some(parent_path) = self
+            .remote_agent_path(parent_id)
+            .filter(|parent| !sidebar_tree::same_path(parent, path))
+        {
+            return Some(self.canonical_remote_path(&parent_path));
+        }
+        Some(format!("agent:{parent_id}"))
+    }
+
     fn publish_remote_snapshot(&mut self) {
         self.remote_snapshot_tick = self.remote_snapshot_tick.wrapping_add(1);
         let active_path = self.state.session_file.clone();
@@ -668,7 +736,7 @@ impl Pui {
                 .agents
                 .nodes
                 .get(id)
-                .is_some_and(|n| n.cloud_host.is_some())
+                .is_some_and(|n| n.cloud_host.is_some() || n.background)
             {
                 continue;
             }
@@ -746,10 +814,11 @@ impl Pui {
             if !seen_paths.insert(path_str.clone()) {
                 continue;
             }
-            if self.prefs.chats.get(&s.path).is_some_and(|m| m.hidden) {
+            let meta = self.chat_prefs(&s.path);
+            if meta.is_some_and(|m| m.hidden) {
                 continue;
             }
-            let pinned = self.prefs.chats.get(&s.path).is_some_and(|m| m.pinned);
+            let pinned = meta.is_some_and(|m| m.pinned);
             let is_active = active_path
                 .as_deref()
                 .is_some_and(|p| sidebar_tree::same_path(std::path::Path::new(p), &s.path));
@@ -758,6 +827,9 @@ impl Pui {
                     .as_deref()
                     .is_some_and(|p| sidebar_tree::same_path(p, &s.path))
             });
+            if node.is_some_and(|n| n.background) {
+                continue;
+            }
             let detail = details.get(&path_str);
             let status = if let Some(d) = detail {
                 d.status.clone()
@@ -772,12 +844,16 @@ impl Pui {
             let origin = detail
                 .map(|d| d.origin.clone())
                 .unwrap_or_else(|| self.session_origin_for(&s.path));
-            let parent_session = self
-                .prefs
-                .chats
-                .get(&s.path)
-                .and_then(|m| m.parent_session.as_ref())
-                .map(|p| p.to_string_lossy().into_owned());
+            let parent_session = self.remote_parent_session(&s.path, node);
+            let title = if node.is_some_and(|n| n.parent.is_some())
+                && meta.is_none_or(|m| m.title.is_none())
+            {
+                node.map(|n| n.name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| self.session_title(s))
+            } else {
+                self.session_title(s)
+            };
             let modified_ms = s
                 .modified
                 .duration_since(UNIX_EPOCH)
@@ -789,7 +865,7 @@ impl Pui {
                 .map(|d| d.as_millis() as i64);
             sessions.push(SessionSummary {
                 path: path_str,
-                title: self.session_title(s),
+                title,
                 project: s.project.to_string_lossy().into_owned(),
                 project_name: sessions::project_name(&s.project),
                 cwd: s.cwd.to_string_lossy().into_owned(),
@@ -809,7 +885,21 @@ impl Pui {
 
         // Ensure a brand-new live session that hasn't been discovered on disk yet is still listed!
         for (path_str, detail) in &details {
+            let path = std::path::Path::new(path_str);
+            let meta = self.chat_prefs(path);
+            if meta.is_some_and(|m| m.hidden) {
+                continue;
+            }
+            let node = self.agents.nodes.values().find(|n| {
+                n.path
+                    .as_deref()
+                    .is_some_and(|p| sidebar_tree::same_path(p, path))
+            });
+            if node.is_some_and(|n| n.background) {
+                continue;
+            }
             if seen_paths.insert(path_str.clone()) {
+                let parent_session = self.remote_parent_session(path, node);
                 sessions.insert(
                     0,
                     SessionSummary {
@@ -826,8 +916,8 @@ impl Pui {
                         modified_ms: chrono::Utc::now().timestamp_millis(),
                         created_ms: detail.origin.created_at,
                         origin: detail.origin.clone(),
-                        parent_session: None,
-                        pinned: false,
+                        parent_session,
+                        pinned: meta.is_some_and(|m| m.pinned),
                         is_active: active_path.as_deref() == Some(path_str.as_str()),
                     },
                 );
@@ -3145,5 +3235,196 @@ mod tests {
         assert!(on_labels.iter().any(|t| t == "Scan with Pui Mobile"));
         assert!(on_labels.iter().any(|t| t == "Copy pairing link"));
         assert!(on_labels.iter().any(|t| t == "Network & host settings"));
+    }
+
+    #[test]
+    fn remote_snapshot_links_spawned_subagents_to_parent_and_hides_background_workers() {
+        let ctx = egui::Context::default();
+        let mut app = Pui::new(
+            &eframe::CreationContext::_new_kittest(ctx),
+            Options {
+                demo: true,
+                ..Default::default()
+            },
+        );
+        app.sessions.clear();
+        app.agents.nodes.clear();
+        app.agents.parked.clear();
+        app.prefs.agent_tree.clear();
+
+        let parent_path = PathBuf::from("/tmp/pui-remote-parent.jsonl");
+        let child_live_path = PathBuf::from("/tmp/pui-remote-child-live.jsonl");
+        let child_saved_path = PathBuf::from("/tmp/pui-remote-child-saved.jsonl");
+        let bg_path = PathBuf::from("/tmp/pui-remote-bg.jsonl");
+        let now = std::time::SystemTime::now();
+
+        for (path, title) in [
+            (&parent_path, "Main chat"),
+            (&child_live_path, "local-sandbox"),
+            (&child_saved_path, "turn-ux"),
+            (&bg_path, "bg-helper"),
+        ] {
+            app.sessions.push(Session {
+                path: path.clone(),
+                cwd: PathBuf::from("/repo/pui"),
+                project: PathBuf::from("/repo/pui"),
+                title: title.into(),
+                created: Some(now),
+                modified: now,
+            });
+        }
+
+        // Parent node + live child node + background worker node.
+        app.agents.active = "agent-1".into();
+        app.state.session_file = Some(parent_path.to_string_lossy().into_owned());
+        app.agents.nodes.insert(
+            "agent-1".into(),
+            agents::Node {
+                id: "agent-1".into(),
+                parent: None,
+                name: "Main chat".into(),
+                cwd: PathBuf::from("/repo/pui"),
+                path: Some(parent_path.clone()),
+                access: "workspace".into(),
+                permission: None,
+                status: "Idle".into(),
+                last_activity: None,
+                created: None,
+                children: vec!["agent-2".into(), "agent-4".into()],
+                stopped: false,
+                reported: false,
+                needs_report: false,
+                settled: false,
+                launch: None,
+                failure: None,
+                result: None,
+                task: String::new(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: false,
+                workflow_id: None,
+                model: None,
+                finished_at: None,
+            },
+        );
+        app.agents.nodes.insert(
+            "agent-2".into(),
+            agents::Node {
+                id: "agent-2".into(),
+                parent: Some("agent-1".into()),
+                name: "local-sandbox".into(),
+                cwd: PathBuf::from("/repo/pui"),
+                path: Some(child_live_path.clone()),
+                access: "worktree".into(),
+                permission: None,
+                status: "Working…".into(),
+                last_activity: None,
+                created: None,
+                children: Vec::new(),
+                stopped: false,
+                reported: false,
+                needs_report: false,
+                settled: false,
+                launch: None,
+                failure: None,
+                result: None,
+                task: String::new(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: false,
+                workflow_id: None,
+                model: None,
+                finished_at: None,
+            },
+        );
+        app.agents.nodes.insert(
+            "agent-4".into(),
+            agents::Node {
+                id: "agent-4".into(),
+                parent: Some("agent-1".into()),
+                name: "bg-helper".into(),
+                cwd: PathBuf::from("/repo/pui"),
+                path: Some(bg_path.clone()),
+                access: "read-only".into(),
+                permission: None,
+                status: "Working…".into(),
+                last_activity: None,
+                created: None,
+                children: Vec::new(),
+                stopped: false,
+                reported: false,
+                needs_report: false,
+                settled: false,
+                launch: None,
+                failure: None,
+                result: None,
+                task: String::new(),
+                depends: Vec::new(),
+                setup: None,
+                worktree: None,
+                cloud_host: None,
+                cloud_repo: None,
+                background: true,
+                workflow_id: None,
+                model: None,
+                finished_at: None,
+            },
+        );
+        // Persisted subagent only present in prefs.agent_tree (not hydrated in agents.nodes).
+        app.prefs.agent_tree.push(agents::AgentRecord {
+            id: "agent-3".into(),
+            parent: Some("agent-1".into()),
+            name: "turn-ux".into(),
+            cwd: PathBuf::from("/repo/pui"),
+            path: child_saved_path.clone(),
+            access: "worktree".into(),
+            permission: None,
+            worktree: None,
+        });
+
+        app.publish_remote_snapshot();
+        let snap = app.remote.current_snapshot();
+        let parent_str = parent_path.to_string_lossy().into_owned();
+
+        let parent = snap
+            .sessions
+            .iter()
+            .find(|s| s.path == parent_str)
+            .expect("parent session present");
+        assert_eq!(parent.parent_session, None);
+
+        let live_child = snap
+            .sessions
+            .iter()
+            .find(|s| s.path == child_live_path.to_string_lossy())
+            .expect("live subagent present with parent_session");
+        assert_eq!(
+            live_child.parent_session.as_deref(),
+            Some(parent_str.as_str())
+        );
+
+        let saved_child = snap
+            .sessions
+            .iter()
+            .find(|s| s.path == child_saved_path.to_string_lossy())
+            .expect("persisted subagent present with parent_session");
+        assert_eq!(
+            saved_child.parent_session.as_deref(),
+            Some(parent_str.as_str())
+        );
+
+        assert!(
+            !snap
+                .sessions
+                .iter()
+                .any(|s| s.path == bg_path.to_string_lossy()),
+            "background subagents must be excluded from remote session list"
+        );
     }
 }

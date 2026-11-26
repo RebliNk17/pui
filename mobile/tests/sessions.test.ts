@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { SessionSummary } from '../src/protocol/types.ts';
 import {
+  descendantsOfSession,
+  expandSectionsWithSubagents,
   filterSessions,
   formatRelativeAge,
   groupSessions,
@@ -69,5 +71,67 @@ describe('session grouping, ordering, filtering, and relative ages', () => {
     const phoneOnly = filterSessions(items, 'phone', '');
     assert.equal(phoneOnly.length, 1);
     assert.equal(phoneOnly[0].path, '/2');
+  });
+
+  it('keeps subagents out of top-level rows until expanded, searched, or needing approval', () => {
+    const items = [
+      makeSession({ path: '/parent', title: 'Main agent', modified_ms: NOW - 10_000 }),
+      makeSession({
+        path: '/child-1',
+        title: 'local-sandbox',
+        parent_session: '/parent',
+        modified_ms: NOW - 5_000,
+        busy: true,
+      }),
+      makeSession({
+        path: '/child-2',
+        title: 'turn-ux',
+        parent_session: '/child-1',
+        modified_ms: NOW - 4_000,
+        has_pending_dialog: true,
+      }),
+    ];
+
+    // Default browsing hides subagents from the top-level list.
+    const allTop = filterSessions(items, 'all', '');
+    assert.deepEqual(
+      allTop.map((s) => s.path),
+      ['/parent'],
+    );
+
+    // Running filter keeps parent visible when a subagent is busy.
+    const running = filterSessions(items, 'running', '');
+    assert.deepEqual(
+      running.map((s) => s.path),
+      ['/parent'],
+    );
+
+    // Attention filter surfaces both parent and subagent with pending dialog.
+    const attention = filterSessions(items, 'attention', '');
+    assert.deepEqual(
+      attention.map((s) => s.path),
+      ['/parent', '/child-2'],
+    );
+
+    // Explicit search still finds subagents by name.
+    const searched = filterSessions(items, 'all', 'local-sandbox');
+    assert.deepEqual(
+      searched.map((s) => s.path),
+      ['/child-1'],
+    );
+
+    // Recursive descendants lookup finds nested subagents.
+    assert.deepEqual(
+      descendantsOfSession(items, '/parent').map((s) => s.path),
+      ['/child-2', '/child-1'],
+    );
+
+    // Expanding parent splices subagents directly beneath it.
+    const grouped = groupSessions(allTop, 'date', 'recent', NOW);
+    const expanded = expandSectionsWithSubagents(grouped, items, { '/parent': true });
+    assert.deepEqual(
+      expanded[0].data.map((s) => s.path),
+      ['/parent', '/child-2', '/child-1'],
+    );
   });
 });

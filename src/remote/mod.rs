@@ -518,6 +518,15 @@ impl RemoteServer {
         Some(tailscale::ws_url(&host, port, self.config.use_tls_in_qr))
     }
 
+    #[cfg(test)]
+    pub fn current_snapshot(&self) -> RemoteSnapshot {
+        self.shared
+            .snapshot
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
     pub fn update_snapshot(&mut self, mut snapshot: RemoteSnapshot) {
         snapshot.host_name = self.config.host_name.clone();
         snapshot.tailscale_ip = self.tailscale_ip.clone();

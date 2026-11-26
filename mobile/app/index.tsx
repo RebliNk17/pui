@@ -21,7 +21,8 @@ import { usePreferences } from '../src/store/preferencesStore';
 import { usePalette } from '../src/theme/colors';
 import { isRtlText } from '../src/utils/markdown';
 import {
-  childrenOfSession,
+  descendantsOfSession,
+  expandSectionsWithSubagents,
   filterSessions,
   formatRelativeAge,
   groupSessions,
@@ -65,6 +66,7 @@ export default function SessionsScreen() {
   const [renameMode, setRenameMode] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [expandedParents, setExpandedParents] = useState<Record<string, boolean>>({});
   const { bindings, metrics } = useCustomScrollbar();
 
   useEffect(() => {
@@ -86,8 +88,11 @@ export default function SessionsScreen() {
 
   const sections = useMemo(() => {
     const filtered = filterSessions(sessions, filter, query);
-    return groupSessions(filtered, grouping, ordering);
-  }, [sessions, filter, query, grouping, ordering]);
+    const grouped = groupSessions(filtered, grouping, ordering);
+    return query.trim()
+      ? grouped
+      : expandSectionsWithSubagents(grouped, sessions, expandedParents);
+  }, [sessions, filter, query, grouping, ordering, expandedParents]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -130,14 +135,28 @@ export default function SessionsScreen() {
   const renderSessionRow = ({ item }: { item: SessionSummary }) => {
     const isPhone = item.origin.platform === 'android' || item.origin.platform === 'ios';
     const isChild = Boolean(item.parent_session);
-    const childCount = childrenOfSession(sessions, item.path).length;
-    const dotColor = item.has_pending_dialog
-      ? colors.amber
-      : item.busy
-        ? colors.accent
-        : colors.dim;
+    const subagents = isChild ? [] : descendantsOfSession(sessions, item.path);
+    const childCount = subagents.length;
+    const childNeedsApproval = subagents.some((c) => c.has_pending_dialog);
+    const childBusy = subagents.some((c) => c.busy);
+    const isExpanded = Boolean(expandedParents[item.path]);
+    const dotColor =
+      item.has_pending_dialog || childNeedsApproval
+        ? colors.amber
+        : item.busy || childBusy
+          ? colors.accent
+          : colors.dim;
     const age = formatRelativeAge(item.modified_ms);
     const titleRtl = isRtlText(item.title);
+    const statusText = item.busy
+      ? ' · Working…'
+      : item.has_pending_dialog
+        ? ' · Needs approval'
+        : childNeedsApproval
+          ? ' · Subagent needs approval'
+          : childBusy
+            ? ' · Subagent working…'
+            : '';
 
     return (
       <Pressable
@@ -174,7 +193,7 @@ export default function SessionsScreen() {
                 styles.rowTitle,
                 {
                   flex: 1,
-                  color: colors.text,
+                  color: isChild ? colors.muted : colors.text,
                   textAlign: titleRtl ? 'right' : 'left',
                 },
               ]}
@@ -184,10 +203,35 @@ export default function SessionsScreen() {
           </View>
           <View style={styles.rowSubLine}>
             <Text numberOfLines={1} style={[styles.rowMeta, { color: colors.muted }]}>
-              {item.project_name}
-              {item.busy ? ' · Working…' : item.has_pending_dialog ? ' · Needs approval' : ''}
-              {childCount > 0 ? ` · ${childCount} subagent${childCount > 1 ? 's' : ''}` : ''}
+              {isChild ? 'Subagent' : item.project_name}
+              {statusText}
             </Text>
+            {childCount > 0 ? (
+              <Pressable
+                onPress={(e) => {
+                  e.stopPropagation();
+                  setExpandedParents((prev) => ({
+                    ...prev,
+                    [item.path]: !prev[item.path],
+                  }));
+                }}
+                hitSlop={6}
+                style={[
+                  styles.subagentPill,
+                  { backgroundColor: colors.surface, borderColor: colors.border },
+                ]}
+              >
+                <Ionicons name="git-branch-outline" size={10} color={colors.muted} />
+                <Text numberOfLines={1} style={[styles.subagentPillText, { color: colors.muted }]}>
+                  {childCount} subagent{childCount > 1 ? 's' : ''}
+                </Text>
+                <Ionicons
+                  name={isExpanded ? 'chevron-down' : 'chevron-forward'}
+                  size={10}
+                  color={colors.dim}
+                />
+              </Pressable>
+            ) : null}
             {isPhone ? (
               <View style={[styles.originPill, { backgroundColor: colors.accentBg }]}>
                 <Ionicons name="phone-portrait-outline" size={10} color={colors.accent} />
@@ -857,6 +901,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    flexWrap: 'wrap',
+  },
+  subagentPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  subagentPillText: {
+    fontSize: 10.5,
+    fontWeight: '500',
   },
   rowMeta: {
     fontSize: 11.5,
