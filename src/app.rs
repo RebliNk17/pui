@@ -637,6 +637,15 @@ impl Pui {
             }
             if options.demo_workflow {
                 app.demo_workflow();
+                if options.demo_agent_detail {
+                    app.demo_agent_detail();
+                }
+            }
+            if options.demo_turn_ux {
+                app.demo_turn_ux();
+            }
+            if options.demo_shell_run {
+                app.demo_shell_run();
             }
             if options.demo_working {
                 app.state.busy = true;

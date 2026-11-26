@@ -429,6 +429,109 @@ impl Pui {
         true
     }
 
+    pub(super) fn demo_turn_ux(&mut self) {
+        self.prefs.hide_inspector = true;
+        self.ultracode_ready = true;
+        self.turn_ux.plan = Some(TurnPlan {
+            title: Some("Implement local sandbox & Turn UX".into()),
+            steps: vec![
+                PlanStep {
+                    id: "s1".into(),
+                    label: "Generate macOS Seatbelt profile with workspace write allowlist".into(),
+                    status: StepStatus::Completed,
+                },
+                PlanStep {
+                    id: "s2".into(),
+                    label:
+                        "Wire Local sandbox & Strict sandbox toggles into Settings → Permissions"
+                            .into(),
+                    status: StepStatus::Completed,
+                },
+                PlanStep {
+                    id: "s3".into(),
+                    label: "Run kernel Seatbelt & UI regression test suites".into(),
+                    status: StepStatus::InProgress,
+                },
+                PlanStep {
+                    id: "s4".into(),
+                    label: "Review diffs and push master to GitHub and GitLab".into(),
+                    status: StepStatus::Pending,
+                },
+            ],
+            expanded: true,
+        });
+        self.turn_ux.wrap_up = Some(WrapUpBox {
+            recap: "Added OS-level macOS Seatbelt sandboxing (Standard & Strict modes) for both foreground bash and background shell commands, plus kernel enforcement tests. Local commits are ready on master.".into(),
+            question: Some("How would you like to proceed?".into()),
+            options: vec![
+                WrapUpOption {
+                    label: "Push to remotes".into(),
+                    prompt: Some("Push master to GitHub and GitLab.".into()),
+                },
+                WrapUpOption {
+                    label: "Rebuild Pui.app".into(),
+                    prompt: Some("Run scripts/bundle-macos.sh to rebuild dist/Pui.app.".into()),
+                },
+                WrapUpOption {
+                    label: "Run full suite".into(),
+                    prompt: Some("Run scripts/test-rust.sh.".into()),
+                },
+            ],
+            dismissed: false,
+        });
+        self.turn_ux.proposals = vec![SessionProposal {
+            id: "proposal-1".into(),
+            title: "Add PR Auto-Fix background watcher".into(),
+            brief: "Watch open PR checks in the background and automatically wake the session on CI failure, merge conflict, or review comment.".into(),
+            access: "worktree".into(),
+            cwd: None,
+            state: ProposalState::Pending,
+        }];
+    }
+
+    pub(super) fn demo_agent_detail(&mut self) {
+        self.background_tasks.open_agent("agent-bg-demo-1".into());
+        self.state.messages.push(protocol::Message {
+            role: "user".into(),
+            text: "Worker Audit HUD layout constraints (agent-bg-demo-1) settled.\n### HUD Audit Summary\n- Audited `scenes/hud.gd` and `scripts/ui/control_groups.gd`.\n- Confirmed **0 anchor conflicts** when moving the six order buttons to a vertical left column on phones.\n- Verified desktop and tablet breakpoints keep the bottom bar intact.".into(),
+            ..Default::default()
+        });
+        self.state.transcript_revision += 1;
+    }
+
+    pub(super) fn demo_shell_run(&mut self) {
+        self.prefs.hide_inspector = true;
+        self.terminals.toggle(&self.ctx, &self.prefs.cwd, true);
+        self.state.messages = vec![
+            protocol::Message {
+                role: "user".into(),
+                text: "How do I run the sandbox tests and inspect the build log in the terminal?".into(),
+                ..Default::default()
+            },
+            protocol::Message {
+                role: "assistant".into(),
+                text: concat!(
+                    "Run the focused sandbox test suite with a single click using the **Run** button on this block:\n\n",
+                    "```bash\n",
+                    "cargo test --bin pui -- sandbox\n",
+                    "```\n\n",
+                    "You can jump directly to the active shell output in [Shell 1 · build output](#terminal/term-1).\n\n",
+                    "Multiline scripts and non-shell snippets intentionally omit the Run button so you copy/review them first:\n\n",
+                    "```bash\n",
+                    "cargo fmt --check\n",
+                    "scripts/test-rust.sh\n",
+                    "```\n\n",
+                    "```rust\n",
+                    "let mode = crate::sandbox::Mode::Strict;\n",
+                    "```"
+                )
+                .into(),
+                ..Default::default()
+            },
+        ];
+        self.state.transcript_revision += 1;
+    }
+
     pub(super) fn turn_ux_strip(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if !self.turn_ux.has_visible_content() {
             return;

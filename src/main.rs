@@ -73,6 +73,9 @@ pub struct Options {
     pub demo_task: bool,
     pub demo_task_proposal: bool,
     pub demo_workflow: bool,
+    pub demo_agent_detail: bool,
+    pub demo_turn_ux: bool,
+    pub demo_shell_run: bool,
     pub demo_files: bool,
     pub demo_table_grid: bool,
     pub demo_side_chat: bool,
@@ -337,6 +340,19 @@ fn main() -> eframe::Result {
             "--demo-workflow" => {
                 options.demo = true;
                 options.demo_workflow = true;
+            }
+            "--demo-agent-detail" => {
+                options.demo = true;
+                options.demo_workflow = true;
+                options.demo_agent_detail = true;
+            }
+            "--demo-turn-ux" => {
+                options.demo = true;
+                options.demo_turn_ux = true;
+            }
+            "--demo-shell-run" => {
+                options.demo = true;
+                options.demo_shell_run = true;
             }
             "--demo-automation" => {
                 options.demo = true;
