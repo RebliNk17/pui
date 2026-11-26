@@ -1,4 +1,5 @@
 //! CEF child views. Every tab owns its Browser; hidden tabs keep DOM/history.
+mod automation;
 mod inspection;
 mod mask;
 mod screenshot;
@@ -58,7 +59,16 @@ wrap_display_handler! {
         fn on_console_message(&self, _browser: Option<&mut Browser>, level: LogSeverity, message: Option<&CefString>, source: Option<&CefString>, line: i32) -> i32 {
             let message = message.map(ToString::to_string).unwrap_or_default();
             let source = source.map(ToString::to_string).unwrap_or_default();
-            self.events.update(|state| console::push(state, matches!(level, LogSeverity::ERROR | LogSeverity::FATAL), &message, &source, line));
+            self.events.update(|state| {
+                console::push_level(
+                    state,
+                    matches!(level, LogSeverity::ERROR | LogSeverity::FATAL),
+                    matches!(level, LogSeverity::WARNING),
+                    &message,
+                    &source,
+                    line,
+                )
+            });
             1 // Never persist page console messages to process stderr/logs.
         }
     }
@@ -285,6 +295,8 @@ struct Tab {
     history: history::Recorder,
     inspection_observer: Option<Registration>,
     screenshot_observer: Option<Registration>,
+    automation_observer: Option<Registration>,
+    automation_driver: automation::SharedDriver,
     _snapshot_observer: Option<Registration>,
     // CEF can resize its child during navigation. Its parent must be the pane,
     // never Pui's entire content view (which also contains chat and console).
@@ -332,6 +344,9 @@ impl Tab {
         }
     }
     fn close(&self) {
+        if let Ok(mut driver) = self.automation_driver.lock() {
+            driver.fail_all("Browser tab was closed while automation was in progress.");
+        }
         if let Ok(mut s) = self.state.lock() {
             s.screenshot.invalidate();
             s.preview_active = false;
@@ -725,6 +740,8 @@ impl Engine {
                     history: recorder,
                     inspection_observer: None,
                     screenshot_observer: None,
+                    automation_observer: None,
+                    automation_driver: Arc::default(),
                     _snapshot_observer: snapshot_observer,
                     container,
                     #[cfg(debug_assertions)]

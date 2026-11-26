@@ -173,6 +173,35 @@ pub(in crate::app) fn divider(ui: &mut egui::Ui) {
     );
 }
 
+/// Quiet accent status badge shown in the Browser toolbar while an agent
+/// browser automation command is actively in flight.
+pub(super) fn agent_activity_indicator(ui: &mut egui::Ui, label: &str) {
+    let colors = theme::palette(ui.ctx());
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), FontId::proportional(11.0), colors.accent);
+    let width = galley.size().x + 26.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, 6, colors.accent_bg);
+    ui.painter().rect_stroke(
+        rect,
+        6,
+        Stroke::new(1.0_f32, colors.accent.gamma_multiply(0.35)),
+        egui::StrokeKind::Inside,
+    );
+    let dot_center = egui::pos2(rect.left() + 10.0, rect.center().y);
+    theme::status::indicator(ui, dot_center, label, colors.accent, 3.0);
+    let text_pos = egui::pos2(rect.left() + 18.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_pos, galley, colors.accent);
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("browser-agent-activity"),
+            (label.to_owned(), rect),
+        );
+    });
+}
+
 pub(in crate::app) fn tab(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash,

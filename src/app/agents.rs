@@ -306,6 +306,7 @@ impl Pui {
             && self.agents.mail.is_empty()
             && self.agents.pending_side_reports.is_empty()
             && self.agents.waits.is_empty()
+            && !self.files.web().automation_pending()
             && !self.agents_still_retiring()
             && self.agents.idle.wake.is_empty()
             && self.agents.idle.mail.is_empty()
@@ -653,6 +654,9 @@ impl Pui {
             self.agents.active.clear();
         }
         self.agents.waits.retain(|w| !ids.contains(&w.source));
+        for id in ids {
+            self.files.web_mut().cancel_automation_for_source(id);
+        }
         for wait in &mut self.agents.waits {
             wait.ids.retain(|id| !ids.contains(id));
         }
@@ -1609,6 +1613,28 @@ impl Pui {
             {
                 return true;
             }
+            if matches!(
+                protocol::string(&request, "action"),
+                "browser_navigate"
+                    | "browser_read"
+                    | "browser_act"
+                    | "browser_screenshot"
+                    | "browser_console"
+            ) {
+                let rpc_id = protocol::string(record, "id").to_owned();
+                if let Some(result) = self.browser_control_request(&id, &rpc_id, &request) {
+                    let value = match result {
+                        Ok(value) => value,
+                        Err(error) => json!({"error": error}),
+                    };
+                    self.send(json!({
+                        "type": "extension_ui_response",
+                        "id": rpc_id,
+                        "value": value.to_string(),
+                    }));
+                }
+                return true;
+            }
             if request["action"] == "wait" {
                 let ids: Vec<String> = request["agent_ids"]
                     .as_array()
@@ -2249,7 +2275,173 @@ impl Pui {
         self.agents.waits = pending;
         self.flush_pending_side_reports();
     }
+    fn browser_control_request(
+        &mut self,
+        source: &str,
+        rpc_id: &str,
+        request: &Value,
+    ) -> Option<Result<Value, String>> {
+        if self
+            .agents
+            .nodes
+            .get(source)
+            .is_some_and(|n| n.access == "read-only")
+        {
+            return Some(Err(
+                "Read-only workers cannot use browser automation.".into()
+            ));
+        }
+        if self.agents.background {
+            return Some(Err(
+                "Browser automation requires this chat to be selected in Pui so the user can watch and take over."
+                    .into(),
+            ));
+        }
+        let plan_mode = self.agent_settings(source).permission == settings::PermissionMode::Plan;
+        let action = protocol::string(request, "action");
+        match action {
+            "browser_navigate" => {
+                let raw = match request.get("url").and_then(Value::as_str) {
+                    Some(url) => url,
+                    None => return Some(Err("Missing URL for browser navigation.".into())),
+                };
+                let url = match webview::automation::validate_url(raw) {
+                    Ok(url) => url,
+                    Err(err) => return Some(Err(err)),
+                };
+                if plan_mode && !webview::local_preview_url(&url) {
+                    return Some(Err(
+                        "Plan mode only allows navigating to localhost/127.0.0.1 preview URLs."
+                            .into(),
+                    ));
+                }
+                if let Err(err) = self.present_preview(&url) {
+                    return Some(Err(err));
+                }
+                self.files.web_mut().navigate_existing(&url, &url);
+                self.ctx.request_repaint();
+                let (live_url, title, loading) = self.files.web().page_info(&url);
+                Some(Ok(json!({
+                    "url": live_url,
+                    "title": title,
+                    "loading": loading,
+                    "opened": true,
+                })))
+            }
+            "browser_console" => {
+                let params = match webview::automation::parse_console_params(request) {
+                    Ok(p) => p,
+                    Err(err) => return Some(Err(err)),
+                };
+                let Some(key) = self.files.active_browser_key().map(str::to_owned) else {
+                    return Some(Err(
+                        "No active Browser tab is open. Call pui_browser_navigate first.".into(),
+                    ));
+                };
+                Some(Ok(self.files.web().automation_console(&key, &params)))
+            }
+            "browser_read" => {
+                let params = match webview::automation::parse_read_page_params(request) {
+                    Ok(p) => p,
+                    Err(err) => return Some(Err(err)),
+                };
+                let Some(key) = self.files.active_browser_key().map(str::to_owned) else {
+                    return Some(Err(
+                        "No active Browser tab is open. Call pui_browser_navigate first.".into(),
+                    ));
+                };
+                match self
+                    .files
+                    .web_mut()
+                    .start_automation_read(source, rpc_id, &key, params)
+                {
+                    Ok(()) => {
+                        self.ctx.request_repaint();
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            }
+            "browser_act" => {
+                if plan_mode {
+                    return Some(Err(
+                        "Plan mode blocks mutating browser actions (pui_browser_act).".into(),
+                    ));
+                }
+                let params = match webview::automation::parse_act_params(request) {
+                    Ok(p) => p,
+                    Err(err) => return Some(Err(err)),
+                };
+                let Some(key) = self.files.active_browser_key().map(str::to_owned) else {
+                    return Some(Err(
+                        "No active Browser tab is open. Call pui_browser_navigate first.".into(),
+                    ));
+                };
+                match self
+                    .files
+                    .web_mut()
+                    .start_automation_act(source, rpc_id, &key, params)
+                {
+                    Ok(()) => {
+                        self.ctx.request_repaint();
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            }
+            "browser_screenshot" => {
+                let params = match webview::automation::parse_screenshot_params(request) {
+                    Ok(p) => p,
+                    Err(err) => return Some(Err(err)),
+                };
+                let Some(key) = self.files.active_browser_key().map(str::to_owned) else {
+                    return Some(Err(
+                        "No active Browser tab is open. Call pui_browser_navigate first.".into(),
+                    ));
+                };
+                match self
+                    .files
+                    .web_mut()
+                    .start_automation_screenshot(source, rpc_id, &key, params)
+                {
+                    Ok(()) => {
+                        self.ctx.request_repaint();
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                }
+            }
+            _ => Some(Err("Unsupported browser automation action.".into())),
+        }
+    }
+    pub(super) fn finish_browser_automation(&mut self) {
+        let ready = self.files.web_mut().poll_automation(&self.ctx);
+        for item in ready {
+            let value = match item.result {
+                Ok(value) => value,
+                Err(error) => json!({"error": error}),
+            };
+            let response = json!({
+                "type": "extension_ui_response",
+                "id": item.rpc_id,
+                "value": value.to_string(),
+            });
+            if item.source == self.agents.active {
+                if let Some(client) = self.client.as_mut() {
+                    let _ = client.send(response);
+                }
+            } else if let Some(client) = self
+                .agents
+                .parked
+                .get_mut(&item.source)
+                .and_then(|c| c.client.as_mut())
+            {
+                let _ = client.send(response);
+            }
+        }
+    }
     pub(super) fn poll_other_agents(&mut self) {
+        self.finish_browser_automation();
         self.agents
             .retiring
             .retain(|rx| matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));

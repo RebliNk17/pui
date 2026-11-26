@@ -16,6 +16,7 @@ const MAX_LINES: usize = 300;
 pub(super) struct ConsoleLine {
     id: u64,
     pub error: bool,
+    pub warn: bool,
     text: Arc<str>,
     source: Arc<str>,
     page: Arc<str>,
@@ -24,8 +25,12 @@ pub(super) struct ConsoleLine {
     omitted_data_source: bool,
 }
 impl ConsoleLine {
-    #[cfg(any(test, target_os = "macos"))]
+    #[cfg(test)]
     fn new(error: bool, message: &str, source: &str, line: i32) -> Self {
+        Self::new_with_level(error, false, message, source, line)
+    }
+    #[cfg(any(test, target_os = "macos"))]
+    fn new_with_level(error: bool, warn: bool, message: &str, source: &str, line: i32) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let mut limited = false;
@@ -46,6 +51,7 @@ impl ConsoleLine {
         Self {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             error,
+            warn: warn && !error,
             text,
             source,
             page: "".into(),
@@ -53,6 +59,27 @@ impl ConsoleLine {
             limited,
             omitted_data_source,
         }
+    }
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+    pub(super) fn level(&self) -> &'static str {
+        if self.error {
+            "error"
+        } else if self.warn {
+            "warn"
+        } else {
+            "log"
+        }
+    }
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+    pub(super) fn source(&self) -> &str {
+        &self.source
+    }
+    pub(super) fn line_number(&self) -> i32 {
+        self.line
     }
     fn snippet(&self, key: &str) -> (String, String) {
         let label = format!(
@@ -90,12 +117,24 @@ fn page_label<'a>(key: &'a str, location: &'a str) -> &'a str {
 }
 
 /// Called by CEF's UI callback. Clones share immutable strings across page snapshots.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(test)]
 pub(super) fn push(state: &mut PageState, error: bool, message: &str, source: &str, line: i32) {
+    push_level(state, error, false, message, source, line);
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn push_level(
+    state: &mut PageState,
+    error: bool,
+    warn: bool,
+    message: &str,
+    source: &str,
+    line: i32,
+) {
     if state.console.len() >= MAX_LINES {
         state.console.pop_front();
     }
-    let mut message = ConsoleLine::new(error, message, source, line);
+    let mut message = ConsoleLine::new_with_level(error, warn, message, source, line);
     if state.location.len() <= 8192 && web_url(&state.location) {
         // The label is bounded again by the draft queue; do not retain long query strings per row.
         let mut end = state.location.len().min(1024);

@@ -12,6 +12,18 @@ import { resolve, dirname, relative, isAbsolute } from "node:path";
 export const PERMISSION_MODES = ["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 const reads = new Set(["read", "grep", "find", "ls"]);
 const inspect = new Set(["pui_jobs", "pui_agents", "pui_message_agent", "pui_wait_agents", "pui_stop_agent", "pui_background_tasks", "tool_search"]);
+const browserInspect = new Set(["pui_browser_read", "pui_browser_screenshot", "pui_browser_console"]);
+export function isLocalBrowserUrl(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim() || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { return false; }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return false;
+  const host = url.hostname.toLowerCase();
+  if (host === "[::1]" || host === "::1") return true;
+  if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true;
+  const trimmed = host.endsWith(".") ? host.slice(0, -1) : host;
+  return trimmed === "localhost" || trimmed.endsWith(".localhost");
+}
 const block = (reason: string) => ({ block: true, reason });
 const MANAGED_AGENTS_ONLY = "Unmanaged agent launches are disabled in Pui. Use pui_spawn_agent (sidebar child chat) or pui_background_agent (in-turn background subagent) so the worker is tracked and stoppable in Pui. If managed spawning is unavailable or denied, report the blocker; do not launch a detached CLI or SDK agent.";
 // A tool-boundary guard, not a shell sandbox. Inspect executable commands/code,
@@ -442,6 +454,8 @@ export function installPermissions(pi: any, initial: any = {}) {
     // The host validates the target relationship; generic Plan chats cannot delegate.
     if (initial.readonly && name === "pui_message_agent") return;
     if (mode === "bypassPermissions") return;
+    if (browserInspect.has(name)) return;
+    if (name === "pui_browser_navigate" && (mode === "plan" || mode === "auto") && isLocalBrowserUrl(args.url)) return;
     const sensitiveRead = mode === "auto" && reads.has(name) && await sensitivePath(ctx.cwd, args.path ?? args.file);
     if ((reads.has(name) && !sensitiveRead) || (inspect.has(name) && (mode !== "plan" || ["pui_jobs", "pui_agents", "tool_search"].includes(name) || (name === "pui_background_tasks" && ["list", "output"].includes(args.operation))))) return;
     const shell = (name === "bash" || name === "pui_background_bash") && typeof args.command === "string";

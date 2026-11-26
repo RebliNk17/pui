@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 /// visible along the full height by leaving them uncovered.
 pub(super) const NATIVE_EDGE_INSET: f32 = 2.0;
 
+pub(super) mod automation;
 pub(super) mod chrome;
 mod console;
 mod history;
@@ -165,6 +166,7 @@ pub(super) struct BrowserView {
     viewport_editor: Option<viewport::Editor>,
     inspection: Option<inspection::Editor>,
     screenshot: Option<screenshot::Editor>,
+    automation: automation::Manager,
     unavailable: bool,
     #[cfg(test)]
     test_pages: std::collections::BTreeMap<String, PageState>,
@@ -198,6 +200,8 @@ impl BrowserView {
         self.engine.hide();
     }
     pub(super) fn clear(&mut self) {
+        self.automation
+            .fail_all("Browser tabs were closed while automation was in progress.");
         #[cfg(target_os = "macos")]
         self.engine.close_all();
         self.options.clear();
@@ -211,6 +215,10 @@ impl BrowserView {
         self.unavailable = false;
     }
     pub(super) fn close(&mut self, key: &str) {
+        self.automation.fail_tab(
+            key,
+            "Browser tab was closed while automation was in progress.",
+        );
         if self.screenshot.as_ref().is_some_and(|e| e.key == key) {
             self.cancel_screenshot();
         }
@@ -472,6 +480,7 @@ impl BrowserView {
                     .is_some_and(|options| options.device == Device::Custom));
         let available = cfg!(target_os = "macos") && !self.unavailable;
         let loading = self.state(key).loading;
+        let automation_label = self.automation.active_label(key);
         if self
             .viewport_editor
             .as_ref()
@@ -582,9 +591,13 @@ impl BrowserView {
                         }
                     }
                 });
-                // Loading lives in the toolbar: the native page composites
-                // above egui, and reserving space below it would resize it.
-                if loading && !narrow {
+                // Loading and agent activity live in the toolbar: the native page
+                // composites above egui, and reserving space below it would resize it.
+                if let Some(label) = automation_label {
+                    if !narrow {
+                        chrome::agent_activity_indicator(ui, label);
+                    }
+                } else if loading && !narrow {
                     loading_indicator(ui);
                 }
             });
@@ -925,6 +938,224 @@ impl BrowserView {
         }
         self.last_location = location.clone();
         Some(location)
+    }
+    pub(super) fn page_info(&self, key: &str) -> (String, String, bool) {
+        let state = self.state(key);
+        let url = if state.location.is_empty() {
+            key.to_owned()
+        } else {
+            state.location
+        };
+        #[cfg(target_os = "macos")]
+        let loading = if self.engine.has_tab(key) {
+            state.loading
+        } else {
+            true
+        };
+        #[cfg(not(target_os = "macos"))]
+        let loading = state.loading;
+        (url, state.title, loading)
+    }
+    pub(super) fn navigate_existing(&mut self, key: &str, url: &str) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.engine.has_tab(key)
+                && self.active == key
+                && !self.privacy.suspended(key)
+                && !self.privacy.confirming()
+            {
+                let current = self.state(key).location;
+                if current != url {
+                    self.engine.navigate(key, url);
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (key, url);
+    }
+    fn check_automation_ready(&self, key: &str) -> Result<(), String> {
+        if self.privacy.suspended(key) || self.privacy.confirming() {
+            return Err(
+                "This browser tab is paused for a privacy or group change. Wait for the user to resume it."
+                    .into(),
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = key;
+            Err(automation::UNAVAILABLE_NON_MACOS.into())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if self.unavailable {
+                return Err(
+                    "Built-in Chromium is unavailable. Browser automation requires the bundled macOS Chromium runtime."
+                        .into(),
+                );
+            }
+            if !self.engine.has_tab(key) {
+                return Err(
+                    "No active Chromium browser tab is open. Call pui_browser_navigate first."
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+    }
+    pub(super) fn start_automation_read(
+        &mut self,
+        source: &str,
+        rpc_id: &str,
+        key: &str,
+        params: automation::ReadPageParams,
+    ) -> Result<(), String> {
+        self.check_automation_ready(key)?;
+        let mailbox = self.automation.push_cdp(
+            source.to_owned(),
+            rpc_id.to_owned(),
+            key.to_owned(),
+            "Agent inspecting…",
+            automation::REQUEST_TIMEOUT,
+        )?;
+        #[cfg(target_os = "macos")]
+        {
+            let script = automation::build_read_page_script(&params);
+            if let Err(err) = self.engine.automation_eval(key, script, mailbox.clone()) {
+                mailbox.complete(Err(err));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (params, mailbox);
+        }
+        Ok(())
+    }
+    pub(super) fn start_automation_act(
+        &mut self,
+        source: &str,
+        rpc_id: &str,
+        key: &str,
+        params: automation::ActParams,
+    ) -> Result<(), String> {
+        if let automation::ActParams::Wait { ms } = params {
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (source, rpc_id, key, ms);
+                return Err(automation::UNAVAILABLE_NON_MACOS.into());
+            }
+            #[cfg(target_os = "macos")]
+            {
+                return self.automation.push_wait(
+                    source.to_owned(),
+                    rpc_id.to_owned(),
+                    key.to_owned(),
+                    ms,
+                );
+            }
+        }
+        self.check_automation_ready(key)?;
+        let mailbox = self.automation.push_cdp(
+            source.to_owned(),
+            rpc_id.to_owned(),
+            key.to_owned(),
+            "Agent acting…",
+            automation::REQUEST_TIMEOUT,
+        )?;
+        #[cfg(target_os = "macos")]
+        {
+            let res = match params {
+                automation::ActParams::Click { selector } => {
+                    let script = automation::build_click_script(&selector);
+                    self.engine.automation_eval(key, script, mailbox.clone())
+                }
+                automation::ActParams::Type {
+                    selector,
+                    text,
+                    clear,
+                } => {
+                    let script = automation::build_type_script(&selector, &text, clear);
+                    self.engine.automation_eval(key, script, mailbox.clone())
+                }
+                automation::ActParams::Press { key: spec } => {
+                    self.engine.automation_press(key, spec, mailbox.clone())
+                }
+                automation::ActParams::Scroll { selector, delta_y } => {
+                    let script = automation::build_scroll_script(selector.as_deref(), delta_y);
+                    self.engine.automation_eval(key, script, mailbox.clone())
+                }
+                automation::ActParams::Wait { .. } => unreachable!(),
+            };
+            if let Err(err) = res {
+                mailbox.complete(Err(err));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (params, mailbox);
+        }
+        Ok(())
+    }
+    pub(super) fn start_automation_screenshot(
+        &mut self,
+        source: &str,
+        rpc_id: &str,
+        key: &str,
+        params: automation::ScreenshotParams,
+    ) -> Result<(), String> {
+        self.check_automation_ready(key)?;
+        let mailbox = self.automation.push_cdp(
+            source.to_owned(),
+            rpc_id.to_owned(),
+            key.to_owned(),
+            "Agent inspecting…",
+            automation::REQUEST_TIMEOUT,
+        )?;
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(err) =
+                self.engine
+                    .automation_screenshot(key, params.full_page, mailbox.clone())
+            {
+                mailbox.complete(Err(err));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (params, mailbox);
+        }
+        Ok(())
+    }
+    pub(super) fn automation_console(
+        &self,
+        key: &str,
+        params: &automation::ConsoleParams,
+    ) -> Value {
+        let state = self.state(key);
+        let url = if state.location.is_empty() {
+            key
+        } else {
+            state.location.as_str()
+        };
+        automation::filter_console(&state.console, url, params)
+    }
+    pub(super) fn poll_automation(&mut self, ctx: &egui::Context) -> Vec<automation::Completion> {
+        if self.automation.is_empty() {
+            return Vec::new();
+        }
+        // Snapshot tab info without borrowing `self` mutably during `poll`.
+        let mut mgr = std::mem::take(&mut self.automation);
+        let ready = mgr.poll(ctx, |key| self.page_info(key));
+        self.automation = mgr;
+        ready
+    }
+    pub(super) fn automation_pending(&self) -> bool {
+        !self.automation.is_empty()
+    }
+    pub(super) fn cancel_automation_for_source(&mut self, source: &str) {
+        self.automation.fail_source(
+            source,
+            "Agent stopped while browser automation was in progress.",
+        );
     }
 }
 

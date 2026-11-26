@@ -419,6 +419,20 @@ impl Browser {
         self.open && self.browser_mode
     }
 
+    pub(super) fn active_browser_key(&self) -> Option<&str> {
+        self.browser_open()
+            .then_some(self.selected_url.as_deref())
+            .flatten()
+    }
+
+    pub(super) fn web(&self) -> &super::webview::BrowserView {
+        &self.web
+    }
+
+    pub(super) fn web_mut(&mut self) -> &mut super::webview::BrowserView {
+        &mut self.web
+    }
+
     pub(super) fn navigation_target(&self) -> Option<String> {
         if self.browser_mode {
             self.selected_url.clone()
@@ -1627,7 +1641,7 @@ impl Pui {
         true
     }
 
-    fn present_preview(&mut self, target: &str) -> Result<(), String> {
+    pub(super) fn present_preview(&mut self, target: &str) -> Result<(), String> {
         self.files.open_target(&self.ctx, &self.prefs.cwd, target)?;
         self.settings_open = false;
         self.inspector_panel = false;

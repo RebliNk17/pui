@@ -8,6 +8,7 @@ import { installTitles } from "./titles.ts";
 import { installRewind } from "./rewind.ts";
 import { installQuestions } from "./questions.ts";
 import { installOpen } from "./open.ts";
+import { installBrowser, BROWSER_GUIDANCE, BROWSER_TOOLS } from "./browser.ts";
 import { installVisual } from "./visual.ts";
 import { installTurnUx, TURN_UX_GUIDANCE } from "./turn_ux.ts";
 import { installPrTools, PR_TOOLS_GUIDANCE } from "./pr_tools.ts";
@@ -28,6 +29,7 @@ Use the fewest useful workers, including zero. Give each a bounded task, relevan
 Use pui_create_monitor for a recurring non-AI shell condition (exit 0 fires once, exit 1 keeps waiting), pui_create_cron for scheduled prompts, and pui_jobs/pui_update_job to inspect/manage your own jobs. Checks and scheduling do not consume context or call models. Only delivered events/prompts wake you. Jobs run while Pui is open; active jobs reconnect their creator on relaunch. Cron uses five numeric fields in UTC and skips missed occurrences. Use bounded side-effect-free checks; never use monitors to launch unmanaged agents. Tell the user that event handling consumes tokens.
 ${WORKFLOW_GUIDANCE} For an eligible hard/high-risk change only, give a very short, specific reason why a workflow is warranted. Pui asks before starting; never use workflows automatically. Approval is one-time for that objective, not a blanket tool grant. Ordinary development remains the default. Never create workflows by editing internal storage or launching the old proposal CLI.
 To show local screenshots or images inline in chat replies, embed them with standard Markdown image syntax ![description](path/to/image.png) (workspace-relative or /tmp paths). To render rich inline HTML/CSS/SVG mockups, diagrams, or visual comparisons directly inside the chat, call pui_visual. Single-line bash code blocks in replies get a one-click Run button in Pui, [label](#terminal/<tab_id>) opens a specific Terminal tab, and [title](#agent/<agent_id>) jumps directly to a sidebar or background session.
+${BROWSER_GUIDANCE}
 ${TURN_UX_GUIDANCE}
 ${PR_TOOLS_GUIDANCE}`;
 
@@ -48,6 +50,7 @@ export default function puiExtension(pi: any) {
   installRewind(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only" });
   installQuestions(pi);
   installOpen(pi);
+  installBrowser(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only", taskRole: process.env.PUI_TASK_ROLE || "" });
   installVisual(pi);
   installTurnUx(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only", taskRole: process.env.PUI_TASK_ROLE || "" });
   installPrTools(pi, { readonly: process.env.PUI_AGENT_ACCESS === "read-only", taskRole: process.env.PUI_TASK_ROLE || "" });
@@ -95,7 +98,7 @@ export default function puiExtension(pi: any) {
     }
   });
   const announce = (ctx: any) => ctx.ui.setStatus("pui-ultracode", JSON.stringify({ ready: true, enabled, readonly }));
-  const orchestrationTools=["pui_spawn_agent","pui_handoff_session","pui_background_agent","pui_background_bash","pui_background_tasks","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_pr_status","pui_pr_bind","pui_pr_autofix","pui_workflow","pui_workflow_control","pui_run_check"];
+  const orchestrationTools=["pui_spawn_agent","pui_handoff_session","pui_background_agent","pui_background_bash","pui_background_tasks","pui_wait_agents","pui_agents","pui_message_agent","pui_stop_agent","pui_create_monitor","pui_create_cron","pui_jobs","pui_update_job","pui_pr_status","pui_pr_bind","pui_pr_autofix","pui_workflow","pui_workflow_control","pui_run_check",...BROWSER_TOOLS];
   const setMode = (on: boolean) => {
     enabled = on && !readonly && !taskRole;
     const tools = pi.getActiveTools().filter((name: string) => !orchestrationTools.includes(name) && !unmanagedAgentLaunch(name, {}));
